@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Core domain model for WinGet manifests: typed manifest object model, YAML serialization with byte-stable output, and WinGet version ordering.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WinMatsch.Core.Tests" />
+  </ItemGroup>
+
+</Project>

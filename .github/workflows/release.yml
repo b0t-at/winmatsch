@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.rid }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: windows-latest
+            rid: win-arm64
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: ubuntu-latest
+            rid: linux-arm64
+          - os: macos-latest
+            rid: osx-x64
+          - os: macos-latest
+            rid: osx-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # The CLI project lands in a later milestone; publish is wired up front so the
+      # release pipeline is exercised from day one. Skips gracefully until it exists.
+      - name: Publish
+        shell: bash
+        run: |
+          if [ -f src/WinMatsch.Cli/WinMatsch.Cli.csproj ]; then
+            dotnet publish src/WinMatsch.Cli/WinMatsch.Cli.csproj \
+              --configuration Release \
+              --runtime ${{ matrix.rid }} \
+              --self-contained \
+              -p:PublishSingleFile=true \
+              -p:PublishTrimmed=true \
+              -p:Version=${GITHUB_REF_NAME#v} \
+              --output artifacts/${{ matrix.rid }}
+          else
+            echo "CLI project not present yet; nothing to publish."
+          fi
+
+      - name: Upload artifacts
+        if: hashFiles('artifacts/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: winmatsch-${{ matrix.rid }}
+          path: artifacts/${{ matrix.rid }}/
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package and checksum
+        shell: bash
+        run: |
+          mkdir -p dist
+          for dir in artifacts/winmatsch-*; do
+            rid=${dir#artifacts/winmatsch-}
+            case "$rid" in
+              win-*) (cd "$dir" && zip -r "../../dist/winmatsch-$rid.zip" .) ;;
+              *)     tar -czf "dist/winmatsch-$rid.tar.gz" -C "$dir" . ;;
+            esac
+          done
+          (cd dist && sha256sum * > SHA256SUMS.txt) || true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: dist/*
+          generate_release_notes: true

@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WinMatsch.Core/WinMatsch.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WinMatsch.Core.Tests/WinMatsch.Core.Tests.csproj" />
+  </Folder>
+</Solution>

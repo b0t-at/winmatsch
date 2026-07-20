@@ -1,0 +1,9 @@
+<Project>
+
+  <!-- Imported after each project body, so $(IsTestProject) is already set. -->
+  <PropertyGroup Condition="'$(IsTestProject)' == 'true'">
+    <!-- CA1707: underscores in test method names are the established xUnit convention. -->
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
+  </PropertyGroup>
+
+</Project>
