@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Rules engine: a deterministic, reflection-free pipeline of normalization, validation and quirk rules that shapes generated WinGet manifests and can explain every change it makes.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinMatsch.Analysis\WinMatsch.Analysis.csproj" />
+    <ProjectReference Include="..\WinMatsch.Core\WinMatsch.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WinMatsch.Rules.Tests" />
+  </ItemGroup>
+
+</Project>
