@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Installer download engine: streaming HTTP downloads with on-the-fly SHA-256 hashing, retries with backoff, redirect tracking, and response metadata capture.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinMatsch.Core\WinMatsch.Core.csproj" />
+  </ItemGroup>
+
+</Project>
