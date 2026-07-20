@@ -1,0 +1,105 @@
+using WinMatsch.Analysis.Pe;
+using WinMatsch.Core;
+
+namespace WinMatsch.Analysis;
+
+/// <summary>
+/// Analyzes .exe files. Format-specific probes run first (none are registered yet; later
+/// waves add them); when no probe claims the file, a generic fallback classifies it as an
+/// installer or a portable executable based on keywords in its version strings.
+/// </summary>
+public sealed class ExeAnalyzer : IInstallerAnalyzer
+{
+    // Intended probe order once later waves add them, most specific first:
+    // AdvancedInstaller → Burn → Inno → Nsis → Squirrel → generic fallback below.
+    private static readonly IReadOnlyList<IExeFormatProbe> _probes = [];
+
+    // An EXE whose OriginalFilename or FileDescription contains one of these is treated as an
+    // installer; everything else is portable. "7zs.sfx"/"7zsd.sfx" are 7-Zip self-extractor stubs.
+    private static readonly string[] _installerKeywords = ["installer", "setup", "7zs.sfx", "7zsd.sfx"];
+
+    public bool CanAnalyze(string fileName)
+    {
+        ArgumentNullException.ThrowIfNull(fileName);
+        return string.Equals(Path.GetExtension(fileName), ".exe", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public InstallerAnalysis Analyze(Stream stream, string fileName)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        using var peFile = new PeFile(stream);
+        foreach (IExeFormatProbe probe in _probes)
+        {
+            stream.Position = 0;
+            InstallerAnalysis? probed = probe.Probe(peFile, stream);
+            if (probed is not null)
+            {
+                return probed;
+            }
+        }
+
+        VersionInfo version = peFile.VersionInfo;
+        bool isInstaller = ContainsInstallerKeyword(version.OriginalFilename)
+            || ContainsInstallerKeyword(version.FileDescription);
+
+        return new InstallerAnalysis
+        {
+            Format = isInstaller ? DetectedInstallerFormat.GenericInstallerExe : DetectedInstallerFormat.PortableExe,
+            Installers = [isInstaller ? CreateGenericInstaller(peFile, version) : CreatePortableInstaller(peFile)],
+            ProductName = version.ProductName,
+            Publisher = version.CompanyName,
+            ProductVersion = version.ProductVersion,
+            Copyright = version.LegalCopyright,
+        };
+    }
+
+    private static Installer CreateGenericInstaller(PeFile peFile, VersionInfo version)
+    {
+        var installer = new Installer
+        {
+            Architecture = peFile.Architecture,
+            InstallerType = InstallerType.Exe,
+            ElevationRequirement = peFile.RequestedElevation,
+        };
+
+        if (version.ProductName is not null || version.CompanyName is not null || version.ProductVersion is not null)
+        {
+            installer.AppsAndFeaturesEntries =
+            [
+                new AppsAndFeaturesEntry
+                {
+                    DisplayName = version.ProductName,
+                    Publisher = version.CompanyName,
+                    DisplayVersion = version.ProductVersion,
+                },
+            ];
+        }
+
+        return installer;
+    }
+
+    // Deliberately minimal: no command alias is derived here; rules decide aliases later.
+    private static Installer CreatePortableInstaller(PeFile peFile) => new()
+    {
+        Architecture = peFile.Architecture,
+        InstallerType = InstallerType.Portable,
+    };
+
+    private static bool ContainsInstallerKeyword(string? value)
+    {
+        if (value is null)
+        {
+            return false;
+        }
+
+        foreach (string keyword in _installerKeywords)
+        {
+            if (value.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
