@@ -25,8 +25,8 @@ public sealed record VersionStrings(
 /// </summary>
 internal static class PeFixtures
 {
-    private const int RtVersion = 16;
-    private const int RtManifest = 24;
+    public const int RtVersion = 16;
+    public const int RtManifest = 24;
 
     public static byte[] BuildExe(
         Machine machine = Machine.Amd64,
@@ -186,10 +186,85 @@ internal static class PeFixtures
     }
 
     /// <summary>
-    /// Emits a .rsrc section with one resource per type: root directory → type directory
-    /// (name id 1) → name directory (language 0x0409) → data entry → data. All directory
-    /// offsets are relative to the section start; the data entry holds an RVA.
+    /// Writes .rsrc section content with one resource per type: root directory → type
+    /// directory (name id 1) → name directory (language 0x0409) → data entry → data. All
+    /// directory offsets are relative to the section start; the data entry holds an RVA.
+    /// Shared with <see cref="BurnFixtures"/>, whose stub PE is built without
+    /// <see cref="ManagedPEBuilder"/>.
     /// </summary>
+    public static void WriteResourceSection(
+        BlobBuilder builder,
+        int relativeVirtualAddress,
+        List<(int TypeId, byte[] Data)> resources)
+    {
+        int count = resources.Count;
+        int rootSize = 16 + (8 * count);
+        int directoriesStart = rootSize;                       // Type + name directory pairs, 48 bytes each.
+        int dataEntriesStart = directoriesStart + (count * 48);
+        int dataStart = dataEntriesStart + (count * 16);
+
+        int[] dataOffsets = new int[count];
+        int offset = dataStart;
+        for (int i = 0; i < count; i++)
+        {
+            offset = (offset + 3) & ~3;
+            dataOffsets[i] = offset;
+            offset += resources[i].Data.Length;
+        }
+
+        WriteDirectoryHeader(builder, count);
+        for (int i = 0; i < count; i++)
+        {
+            builder.WriteUInt32((uint)resources[i].TypeId);
+            builder.WriteUInt32(0x80000000u | (uint)(directoriesStart + (i * 48)));
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            // Type directory: one id entry (resource name id 1) → name directory.
+            WriteDirectoryHeader(builder, 1);
+            builder.WriteUInt32(1);
+            builder.WriteUInt32(0x80000000u | (uint)(directoriesStart + (i * 48) + 24));
+
+            // Name directory: one id entry (language 0x0409) → data entry (leaf).
+            WriteDirectoryHeader(builder, 1);
+            builder.WriteUInt32(0x0409);
+            builder.WriteUInt32((uint)(dataEntriesStart + (i * 16)));
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            builder.WriteUInt32((uint)(relativeVirtualAddress + dataOffsets[i]));
+            builder.WriteUInt32((uint)resources[i].Data.Length);
+            builder.WriteUInt32(0); // Code page.
+            builder.WriteUInt32(0); // Reserved.
+        }
+
+        int written = dataStart;
+        for (int i = 0; i < count; i++)
+        {
+            while (written < dataOffsets[i])
+            {
+                builder.WriteByte(0);
+                written++;
+            }
+
+            builder.WriteBytes(resources[i].Data);
+            written += resources[i].Data.Length;
+        }
+    }
+
+    private static void WriteDirectoryHeader(BlobBuilder builder, int idEntryCount)
+    {
+        builder.WriteUInt32(0); // Characteristics.
+        builder.WriteUInt32(0); // Timestamp.
+        builder.WriteUInt16(0); // Major version.
+        builder.WriteUInt16(0); // Minor version.
+        builder.WriteUInt16(0); // Named entry count.
+        builder.WriteUInt16((ushort)idEntryCount);
+    }
+
+    /// <summary>The <see cref="ManagedPEBuilder"/> adapter over <see cref="WriteResourceSection"/>.</summary>
     private sealed class ResourceSection : ResourceSectionBuilder
     {
         private readonly List<(int TypeId, byte[] Data)> _resources;
@@ -197,72 +272,6 @@ internal static class PeFixtures
         public ResourceSection(List<(int TypeId, byte[] Data)> resources) => _resources = resources;
 
         protected override void Serialize(BlobBuilder builder, SectionLocation location)
-        {
-            int count = _resources.Count;
-            int rootSize = 16 + (8 * count);
-            int directoriesStart = rootSize;                       // Type + name directory pairs, 48 bytes each.
-            int dataEntriesStart = directoriesStart + (count * 48);
-            int dataStart = dataEntriesStart + (count * 16);
-
-            int[] dataOffsets = new int[count];
-            int offset = dataStart;
-            for (int i = 0; i < count; i++)
-            {
-                offset = (offset + 3) & ~3;
-                dataOffsets[i] = offset;
-                offset += _resources[i].Data.Length;
-            }
-
-            WriteDirectoryHeader(builder, count);
-            for (int i = 0; i < count; i++)
-            {
-                builder.WriteUInt32((uint)_resources[i].TypeId);
-                builder.WriteUInt32(0x80000000u | (uint)(directoriesStart + (i * 48)));
-            }
-
-            for (int i = 0; i < count; i++)
-            {
-                // Type directory: one id entry (resource name id 1) → name directory.
-                WriteDirectoryHeader(builder, 1);
-                builder.WriteUInt32(1);
-                builder.WriteUInt32(0x80000000u | (uint)(directoriesStart + (i * 48) + 24));
-
-                // Name directory: one id entry (language 0x0409) → data entry (leaf).
-                WriteDirectoryHeader(builder, 1);
-                builder.WriteUInt32(0x0409);
-                builder.WriteUInt32((uint)(dataEntriesStart + (i * 16)));
-            }
-
-            for (int i = 0; i < count; i++)
-            {
-                builder.WriteUInt32((uint)(location.RelativeVirtualAddress + dataOffsets[i]));
-                builder.WriteUInt32((uint)_resources[i].Data.Length);
-                builder.WriteUInt32(0); // Code page.
-                builder.WriteUInt32(0); // Reserved.
-            }
-
-            int written = dataStart;
-            for (int i = 0; i < count; i++)
-            {
-                while (written < dataOffsets[i])
-                {
-                    builder.WriteByte(0);
-                    written++;
-                }
-
-                builder.WriteBytes(_resources[i].Data);
-                written += _resources[i].Data.Length;
-            }
-        }
-
-        private static void WriteDirectoryHeader(BlobBuilder builder, int idEntryCount)
-        {
-            builder.WriteUInt32(0); // Characteristics.
-            builder.WriteUInt32(0); // Timestamp.
-            builder.WriteUInt16(0); // Major version.
-            builder.WriteUInt16(0); // Minor version.
-            builder.WriteUInt16(0); // Named entry count.
-            builder.WriteUInt16((ushort)idEntryCount);
-        }
+            => WriteResourceSection(builder, location.RelativeVirtualAddress, _resources);
     }
 }

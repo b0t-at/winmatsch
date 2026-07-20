@@ -1,18 +1,19 @@
+using WinMatsch.Analysis.Burn;
 using WinMatsch.Analysis.Pe;
 using WinMatsch.Core;
 
 namespace WinMatsch.Analysis;
 
 /// <summary>
-/// Analyzes .exe files. Format-specific probes run first (none are registered yet; later
-/// waves add them); when no probe claims the file, a generic fallback classifies it as an
-/// installer or a portable executable based on keywords in its version strings.
+/// Analyzes .exe files. Format-specific probes run first; when no probe claims the file, a
+/// generic fallback classifies it as an installer or a portable executable based on keywords
+/// in its version strings.
 /// </summary>
 public sealed class ExeAnalyzer : IInstallerAnalyzer
 {
     // Intended probe order once later waves add them, most specific first:
     // AdvancedInstaller → Burn → Inno → Nsis → Squirrel → generic fallback below.
-    private static readonly IReadOnlyList<IExeFormatProbe> _probes = [];
+    private static readonly IReadOnlyList<IExeFormatProbe> _probes = [new BurnProbe()];
 
     // An EXE whose OriginalFilename or FileDescription contains one of these is treated as an
     // installer; everything else is portable. "7zs.sfx"/"7zsd.sfx" are 7-Zip self-extractor stubs.
