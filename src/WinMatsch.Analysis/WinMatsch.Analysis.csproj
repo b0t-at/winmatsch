@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <PackageReference Include="OpenMcdf" />
+    <PackageReference Include="SharpCompress" />
   </ItemGroup>
 
   <ItemGroup>

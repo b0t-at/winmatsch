@@ -20,43 +20,6 @@ public sealed class MsiAnalyzer : IInstallerAnalyzer
     private const string PropertyTableName = "Property";
     private const string SummaryInformationStreamName = "\u0005SummaryInformation";
 
-    // ProductLanguage is an LCID; InvariantGlobalization is enabled, so CultureInfo cannot
-    // resolve it and a hand-written map of the LCIDs common in real packages is used instead.
-    // Unknown LCIDs (and 0, "language neutral") map to no locale.
-    private static readonly Dictionary<int, string> _lcidToLanguageTag = new()
-    {
-        [1025] = "ar-SA",
-        [1028] = "zh-TW",
-        [1029] = "cs-CZ",
-        [1030] = "da-DK",
-        [1031] = "de-DE",
-        [1032] = "el-GR",
-        [1033] = "en-US",
-        [1034] = "es-ES",
-        [1035] = "fi-FI",
-        [1036] = "fr-FR",
-        [1037] = "he-IL",
-        [1038] = "hu-HU",
-        [1040] = "it-IT",
-        [1041] = "ja-JP",
-        [1042] = "ko-KR",
-        [1043] = "nl-NL",
-        [1044] = "nb-NO",
-        [1045] = "pl-PL",
-        [1046] = "pt-BR",
-        [1049] = "ru-RU",
-        [1053] = "sv-SE",
-        [1054] = "th-TH",
-        [1055] = "tr-TR",
-        [1057] = "id-ID",
-        [1058] = "uk-UA",
-        [1066] = "vi-VN",
-        [1081] = "hi-IN",
-        [2052] = "zh-CN",
-        [2070] = "pt-PT",
-        [3082] = "es-ES",
-    };
-
     public bool CanAnalyze(string fileName)
     {
         ArgumentNullException.ThrowIfNull(fileName);
@@ -296,11 +259,11 @@ public sealed class MsiAnalyzer : IInstallerAnalyzer
         _ => null,
     };
 
+    /// <summary>ProductLanguage is an LCID; see <see cref="Lcid"/> for the mapping caveats.</summary>
     private static LanguageTag? MapLanguage(string? productLanguage)
         => productLanguage is not null
             && int.TryParse(productLanguage, NumberStyles.Integer, CultureInfo.InvariantCulture, out int lcid)
-            && _lcidToLanguageTag.TryGetValue(lcid, out string? tag)
-            ? new LanguageTag(tag)
+            ? Lcid.ToLanguageTag(lcid)
             : null;
 
     private static string? NullIfEmpty(string? value) => string.IsNullOrEmpty(value) ? null : value;

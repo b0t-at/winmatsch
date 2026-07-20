@@ -11,6 +11,7 @@
 
     <!-- Analysis -->
     <PackageVersion Include="OpenMcdf" Version="3.1.4" />
+    <PackageVersion Include="SharpCompress" Version="1.0.0" />
 
     <!-- Tests -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
