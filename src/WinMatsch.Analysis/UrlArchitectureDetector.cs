@@ -13,7 +13,7 @@ public static class UrlArchitectureDetector
     private static readonly string[] _arm64Tokens = ["arm64", "aarch64"];
     private static readonly string[] _armTokens = ["arm"];
     private static readonly string[] _x64Tokens = ["x86_64", "x86-64", "x64", "win64", "amd64", "64bit", "64-bit"];
-    private static readonly string[] _x86Tokens = ["x86", "win32", "ia32", "386", "686", "32bit", "32-bit"];
+    private static readonly string[] _x86Tokens = ["x86", "win32", "ia32", "i386", "i686", "386", "686", "32bit", "32-bit"];
 
     /// <summary>Returns the architecture implied by the URL, or null when no token matches.</summary>
     public static Architecture? Detect(string url)

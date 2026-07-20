@@ -5,6 +5,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="OpenMcdf" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\WinMatsch.Core\WinMatsch.Core.csproj" />
   </ItemGroup>
 

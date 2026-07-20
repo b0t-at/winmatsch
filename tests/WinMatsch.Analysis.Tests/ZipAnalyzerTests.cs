@@ -18,9 +18,12 @@ public class ZipAnalyzerTests
         => Assert.Equal(expected, _analyzer.CanAnalyze(fileName));
 
     [Fact]
-    public void Single_msi_candidate_is_selected_with_relative_path()
+    public void Single_msi_candidate_is_refined_through_the_msi_analyzer()
     {
-        using MemoryStream zip = BuildZip(("installers/app.msi", [1, 2, 3]));
+        byte[] msi = MsiFixtures.BuildMsi(
+            [("ProductName", "Contoso Editor"), ("Manufacturer", "Contoso Ltd"), ("ProductVersion", "2.4.1")],
+            template: "x64;1033");
+        using MemoryStream zip = BuildZip(("installers/app.msi", msi));
 
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
 
@@ -30,7 +33,10 @@ public class ZipAnalyzerTests
         Assert.Equal(InstallerType.Msi, installer.NestedInstallerType);
         NestedInstallerFile nested = Assert.Single(installer.NestedInstallerFiles!);
         Assert.Equal("installers/app.msi", nested.RelativeFilePath);
-        Assert.Null(installer.Architecture); // No MSI analyzer registered yet; rules fill it later.
+        Assert.Equal(Architecture.X64, installer.Architecture); // From the nested MSI's Template.
+        Assert.Equal("Contoso Editor", analysis.ProductName);
+        Assert.Equal("Contoso Ltd", analysis.Publisher);
+        Assert.Equal("2.4.1", analysis.ProductVersion);
         Assert.NotNull(analysis.Zip);
         Assert.True(analysis.Zip.HasSingleCandidate);
     }
@@ -115,7 +121,7 @@ public class ZipAnalyzerTests
             ("__MACOSX/app.exe", [1]),
             ("__macosx/other.msi", [2]),
             ("app/resources/helper.exe", [3]),
-            ("payload/app.msi", [4]));
+            ("payload/app.msi", MsiFixtures.BuildMsi([])));
 
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
 
@@ -139,7 +145,7 @@ public class ZipAnalyzerTests
     {
         using MemoryStream zip = BuildZip(
             ("bin/", null),
-            ("bin/app.msi", [1]));
+            ("bin/app.msi", MsiFixtures.BuildMsi([])));
 
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
 
@@ -175,7 +181,7 @@ public class ZipAnalyzerTests
     [Fact]
     public void Backslash_entry_names_are_normalized_to_forward_slashes()
     {
-        using MemoryStream zip = BuildZip((@"bin\app.msi", [1]));
+        using MemoryStream zip = BuildZip((@"bin\app.msi", MsiFixtures.BuildMsi([]))); ;
 
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
 

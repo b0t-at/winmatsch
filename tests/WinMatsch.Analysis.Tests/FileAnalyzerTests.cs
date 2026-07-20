@@ -8,8 +8,12 @@ public class FileAnalyzerTests
     [InlineData("app.zip", true)]
     [InlineData("app.exe", true)]
     [InlineData("app.EXE", true)]
-    [InlineData("app.msi", false)]
-    [InlineData("app.msix", false)]
+    [InlineData("app.msi", true)]
+    [InlineData("app.msix", true)]
+    [InlineData("app.appx", true)]
+    [InlineData("app.msixbundle", true)]
+    [InlineData("app.appxbundle", true)]
+    [InlineData("app.7z", false)]
     [InlineData("app.txt", false)]
     public void CanAnalyze_reflects_the_registered_analyzers(string fileName, bool expected)
         => Assert.Equal(expected, FileAnalyzer.CanAnalyze(fileName));
@@ -25,14 +29,34 @@ public class FileAnalyzerTests
     }
 
     [Fact]
+    public void Analyze_dispatches_to_the_msi_analyzer()
+    {
+        using var stream = new MemoryStream(MsiFixtures.BuildMsi([("ProductName", "Contoso")]));
+
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(stream, "contoso.msi");
+
+        Assert.Equal(DetectedInstallerFormat.Msi, analysis.Format);
+    }
+
+    [Fact]
+    public void Analyze_dispatches_to_the_msix_analyzer()
+    {
+        using MemoryStream stream = MsixFixtures.BuildPackage(MsixFixtures.PackageManifest());
+
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(stream, "app.msix");
+
+        Assert.Equal(DetectedInstallerFormat.Msix, analysis.Format);
+    }
+
+    [Fact]
     public void Unknown_extension_throws_not_supported()
     {
         using var stream = new MemoryStream([1, 2, 3]);
 
         NotSupportedException exception = Assert.Throws<NotSupportedException>(
-            () => FileAnalyzer.Analyze(stream, "app.msi"));
+            () => FileAnalyzer.Analyze(stream, "app.7z"));
 
-        Assert.Contains(".msi", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(".7z", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

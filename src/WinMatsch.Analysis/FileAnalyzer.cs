@@ -1,15 +1,21 @@
+using WinMatsch.Analysis.Msi;
+using WinMatsch.Analysis.Msix;
+
 namespace WinMatsch.Analysis;
 
 /// <summary>
 /// Entry point for installer analysis: dispatches a file to the first built-in analyzer that
-/// handles its extension. The analyzer list is fixed in code — later waves extend it with MSI
-/// and MSIX analyzers — keeping dispatch trivially AOT-safe.
+/// handles its extension. The analyzer list is fixed in code — later waves extend it with
+/// EXE format probes — keeping dispatch trivially AOT-safe.
 /// </summary>
 public static class FileAnalyzer
 {
-    /// <summary>The built-in analyzers, probed in order. Extended in code by later waves (Msi, Msix, ...).</summary>
+    /// <summary>The built-in analyzers, probed in order; their extensions are disjoint.</summary>
     internal static IReadOnlyList<IInstallerAnalyzer> Analyzers { get; } =
     [
+        new MsiAnalyzer(),
+        new MsixAnalyzer(),
+        new MsixBundleAnalyzer(),
         new ZipAnalyzer(),
         new ExeAnalyzer(),
     ];
@@ -52,7 +58,7 @@ public static class FileAnalyzer
         }
 
         throw new NotSupportedException(
-            $"No installer analyzer is registered for the file extension '{Path.GetExtension(fileName)}' (file '{fileName}'). Supported: .zip, .exe.");
+            $"No installer analyzer is registered for the file extension '{Path.GetExtension(fileName)}' (file '{fileName}'). Supported: .msi, .msix, .appx, .msixbundle, .appxbundle, .zip, .exe.");
     }
 
     /// <summary>Opens the file and analyzes it; the file name decides the analyzer.</summary>

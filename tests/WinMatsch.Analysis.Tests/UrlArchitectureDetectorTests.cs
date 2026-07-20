@@ -22,6 +22,8 @@ public class UrlArchitectureDetectorTests
     [InlineData("https://x.com/app-x86.exe", Architecture.X86)]
     [InlineData("https://x.com/app-win32.exe", Architecture.X86)]
     [InlineData("https://x.com/app-ia32.zip", Architecture.X86)]
+    [InlineData("app-i386.exe", Architecture.X86)]
+    [InlineData("app_i686.zip", Architecture.X86)]
     [InlineData("https://x.com/app.386.exe", Architecture.X86)]
     [InlineData("https://x.com/app-686.exe", Architecture.X86)]
     [InlineData("app_32-bit.exe", Architecture.X86)]
