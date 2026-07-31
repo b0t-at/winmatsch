@@ -1,6 +1,7 @@
 namespace WinMatsch.Rules;
 
 using System.Collections.ObjectModel;
+using WinMatsch.Core;
 using WinMatsch.Rules.OverridePacks;
 
 /// <summary>
@@ -175,13 +176,14 @@ public sealed class RulePipeline
             return;
         }
 
+        PackageManifests beforeManifests = ManifestSnapshot.Clone(context.Manifests);
         rule.Apply(context);
         if (!ManifestSnapshot.TryCapture(context.Manifests, out ManifestSnapshot after))
         {
             return;
         }
 
-        RecordChanges(rule, context, before.Diff(after), resolution, context);
+        RecordChanges(rule, context, before.Diff(after), resolution, context, beforeManifests);
     }
 
     private static void RunLogOnly(
@@ -219,7 +221,13 @@ public sealed class RulePipeline
         }
         context.ImportFindings(simulation.Findings);
         context.ImportTrace(simulation.Trace);
-        RecordChanges(rule, context, before.Diff(after), resolution, simulation);
+        RecordChanges(
+            rule,
+            context,
+            before.Diff(after),
+            resolution,
+            simulation,
+            context.Manifests);
     }
 
     private static void RecordChanges(
@@ -227,7 +235,8 @@ public sealed class RulePipeline
         ManifestContext target,
         IReadOnlyList<RawManifestChange> changes,
         RuleModeResolution resolution,
-        ManifestContext evidenceContext)
+        ManifestContext evidenceContext,
+        PackageManifests beforeManifests)
     {
         foreach (RawManifestChange change in changes)
         {
@@ -240,7 +249,7 @@ public sealed class RulePipeline
                     rule.Id,
                     change.ManifestPath,
                     change.FieldPath)
-                ?? ResolveInstallerEvidence(change, evidenceContext)
+                ?? ResolveInstallerEvidence(change, evidenceContext, beforeManifests)
                 ?? new($"rule {rule.Id}", RuleChangeConfidence.High);
 
             target.AddChange(new(
@@ -258,7 +267,8 @@ public sealed class RulePipeline
 
     private static RuleChangeEvidence? ResolveInstallerEvidence(
         RawManifestChange change,
-        ManifestContext context)
+        ManifestContext context,
+        PackageManifests beforeManifests)
     {
         const string prefix = "Installers[";
         if (!change.FieldPath.StartsWith(prefix, StringComparison.Ordinal))
@@ -271,7 +281,7 @@ public sealed class RulePipeline
             || !int.TryParse(
                 change.FieldPath.AsSpan(prefix.Length, close - prefix.Length),
                 out int index)
-            || context.Manifests.Installer.Installers is not { } installers
+            || (change.After is null ? beforeManifests : context.Manifests).Installer.Installers is not { } installers
             || index < 0
             || index >= installers.Count)
         {

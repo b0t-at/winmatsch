@@ -22,7 +22,6 @@ internal static class HumanCorrectionDetector
             .Where(static change => !change.IsPairing)
             .ToArray();
         IReadOnlyList<RawManifestChange> generatedChangeList = botSnapshot.Diff(generatedSnapshot);
-        IReadOnlyList<RawManifestChange> humanGeneratedChangeList = humanSnapshot.Diff(generatedSnapshot);
         Dictionary<SemanticChangeKey, RawManifestChange> generatedChanges = generatedChangeList
             .Where(static change => !change.IsPairing)
             .ToDictionary(
@@ -87,7 +86,6 @@ internal static class HumanCorrectionDetector
                     humanChange.SemanticPath,
                     botValue,
                     humanSnapshot,
-                    humanGeneratedChangeList,
                     out matchedGeneratedValue);
             }
             else

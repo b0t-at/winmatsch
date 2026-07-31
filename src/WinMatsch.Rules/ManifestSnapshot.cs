@@ -750,7 +750,6 @@ internal sealed class ManifestSnapshot
         string rootSemanticPath,
         string? expected,
         ManifestSnapshot humanSnapshot,
-        IReadOnlyList<RawManifestChange> humanGeneratedPairings,
         out string? matched)
     {
         YamlMappingNode generatedRoot = GetRoot("installer");
@@ -790,16 +789,25 @@ internal sealed class ManifestSnapshot
                 continue;
             }
 
-            RawManifestChange? pairing = humanGeneratedPairings.FirstOrDefault(
-                change => change.IsPairing
-                    && change.DocumentKey == "installer"
-                    && TryGetInstallerIndex(change.FieldPath, out int pairedGeneratedIndex)
-                    && pairedGeneratedIndex == generatedIndex);
             string? humanValue = null;
-            if (pairing is not null)
+            YamlMappingNode humanRoot = humanSnapshot.GetRoot("installer");
+            if (GetMappingValue(humanRoot, "Installers") is YamlSequenceNode humanInstallers
+                && MatchInstallerExcludingField(
+                    humanInstallers,
+                    humanRoot,
+                    generatedInstaller,
+                    generatedRoot,
+                    rootSemanticPath) is int humanIndex
+                && humanInstallers.Children[humanIndex] is YamlMappingNode humanInstaller)
             {
-                string humanInstallerPath = $"{pairing.SemanticPath}.{rootSemanticPath}";
-                _ = humanSnapshot.TryGetEffectiveInstallerValue(humanInstallerPath, out humanValue);
+                humanValue = TryResolveSemanticPath(
+                    humanInstaller,
+                    rootSemanticPath,
+                    out string? explicitHumanValue)
+                    ? explicitHumanValue
+                    : TryResolveSemanticPath(humanRoot, rootSemanticPath, out string? humanRootValue)
+                        ? humanRootValue
+                        : null;
             }
 
             if (!SemanticValueEquals(rootSemanticPath, expected, humanValue))
@@ -811,6 +819,79 @@ internal sealed class ManifestSnapshot
 
         matched = null;
         return false;
+    }
+
+    private static int? MatchInstallerExcludingField(
+        YamlSequenceNode candidates,
+        YamlMappingNode candidateRoot,
+        YamlMappingNode target,
+        YamlMappingNode targetRoot,
+        string excludedField)
+    {
+        int bestIndex = -1;
+        int bestScore = int.MinValue;
+        for (int index = 0; index < candidates.Children.Count; index++)
+        {
+            if (candidates.Children[index] is not YamlMappingNode candidate)
+            {
+                continue;
+            }
+
+            int score = 0;
+            score += EqualScalar(candidate, target, "InstallerUrl") ? 10_000 : 0;
+            score += EqualScalar(candidate, target, "InstallerSha256") ? 5_000 : 0;
+            score += EqualScalar(candidate, target, "Architecture") ? 2_000 : 0;
+            score += EqualNode(candidate, target, "InstallerSwitches") ? 3_000 : 0;
+            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "InstallerType", excludedField) ? 500 : 0;
+            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "Scope", excludedField) ? 400 : 0;
+            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "InstallerLocale", excludedField) ? 300 : 0;
+            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "NestedInstallerType", excludedField) ? 200 : 0;
+            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "ProductCode", excludedField) ? 100 : 0;
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestIndex = index;
+            }
+        }
+
+        return bestIndex < 0 ? null : bestIndex;
+    }
+
+    private static bool EqualScalar(
+        YamlMappingNode left,
+        YamlMappingNode right,
+        string field)
+        => string.Equals(
+            ScalarValue(GetMappingValue(left, field)),
+            ScalarValue(GetMappingValue(right, field)),
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool EqualNode(
+        YamlMappingNode left,
+        YamlMappingNode right,
+        string field)
+        => string.Equals(
+            GetMappingValue(left, field) is { } leftValue ? CanonicalNode(leftValue) : null,
+            GetMappingValue(right, field) is { } rightValue ? CanonicalNode(rightValue) : null,
+            StringComparison.Ordinal);
+
+    private static bool EqualEffectiveScalar(
+        YamlMappingNode left,
+        YamlMappingNode leftRoot,
+        YamlMappingNode right,
+        YamlMappingNode rightRoot,
+        string field,
+        string excludedField)
+    {
+        if (string.Equals(field, excludedField, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return string.Equals(
+            ScalarValue(GetMappingValue(left, field) ?? GetMappingValue(leftRoot, field)),
+            ScalarValue(GetMappingValue(right, field) ?? GetMappingValue(rightRoot, field)),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryGetInstallerIndex(string fieldPath, out int index)

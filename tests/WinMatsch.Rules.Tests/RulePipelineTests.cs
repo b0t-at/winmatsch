@@ -1,4 +1,5 @@
 using WinMatsch.Core;
+using WinMatsch.Rules.OverridePacks;
 using Xunit;
 
 namespace WinMatsch.Rules.Tests;
@@ -164,6 +165,32 @@ public class RulePipelineTests
 
         Assert.Equal(first.Findings, second.Findings);
         Assert.Equal(first.Trace, second.Trace);
+    }
+
+    [Fact]
+    public void Removed_installer_change_uses_pre_rule_evidence()
+    {
+        Installer first = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+        Installer duplicate = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+        Installer third = TestManifests.CreateInstaller(url: "https://example.test/c.exe");
+        PackageManifests manifests = TestManifests.Create(first, duplicate, third);
+        ManifestContext context = TestManifests.CreateContext(
+            manifests,
+            evidence:
+            [
+                new InstallerEvidence { InstallerUrl = first.InstallerUrl!, Properties = new Dictionary<string, string>() },
+                new InstallerEvidence { InstallerUrl = third.InstallerUrl!, Properties = new Dictionary<string, string>() },
+            ]);
+
+        RulePipeline.Create(
+            [new RemoveDuplicateInstallersRule()],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        Assert.DoesNotContain(
+            context.Changes,
+            change => change.FieldPath.StartsWith("Installers[1]", StringComparison.Ordinal)
+                && change.SourceEvidence.Contains("c.exe", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

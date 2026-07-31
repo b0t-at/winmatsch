@@ -621,6 +621,43 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Root_correction_pairing_excludes_the_corrected_field()
+    {
+        static PackageManifests Create(
+            Scope rootScope,
+            Scope? firstScope,
+            Scope? secondScope)
+        {
+            Installer first = TestManifests.CreateInstaller(url: "https://example.test/universal.exe");
+            first.InstallerSwitches = new() { Silent = "/first" };
+            first.Scope = firstScope;
+            Installer second = TestManifests.CreateInstaller(url: "https://example.test/universal.exe");
+            second.InstallerSwitches = new() { Silent = "/second" };
+            second.Scope = secondScope;
+            PackageManifests manifests = TestManifests.Create(first, second);
+            manifests.Installer.Scope = rootScope;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(Scope.User, firstScope: null, secondScope: null),
+            Previous = Create(Scope.Machine, firstScope: null, secondScope: null),
+            Manifests = Create(
+                Scope.Machine,
+                firstScope: Scope.User,
+                secondScope: Scope.Machine),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath == "Scope"
+                && review.GeneratedValue == "user");
+    }
+
+    [Fact]
     public void Mixed_generated_values_without_the_bot_value_do_not_trigger_review()
     {
         static PackageManifests Create(string? rootProductCode, string first, string second)
