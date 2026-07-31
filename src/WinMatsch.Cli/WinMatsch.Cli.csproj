@@ -6,6 +6,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Spectre.Console" />
+    <PackageReference Include="System.CommandLine" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinMatsch.GitHub\WinMatsch.GitHub.csproj" />
     <ProjectReference Include="..\WinMatsch.Workflows\WinMatsch.Workflows.csproj" />
   </ItemGroup>
 

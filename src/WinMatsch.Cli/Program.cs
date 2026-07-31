@@ -1,21 +1,14 @@
-using System.Reflection;
+using WinMatsch.Cli.Hosting;
 
 namespace WinMatsch.Cli;
 
+/// <summary>
+/// The executable entry point. All behavior lives in <see cref="CliHost"/> so tests can run
+/// the identical composition fully in process. Ctrl+C is translated by System.CommandLine
+/// into the invocation's cancellation token, which the host maps to
+/// <see cref="ExitCodes.Cancelled"/>.
+/// </summary>
 public static class Program
 {
-    public static int Main(string[] args)
-    {
-        if (args is ["--version"])
-        {
-            string version = typeof(Program).Assembly
-                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
-                .InformationalVersion ?? "unknown";
-            Console.WriteLine(version);
-            return 0;
-        }
-
-        Console.WriteLine("winmatsch command host");
-        return 0;
-    }
+    public static Task<int> Main(string[] args) => CliHost.CreateDefault().RunAsync(args);
 }
