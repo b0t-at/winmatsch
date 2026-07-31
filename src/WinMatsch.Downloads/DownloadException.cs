@@ -37,6 +37,25 @@ public sealed class DownloadHttpException : DownloadException
     public HttpStatusCode StatusCode { get; }
 }
 
+/// <summary>A redirect chain exceeded the downloader's fixed safety limit.</summary>
+public sealed class DownloadRedirectException : DownloadException
+{
+    public DownloadRedirectException(string requestUrl, int redirectLimit)
+        : base(
+            $"The request for '{requestUrl}' exceeded the limit of {redirectLimit} redirects.",
+            DownloadFailureKind.PermanentHttp)
+    {
+        RequestUrl = requestUrl;
+        RedirectLimit = redirectLimit;
+    }
+
+    /// <summary>The URL whose redirect chain exceeded the limit.</summary>
+    public string RequestUrl { get; }
+
+    /// <summary>The maximum number of redirects permitted by the downloader.</summary>
+    public int RedirectLimit { get; }
+}
+
 /// <summary>The local artifact no longer matches the identity that was previously downloaded.</summary>
 public sealed class DownloadContentChangedException : DownloadException
 {

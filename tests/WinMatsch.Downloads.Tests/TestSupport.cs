@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace WinMatsch.Downloads.Tests;
 
 /// <summary>
@@ -72,6 +74,62 @@ internal sealed class ProgressCollector : IProgress<DownloadProgress>
         lock (_gate)
         {
             _reports.Add(value);
+        }
+    }
+}
+
+internal sealed class ConstrainedFallbackHandler : HttpMessageHandler
+{
+    private TrackingContent? _headContent;
+    private int _requestCount;
+
+    public int RequestCount => Volatile.Read(ref _requestCount);
+
+    public bool HeadExchangeDisposedBeforeGet { get; private set; }
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _requestCount);
+        if (request.Method == HttpMethod.Head)
+        {
+            _headContent = new TrackingContent();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.MethodNotAllowed)
+            {
+                Content = _headContent,
+                RequestMessage = request,
+            });
+        }
+
+        HeadExchangeDisposedBeforeGet = _headContent?.IsDisposed == true;
+        if (!HeadExchangeDisposedBeforeGet)
+        {
+            throw new InvalidOperationException("The constrained connection is still held by the HEAD exchange.");
+        }
+
+        var response = new HttpResponseMessage(HttpStatusCode.PartialContent)
+        {
+            Content = new ByteArrayContent([7]),
+            RequestMessage = request,
+        };
+        response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(0, 0, 1);
+        return Task.FromResult(response);
+    }
+
+    private sealed class TrackingContent : ByteArrayContent
+    {
+        public TrackingContent()
+            : base([])
+        {
+        }
+
+        public bool IsDisposed { get; private set; }
+
+        protected override void Dispose(bool disposing)
+        {
+            IsDisposed = true;
+            base.Dispose(disposing);
         }
     }
 }

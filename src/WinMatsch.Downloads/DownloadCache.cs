@@ -18,7 +18,7 @@ public sealed class DownloadCache
     private const string LockFileName = ".winmatsch-cache.lock";
     private const int CopyBufferSize = 81920;
 
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> CacheGates = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _cacheGates = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly string _directory;
     private readonly DownloadCacheOptions _options;
@@ -30,7 +30,7 @@ public sealed class DownloadCache
         _directory = Path.GetFullPath(directory);
         _options = options ?? new DownloadCacheOptions();
         ValidateOptions(_options);
-        _gate = CacheGates.GetOrAdd(_directory, static _ => new SemaphoreSlim(1, 1));
+        _gate = _cacheGates.GetOrAdd(_directory, static _ => new SemaphoreSlim(1, 1));
     }
 
     /// <summary>The full cache directory path.</summary>
@@ -73,15 +73,36 @@ public sealed class DownloadCache
                 return null;
             }
 
-            Directory.CreateDirectory(destinationDirectory);
+            try
+            {
+                Directory.CreateDirectory(destinationDirectory);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                throw DestinationFailure(
+                    destinationDirectory,
+                    $"Failed to create the cache restoration destination '{destinationDirectory}'.",
+                    exception);
+            }
+
             string destinationPath = Path.Combine(destinationDirectory, metadata.FileName);
             string tempPath = destinationPath + TempSuffix + "." + Guid.NewGuid().ToString("N");
             DownloadContentIdentity actual;
             try
             {
-                actual = await CopyAndHashAsync(payloadPath, tempPath, cancellationToken).ConfigureAwait(false);
+                actual = await RestorePayloadAsync(payloadPath, tempPath, cancellationToken).ConfigureAwait(false);
                 EnsureIdentity(metadata, actual, payloadPath);
-                File.Move(tempPath, destinationPath, overwrite: true);
+                try
+                {
+                    File.Move(tempPath, destinationPath, overwrite: true);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    throw DestinationFailure(
+                        destinationPath,
+                        $"Failed to atomically restore the cached installer to '{destinationPath}'.",
+                        exception);
+                }
             }
             catch
             {
@@ -473,6 +494,103 @@ public sealed class DownloadCache
         return new DownloadContentIdentity(Sha256Hash.FromHashBytes(hash.GetHashAndReset()), size);
     }
 
+    private static async Task<DownloadContentIdentity> RestorePayloadAsync(
+        string sourcePath,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        FileStream source;
+        try
+        {
+            source = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                CopyBufferSize,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw Corruption(sourcePath, "The cached payload could not be opened for restoration.", exception);
+        }
+
+        await using (source.ConfigureAwait(false))
+        {
+            FileStream destination;
+            try
+            {
+                destination = new FileStream(
+                    destinationPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    CopyBufferSize,
+                    FileOptions.Asynchronous | FileOptions.WriteThrough);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                throw DestinationFailure(
+                    destinationPath,
+                    $"Failed to create the cache restoration file '{destinationPath}'.",
+                    exception);
+            }
+
+            await using (destination.ConfigureAwait(false))
+            {
+                using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                var buffer = new byte[CopyBufferSize];
+                long size = 0;
+                while (true)
+                {
+                    int read;
+                    try
+                    {
+                        read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (IOException exception)
+                    {
+                        throw Corruption(sourcePath, "The cached payload could not be read during restoration.", exception);
+                    }
+
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    hash.AppendData(buffer.AsSpan(0, read));
+                    try
+                    {
+                        await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    {
+                        throw DestinationFailure(
+                            destinationPath,
+                            $"Failed to write the cache restoration file '{destinationPath}'.",
+                            exception);
+                    }
+
+                    size += read;
+                }
+
+                try
+                {
+                    await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    throw DestinationFailure(
+                        destinationPath,
+                        $"Failed to flush the cache restoration file '{destinationPath}'.",
+                        exception);
+                }
+
+                return new DownloadContentIdentity(Sha256Hash.FromHashBytes(hash.GetHashAndReset()), size);
+            }
+        }
+    }
+
     private static async Task<DownloadContentIdentity> ComputeIdentityAsync(string path, CancellationToken cancellationToken)
     {
         await using FileStream stream = new(
@@ -570,6 +688,9 @@ public sealed class DownloadCache
     }
 
     private static DownloadCacheCorruptionException Corruption(string path, string message, Exception? innerException = null)
+        => new(path, message, innerException);
+
+    private static DownloadFileException DestinationFailure(string path, string message, Exception innerException)
         => new(path, message, innerException);
 
     private static void ValidateLeafName(string value, string field)

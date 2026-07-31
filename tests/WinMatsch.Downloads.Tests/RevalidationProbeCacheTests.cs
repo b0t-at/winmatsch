@@ -27,13 +27,14 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     public async Task DownloadAsync_CapturesEtagDateFreshnessAndStableIdentity()
     {
         byte[] payload = Payload(128);
-        var date = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero);
+        DateTimeOffset date = DateTimeOffset.UtcNow;
         using StubHttpMessageHandler handler = new((request, _) =>
         {
             HttpResponseMessage response = Ok(request, payload);
             response.Headers.ETag = new EntityTagHeaderValue("\"v1\"");
             response.Headers.Date = date;
             response.Headers.CacheControl = new CacheControlHeaderValue { MaxAge = TimeSpan.FromMinutes(15) };
+            response.Headers.Age = TimeSpan.FromMinutes(5);
             return response;
         });
         using InstallerDownloader downloader = new(handler);
@@ -42,9 +43,9 @@ public sealed class RevalidationProbeCacheTests : IDisposable
 
         Assert.Equal("\"v1\"", result.ETag);
         Assert.Equal(date, result.ResponseDate);
-        Assert.Equal(date.AddMinutes(15), result.FreshUntil);
-        Assert.True(result.IsFreshAt(date.AddMinutes(14)));
-        Assert.False(result.IsFreshAt(date.AddMinutes(15)));
+        Assert.Equal(result.RetrievedAt.AddMinutes(10), result.FreshUntil);
+        Assert.True(result.IsFreshAt(result.RetrievedAt.AddMinutes(9)));
+        Assert.False(result.IsFreshAt(result.RetrievedAt.AddMinutes(10)));
         Assert.Equal(result.Sha256, result.ContentIdentity.Sha256);
         Assert.Equal(result.SizeInBytes, result.ContentIdentity.SizeInBytes);
     }
@@ -65,8 +66,9 @@ public sealed class RevalidationProbeCacheTests : IDisposable
             }
 
             Assert.Contains(request.Headers.IfNoneMatch, value => value.Tag == "\"v1\"");
-            Assert.Equal(lastModified, request.Headers.IfModifiedSince);
+            Assert.Null(request.Headers.IfModifiedSince);
             var notModified = new HttpResponseMessage(HttpStatusCode.NotModified) { RequestMessage = request };
+            notModified.Headers.ETag = new EntityTagHeaderValue("\"v1\"");
             notModified.Headers.Date = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero);
             notModified.Headers.CacheControl = new CacheControlHeaderValue { MaxAge = TimeSpan.FromHours(1) };
             return notModified;
@@ -80,6 +82,99 @@ public sealed class RevalidationProbeCacheTests : IDisposable
         Assert.True(revalidated.WasNotModifiedResponse);
         Assert.Equal(initial.ContentIdentity, revalidated.Result.ContentIdentity);
         Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task RevalidateAsync_WeakEtagForcesUnconditionalGetAndDetectsChangedBytes()
+    {
+        byte[] original = Payload(128);
+        byte[] changed = Payload(129);
+        using StubHttpMessageHandler handler = new((request, requestNumber) =>
+        {
+            if (requestNumber == 1)
+            {
+                HttpResponseMessage initial = Ok(request, original);
+                initial.Headers.ETag = new EntityTagHeaderValue("\"v1\"", isWeak: true);
+                return initial;
+            }
+
+            Assert.Empty(request.Headers.IfNoneMatch);
+            Assert.Null(request.Headers.IfModifiedSince);
+            return Ok(request, changed);
+        });
+        using InstallerDownloader downloader = new(handler);
+        DownloadResult initial = await downloader.DownloadAsync("https://example.com/setup.exe", _tempDir);
+
+        DownloadRevalidationResult revalidated = await downloader.RevalidateAsync(initial);
+
+        Assert.Equal(DownloadRevalidationStatus.ContentChanged, revalidated.Status);
+        Assert.False(revalidated.WasNotModifiedResponse);
+        Assert.Equal(changed, await File.ReadAllBytesAsync(revalidated.Result.FilePath));
+        Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task RevalidateAsync_LastModifiedOnlyForcesUnconditionalGet()
+    {
+        byte[] payload = Payload(128);
+        DateTimeOffset lastModified = DateTimeOffset.UtcNow.AddDays(-1);
+        using StubHttpMessageHandler handler = new((request, requestNumber) =>
+        {
+            if (requestNumber == 1)
+            {
+                HttpResponseMessage initial = Ok(request, payload);
+                initial.Content.Headers.LastModified = lastModified;
+                return initial;
+            }
+
+            Assert.Empty(request.Headers.IfNoneMatch);
+            Assert.Null(request.Headers.IfModifiedSince);
+            return Ok(request, payload);
+        });
+        using InstallerDownloader downloader = new(handler);
+        DownloadResult initial = await downloader.DownloadAsync("https://example.com/setup.exe", _tempDir);
+
+        DownloadRevalidationResult revalidated = await downloader.RevalidateAsync(initial);
+
+        Assert.Equal(DownloadRevalidationStatus.Unchanged, revalidated.Status);
+        Assert.False(revalidated.WasNotModifiedResponse);
+        Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task RevalidateAsync_MismatchedStrongEtagOn304FallsBackToUnconditionalGet()
+    {
+        byte[] original = Payload(128);
+        byte[] changed = Payload(129);
+        using StubHttpMessageHandler handler = new((request, requestNumber) =>
+        {
+            if (requestNumber == 1)
+            {
+                HttpResponseMessage initial = Ok(request, original);
+                initial.Headers.ETag = new EntityTagHeaderValue("\"v1\"");
+                return initial;
+            }
+
+            if (requestNumber == 2)
+            {
+                Assert.Contains(request.Headers.IfNoneMatch, value => value.Tag == "\"v1\"");
+                var notModified = new HttpResponseMessage(HttpStatusCode.NotModified) { RequestMessage = request };
+                notModified.Headers.ETag = new EntityTagHeaderValue("\"v2\"");
+                return notModified;
+            }
+
+            Assert.Empty(request.Headers.IfNoneMatch);
+            return Ok(request, changed);
+        });
+        using InstallerDownloader downloader = new(handler);
+        DownloadResult initial = await downloader.DownloadAsync("https://example.com/setup.exe", _tempDir);
+
+        DownloadRevalidationResult revalidated = await downloader.RevalidateAsync(initial);
+
+        Assert.Equal(DownloadRevalidationStatus.ContentChanged, revalidated.Status);
+        Assert.False(revalidated.WasNotModifiedResponse);
+        Assert.Equal(changed, await File.ReadAllBytesAsync(revalidated.Result.FilePath));
+        Assert.Equal(3, handler.RequestCount);
     }
 
     [Fact]
@@ -175,12 +270,36 @@ public sealed class RevalidationProbeCacheTests : IDisposable
             }
 
             File.WriteAllBytes(initial!.FilePath, Payload(32));
-            return new HttpResponseMessage(HttpStatusCode.NotModified) { RequestMessage = request };
+            var notModified = new HttpResponseMessage(HttpStatusCode.NotModified) { RequestMessage = request };
+            notModified.Headers.ETag = new EntityTagHeaderValue("\"v1\"");
+            return notModified;
         });
         using InstallerDownloader downloader = new(handler);
         initial = await downloader.DownloadAsync("https://example.com/setup.exe", _tempDir);
 
         await Assert.ThrowsAsync<DownloadContentChangedException>(() => downloader.RevalidateAsync(initial));
+    }
+
+    [Fact]
+    public async Task RevalidateAsync_SerializesCompetingOperationsForSameDestination()
+    {
+        byte[] payload = Payload(256);
+        using StubHttpMessageHandler handler = new((request, _) => Ok(request, payload))
+        {
+            PerRequestDelay = TimeSpan.FromMilliseconds(75),
+        };
+        using InstallerDownloader downloader = new(handler);
+        DownloadResult initial = await downloader.DownloadAsync("https://example.com/setup.exe", _tempDir);
+
+        DownloadRevalidationResult[] results = await Task.WhenAll(
+            downloader.RevalidateAsync(initial),
+            downloader.RevalidateAsync(initial));
+
+        Assert.All(results, result => Assert.Equal(DownloadRevalidationStatus.Unchanged, result.Status));
+        Assert.Equal(1, handler.MaxObservedConcurrency);
+        Assert.Equal(3, handler.RequestCount);
+        Assert.All(results, result => Assert.Equal(result.Result.ContentIdentity, initial.ContentIdentity));
+        Assert.Equal(payload, await File.ReadAllBytesAsync(initial.FilePath));
     }
 
     [Fact]
@@ -239,6 +358,19 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task ProbeAsync_DisposesRejectedHeadBeforeRangeFallbackOnConstrainedConnection()
+    {
+        using ConstrainedFallbackHandler handler = new();
+        using InstallerDownloader downloader = new(handler);
+
+        DownloadProbeResult result = await downloader.ProbeAsync("https://example.com/setup.exe");
+
+        Assert.Equal(DownloadProbeMethod.RangeGet, result.Method);
+        Assert.True(handler.HeadExchangeDisposedBeforeGet);
+        Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
     public async Task ProbeAsync_DoesNotClaimRangeSupportWhenServerIgnoresRange()
     {
         using StubHttpMessageHandler handler = new((request, _) => request.Method == HttpMethod.Head
@@ -276,6 +408,27 @@ public sealed class RevalidationProbeCacheTests : IDisposable
 
         Assert.False(insecureRequestSent);
         Assert.False(File.Exists(Path.Combine(_tempDir, "setup.exe")));
+    }
+
+    [Fact]
+    public async Task DownloadAsync_RedirectLimitIsPermanentAndNotRetried()
+    {
+        using StubHttpMessageHandler handler = new((request, _) =>
+        {
+            var redirect = new HttpResponseMessage(HttpStatusCode.Redirect) { RequestMessage = request };
+            redirect.Headers.Location = request.RequestUri;
+            return redirect;
+        });
+        using InstallerDownloader downloader = new(
+            handler,
+            new DownloaderOptions { MaxRetryAttempts = 3, RetryBaseDelay = TimeSpan.Zero });
+
+        DownloadRedirectException exception = await Assert.ThrowsAsync<DownloadRedirectException>(
+            () => downloader.DownloadAsync("https://example.com/loop.exe", _tempDir));
+
+        Assert.Equal(DownloadFailureKind.PermanentHttp, exception.FailureKind);
+        Assert.Equal(10, exception.RedirectLimit);
+        Assert.Equal(11, handler.RequestCount);
     }
 
     [Fact]
@@ -370,6 +523,26 @@ public sealed class RevalidationProbeCacheTests : IDisposable
 
         Assert.Equal(DownloadCacheEntryState.Corrupt, Assert.Single(inspection).State);
         Assert.Equal(DownloadFailureKind.CacheCorruption, exception.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task Cache_RestoreMoveFailureUsesLocalFileTaxonomyAndCleansTemporaryFile()
+    {
+        byte[] payload = Payload(100);
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        string destination = Path.Combine(_tempDir, "blocked-destination");
+        using StubHttpMessageHandler handler = new((request, _) => Ok(request, payload));
+        using InstallerDownloader downloader = CreateCachedDownloader(handler, cacheDirectory);
+        await downloader.DownloadAsync("https://example.com/setup.exe", Path.Combine(_tempDir, "first"));
+        Directory.CreateDirectory(Path.Combine(destination, "setup.exe"));
+
+        DownloadFileException exception = await Assert.ThrowsAsync<DownloadFileException>(
+            () => downloader.DownloadAsync("https://example.com/setup.exe", destination));
+
+        Assert.Equal(DownloadFailureKind.LocalFile, exception.FailureKind);
+        Assert.Equal(Path.Combine(destination, "setup.exe"), exception.FilePath);
+        Assert.Empty(Directory.EnumerateFiles(destination, "*.tmp.*"));
         Assert.Equal(1, handler.RequestCount);
     }
 
