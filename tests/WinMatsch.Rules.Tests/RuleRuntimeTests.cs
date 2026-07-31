@@ -621,6 +621,42 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Non_restoring_installer_still_consumes_its_human_pair()
+    {
+        static PackageManifests Create(
+            string rootProductCode,
+            string first,
+            string second)
+        {
+            Installer firstInstaller = TestManifests.CreateInstaller(
+                url: "https://example.test/universal.exe",
+                scope: Scope.User);
+            firstInstaller.ProductCode = first;
+            Installer secondInstaller = TestManifests.CreateInstaller(
+                url: "https://example.test/universal.exe",
+                scope: Scope.Machine);
+            secondInstaller.ProductCode = second;
+            PackageManifests manifests = TestManifests.Create(firstInstaller, secondInstaller);
+            manifests.Installer.ProductCode = rootProductCode;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("A", "A", "A"),
+            Previous = Create("B", "A", "B"),
+            Manifests = Create("B", "C", "A"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath == "ProductCode"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
     public void Root_correction_pairing_excludes_the_corrected_field()
     {
         static PackageManifests Create(

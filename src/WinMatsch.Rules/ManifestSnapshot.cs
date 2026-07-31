@@ -753,10 +753,10 @@ internal sealed class ManifestSnapshot
         out string? matched)
     {
         YamlMappingNode generatedRoot = GetRoot("installer");
+        YamlMappingNode humanRoot = humanSnapshot.GetRoot("installer");
         if (TryResolveSemanticPath(generatedRoot, rootSemanticPath, out string? generatedRootValue)
             && SemanticValueEquals(rootSemanticPath, expected, generatedRootValue))
         {
-            YamlMappingNode humanRoot = humanSnapshot.GetRoot("installer");
             _ = TryResolveSemanticPath(humanRoot, rootSemanticPath, out string? humanRootValue);
             if (!SemanticValueEquals(rootSemanticPath, expected, humanRootValue))
             {
@@ -771,7 +771,29 @@ internal sealed class ManifestSnapshot
             return false;
         }
 
+        YamlSequenceNode? humanInstallers =
+            GetMappingValue(humanRoot, "Installers") as YamlSequenceNode;
         var usedHumanInstallers = new HashSet<int>();
+        var humanIndexByGenerated = new int?[generatedInstallers.Children.Count];
+        if (humanInstallers is not null)
+        {
+            for (int generatedIndex = 0; generatedIndex < generatedInstallers.Children.Count; generatedIndex++)
+            {
+                if (generatedInstallers.Children[generatedIndex] is YamlMappingNode generatedInstaller
+                    && MatchInstallerExcludingField(
+                        humanInstallers,
+                        humanRoot,
+                        generatedInstaller,
+                        generatedRoot,
+                        rootSemanticPath,
+                        usedHumanInstallers) is int humanIndex)
+                {
+                    usedHumanInstallers.Add(humanIndex);
+                    humanIndexByGenerated[generatedIndex] = humanIndex;
+                }
+            }
+        }
+
         for (int generatedIndex = 0; generatedIndex < generatedInstallers.Children.Count; generatedIndex++)
         {
             if (generatedInstallers.Children[generatedIndex] is not YamlMappingNode generatedInstaller)
@@ -791,18 +813,10 @@ internal sealed class ManifestSnapshot
             }
 
             string? humanValue = null;
-            YamlMappingNode humanRoot = humanSnapshot.GetRoot("installer");
-            if (GetMappingValue(humanRoot, "Installers") is YamlSequenceNode humanInstallers
-                && MatchInstallerExcludingField(
-                    humanInstallers,
-                    humanRoot,
-                    generatedInstaller,
-                    generatedRoot,
-                    rootSemanticPath,
-                    usedHumanInstallers) is int humanIndex
+            if (humanInstallers is not null
+                && humanIndexByGenerated[generatedIndex] is int humanIndex
                 && humanInstallers.Children[humanIndex] is YamlMappingNode humanInstaller)
             {
-                usedHumanInstallers.Add(humanIndex);
                 humanValue = TryResolveSemanticPath(
                     humanInstaller,
                     rootSemanticPath,
