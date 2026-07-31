@@ -276,7 +276,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     {
         ArgumentNullException.ThrowIfNull(repository);
         Uri first = new(
-            _options.ApiBaseUri,
+            _options.NormalizedApiBaseUri,
             $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/releases?per_page=100");
         List<RestReleaseDto> releases = await GetAllPagesAsync(
             first,

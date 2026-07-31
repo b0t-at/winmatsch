@@ -130,6 +130,30 @@ public sealed class GitHubTransportSafetyTests
         Assert.Equal("Test", result.GetText());
     }
 
+    [Fact]
+    public async Task Enterprise_api_base_path_is_preserved_for_release_enumeration()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(request =>
+        {
+            Assert.Equal(
+                "https://ghe.invalid/api/v3/repos/upstream/repo/releases?per_page=100",
+                request.Uri.AbsoluteUri);
+            return GitHubClientTestSupport.Json("[]");
+        });
+
+        IReadOnlyList<GitHubRelease> releases = await CreateClient(
+                handler,
+                new Uri("https://ghe.invalid/api/v3"),
+                retryBaseDelay: TimeSpan.Zero)
+            .GetReleasesAsync(
+                _repository,
+                TestContext.Current.CancellationToken);
+
+        Assert.Empty(releases);
+        Assert.Single(handler.Requests);
+    }
+
     private static GitHubRepositoryClient CreateClient(
         ScriptedHttpMessageHandler handler,
         Uri apiBaseUri,
