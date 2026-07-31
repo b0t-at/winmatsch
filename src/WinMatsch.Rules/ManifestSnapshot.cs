@@ -319,6 +319,59 @@ internal sealed class ManifestSnapshot
                 StringComparison.OrdinalIgnoreCase);
     }
 
+    internal bool TryGetEffectiveInstallerValue(string semanticPath, out string? value)
+    {
+        const string prefix = "Installers{installer:";
+        if (!semanticPath.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            value = null;
+            return false;
+        }
+
+        int close = semanticPath.IndexOf('}', prefix.Length);
+        if (close < 0
+            || close + 2 > semanticPath.Length
+            || semanticPath[close + 1] != '.')
+        {
+            value = null;
+            return false;
+        }
+
+        string field = semanticPath[(close + 2)..];
+        if (field.Contains('.') || field.Contains('{'))
+        {
+            value = null;
+            return false;
+        }
+
+        string identityToken = semanticPath[prefix.Length..close];
+        YamlMappingNode root = GetRoot("installer");
+        if (GetMappingValue(root, "Installers") is not YamlSequenceNode installers)
+        {
+            value = ScalarValue(GetMappingValue(root, field));
+            return true;
+        }
+
+        int[] occurrences = GetInstallerOccurrenceOrdinals(installers, root);
+        for (int i = 0; i < installers.Children.Count; i++)
+        {
+            string identity = InstallerIdentity(installers.Children[i], root);
+            string candidate = $"{Hash(identity)}#{occurrences[i]}";
+            if (!string.Equals(candidate, identityToken, StringComparison.Ordinal)
+                || installers.Children[i] is not YamlMappingNode installer)
+            {
+                continue;
+            }
+
+            value = ScalarValue(GetMappingValue(installer, field))
+                ?? ScalarValue(GetMappingValue(root, field));
+            return true;
+        }
+
+        value = null;
+        return false;
+    }
+
     private static string GetVersionPath(PackageManifests manifests)
         => manifests.Version.PackageIdentifier is { } identifier
             ? ManifestPaths.GetVersionFileName(identifier)
@@ -801,9 +854,12 @@ internal sealed class ManifestSnapshot
                 || digits.SequenceEqual("86")
                     && prefix.EndsWith("x", StringComparison.OrdinalIgnoreCase)
                 || digits.SequenceEqual("32")
-                    && prefix.EndsWith("win", StringComparison.OrdinalIgnoreCase)
+                    && (prefix.EndsWith("win", StringComparison.OrdinalIgnoreCase)
+                        || prefix.EndsWith("arm", StringComparison.OrdinalIgnoreCase))
                 || digits.SequenceEqual("386")
-                    && prefix.EndsWith("i", StringComparison.OrdinalIgnoreCase);
+                    && prefix.EndsWith("i", StringComparison.OrdinalIgnoreCase)
+                || (digits.SequenceEqual("7") || digits.SequenceEqual("8"))
+                    && prefix.EndsWith("armv", StringComparison.OrdinalIgnoreCase);
             if (architectureToken)
             {
                 normalized.Append(digits);

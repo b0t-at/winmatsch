@@ -364,6 +364,45 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Hoisted_generated_value_cannot_hide_a_reverted_installer_correction()
+    {
+        static Installer Installer(string url, string productCode)
+        {
+            Installer installer = TestManifests.CreateInstaller(url: url);
+            installer.ProductCode = productCode;
+            return installer;
+        }
+
+        PackageManifests originalBot = TestManifests.Create(
+            Installer("https://example.test/a.exe", "A"),
+            Installer("https://example.test/c.exe", "C"));
+        PackageManifests merged = TestManifests.Create(
+            Installer("https://example.test/a.exe", "B"),
+            Installer("https://example.test/c.exe", "C"));
+        PackageManifests generated = TestManifests.Create(
+            Installer("https://example.test/a.exe", "A"),
+            Installer("https://example.test/c.exe", "A"));
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create(
+            [new HoistCommonInstallerFieldsRule()],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        Assert.Equal("A", generated.Installer.ProductCode);
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal)
+                && review.HumanValue == "B"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
     public void Human_inserted_installer_is_not_hidden_by_index_shifts()
     {
         Installer original = TestManifests.CreateInstaller(url: "https://example.test/app-x64.exe");
@@ -685,6 +724,7 @@ public class RuleRuntimeTests
     [InlineData("Download from https://example.test/file?sig=super-secret")]
     [InlineData("Download from https://example.test/token%3Dsuper-secret/file.exe")]
     [InlineData("Download from https://example.test/token%253Dsuper-secret/file.exe")]
+    [InlineData("Download from https://example.test/file?x=1;sig=super-secret")]
     public void Embedded_signed_or_encoded_urls_cannot_leak_from_structured_values(string value)
     {
         string? sanitized = RuleLogSanitizer.Sanitize("SourceEvidence", value);
@@ -739,6 +779,34 @@ public class RuleRuntimeTests
 
         Assert.False(context.RequiresReview);
         Assert.Empty(context.HumanCorrectionReviews);
+    }
+
+    [Fact]
+    public void Armv_architecture_urls_remain_distinct_when_installers_reorder()
+    {
+        static PackageManifests Create(bool reversed)
+        {
+            Installer armv7 = TestManifests.CreateInstaller(
+                Architecture.Arm,
+                url: "https://example.test/app-armv7-1.0.exe");
+            Installer armv8 = TestManifests.CreateInstaller(
+                Architecture.Arm64,
+                url: "https://example.test/app-armv8-1.0.exe");
+            return reversed
+                ? TestManifests.Create(armv8, armv7)
+                : TestManifests.Create(armv7, armv8);
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(reversed: false),
+            Previous = Create(reversed: true),
+            Manifests = Create(reversed: false),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
     }
 
     [Fact]

@@ -28,7 +28,11 @@ internal static class HumanCorrectionDetector
         {
             var key = new SemanticChangeKey(humanChange.DocumentKey, humanChange.SemanticPath);
             generatedChanges.TryGetValue(key, out RawManifestChange? generatedChange);
-            string? generatedValue = generatedChange?.After ?? humanChange.Before;
+            string? generatedValue = generatedSnapshot.TryGetEffectiveInstallerValue(
+                humanChange.SemanticPath,
+                out string? effectiveValue)
+                ? effectiveValue
+                : generatedChange?.After ?? humanChange.Before;
 
             if (!string.Equals(humanChange.Before, humanChange.After, StringComparison.Ordinal)
                 && ManifestSnapshot.SemanticValueEquals(

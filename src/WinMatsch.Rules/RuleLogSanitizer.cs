@@ -217,7 +217,7 @@ internal static class RuleLogSanitizer
     }
 
     private static bool IsUriTerminator(char value)
-        => char.IsWhiteSpace(value) || value is ')' or ']' or '}' or ',' or ';' or '\'' or '"';
+        => char.IsWhiteSpace(value) || value is ')' or ']' or '}' or '\'' or '"';
 
     private static bool IsIdentifierCharacter(char value)
         => char.IsAsciiLetterOrDigit(value) || value == '_';
