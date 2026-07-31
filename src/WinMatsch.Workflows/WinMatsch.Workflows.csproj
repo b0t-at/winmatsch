@@ -13,4 +13,8 @@
     <ProjectReference Include="..\WinMatsch.Validation\WinMatsch.Validation.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+
 </Project>
