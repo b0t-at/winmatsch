@@ -254,11 +254,20 @@ internal sealed class RestPullRequestDto
 
 internal sealed class RestPullRequestRefDto
 {
+    public string Label { get; set; } = "";
+
     public string Ref { get; set; } = "";
 
     public string Sha { get; set; } = "";
 
-    public RestRepositoryDto Repo { get; set; } = new();
+    public RestRepositoryDto? Repo { get; set; }
+
+    public RestPullRequestUserDto? User { get; set; }
+}
+
+internal sealed class RestPullRequestUserDto
+{
+    public string Login { get; set; } = "";
 }
 
 internal sealed class CreatePullRequestDto

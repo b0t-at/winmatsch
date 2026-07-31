@@ -8,7 +8,7 @@ namespace WinMatsch.GitHub.Internal;
 
 internal sealed class GitHubHttpTransport
 {
-    private static readonly MediaTypeWithQualityHeaderValue GitHubJson =
+    private static readonly MediaTypeWithQualityHeaderValue _gitHubJson =
         new("application/vnd.github+json");
 
     private readonly HttpClient _httpClient;
@@ -39,7 +39,7 @@ internal sealed class GitHubHttpTransport
     {
         TransportResponse<TResponse> response = await SendAsync(
             HttpMethod.Get,
-            new Uri(_options.ApiBaseUri, relativePath),
+            new Uri(_options.NormalizedApiBaseUri, relativePath),
             null,
             responseType,
             allowRetry: true,
@@ -51,13 +51,16 @@ internal sealed class GitHubHttpTransport
         Uri uri,
         JsonTypeInfo<TResponse> responseType,
         CancellationToken cancellationToken)
-        => SendAsync(
+    {
+        ValidateApiUri(uri);
+        return SendAsync(
             HttpMethod.Get,
             uri,
             null,
             responseType,
             allowRetry: true,
             cancellationToken);
+    }
 
     public Task<TResponse> PostAsync<TRequest, TResponse>(
         string relativePath,
@@ -67,7 +70,7 @@ internal sealed class GitHubHttpTransport
         CancellationToken cancellationToken)
         => SendValueAsync(
             HttpMethod.Post,
-            new Uri(_options.ApiBaseUri, relativePath),
+            new Uri(_options.NormalizedApiBaseUri, relativePath),
             Serialize(request, requestType),
             responseType,
             allowRetry: false,
@@ -81,7 +84,7 @@ internal sealed class GitHubHttpTransport
         CancellationToken cancellationToken)
         => SendValueAsync(
             HttpMethod.Patch,
-            new Uri(_options.ApiBaseUri, relativePath),
+            new Uri(_options.NormalizedApiBaseUri, relativePath),
             Serialize(request, requestType),
             responseType,
             allowRetry: false,
@@ -93,7 +96,7 @@ internal sealed class GitHubHttpTransport
     {
         using var request = CreateRequest(
             HttpMethod.Delete,
-            new Uri(_options.ApiBaseUri, relativePath),
+            new Uri(_options.NormalizedApiBaseUri, relativePath),
             content: null);
         using HttpResponseMessage response = await _httpClient.SendAsync(
             request,
@@ -192,9 +195,11 @@ internal sealed class GitHubHttpTransport
                         attempt < _options.MaxTransientRetries &&
                         IsTransient(response))
                     {
+                        RetryConditionHeaderValue? retryAfter = GetServerRetryAfter(response);
+                        response.Dispose();
                         await DelayAsync(
                                 attempt,
-                                GetServerRetryAfter(response),
+                                retryAfter,
                                 cancellationToken)
                             .ConfigureAwait(false);
                         continue;
@@ -229,7 +234,7 @@ internal sealed class GitHubHttpTransport
     {
         var request = new HttpRequestMessage(method, uri);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _accessToken);
-        request.Headers.Accept.Add(GitHubJson);
+        request.Headers.Accept.Add(_gitHubJson);
         request.Headers.UserAgent.ParseAdd(_options.UserAgent);
         request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
         if (content is not null)
@@ -303,10 +308,17 @@ internal sealed class GitHubHttpTransport
             return response.Headers.RetryAfter;
         }
 
-        if (response.StatusCode == HttpStatusCode.Forbidden &&
+        if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests &&
             TryGetLongHeader(response.Headers, "X-RateLimit-Reset", out long reset))
         {
-            return new RetryConditionHeaderValue(DateTimeOffset.FromUnixTimeSeconds(reset));
+            try
+            {
+                return new RetryConditionHeaderValue(DateTimeOffset.FromUnixTimeSeconds(reset));
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return null;
+            }
         }
 
         return null;
@@ -368,10 +380,26 @@ internal sealed class GitHubHttpTransport
                 {
                     return next;
                 }
+
+                throw new GitHubApiException(
+                    "GitHub returned an invalid absolute pagination link.");
             }
         }
 
         return null;
+    }
+
+    private void ValidateApiUri(Uri uri)
+    {
+        Uri apiBaseUri = _options.NormalizedApiBaseUri;
+        if (!uri.IsAbsoluteUri ||
+            !string.Equals(uri.Scheme, apiBaseUri.Scheme, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(uri.Host, apiBaseUri.Host, StringComparison.OrdinalIgnoreCase) ||
+            uri.Port != apiBaseUri.Port)
+        {
+            throw new GitHubApiException(
+                "GitHub returned a pagination link outside the configured API origin.");
+        }
     }
 
     private static string? GetRequestId(HttpResponseMessage response)

@@ -5,7 +5,7 @@ namespace WinMatsch.GitHub.Tests;
 
 public sealed class GitHubPullRequestTests
 {
-    private static readonly RepositoryCoordinates Repository = new("upstream", "repo");
+    private static readonly RepositoryCoordinates _repository = new("upstream", "repo");
 
     [Fact]
     public async Task Pull_request_search_paginates_and_matches_exact_title_token()
@@ -27,7 +27,7 @@ public sealed class GitHubPullRequestTests
         IReadOnlyList<PullRequestInfo> pullRequests = await GitHubClientTestSupport
             .CreateClient(handler)
             .SearchPullRequestsAsync(
-                Repository,
+                _repository,
                 new PullRequestSearch(
                     PullRequestState.Open,
                     "contributor",
@@ -38,6 +38,51 @@ public sealed class GitHubPullRequestTests
 
         PullRequestInfo pullRequest = Assert.Single(pullRequests);
         Assert.Equal(2, pullRequest.Number);
+    }
+
+    [Fact]
+    public async Task Pull_request_from_deleted_fork_uses_head_user()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            [{
+              "number": 3,
+              "node_id": "PR_3",
+              "title": "Update deleted fork",
+              "body": null,
+              "state": "open",
+              "draft": false,
+              "head": {
+                "label": "contributor:update",
+                "ref": "update",
+                "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repo": null,
+                "user": { "login": "contributor" }
+              },
+              "base": {
+                "label": "upstream:main",
+                "ref": "main",
+                "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "repo": null,
+                "user": { "login": "upstream" }
+              },
+              "html_url": "https://github.invalid/upstream/repo/pull/3",
+              "created_at": "2026-01-01T00:00:00Z",
+              "updated_at": "2026-01-02T00:00:00Z"
+            }]
+            """));
+
+        IReadOnlyList<PullRequestInfo> pullRequests = await GitHubClientTestSupport
+            .CreateClient(handler)
+            .SearchPullRequestsAsync(
+                _repository,
+                new PullRequestSearch(),
+                TestContext.Current.CancellationToken);
+
+        PullRequestInfo pullRequest = Assert.Single(pullRequests);
+        Assert.Equal("contributor", pullRequest.HeadOwner);
+        Assert.Equal("update", pullRequest.HeadBranch);
     }
 
     [Fact]
@@ -55,7 +100,7 @@ public sealed class GitHubPullRequestTests
 
         PullRequestInfo result = await GitHubClientTestSupport.CreateClient(handler)
             .CreatePullRequestAsync(
-                Repository,
+                _repository,
                 request,
                 new MutationRequest("pr-create-1"),
                 TestContext.Current.CancellationToken);
@@ -80,7 +125,7 @@ public sealed class GitHubPullRequestTests
 
         PullRequestInfo result = await GitHubClientTestSupport.CreateClient(handler)
             .CreatePullRequestAsync(
-                Repository,
+                _repository,
                 new CreatePullRequestRequest(
                     "Update Contoso.App",
                     null,
@@ -128,17 +173,17 @@ public sealed class GitHubPullRequestTests
         GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
 
         PullRequestInfo read = await client.GetPullRequestAsync(
-            Repository,
+            _repository,
             9,
             TestContext.Current.CancellationToken);
         PullRequestComment comment = await client.CommentOnPullRequestAsync(
-            Repository,
+            _repository,
             9,
             "Synthetic comment",
             new MutationRequest("comment-9"),
             TestContext.Current.CancellationToken);
         PullRequestInfo closed = await client.ClosePullRequestAsync(
-            Repository,
+            _repository,
             9,
             new MutationRequest("close-9"),
             TestContext.Current.CancellationToken);
@@ -160,14 +205,14 @@ public sealed class GitHubPullRequestTests
 
         await Assert.ThrowsAsync<GitHubApiException>(
             () => client.CommentOnPullRequestAsync(
-                Repository,
+                _repository,
                 10,
                 "Synthetic comment",
                 mutation,
                 TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<GitHubApiException>(
             () => client.CommentOnPullRequestAsync(
-                Repository,
+                _repository,
                 10,
                 "Synthetic comment",
                 mutation,

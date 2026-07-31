@@ -5,7 +5,7 @@ namespace WinMatsch.GitHub.Tests;
 
 public sealed class GitHubReadOperationsTests
 {
-    private static readonly RepositoryCoordinates Repository = new("upstream", "repo");
+    private static readonly RepositoryCoordinates _repository = new("upstream", "repo");
 
     [Fact]
     public async Task Authenticated_user_uses_graphql_and_reports_rate_limit()
@@ -82,13 +82,26 @@ public sealed class GitHubReadOperationsTests
         var handler = new ScriptedHttpMessageHandler();
         handler.Add(_ => GitHubClientTestSupport.Json(
             GitHubClientTestSupport.RepositoryGraphQlJson()));
+        handler.Add(request =>
+        {
+            Assert.EndsWith("/repos/upstream/repo/branches/main", request.Uri.AbsolutePath);
+            return GitHubClientTestSupport.Json(
+                """
+                {
+                  "name": "main",
+                  "commit": { "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+                  "protected": true
+                }
+                """);
+        });
 
         RepositoryInfo repository = await GitHubClientTestSupport.CreateClient(handler)
-            .GetRepositoryAsync(Repository, TestContext.Current.CancellationToken);
+            .GetRepositoryAsync(_repository, TestContext.Current.CancellationToken);
 
-        Assert.Equal(Repository, repository.Coordinates);
+        Assert.Equal(_repository, repository.Coordinates);
         Assert.Equal("main", repository.DefaultBranch.Name);
         Assert.Equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", repository.DefaultBranch.HeadSha);
+        Assert.True(repository.DefaultBranch.IsProtected);
     }
 
     [Fact]
@@ -121,7 +134,7 @@ public sealed class GitHubReadOperationsTests
             """));
 
         RepositoryInfo repository = await GitHubClientTestSupport.CreateClient(handler)
-            .GetRepositoryAsync(Repository, TestContext.Current.CancellationToken);
+            .GetRepositoryAsync(_repository, TestContext.Current.CancellationToken);
 
         Assert.Equal("trunk", repository.DefaultBranch.Name);
         Assert.True(repository.DefaultBranch.IsProtected);
@@ -160,7 +173,7 @@ public sealed class GitHubReadOperationsTests
 
         IReadOnlyList<ManifestFile> manifests = await GitHubClientTestSupport.CreateClient(handler)
             .GetManifestFilesAsync(
-                Repository,
+                _repository,
                 "manifests/a/App/1.0",
                 "main",
                 TestContext.Current.CancellationToken);
@@ -178,7 +191,7 @@ public sealed class GitHubReadOperationsTests
 
         GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
             () => GitHubClientTestSupport.CreateClient(handler).GetTreeAsync(
-                Repository,
+                _repository,
                 "main",
                 cancellationToken: TestContext.Current.CancellationToken));
 
@@ -241,7 +254,7 @@ public sealed class GitHubReadOperationsTests
         GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
 
         IReadOnlyList<GitHubRelease> releases = await client.GetReleasesAsync(
-            Repository,
+            _repository,
             TestContext.Current.CancellationToken);
 
         Assert.Equal(2, releases.Count);
@@ -265,7 +278,7 @@ public sealed class GitHubReadOperationsTests
 
         GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
             () => GitHubClientTestSupport.CreateClient(handler).GetContentAsync(
-                Repository,
+                _repository,
                 "manifest.yaml",
                 "main",
                 TestContext.Current.CancellationToken));
@@ -297,7 +310,7 @@ public sealed class GitHubReadOperationsTests
 
         RepositoryContent result = await GitHubClientTestSupport.CreateClient(handler)
             .GetContentAsync(
-                Repository,
+                _repository,
                 "manifest.yaml",
                 "main",
                 TestContext.Current.CancellationToken);
@@ -332,7 +345,7 @@ public sealed class GitHubReadOperationsTests
         GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
 
         RepositoryContent result = await client.GetContentAsync(
-            Repository,
+            _repository,
             "manifest.yaml",
             "main",
             TestContext.Current.CancellationToken);
@@ -368,7 +381,7 @@ public sealed class GitHubReadOperationsTests
             """));
 
         IReadOnlyList<BranchState> branches = await GitHubClientTestSupport.CreateClient(handler)
-            .GetBranchesAsync(Repository, TestContext.Current.CancellationToken);
+            .GetBranchesAsync(_repository, TestContext.Current.CancellationToken);
 
         Assert.Equal(2, branches.Count);
         Assert.True(branches[0].IsProtected);
@@ -389,7 +402,7 @@ public sealed class GitHubReadOperationsTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => GitHubClientTestSupport.CreateClient(handler).GetContentAsync(
-                Repository,
+                _repository,
                 "manifest.yaml",
                 "main",
                 cancellation.Token));

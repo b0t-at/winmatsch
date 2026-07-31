@@ -5,7 +5,7 @@ namespace WinMatsch.GitHub.Tests;
 
 public sealed class GitHubMutationOperationsTests
 {
-    private static readonly RepositoryCoordinates Repository = new("upstream", "repo");
+    private static readonly RepositoryCoordinates _repository = new("upstream", "repo");
     private const string HeadSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string OtherSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -19,13 +19,13 @@ public sealed class GitHubMutationOperationsTests
         var mutation = new MutationRequest("create-ref-1");
 
         GitReference first = await client.CreateReferenceAsync(
-            Repository,
+            _repository,
             "update",
             HeadSha,
             mutation,
             TestContext.Current.CancellationToken);
         GitReference second = await client.CreateReferenceAsync(
-            Repository,
+            _repository,
             "update",
             HeadSha,
             mutation,
@@ -45,7 +45,7 @@ public sealed class GitHubMutationOperationsTests
 
         GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
             () => GitHubClientTestSupport.CreateClient(handler).CreateReferenceAsync(
-                Repository,
+                _repository,
                 "update",
                 HeadSha,
                 new MutationRequest("create-ref-conflict"),
@@ -55,11 +55,9 @@ public sealed class GitHubMutationOperationsTests
     }
 
     [Fact]
-    public async Task Reference_deletion_requires_the_planned_head()
+    public async Task Reference_deletion_is_explicitly_unconditional()
     {
         var handler = new ScriptedHttpMessageHandler();
-        handler.Add(_ => GitHubClientTestSupport.Json(
-            $"{{\"ref\":\"refs/heads/update\",\"object\":{{\"sha\":\"{HeadSha}\"}}}}"));
         handler.Add(request =>
         {
             Assert.Equal(HttpMethod.Delete, request.Method);
@@ -68,31 +66,30 @@ public sealed class GitHubMutationOperationsTests
 
         bool deleted = await GitHubClientTestSupport.CreateClient(handler)
             .DeleteReferenceAsync(
-                Repository,
+                _repository,
                 "update",
-                HeadSha,
                 new MutationRequest("delete-ref-1"),
                 TestContext.Current.CancellationToken);
 
         Assert.True(deleted);
+        Assert.Single(handler.Requests);
     }
 
     [Fact]
-    public async Task Reference_deletion_rejects_a_branch_that_advanced()
+    public async Task Reference_deletion_reports_an_already_absent_branch()
     {
         var handler = new ScriptedHttpMessageHandler();
         handler.Add(_ => GitHubClientTestSupport.Json(
-            $"{{\"ref\":\"refs/heads/update\",\"object\":{{\"sha\":\"{OtherSha}\"}}}}"));
+            """{"message":"Reference does not exist"}""",
+            HttpStatusCode.NotFound));
 
-        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
-            () => GitHubClientTestSupport.CreateClient(handler).DeleteReferenceAsync(
-                Repository,
+        bool deleted = await GitHubClientTestSupport.CreateClient(handler).DeleteReferenceAsync(
+                _repository,
                 "update",
-                HeadSha,
                 new MutationRequest("delete-ref-conflict"),
-                TestContext.Current.CancellationToken));
+                TestContext.Current.CancellationToken);
 
-        Assert.True(exception.IsConflict);
+        Assert.False(deleted);
         Assert.Single(handler.Requests);
     }
 
@@ -109,7 +106,7 @@ public sealed class GitHubMutationOperationsTests
 
         await Assert.ThrowsAsync<GitHubApiException>(
             () => GitHubClientTestSupport.CreateClient(handler).CreateReferenceAsync(
-                Repository,
+                _repository,
                 "update",
                 HeadSha,
                 new MutationRequest("no-retry"),
@@ -128,7 +125,7 @@ public sealed class GitHubMutationOperationsTests
         GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
         var mutation = new MutationRequest("shared-key");
         await client.CreateReferenceAsync(
-            Repository,
+            _repository,
             "one",
             HeadSha,
             mutation,
@@ -136,7 +133,7 @@ public sealed class GitHubMutationOperationsTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => client.CreateReferenceAsync(
-                Repository,
+                _repository,
                 "two",
                 HeadSha,
                 mutation,
@@ -185,7 +182,7 @@ public sealed class GitHubMutationOperationsTests
 
         ServerCommitResult result = await GitHubClientTestSupport.CreateClient(handler)
             .CreateCommitAsync(
-                Repository,
+                _repository,
                 request,
                 new MutationRequest("commit-1"),
                 TestContext.Current.CancellationToken);
@@ -216,7 +213,7 @@ public sealed class GitHubMutationOperationsTests
 
         GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
             () => GitHubClientTestSupport.CreateClient(handler).CreateCommitAsync(
-                Repository,
+                _repository,
                 request,
                 new MutationRequest("commit-conflict"),
                 TestContext.Current.CancellationToken));
@@ -275,7 +272,7 @@ public sealed class GitHubMutationOperationsTests
 
         ServerCommitResult result = await GitHubClientTestSupport.CreateClient(handler)
             .CreateCommitAsync(
-                Repository,
+                _repository,
                 request,
                 new MutationRequest("commit-rest"),
                 TestContext.Current.CancellationToken);
@@ -285,7 +282,7 @@ public sealed class GitHubMutationOperationsTests
     }
 
     [Fact]
-    public async Task Compare_maps_commit_distance_and_commits()
+    public async Task Compare_paginates_commit_pages()
     {
         var handler = new ScriptedHttpMessageHandler();
         handler.Add(request =>
@@ -304,18 +301,40 @@ public sealed class GitHubMutationOperationsTests
                     "commit": { "message": "Synthetic commit", "tree": { "sha": "tree" } }
                   }]
                 }
+                """,
+                headers:
+                [
+                    ("Link", "<https://github.invalid/api/compare-page-2>; rel=\"next\""),
+                ]);
+        });
+        handler.Add(request =>
+        {
+            Assert.Equal("https://github.invalid/api/compare-page-2", request.Uri.AbsoluteUri);
+            return GitHubClientTestSupport.Json(
+                $$"""
+                {
+                 "status": "ahead",
+                 "ahead_by": 2,
+                 "behind_by": 0,
+                 "total_commits": 2,
+                 "commits": [{
+                   "sha": "{{HeadSha}}",
+                   "html_url": "https://github.invalid/upstream/repo/commit/{{HeadSha}}",
+                   "commit": { "message": "Second commit", "tree": { "sha": "tree-2" } }
+                 }]
+                }
                 """);
         });
 
         CompareResult comparison = await GitHubClientTestSupport.CreateClient(handler)
             .CompareAsync(
-                Repository,
+                _repository,
                 "main",
                 "update",
                 TestContext.Current.CancellationToken);
 
         Assert.Equal(1, comparison.AheadBy);
-        Assert.Single(comparison.Commits);
+        Assert.Equal(2, comparison.Commits.Count);
     }
 
     [Fact]
@@ -323,7 +342,17 @@ public sealed class GitHubMutationOperationsTests
     {
         var handler = new ScriptedHttpMessageHandler();
         handler.Add(_ => GitHubClientTestSupport.Json(
-            """{"data":{"repository":null,"rateLimit":null}}"""));
+            """
+            {
+              "data": { "repository": null, "rateLimit": null },
+              "errors": [{
+                "type": "NOT_FOUND",
+                "path": ["repository"],
+                "locations": [{ "line": 2, "column": 3 }],
+                "message": "Could not resolve to a Repository with the name 'contributor/repo'."
+              }]
+            }
+            """));
         handler.Add(_ => GitHubClientTestSupport.Json(
             """
             {
@@ -360,6 +389,17 @@ public sealed class GitHubMutationOperationsTests
                 HttpStatusCode.Accepted);
         });
         handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "data": { "repository": null, "rateLimit": null },
+              "errors": [{
+                "type": "NOT_FOUND",
+                "path": ["repository"],
+                "message": "Could not resolve to a Repository with the name 'contributor/repo'."
+              }]
+            }
+            """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
             $$"""
             {
               "data": {
@@ -379,16 +419,127 @@ public sealed class GitHubMutationOperationsTests
               }
             }
             """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $$"""
+            {
+              "name": "main",
+              "commit": { "sha": "{{HeadSha}}" },
+              "protected": true
+            }
+            """));
 
         ForkResult fork = await GitHubClientTestSupport.CreateClient(handler)
             .EnsureForkAsync(
-                Repository,
+                _repository,
                 "contributor",
                 new MutationRequest("fork-1"),
                 TestContext.Current.CancellationToken);
 
         Assert.False(fork.AlreadyExisted);
         Assert.Equal(new RepositoryCoordinates("contributor", "repo"), fork.Repository.Coordinates);
+        Assert.True(fork.Repository.DefaultBranch.IsProtected);
+    }
+
+    [Fact]
+    public async Task Fork_poll_failure_is_not_cached_after_creation_is_accepted()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        string missing = """
+            {
+              "data": { "repository": null },
+              "errors": [{
+                "type": "NOT_FOUND",
+                "message": "Could not resolve to a Repository with the name 'contributor/repo'."
+              }]
+            }
+            """;
+        handler.Add(_ => GitHubClientTestSupport.Json(missing));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "data": {
+                "viewer": {
+                  "login": "contributor",
+                  "avatarUrl": "https://github.invalid/avatar.png"
+                }
+              }
+            }
+            """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "node_id": "R_fork",
+              "full_name": "contributor/repo",
+              "html_url": "https://github.invalid/contributor/repo",
+              "fork": true,
+              "private": false,
+              "default_branch": "main",
+              "owner": { "login": "contributor" },
+              "parent": { "full_name": "upstream/repo" }
+            }
+            """,
+            HttpStatusCode.Accepted));
+        handler.Add(_ => GitHubClientTestSupport.Json(missing));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $$"""
+            {
+              "data": {
+                "repository": {
+                  "id": "R_fork",
+                  "nameWithOwner": "contributor/repo",
+                  "url": "https://github.invalid/contributor/repo",
+                  "isPrivate": false,
+                  "isFork": true,
+                  "parent": { "nameWithOwner": "upstream/repo" },
+                  "defaultBranchRef": {
+                    "name": "main",
+                    "target": { "oid": "{{HeadSha}}" }
+                  }
+                },
+                "rateLimit": null
+              }
+            }
+            """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $$"""
+            {
+              "name": "main",
+              "commit": { "sha": "{{HeadSha}}" },
+              "protected": false
+            }
+            """));
+        var options = new GitHubClientOptions
+        {
+            ApiBaseUri = new Uri("https://github.invalid/api/"),
+            GraphQlUri = new Uri("https://github.invalid/graphql"),
+            UserAgent = "winmatsch-tests",
+            RetryBaseDelay = TimeSpan.Zero,
+            ForkAvailabilityBaseDelay = TimeSpan.Zero,
+            ForkAvailabilityMaxAttempts = 1,
+        };
+        var client = new GitHubRepositoryClient(
+            new HttpClient(handler),
+            "synthetic-token",
+            options);
+        var mutation = new MutationRequest("fork-repoll");
+
+        await Assert.ThrowsAsync<GitHubApiException>(
+            () => client.EnsureForkAsync(
+                _repository,
+                "contributor",
+                mutation,
+                TestContext.Current.CancellationToken));
+        ForkResult fork = await client.EnsureForkAsync(
+            _repository,
+            "contributor",
+            mutation,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(fork.AlreadyExisted);
+        Assert.Equal("contributor", fork.Repository.Coordinates.Owner);
+        Assert.Single(handler.Requests, static request =>
+            request.Method == HttpMethod.Post &&
+            request.Uri.AbsolutePath.EndsWith("/forks", StringComparison.Ordinal));
     }
 
     [Fact]

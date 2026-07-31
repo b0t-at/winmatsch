@@ -55,10 +55,13 @@ public interface IGitHubRepositoryClient
         MutationRequest mutation,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Deletes a branch without a head-SHA precondition. GitHub's REST delete endpoint is
+    /// unconditional; callers must only use this when unconditional deletion is acceptable.
+    /// </summary>
     public Task<bool> DeleteReferenceAsync(
         RepositoryCoordinates repository,
         string branchName,
-        string expectedSha,
         MutationRequest mutation,
         CancellationToken cancellationToken = default);
 

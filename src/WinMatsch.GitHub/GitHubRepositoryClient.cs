@@ -130,15 +130,20 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                     requestId: null);
             GraphQlBranchDto branch = dto.DefaultBranchRef ??
                 throw InvalidGraphQlResponse("default branch");
-            string headSha = branch.Target?.Oid ??
-                throw InvalidGraphQlResponse("default branch head");
+            RestBranchDto branchState = await GetBranchAsync(
+                repository,
+                branch.Name,
+                cancellationToken).ConfigureAwait(false);
             return new RepositoryInfo(
                 RepositoryCoordinates.Parse(dto.NameWithOwner),
                 dto.Id,
                 ParseAbsoluteUri(dto.Url, "repository URL"),
                 dto.IsPrivate,
                 dto.IsFork,
-                new BranchState(branch.Name, headSha, IsProtected: false),
+                new BranchState(
+                    branchState.Name,
+                    branchState.Commit.Sha,
+                    branchState.Protected),
                 dto.Parent is null
                     ? null
                     : RepositoryCoordinates.Parse(dto.Parent.NameWithOwner));
@@ -302,7 +307,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     {
         ArgumentNullException.ThrowIfNull(repository);
         Uri first = new(
-            _options.ApiBaseUri,
+            _options.NormalizedApiBaseUri,
             $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/branches?per_page=100");
         List<RestBranchDto> branches = await GetAllPagesAsync(
             first,
@@ -387,42 +392,31 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     public Task<bool> DeleteReferenceAsync(
         RepositoryCoordinates repository,
         string branchName,
-        string expectedSha,
         MutationRequest mutation,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentException.ThrowIfNullOrWhiteSpace(branchName);
-        ValidateSha(expectedSha);
         ArgumentNullException.ThrowIfNull(mutation);
-        string fingerprint = $"delete-ref|{repository}|{branchName}|{expectedSha}";
+        string fingerprint = $"delete-ref-unconditional|{repository}|{branchName}";
         return ExecuteMutationAsync(
             mutation,
             fingerprint,
             async () =>
             {
-                GitReference? existing = await GetReferenceAsync(
-                    repository,
-                    branchName,
-                    cancellationToken).ConfigureAwait(false);
-                if (existing is null)
+                try
+                {
+                    await _transport.DeleteAsync(
+                        $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/git/refs/heads/" +
+                        Escape(branchName),
+                        cancellationToken).ConfigureAwait(false);
+                    return true;
+                }
+                catch (GitHubApiException exception) when (
+                    exception.StatusCode == HttpStatusCode.NotFound)
                 {
                     return false;
                 }
-
-                if (!string.Equals(existing.Sha, expectedSha, StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new GitHubApiException(
-                        $"Branch '{branchName}' advanced after cleanup was planned.",
-                        HttpStatusCode.Conflict,
-                        requestId: null);
-                }
-
-                await _transport.DeleteAsync(
-                    $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/git/refs/heads/" +
-                    Escape(branchName),
-                    cancellationToken).ConfigureAwait(false);
-                return true;
             });
     }
 
@@ -451,23 +445,40 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentException.ThrowIfNullOrWhiteSpace(baseReference);
         ArgumentException.ThrowIfNullOrWhiteSpace(head);
-        RestCompareDto comparison = await _transport.GetAsync(
+        Uri? next = new(
+            _options.NormalizedApiBaseUri,
             $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/compare/" +
-            $"{Escape(baseReference)}...{Escape(head)}?per_page=100",
+            $"{Escape(baseReference)}...{Escape(head)}?per_page=100");
+        RestCompareDto? comparison = null;
+        var commits = new List<RestComparedCommitDto>();
+        while (next is not null)
+        {
+            TransportResponse<RestCompareDto> page = await _transport.GetPageAsync(
+            next,
             GitHubJsonContext.Default.RestCompareDto,
             cancellationToken).ConfigureAwait(false);
+            comparison ??= page.Value;
+            commits.AddRange(page.Value.Commits);
+            next = page.NextUri;
+        }
+
+        if (comparison is null)
+        {
+            throw new GitHubApiException("GitHub compare returned no response pages.");
+        }
+
         return new CompareResult(
             comparison.Status,
             comparison.AheadBy,
             comparison.BehindBy,
             comparison.TotalCommits,
-            comparison.Commits.Select(static commit => new ComparedCommit(
-                commit.Sha,
-                commit.Commit.Message,
-                ParseAbsoluteUri(commit.HtmlUrl, "commit URL"))).ToArray());
+            commits.Select(static commit => new ComparedCommit(
+            commit.Sha,
+            commit.Commit.Message,
+            ParseAbsoluteUri(commit.HtmlUrl, "commit URL"))).ToArray());
     }
 
-    public Task<ForkResult> EnsureForkAsync(
+    public async Task<ForkResult> EnsureForkAsync(
         RepositoryCoordinates upstream,
         string owner,
         MutationRequest mutation,
@@ -477,7 +488,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         ArgumentException.ThrowIfNullOrWhiteSpace(owner);
         ArgumentNullException.ThrowIfNull(mutation);
         string fingerprint = $"ensure-fork|{upstream}|{owner}";
-        return ExecuteMutationAsync(
+        ForkMutationResult mutationResult = await ExecuteMutationAsync(
             mutation,
             fingerprint,
             async () =>
@@ -496,7 +507,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                             requestId: null);
                     }
 
-                    return new ForkResult(existing, AlreadyExisted: true);
+                    return new ForkMutationResult(existing);
                 }
                 catch (GitHubApiException exception) when (exception.StatusCode == HttpStatusCode.NotFound)
                 {
@@ -518,12 +529,19 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                         GitHubJsonContext.Default.CreateForkDto,
                         GitHubJsonContext.Default.RestRepositoryDto,
                         cancellationToken).ConfigureAwait(false);
-                    RepositoryInfo created = await GetRepositoryAsync(
-                        forkCoordinates,
-                        cancellationToken).ConfigureAwait(false);
-                    return new ForkResult(created, AlreadyExisted: false);
+                    return new ForkMutationResult(Existing: null);
                 }
-            });
+            }).ConfigureAwait(false);
+        if (mutationResult.Existing is not null)
+        {
+            return new ForkResult(mutationResult.Existing, AlreadyExisted: true);
+        }
+
+        RepositoryInfo created = await WaitForForkAsync(
+            upstream,
+            new RepositoryCoordinates(owner, upstream.Name),
+            cancellationToken).ConfigureAwait(false);
+        return new ForkResult(created, AlreadyExisted: false);
     }
 
     public Task<UpstreamSyncResult> SyncForkAsync(
@@ -588,7 +606,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             query.Append(Escape(search.BaseBranch));
         }
 
-        Uri first = new(_options.ApiBaseUri, query.ToString());
+        Uri first = new(_options.NormalizedApiBaseUri, query.ToString());
         List<RestPullRequestDto> pullRequests = await GetAllPagesAsync(
             first,
             GitHubJsonContext.Default.ListRestPullRequestDto,
@@ -745,10 +763,9 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}",
             GitHubJsonContext.Default.RestRepositoryDto,
             cancellationToken).ConfigureAwait(false);
-        RestBranchDto branch = await _transport.GetAsync(
-            $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/branches/" +
-            Escape(dto.DefaultBranch),
-            GitHubJsonContext.Default.RestBranchDto,
+        RestBranchDto branch = await GetBranchAsync(
+            repository,
+            dto.DefaultBranch,
             cancellationToken).ConfigureAwait(false);
         return new RepositoryInfo(
             RepositoryCoordinates.Parse(dto.FullName),
@@ -927,6 +944,59 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         return results;
     }
 
+    private Task<RestBranchDto> GetBranchAsync(
+        RepositoryCoordinates repository,
+        string branchName,
+        CancellationToken cancellationToken)
+        => _transport.GetAsync(
+            $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/branches/" +
+            Escape(branchName),
+            GitHubJsonContext.Default.RestBranchDto,
+            cancellationToken);
+
+    private async Task<RepositoryInfo> WaitForForkAsync(
+        RepositoryCoordinates upstream,
+        RepositoryCoordinates fork,
+        CancellationToken cancellationToken)
+    {
+        GitHubApiException? lastException = null;
+        for (int attempt = 0; attempt < _options.ForkAvailabilityMaxAttempts; attempt++)
+        {
+            try
+            {
+                RepositoryInfo repository = await GetRepositoryAsync(
+                    fork,
+                    cancellationToken).ConfigureAwait(false);
+                if (!CoordinatesEqual(repository.Parent, upstream))
+                {
+                    throw new GitHubApiException(
+                        $"Repository '{fork}' exists but is not a fork of '{upstream}'.",
+                        HttpStatusCode.Conflict,
+                        requestId: null);
+                }
+
+                return repository;
+            }
+            catch (GitHubApiException exception) when (
+                IsForkNotReady(exception) &&
+                attempt + 1 < _options.ForkAvailabilityMaxAttempts)
+            {
+                lastException = exception;
+                TimeSpan delay = TimeSpan.FromMilliseconds(Math.Clamp(
+                    (_options.ForkAvailabilityBaseDelay * Math.Pow(2, attempt)).TotalMilliseconds,
+                    0,
+                    5_000));
+                if (delay > TimeSpan.Zero)
+                {
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
+        throw lastException ??
+            new GitHubApiException($"GitHub fork '{fork}' did not become available.");
+    }
+
     private Task<T> ExecuteMutationAsync<T>(
         MutationRequest mutation,
         string fingerprint,
@@ -980,11 +1050,23 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             return;
         }
 
-        HttpStatusCode? status = errors.Any(static error =>
-            error.Message.Contains("expectedHeadOid", StringComparison.OrdinalIgnoreCase) ||
-            error.Message.Contains("head oid", StringComparison.OrdinalIgnoreCase))
-            ? HttpStatusCode.Conflict
-            : null;
+        HttpStatusCode? status;
+        if (errors.Any(static error =>
+                string.Equals(error.Type, "NOT_FOUND", StringComparison.OrdinalIgnoreCase)))
+        {
+            status = HttpStatusCode.NotFound;
+        }
+        else if (errors.Any(static error =>
+                     error.Message.Contains("expectedHeadOid", StringComparison.OrdinalIgnoreCase) ||
+                     error.Message.Contains("head oid", StringComparison.OrdinalIgnoreCase)))
+        {
+            status = HttpStatusCode.Conflict;
+        }
+        else
+        {
+            status = null;
+        }
+
         throw new GitHubApiException(
             errors[0].Message,
             status,
@@ -999,6 +1081,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         => exception.StatusCode is HttpStatusCode.MethodNotAllowed
             or HttpStatusCode.NotImplemented ||
             (exception.StatusCode == HttpStatusCode.NotFound &&
+             exception.Errors.Count == 0 &&
              !exception.Message.StartsWith(
                  "GitHub repository '",
                  StringComparison.Ordinal));
@@ -1013,20 +1096,47 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         };
 
     private static PullRequestInfo MapPullRequest(RestPullRequestDto pullRequest)
-        => new(
+    {
+        string? headOwner = pullRequest.Head.Repo?.Owner.Login;
+        if (string.IsNullOrWhiteSpace(headOwner))
+        {
+            headOwner = pullRequest.Head.User?.Login;
+        }
+
+        if (string.IsNullOrWhiteSpace(headOwner))
+        {
+            int separator = pullRequest.Head.Label.IndexOf(':');
+            if (separator > 0)
+            {
+                headOwner = pullRequest.Head.Label[..separator];
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(headOwner))
+        {
+            throw new GitHubApiException(
+                $"GitHub pull request #{pullRequest.Number} did not identify its head owner.");
+        }
+
+        return new(
             pullRequest.Number,
             pullRequest.NodeId,
             pullRequest.Title,
             pullRequest.Body,
             ParsePullRequestState(pullRequest.State),
             pullRequest.Draft,
-            pullRequest.Head.Repo.Owner.Login,
+            headOwner,
             pullRequest.Head.Ref,
             pullRequest.Head.Sha,
             pullRequest.Base.Ref,
             ParseAbsoluteUri(pullRequest.HtmlUrl, "pull request URL"),
             pullRequest.CreatedAt,
             pullRequest.UpdatedAt);
+    }
+
+    private static bool IsForkNotReady(GitHubApiException exception)
+        => exception.StatusCode == HttpStatusCode.NotFound ||
+            exception.Message.Contains("default branch", StringComparison.OrdinalIgnoreCase);
 
     private static PullRequestState ParsePullRequestState(string state)
         => state switch
@@ -1184,4 +1294,6 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     private sealed record MutationEntry(
         string Fingerprint,
         Lazy<Task<object>> Result);
+
+    private sealed record ForkMutationResult(RepositoryInfo? Existing);
 }

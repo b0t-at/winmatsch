@@ -81,6 +81,8 @@ internal static class GitHubClientTestSupport
                 UserAgent = "winmatsch-tests",
                 RetryBaseDelay = TimeSpan.Zero,
                 MaxTransientRetries = 2,
+                ForkAvailabilityBaseDelay = TimeSpan.Zero,
+                ForkAvailabilityMaxAttempts = 3,
             });
 
     public static HttpResponseMessage Json(
