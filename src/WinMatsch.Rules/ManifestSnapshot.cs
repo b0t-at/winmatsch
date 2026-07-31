@@ -746,6 +746,73 @@ internal sealed class ManifestSnapshot
         return TryResolveSemanticPath(root, fieldPath, out value);
     }
 
+    internal bool TryFindChangedEffectiveInstallerValue(
+        string rootSemanticPath,
+        string? expected,
+        ManifestSnapshot humanSnapshot,
+        IReadOnlyList<RawManifestChange> humanGeneratedPairings,
+        out string? matched)
+    {
+        YamlMappingNode generatedRoot = GetRoot("installer");
+        if (TryResolveSemanticPath(generatedRoot, rootSemanticPath, out string? generatedRootValue)
+            && SemanticValueEquals(rootSemanticPath, expected, generatedRootValue))
+        {
+            YamlMappingNode humanRoot = humanSnapshot.GetRoot("installer");
+            _ = TryResolveSemanticPath(humanRoot, rootSemanticPath, out string? humanRootValue);
+            if (!SemanticValueEquals(rootSemanticPath, expected, humanRootValue))
+            {
+                matched = generatedRootValue;
+                return true;
+            }
+        }
+
+        if (GetMappingValue(generatedRoot, "Installers") is not YamlSequenceNode generatedInstallers)
+        {
+            matched = null;
+            return false;
+        }
+
+        for (int generatedIndex = 0; generatedIndex < generatedInstallers.Children.Count; generatedIndex++)
+        {
+            if (generatedInstallers.Children[generatedIndex] is not YamlMappingNode generatedInstaller)
+            {
+                continue;
+            }
+
+            string? generatedValue = TryResolveSemanticPath(
+                generatedInstaller,
+                rootSemanticPath,
+                out string? explicitValue)
+                ? explicitValue
+                : generatedRootValue;
+            if (!SemanticValueEquals(rootSemanticPath, expected, generatedValue))
+            {
+                continue;
+            }
+
+            RawManifestChange? pairing = humanGeneratedPairings.FirstOrDefault(
+                change => change.IsPairing
+                    && change.DocumentKey == "installer"
+                    && TryGetInstallerIndex(change.FieldPath, out int pairedGeneratedIndex)
+                    && pairedGeneratedIndex == generatedIndex);
+            string? humanValue = null;
+            if (pairing is not null)
+            {
+                string humanInstallerPath = $"{pairing.SemanticPath}.{rootSemanticPath}";
+                _ = humanSnapshot.TryGetEffectiveInstallerValue(humanInstallerPath, out humanValue);
+            }
+
+            if (!SemanticValueEquals(rootSemanticPath, expected, humanValue))
+            {
+                matched = generatedValue;
+                return true;
+            }
+        }
+
+        matched = null;
+        return false;
+    }
+
     private static bool TryGetInstallerIndex(string fieldPath, out int index)
     {
         const string prefix = "Installers[";

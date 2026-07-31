@@ -22,10 +22,7 @@ internal static class HumanCorrectionDetector
             .Where(static change => !change.IsPairing)
             .ToArray();
         IReadOnlyList<RawManifestChange> generatedChangeList = botSnapshot.Diff(generatedSnapshot);
-        IReadOnlyList<RawManifestChange> humanGeneratedChanges = humanSnapshot
-            .Diff(generatedSnapshot)
-            .Where(static change => !change.IsPairing)
-            .ToArray();
+        IReadOnlyList<RawManifestChange> humanGeneratedChangeList = humanSnapshot.Diff(generatedSnapshot);
         Dictionary<SemanticChangeKey, RawManifestChange> generatedChanges = generatedChangeList
             .Where(static change => !change.IsPairing)
             .ToDictionary(
@@ -61,12 +58,6 @@ internal static class HumanCorrectionDetector
                 && !humanChange.SemanticPath.StartsWith(
                     "Installers{installer:",
                     StringComparison.Ordinal);
-            if (rootInstallerPath
-                && !HasRelatedEffectiveChange(humanGeneratedChanges, humanChange.SemanticPath))
-            {
-                continue;
-            }
-
             bool generatedValueKnown = generatedEffectiveResolved
                 || generatedChange is not null
                 || !effectiveInstallerPath;
@@ -77,15 +68,35 @@ internal static class HumanCorrectionDetector
             bool installerSpecificPath = humanChange.SemanticPath.StartsWith(
                 "Installers{installer:",
                 StringComparison.Ordinal);
-            bool generatedRestoresBot = generatedEffectiveResolved && installerSpecificPath
-                ? ManifestSnapshot.SemanticValueEquals(
-                    humanChange.FieldPath,
+            bool generatedRestoresBot;
+            if (installerSpecificPath)
+            {
+                generatedRestoresBot = generatedEffectiveResolved
+                    ? ManifestSnapshot.SemanticValueEquals(
+                        humanChange.FieldPath,
+                        botValue,
+                        effectiveValue)
+                    : generatedSnapshot.TryFindEffectiveInstallerValue(
+                        humanChange.SemanticPath,
+                        botValue,
+                        out matchedGeneratedValue);
+            }
+            else if (rootInstallerPath)
+            {
+                generatedRestoresBot = generatedSnapshot.TryFindChangedEffectiveInstallerValue(
+                    humanChange.SemanticPath,
                     botValue,
-                    effectiveValue)
-                : generatedSnapshot.TryFindEffectiveInstallerValue(
+                    humanSnapshot,
+                    humanGeneratedChangeList,
+                    out matchedGeneratedValue);
+            }
+            else
+            {
+                generatedRestoresBot = generatedSnapshot.TryFindEffectiveInstallerValue(
                     humanChange.SemanticPath,
                     botValue,
                     out matchedGeneratedValue);
+            }
             if (generatedEffectiveResolved && installerSpecificPath && generatedRestoresBot)
             {
                 matchedGeneratedValue = effectiveValue;
@@ -109,32 +120,6 @@ internal static class HumanCorrectionDetector
                     RuleLogSanitizer.Sanitize(humanChange.FieldPath, reviewGeneratedValue)));
             }
         }
-    }
-
-    private static bool HasRelatedEffectiveChange(
-        IReadOnlyList<RawManifestChange> changes,
-        string rootSemanticPath)
-    {
-        return changes.Any(
-            change => change.DocumentKey == "installer"
-                && (string.Equals(change.SemanticPath, rootSemanticPath, StringComparison.Ordinal)
-                    || IsInstallerChangeForRootPath(change.SemanticPath, rootSemanticPath)));
-    }
-
-    private static bool IsInstallerChangeForRootPath(string semanticPath, string rootSemanticPath)
-    {
-        if (!semanticPath.StartsWith("Installers{installer:", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        int close = semanticPath.IndexOf('}');
-        return close >= 0
-            && close + 2 <= semanticPath.Length
-            && string.Equals(
-                semanticPath[(close + 2)..],
-                rootSemanticPath,
-                StringComparison.Ordinal);
     }
 
     private readonly record struct SemanticChangeKey(string DocumentKey, string SemanticPath);

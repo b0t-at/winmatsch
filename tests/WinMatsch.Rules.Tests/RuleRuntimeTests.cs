@@ -592,6 +592,35 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Unrelated_override_change_does_not_revive_preserved_override_false_positive()
+    {
+        static PackageManifests Create(
+            string rootProductCode,
+            string? firstOverride,
+            string? secondOverride)
+        {
+            Installer first = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+            first.ProductCode = firstOverride;
+            Installer second = TestManifests.CreateInstaller(url: "https://example.test/b.exe");
+            second.ProductCode = secondOverride;
+            PackageManifests manifests = TestManifests.Create(first, second);
+            manifests.Installer.ProductCode = rootProductCode;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("A", firstOverride: null, secondOverride: null),
+            Previous = Create("B", firstOverride: "A", secondOverride: null),
+            Manifests = Create("B", firstOverride: "A", secondOverride: "C"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
     public void Mixed_generated_values_without_the_bot_value_do_not_trigger_review()
     {
         static PackageManifests Create(string? rootProductCode, string first, string second)
