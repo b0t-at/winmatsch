@@ -60,7 +60,10 @@ internal static class HumanCorrectionDetector
                 ? effectiveValue
                 : generatedChange is null ? botValue : generatedChange.After;
             string? matchedGeneratedValue = null;
-            bool generatedRestoresBot = generatedEffectiveResolved
+            bool installerSpecificPath = humanChange.SemanticPath.StartsWith(
+                "Installers{installer:",
+                StringComparison.Ordinal);
+            bool generatedRestoresBot = generatedEffectiveResolved && installerSpecificPath
                 ? ManifestSnapshot.SemanticValueEquals(
                     humanChange.FieldPath,
                     botValue,
@@ -69,7 +72,7 @@ internal static class HumanCorrectionDetector
                     humanChange.SemanticPath,
                     botValue,
                     out matchedGeneratedValue);
-            if (generatedEffectiveResolved && generatedRestoresBot)
+            if (generatedEffectiveResolved && installerSpecificPath && generatedRestoresBot)
             {
                 matchedGeneratedValue = effectiveValue;
             }

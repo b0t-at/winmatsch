@@ -538,6 +538,34 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Corrected_root_with_one_reverted_installer_override_requires_review()
+    {
+        static PackageManifests Create(string rootProductCode, string? firstOverride)
+        {
+            Installer first = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+            first.ProductCode = firstOverride;
+            Installer second = TestManifests.CreateInstaller(url: "https://example.test/b.exe");
+            PackageManifests manifests = TestManifests.Create(first, second);
+            manifests.Installer.ProductCode = rootProductCode;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("A", firstOverride: null),
+            Previous = Create("B", firstOverride: null),
+            Manifests = Create("B", firstOverride: "A"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath == "ProductCode"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
     public void Mixed_generated_values_without_the_bot_value_do_not_trigger_review()
     {
         static PackageManifests Create(string? rootProductCode, string first, string second)
