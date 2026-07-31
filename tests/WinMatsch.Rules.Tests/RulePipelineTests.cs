@@ -85,6 +85,16 @@ public class RulePipelineTests
     }
 
     [Fact]
+    public void Legacy_null_calls_remain_source_compatible_and_unambiguous()
+    {
+        var explicitPipeline = new RulePipeline([], null);
+        RulePipeline defaultPipeline = RulePipeline.CreateDefault(null);
+
+        Assert.Empty(explicitPipeline.Rules);
+        Assert.NotEmpty(defaultPipeline.Rules);
+    }
+
+    [Fact]
     public void Disabled_rules_are_skipped()
     {
         Installer a = TestManifests.CreateInstaller();

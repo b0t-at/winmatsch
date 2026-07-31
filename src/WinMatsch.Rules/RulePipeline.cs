@@ -25,11 +25,10 @@ public sealed class RulePipeline
     {
     }
 
-    /// <summary>Creates a pipeline with explicit runtime mode and package override inputs.</summary>
-    public RulePipeline(
+    private RulePipeline(
         IReadOnlyList<IRule> rules,
         RuleRuntimeConfiguration runtimeConfiguration,
-        OverridePackSet? overridePacks = null)
+        OverridePackSet overridePacks)
     {
         ArgumentNullException.ThrowIfNull(rules);
         ArgumentNullException.ThrowIfNull(runtimeConfiguration);
@@ -54,7 +53,7 @@ public sealed class RulePipeline
 
         _rules = [.. rules];
         _runtimeConfiguration = runtimeConfiguration;
-        _overridePacks = overridePacks ?? OverridePackSet.Empty;
+        _overridePacks = overridePacks;
         _disabledRuleIds = new ReadOnlyCollection<string>(
             runtimeConfiguration.CommandOverrides
                 .Concat(runtimeConfiguration.UserOverrides)
@@ -70,6 +69,16 @@ public sealed class RulePipeline
 
     /// <summary>The ids of rules this pipeline skips.</summary>
     public IReadOnlyCollection<string> DisabledRuleIds => _disabledRuleIds;
+
+    /// <summary>Creates a pipeline with explicit runtime mode and package override inputs.</summary>
+    public static RulePipeline Create(
+        IReadOnlyList<IRule> rules,
+        RuleRuntimeConfiguration runtimeConfiguration,
+        OverridePackSet? overridePacks = null)
+    {
+        ArgumentNullException.ThrowIfNull(runtimeConfiguration);
+        return new(rules, runtimeConfiguration, overridePacks ?? OverridePackSet.Empty);
+    }
 
     /// <summary>Runs all enabled rules in order and returns the findings collected on the context.</summary>
     public IReadOnlyList<RuleFinding> Run(ManifestContext context)
@@ -123,7 +132,7 @@ public sealed class RulePipeline
         disabledRuleIds);
 
     /// <summary>Creates the default pipeline with layered runtime and package overrides.</summary>
-    public static RulePipeline CreateDefault(
+    public static RulePipeline CreateDefaultWithRuntime(
         RuleRuntimeConfiguration runtimeConfiguration,
         OverridePackSet? overridePacks = null)
     {

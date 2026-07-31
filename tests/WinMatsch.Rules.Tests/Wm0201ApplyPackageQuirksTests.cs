@@ -136,7 +136,7 @@ public class Wm0201ApplyPackageQuirksTests
                 [RuleIds.ApplyPackageQuirks] = RuleMode.LogOnly,
             });
 
-        new RulePipeline(
+        RulePipeline.Create(
             [new ApplyPackageQuirksRule()],
             configuration,
             OverridePackSet.BuiltIn).Run(context);
@@ -163,7 +163,7 @@ public class Wm0201ApplyPackageQuirksTests
             manifests,
             evidence: [CreateCommentsEvidence(url, "138.0.7204.97")]);
 
-        new RulePipeline(
+        RulePipeline.Create(
             [new ApplyPackageQuirksRule()],
             new RuleRuntimeConfiguration(),
             OverridePackSet.BuiltIn).Run(context);

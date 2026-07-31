@@ -44,17 +44,12 @@ internal static class RuleLogSanitizer
             return safe.Uri.AbsoluteUri;
         }
 
-        return ContainsCredentialMaterial(value) ? "[REDACTED]" : value;
+        return ContainsBoundedCredential(value) ? "[REDACTED]" : value;
     }
 
     public static string SanitizeMessage(string message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        if (ContainsCredentialMaterial(message))
-        {
-            return "[REDACTED]";
-        }
-
         var result = new System.Text.StringBuilder(message.Length);
         int position = 0;
         while (position < message.Length)
@@ -80,12 +75,13 @@ internal static class RuleLogSanitizer
             position = end;
         }
 
-        return result.ToString();
+        string sanitized = result.ToString();
+        return ContainsBoundedCredential(sanitized) ? "[REDACTED]" : sanitized;
     }
 
-    private static bool ContainsCredentialMaterial(string value)
+    private static bool ContainsBoundedCredential(string value)
     {
-        ReadOnlySpan<string> names =
+        ReadOnlySpan<string> assignmentNames =
         [
             "token",
             "password",
@@ -96,24 +92,100 @@ internal static class RuleLogSanitizer
             "api_key",
             "authorization",
             "credential",
-            "bearer ",
-            "basic ",
             "session",
             "cookie",
         ];
-        foreach (string name in names)
+        foreach (string name in assignmentNames)
         {
-            if (value.Contains(name, StringComparison.OrdinalIgnoreCase))
+            int searchStart = 0;
+            while (searchStart < value.Length)
             {
-                return true;
+                int index = value.IndexOf(name, searchStart, StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
+                {
+                    break;
+                }
+
+                int end = index + name.Length;
+                bool boundedBefore = index == 0 || !IsIdentifierCharacter(value[index - 1]);
+                bool boundedAfter = end == value.Length || !IsIdentifierCharacter(value[end]);
+                if (boundedBefore && boundedAfter)
+                {
+                    int next = end;
+                    while (next < value.Length && char.IsWhiteSpace(value[next]))
+                    {
+                        next++;
+                    }
+
+                    if (next < value.Length && value[next] is ':' or '=')
+                    {
+                        return true;
+                    }
+
+                    bool commandSwitch = index >= 2 && value[index - 2] == '-' && value[index - 1] == '-'
+                        || index >= 1 && value[index - 1] == '/';
+                    if (commandSwitch && next > end && next < value.Length)
+                    {
+                        return true;
+                    }
+                }
+
+                searchStart = end;
             }
         }
 
-        return LooksLikeJwt(value);
+        return ContainsAuthorizationScheme(value, "bearer")
+            || ContainsAuthorizationScheme(value, "basic")
+            || LooksLikeJwt(value);
     }
 
     private static bool IsUriTerminator(char value)
         => char.IsWhiteSpace(value) || value is ')' or ']' or '}' or ',' or ';' or '\'' or '"';
+
+    private static bool IsIdentifierCharacter(char value)
+        => char.IsAsciiLetterOrDigit(value) || value == '_';
+
+    private static bool ContainsAuthorizationScheme(string value, string scheme)
+    {
+        int searchStart = 0;
+        while (searchStart < value.Length)
+        {
+            int index = value.IndexOf(scheme, searchStart, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            int end = index + scheme.Length;
+            bool boundedBefore = index == 0 || !IsIdentifierCharacter(value[index - 1]);
+            if (boundedBefore && end < value.Length && char.IsWhiteSpace(value[end]))
+            {
+                int tokenStart = end;
+                while (tokenStart < value.Length && char.IsWhiteSpace(value[tokenStart]))
+                {
+                    tokenStart++;
+                }
+
+                int tokenEnd = tokenStart;
+                while (tokenEnd < value.Length
+                    && !char.IsWhiteSpace(value[tokenEnd])
+                    && !IsUriTerminator(value[tokenEnd]))
+                {
+                    tokenEnd++;
+                }
+
+                ReadOnlySpan<char> token = value.AsSpan(tokenStart, tokenEnd - tokenStart);
+                if (token.Length >= 12 && IsBase64UrlToken(token))
+                {
+                    return true;
+                }
+            }
+
+            searchStart = end;
+        }
+
+        return false;
+    }
 
     private static bool LooksLikeJwt(string value)
     {
@@ -134,4 +206,17 @@ internal static class RuleLogSanitizer
 
     private static bool IsBase64UrlCharacter(char value)
         => char.IsAsciiLetterOrDigit(value) || value is '-' or '_' or '=';
+
+    private static bool IsBase64UrlToken(ReadOnlySpan<char> value)
+    {
+        foreach (char character in value)
+        {
+            if (!IsBase64UrlCharacter(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }

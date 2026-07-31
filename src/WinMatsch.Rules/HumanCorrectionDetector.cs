@@ -17,38 +17,31 @@ internal static class HumanCorrectionDetector
             return;
         }
 
-        IReadOnlyDictionary<ManifestFieldKey, ManifestFieldValue> botValues = botSnapshot.Flatten();
-        IReadOnlyDictionary<ManifestFieldKey, ManifestFieldValue> humanValues = humanSnapshot.Flatten();
-        IReadOnlyDictionary<ManifestFieldKey, ManifestFieldValue> generatedValues = generatedSnapshot.Flatten();
+        IReadOnlyList<RawManifestChange> humanChanges = botSnapshot.Diff(humanSnapshot);
+        Dictionary<SemanticChangeKey, RawManifestChange> generatedChanges = botSnapshot
+            .Diff(generatedSnapshot)
+            .ToDictionary(
+                static change => new SemanticChangeKey(change.DocumentKey, change.SemanticPath),
+                static change => change);
 
-        var paths = new SortedSet<ManifestFieldKey>(
-            botValues.Keys,
-            Comparer<ManifestFieldKey>.Create(static (left, right) =>
-            {
-                int manifest = StringComparer.Ordinal.Compare(left.DocumentKey, right.DocumentKey);
-                return manifest != 0
-                    ? manifest
-                    : StringComparer.Ordinal.Compare(left.FieldPath, right.FieldPath);
-            }));
-        paths.UnionWith(humanValues.Keys);
-        paths.UnionWith(generatedValues.Keys);
-
-        foreach (ManifestFieldKey path in paths)
+        foreach (RawManifestChange humanChange in humanChanges)
         {
-            botValues.TryGetValue(path, out ManifestFieldValue? bot);
-            humanValues.TryGetValue(path, out ManifestFieldValue? human);
-            generatedValues.TryGetValue(path, out ManifestFieldValue? generated);
+            var key = new SemanticChangeKey(humanChange.DocumentKey, humanChange.SemanticPath);
+            generatedChanges.TryGetValue(key, out RawManifestChange? generatedChange);
+            string? generatedValue = generatedChange?.After ?? humanChange.Before;
 
-            if (!string.Equals(bot?.Value, human?.Value, StringComparison.Ordinal)
-                && string.Equals(bot?.Value, generated?.Value, StringComparison.Ordinal))
+            if (!string.Equals(humanChange.Before, humanChange.After, StringComparison.Ordinal)
+                && string.Equals(humanChange.Before, generatedValue, StringComparison.Ordinal))
             {
                 context.AddHumanCorrectionReview(new(
-                    generated?.ManifestPath ?? human?.ManifestPath ?? bot!.ManifestPath,
-                    path.FieldPath,
-                    RuleLogSanitizer.Sanitize(path.FieldPath, bot?.Value),
-                    RuleLogSanitizer.Sanitize(path.FieldPath, human?.Value),
-                    RuleLogSanitizer.Sanitize(path.FieldPath, generated?.Value)));
+                    generatedChange?.ManifestPath ?? humanChange.ManifestPath,
+                    generatedChange?.FieldPath ?? humanChange.FieldPath,
+                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, humanChange.Before),
+                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, humanChange.After),
+                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, generatedValue)));
             }
         }
     }
+
+    private readonly record struct SemanticChangeKey(string DocumentKey, string SemanticPath);
 }

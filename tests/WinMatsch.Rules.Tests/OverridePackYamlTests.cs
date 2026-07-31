@@ -167,4 +167,99 @@ public class OverridePackYamlTests
         Assert.Equal("Comments", chrome.Quirks.DisplayVersionFromEvidenceProperty);
         Assert.Contains(chrome.Policies, annotation => annotation.Id == RuleCatalogueIds.Arp1);
     }
+
+    [Fact]
+    public void Override_pack_enumeration_is_immutable_and_consistent_with_lookup()
+    {
+        var first = new OverridePack { PackageIdentifier = new PackageIdentifier("Example.First") };
+        var second = new OverridePack { PackageIdentifier = new PackageIdentifier("Example.Second") };
+        var set = new OverridePackSet([first, second]);
+
+        object exposed = set.Packs;
+        Assert.False(exposed is OverridePack[]);
+        Assert.True(set.TryGet(first.PackageIdentifier, out OverridePack? found));
+        Assert.Same(first, found);
+        Assert.Contains(found, set.Packs);
+    }
+
+    [Fact]
+    public void Writer_rejects_reader_invalid_scalars_before_serialization()
+    {
+        var pack = new OverridePack
+        {
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            VersionSource = new string('x', OverridePackYaml.MaximumScalarLength + 1),
+        };
+
+        ArgumentException exception = Assert.Throws<ArgumentException>(() => OverridePackYaml.Write(pack));
+
+        Assert.Contains("scalar limit", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Writer_rejects_excessive_node_counts_before_serialization()
+    {
+        var pack = new OverridePack
+        {
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PreservedFields =
+            [
+                .. Enumerable.Range(0, OverridePackYaml.MaximumNodeCount)
+                    .Select(static index => $"Field{index}"),
+            ],
+        };
+
+        ArgumentException exception = Assert.Throws<ArgumentException>(() => OverridePackYaml.Write(pack));
+
+        Assert.Contains("node count", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Writer_rejects_output_that_would_exceed_the_document_limit()
+    {
+        string large = new('x', OverridePackYaml.MaximumScalarLength);
+        var pack = new OverridePack
+        {
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PreservedFields = [.. Enumerable.Repeat(large, 16)],
+        };
+
+        ArgumentException exception = Assert.Throws<ArgumentException>(() => OverridePackYaml.Write(pack));
+
+        Assert.Contains("output limit", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Writer_rejects_enum_values_the_reader_would_reject()
+    {
+        var pack = new OverridePack
+        {
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            ScopeLayout = (ScopeLayoutOverride)999,
+        };
+
+        Assert.Throws<ArgumentException>(() => OverridePackYaml.Write(pack));
+    }
+
+    [Fact]
+    public void Yaml_line_break_characters_are_escaped_and_round_trip_exactly()
+    {
+        const string annotation = "next\u0085line\u2028separator\u2029paragraph";
+        var pack = new OverridePack
+        {
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            Policies = [new() { Id = RuleCatalogueIds.Pipe1, Annotation = annotation }],
+        };
+
+        string yaml = OverridePackYaml.Write(pack);
+        OverridePack parsed = OverridePackYaml.Read(yaml);
+
+        Assert.DoesNotContain('\u0085', yaml);
+        Assert.DoesNotContain('\u2028', yaml);
+        Assert.DoesNotContain('\u2029', yaml);
+        Assert.Contains("\\u0085", yaml, StringComparison.Ordinal);
+        Assert.Contains("\\u2028", yaml, StringComparison.Ordinal);
+        Assert.Contains("\\u2029", yaml, StringComparison.Ordinal);
+        Assert.Equal(annotation, Assert.Single(parsed.Policies).Annotation);
+    }
 }

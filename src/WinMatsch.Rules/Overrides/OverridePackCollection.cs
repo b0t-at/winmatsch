@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 using WinMatsch.Core;
 
@@ -7,7 +8,7 @@ namespace WinMatsch.Rules.OverridePacks;
 public sealed class OverridePackSet
 {
     private readonly ReadOnlyDictionary<string, OverridePack> _packs;
-    private readonly IReadOnlyCollection<OverridePack> _packValues;
+    private readonly ImmutableArray<OverridePack> _packValues;
 
     public OverridePackSet(IEnumerable<OverridePack>? packs = null)
     {
@@ -22,14 +23,14 @@ public sealed class OverridePackSet
         }
 
         _packs = new ReadOnlyDictionary<string, OverridePack>(values);
-        _packValues = values.Values.ToArray();
+        _packValues = [.. values.Values];
     }
 
     public static OverridePackSet Empty { get; } = new();
 
     public static OverridePackSet BuiltIn { get; } = LoadBuiltIn();
 
-    public IReadOnlyCollection<OverridePack> Packs => _packValues;
+    public ImmutableArray<OverridePack> Packs => _packValues;
 
     public bool TryGet(PackageIdentifier? packageIdentifier, out OverridePack? pack)
     {

@@ -122,12 +122,13 @@ public static class OverridePackYaml
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(pack);
+        string yaml = Write(pack);
         string? directory = Path.GetDirectoryName(Path.GetFullPath(path));
         Directory.CreateDirectory(directory!);
         string temporaryPath = Path.Combine(directory!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
         try
         {
-            File.WriteAllText(temporaryPath, Write(pack), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.WriteAllText(temporaryPath, yaml, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
             File.Move(temporaryPath, path, overwrite: true);
         }
         finally
@@ -149,7 +150,8 @@ public static class OverridePackYaml
                 nameof(pack));
         }
 
-        var yaml = new StringBuilder();
+        int estimatedLength = ValidateForWrite(pack);
+        var yaml = new StringBuilder(estimatedLength);
         yaml.AppendLine($"formatVersion: {pack.FormatVersion.ToString(CultureInfo.InvariantCulture)}");
         yaml.AppendLine($"packageIdentifier: {Quote(pack.PackageIdentifier.Value)}");
         WriteRuleModes(yaml, pack.RuleModes);
@@ -164,7 +166,199 @@ public static class OverridePackYaml
         yaml.AppendLine($"manualOnly: {(pack.ManualOnly ? "true" : "false")}");
         WritePolicies(yaml, pack.Policies);
         WriteQuirks(yaml, pack.Quirks);
-        return yaml.ToString().ReplaceLineEndings("\n");
+        string result = yaml.ToString().ReplaceLineEndings("\n");
+        if (result.Length > MaximumDocumentLength)
+        {
+            throw new ArgumentException(
+                $"Override pack exceeds the {MaximumDocumentLength} character output limit.",
+                nameof(pack));
+        }
+
+        _ = Read(result);
+        return result;
+    }
+
+    private static int ValidateForWrite(OverridePack pack)
+    {
+        ArgumentNullException.ThrowIfNull(pack.PackageIdentifier);
+        ArgumentNullException.ThrowIfNull(pack.RuleModes);
+        ArgumentNullException.ThrowIfNull(pack.MetadataUrlReplacements);
+        ArgumentNullException.ThrowIfNull(pack.Quirks);
+
+        int nodeCount = 7;
+        long scalarOutputLength = ValidateScalar(pack.PackageIdentifier.Value, "packageIdentifier");
+
+        if (pack.RuleModes.Count > 0)
+        {
+            nodeCount += 2 + (2 * pack.RuleModes.Count);
+            foreach ((string ruleId, RuleMode mode) in pack.RuleModes)
+            {
+                scalarOutputLength += ValidateScalar(ruleId, "a rules key");
+                ValidateEnum(mode, $"rules.{ruleId}");
+            }
+        }
+
+        if (!pack.ForcedArchitectures.IsDefaultOrEmpty)
+        {
+            nodeCount += 2 + (9 * pack.ForcedArchitectures.Length);
+            foreach (ForcedArchitectureOverride value in pack.ForcedArchitectures)
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                scalarOutputLength += ValidateScalar(value.AssetPattern, "forcedArchitectures.assetPattern");
+                scalarOutputLength += ValidateScalar(value.SourceEvidence, "forcedArchitectures.sourceEvidence");
+                ValidateEnum(value.Architecture, "forcedArchitectures.architecture");
+                ValidateEnum(value.Confidence, "forcedArchitectures.confidence");
+            }
+        }
+
+        if (!pack.AssetMappings.IsDefaultOrEmpty)
+        {
+            nodeCount += 2;
+            foreach (AssetMappingOverride value in pack.AssetMappings)
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                nodeCount += 5;
+                scalarOutputLength += ValidateScalar(value.AssetPattern, "assetMappings.assetPattern");
+                scalarOutputLength += ValidateScalar(value.Entry, "assetMappings.entry");
+                if (value.Architecture is { } architecture)
+                {
+                    nodeCount += 2;
+                    ValidateEnum(architecture, "assetMappings.architecture");
+                }
+
+                if (value.InstallerType is { } installerType)
+                {
+                    nodeCount += 2;
+                    ValidateEnum(installerType, "assetMappings.installerType");
+                }
+
+                if (value.Scope is { } scope)
+                {
+                    nodeCount += 2;
+                    ValidateEnum(scope, "assetMappings.scope");
+                }
+            }
+        }
+
+        if (pack.ScopeLayout is { } scopeLayout)
+        {
+            nodeCount += 2;
+            ValidateEnum(scopeLayout, "scopeLayout");
+        }
+
+        if (pack.VersionSource is { } versionSource)
+        {
+            nodeCount += 2;
+            scalarOutputLength += ValidateScalar(versionSource, "versionSource");
+        }
+
+        if (pack.MetadataUrlReplacements.Count > 0)
+        {
+            nodeCount += 2 + (2 * pack.MetadataUrlReplacements.Count);
+            foreach ((string source, string replacement) in pack.MetadataUrlReplacements)
+            {
+                scalarOutputLength += ValidateScalar(source, "a metadataUrlReplacements key");
+                scalarOutputLength += ValidateScalar(replacement, $"metadataUrlReplacements.{source}");
+            }
+        }
+
+        AddStringSequenceBudget(pack.PreservedFields, "preservedFields", ref nodeCount, ref scalarOutputLength);
+        AddStringSequenceBudget(pack.DroppedFields, "droppedFields", ref nodeCount, ref scalarOutputLength);
+        AddStringSequenceBudget(pack.VanityUrls, "vanityUrls", ref nodeCount, ref scalarOutputLength);
+
+        if (!pack.Policies.IsDefaultOrEmpty)
+        {
+            nodeCount += 2 + (5 * pack.Policies.Length);
+            foreach (PolicyAnnotation value in pack.Policies)
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                scalarOutputLength += ValidateScalar(value.Id, "policies.id");
+                scalarOutputLength += ValidateScalar(value.Annotation, "policies.annotation");
+            }
+        }
+
+        if (pack.Quirks.DisplayVersionFromEvidenceProperty is { } property)
+        {
+            nodeCount += 4;
+            scalarOutputLength += ValidateScalar(property, "quirks.displayVersionFromEvidenceProperty");
+        }
+
+        if (nodeCount > MaximumNodeCount)
+        {
+            throw new ArgumentException(
+                $"Override pack exceeds the maximum YAML node count of {MaximumNodeCount}.",
+                nameof(pack));
+        }
+
+        const int maximumWriterDepth = 3;
+        if (maximumWriterDepth > MaximumDepth)
+        {
+            throw new InvalidOperationException("The override-pack writer shape exceeds the configured YAML depth limit.");
+        }
+
+        long estimatedLength = 512L + (nodeCount * 64L) + scalarOutputLength;
+        if (estimatedLength > MaximumDocumentLength)
+        {
+            throw new ArgumentException(
+                $"Override pack exceeds the {MaximumDocumentLength} character output limit.",
+                nameof(pack));
+        }
+
+        return (int)estimatedLength;
+    }
+
+    private static void AddStringSequenceBudget(
+        ImmutableArray<string> values,
+        string description,
+        ref int nodeCount,
+        ref long scalarOutputLength)
+    {
+        if (values.IsDefaultOrEmpty)
+        {
+            return;
+        }
+
+        nodeCount += 2 + values.Length;
+        foreach (string value in values)
+        {
+            scalarOutputLength += ValidateScalar(value, $"an entry of {description}");
+        }
+    }
+
+    private static int ValidateScalar(string? value, string description)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new ArgumentException($"'{description}' must be a non-empty scalar value.");
+        }
+
+        if (value.Length > MaximumScalarLength)
+        {
+            throw new ArgumentException(
+                $"'{description}' exceeds the {MaximumScalarLength} character scalar limit.");
+        }
+
+        int escapedLength = 2;
+        foreach (char character in value)
+        {
+            escapedLength += character switch
+            {
+                '"' or '\\' or '\n' or '\r' or '\t' => 2,
+                < ' ' or '\u0085' or '\u2028' or '\u2029' => 6,
+                _ => 1,
+            };
+        }
+
+        return escapedLength;
+    }
+
+    private static void ValidateEnum<T>(T value, string description)
+        where T : struct, Enum
+    {
+        if (!Enum.IsDefined(value))
+        {
+            throw new ArgumentException($"'{description}' has unsupported value '{value}'.");
+        }
     }
 
     private static void ValidateParserEvents(string yaml)
@@ -531,7 +725,7 @@ public static class OverridePackYaml
                 '\n' => result.Append("\\n"),
                 '\r' => result.Append("\\r"),
                 '\t' => result.Append("\\t"),
-                < ' ' => result.Append($"\\u{(int)character:x4}"),
+                < ' ' or '\u0085' or '\u2028' or '\u2029' => result.Append($"\\u{(int)character:x4}"),
                 _ => result.Append(character),
             };
         }

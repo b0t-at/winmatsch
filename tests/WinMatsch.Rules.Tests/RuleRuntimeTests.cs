@@ -27,7 +27,7 @@ public class RuleRuntimeTests
         var packageSet = new OverridePackSet([packagePack]);
 
         ManifestContext fromDefault = Context();
-        new RulePipeline(
+        RulePipeline.Create(
             [new NormalizeProductCodesRule()],
             new RuleRuntimeConfiguration(defaultMode: RuleMode.Disabled),
             overridePacks: OverridePackSet.Empty).Run(fromDefault);
@@ -35,7 +35,7 @@ public class RuleRuntimeTests
         Assert.Equal(RuleMode.Disabled, Assert.Single(fromDefault.Executions).Mode);
 
         ManifestContext fromUser = Context();
-        new RulePipeline(
+        RulePipeline.Create(
             [new NormalizeProductCodesRule()],
             new RuleRuntimeConfiguration(
                 userOverrides: new Dictionary<string, RuleMode>
@@ -47,7 +47,7 @@ public class RuleRuntimeTests
         Assert.Equal(RuleMode.LogOnly, Assert.Single(fromUser.Executions).Mode);
 
         ManifestContext fromPackage = Context();
-        new RulePipeline(
+        RulePipeline.Create(
             [new NormalizeProductCodesRule()],
             new RuleRuntimeConfiguration(
                 userOverrides: new Dictionary<string, RuleMode>
@@ -59,7 +59,7 @@ public class RuleRuntimeTests
         Assert.Equal(RuleMode.Apply, Assert.Single(fromPackage.Executions).Mode);
 
         ManifestContext fromCommand = Context();
-        new RulePipeline(
+        RulePipeline.Create(
             [new NormalizeProductCodesRule()],
             new RuleRuntimeConfiguration(
                 userOverrides: new Dictionary<string, RuleMode>
@@ -89,7 +89,7 @@ public class RuleRuntimeTests
         installer.ProductCode = "ab12cd34-ef56-7890-abcd-ef1234567890";
         ManifestContext context = TestManifests.CreateContext(TestManifests.Create(installer));
 
-        new RulePipeline([new NormalizeProductCodesRule()], configuration, OverridePackSet.Empty).Run(context);
+        RulePipeline.Create([new NormalizeProductCodesRule()], configuration, OverridePackSet.Empty).Run(context);
 
         Assert.Equal("ab12cd34-ef56-7890-abcd-ef1234567890", installer.ProductCode);
         Assert.Equal(RuleMode.Disabled, Assert.Single(context.Executions).Mode);
@@ -107,11 +107,11 @@ public class RuleRuntimeTests
 
         (ManifestContext applied, Installer appliedInstaller) = Create();
         (ManifestContext logged, Installer loggedInstaller) = Create();
-        var applyPipeline = new RulePipeline(
+        RulePipeline applyPipeline = RulePipeline.Create(
             [new NormalizeProductCodesRule()],
             new RuleRuntimeConfiguration(),
             OverridePackSet.Empty);
-        var logPipeline = new RulePipeline(
+        RulePipeline logPipeline = RulePipeline.Create(
             [new NormalizeProductCodesRule()],
             new RuleRuntimeConfiguration(
                 commandOverrides: new Dictionary<string, RuleMode>
@@ -141,7 +141,7 @@ public class RuleRuntimeTests
         const string secretUrl = "https://user:password@example.com/app.exe?token=super-secret";
         Installer installer = TestManifests.CreateInstaller(url: secretUrl);
         ManifestContext context = TestManifests.CreateContext(TestManifests.Create(installer));
-        var pipeline = new RulePipeline(
+        RulePipeline pipeline = RulePipeline.Create(
             [new ReplaceUrlRule()],
             new RuleRuntimeConfiguration(),
             OverridePackSet.Empty);
@@ -189,7 +189,7 @@ public class RuleRuntimeTests
             OriginalBotSubmission = originalBot,
         };
 
-        new RulePipeline([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
 
         Assert.True(context.RequiresReview);
         HumanCorrectionReview review = Assert.Single(context.HumanCorrectionReviews);
@@ -225,12 +225,172 @@ public class RuleRuntimeTests
             OriginalBotSubmission = originalBot,
         };
 
-        new RulePipeline([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
 
         Assert.Contains(
             context.HumanCorrectionReviews,
             review => review.FieldPath == "PublisherUrl"
                 && review.HumanValue == "https://correct.example.test/");
+    }
+
+    [Fact]
+    public void Human_correction_detection_matches_locales_by_package_locale_after_reorder()
+    {
+        static LocaleManifest Locale(string language, string description) => new()
+        {
+            PackageIdentifier = new PackageIdentifier("Test.App"),
+            PackageVersion = new PackageVersion(TestManifests.DefaultVersion),
+            PackageLocale = new LanguageTag(language),
+            Publisher = TestManifests.DefaultPublisher,
+            PackageName = TestManifests.DefaultPackageName,
+            License = "MIT",
+            ShortDescription = description,
+        };
+
+        PackageManifests originalBot = TestManifests.Create(TestManifests.CreateInstaller());
+        PackageManifests merged = TestManifests.Create(TestManifests.CreateInstaller());
+        PackageManifests generated = TestManifests.Create(TestManifests.CreateInstaller());
+        originalBot.Locales = [Locale("de-DE", "Deutsch"), Locale("fr-FR", "Old French")];
+        merged.Locales = [Locale("fr-FR", "Correct French"), Locale("de-DE", "Deutsch")];
+        generated.Locales = [Locale("de-DE", "Deutsch"), Locale("fr-FR", "Old French")];
+        var context = new ManifestContext
+        {
+            Manifests = generated,
+            Previous = merged,
+            OriginalBotSubmission = originalBot,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.ManifestPath.EndsWith(".locale.fr-FR.yaml", StringComparison.Ordinal)
+                && review.FieldPath == "ShortDescription"
+                && review.HumanValue == "Correct French");
+    }
+
+    [Fact]
+    public void Human_correction_detection_matches_installers_after_reorder()
+    {
+        static Installer Installer(Architecture architecture, string url, string productCode)
+        {
+            Installer installer = TestManifests.CreateInstaller(architecture, url: url);
+            installer.ProductCode = productCode;
+            return installer;
+        }
+
+        PackageManifests originalBot = TestManifests.Create(
+            Installer(Architecture.X64, "https://example.test/app-x64-1.0.exe", "BOT-A"),
+            Installer(Architecture.X86, "https://example.test/app-x86-1.0.exe", "BOT-B"));
+        PackageManifests merged = TestManifests.Create(
+            Installer(Architecture.X86, "https://example.test/app-x86-1.0.exe", "HUMAN-B"),
+            Installer(Architecture.X64, "https://example.test/app-x64-1.0.exe", "BOT-A"));
+        PackageManifests generated = TestManifests.Create(
+            Installer(Architecture.X64, "https://example.test/app-x64-2.0.exe", "BOT-A"),
+            Installer(Architecture.X86, "https://example.test/app-x86-2.0.exe", "BOT-B"));
+        var context = new ManifestContext
+        {
+            Manifests = generated,
+            Previous = merged,
+            OriginalBotSubmission = originalBot,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal)
+                && review.HumanValue == "HUMAN-B");
+    }
+
+    [Fact]
+    public void Human_inserted_installer_is_not_hidden_by_index_shifts()
+    {
+        Installer original = TestManifests.CreateInstaller(url: "https://example.test/app-x64.exe");
+        Installer inserted = TestManifests.CreateInstaller(
+            Architecture.Arm64,
+            url: "https://example.test/app-arm64.exe");
+        PackageManifests originalBot = TestManifests.Create(original);
+        PackageManifests merged = TestManifests.Create(inserted, TestManifests.CreateInstaller(url: original.InstallerUrl));
+        PackageManifests generated = TestManifests.Create(TestManifests.CreateInstaller(url: original.InstallerUrl));
+        var context = new ManifestContext
+        {
+            Manifests = generated,
+            Previous = merged,
+            OriginalBotSubmission = originalBot,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.True(context.RequiresReview);
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.StartsWith("Installers[0].", StringComparison.Ordinal)
+                && review.HumanValue == "arm64");
+    }
+
+    [Fact]
+    public void Human_removed_installer_is_not_hidden_by_index_shifts()
+    {
+        PackageManifests originalBot = TestManifests.Create(
+            TestManifests.CreateInstaller(url: "https://example.test/app-x64.exe"),
+            TestManifests.CreateInstaller(Architecture.X86, url: "https://example.test/app-x86.exe"));
+        PackageManifests merged = TestManifests.Create(
+            TestManifests.CreateInstaller(Architecture.X86, url: "https://example.test/app-x86.exe"));
+        PackageManifests generated = TestManifests.Create(
+            TestManifests.CreateInstaller(url: "https://example.test/app-x64.exe"),
+            TestManifests.CreateInstaller(Architecture.X86, url: "https://example.test/app-x86.exe"));
+        var context = new ManifestContext
+        {
+            Manifests = generated,
+            Previous = merged,
+            OriginalBotSubmission = originalBot,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.True(context.RequiresReview);
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.StartsWith("Installers[0].", StringComparison.Ordinal)
+                && review.BotValue == "x64"
+                && review.HumanValue is null);
+    }
+
+    [Fact]
+    public void Duplicate_sequence_removal_logs_only_the_removed_occurrence()
+    {
+        Installer installer = TestManifests.CreateInstaller();
+        installer.Commands = ["A", "A", "B"];
+        ManifestContext context = TestManifests.CreateContext(TestManifests.Create(installer));
+
+        RulePipeline.Create(
+            [new ReplaceCommandsRule(["A", "B"])],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        RuleChange change = Assert.Single(context.Changes);
+        Assert.Equal("Installers[0].Commands[1]", change.FieldPath);
+        Assert.Equal("A", change.Before);
+        Assert.Null(change.After);
+    }
+
+    [Fact]
+    public void Duplicate_sequence_change_logs_the_changed_occurrence_without_shifting_following_values()
+    {
+        Installer installer = TestManifests.CreateInstaller();
+        installer.Commands = ["A", "A", "B"];
+        ManifestContext context = TestManifests.CreateContext(TestManifests.Create(installer));
+
+        RulePipeline.Create(
+            [new ReplaceCommandsRule(["A", "C", "B"])],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        RuleChange change = Assert.Single(context.Changes);
+        Assert.Equal("Installers[0].Commands[1]", change.FieldPath);
+        Assert.Equal("A", change.Before);
+        Assert.Equal("C", change.After);
     }
 
     [Fact]
@@ -242,7 +402,7 @@ public class RuleRuntimeTests
         second.InstallerSha256 = null;
         ManifestContext context = TestManifests.CreateContext(TestManifests.Create(first, second));
 
-        new RulePipeline(
+        RulePipeline.Create(
             [new DuplicateInstallerEntriesRule()],
             new RuleRuntimeConfiguration(),
             OverridePackSet.Empty).Run(context);
@@ -258,7 +418,7 @@ public class RuleRuntimeTests
         installer.ProductCode = "ab12cd34-ef56-7890-abcd-ef1234567890";
         ManifestContext context = TestManifests.CreateContext(TestManifests.Create(installer));
 
-        new RulePipeline(
+        RulePipeline.Create(
             [new NormalizeProductCodesRule()],
             new RuleRuntimeConfiguration(),
             OverridePackSet.Empty).Run(context);
@@ -280,7 +440,7 @@ public class RuleRuntimeTests
                 [RuleIds.NormalizeProductCodes] = RuleMode.LogOnly,
             });
 
-        new RulePipeline(
+        RulePipeline.Create(
             [new NormalizeProductCodesRule()],
             configuration,
             OverridePackSet.Empty).Run(context);
@@ -313,6 +473,53 @@ public class RuleRuntimeTests
         var rule = new DirectLoggingRule(message);
 
         rule.Apply(context);
+
+        Assert.Equal("[REDACTED]", Assert.Single(context.Trace).Message);
+    }
+
+    [Fact]
+    public void Embedded_urls_are_sanitized_without_discarding_surrounding_text()
+    {
+        const string message =
+            "Evidence from https://user:password@example.test/app.exe?sig=do-not-log#fragment was accepted.";
+        ManifestContext context = TestManifests.CreateContext(
+            TestManifests.Create(TestManifests.CreateInstaller()),
+            explain: true);
+
+        new DirectLoggingRule(message).Apply(context);
+
+        string sanitized = Assert.Single(context.Trace).Message;
+        Assert.Equal("Evidence from https://example.test/app.exe was accepted.", sanitized);
+        Assert.DoesNotContain("password", sanitized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("do-not-log", sanitized, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("basic installer session")]
+    [InlineData("Token Studio")]
+    [InlineData("secret sauce")]
+    public void Harmless_credential_words_are_not_redacted(string message)
+    {
+        ManifestContext context = TestManifests.CreateContext(
+            TestManifests.Create(TestManifests.CreateInstaller()),
+            explain: true);
+
+        new DirectLoggingRule(message).Apply(context);
+
+        Assert.Equal(message, Assert.Single(context.Trace).Message);
+    }
+
+    [Theory]
+    [InlineData("--password hunter2")]
+    [InlineData("/password:hunter2")]
+    [InlineData("session=top-secret")]
+    public void Syntactically_bounded_credential_markers_are_redacted(string message)
+    {
+        ManifestContext context = TestManifests.CreateContext(
+            TestManifests.Create(TestManifests.CreateInstaller()),
+            explain: true);
+
+        new DirectLoggingRule(message).Apply(context);
 
         Assert.Equal("[REDACTED]", Assert.Single(context.Trace).Message);
     }
@@ -363,5 +570,21 @@ public class RuleRuntimeTests
         public string Description => "Test direct logging.";
 
         public void Apply(ManifestContext context) => context.AddTrace(this, message);
+    }
+
+    private sealed class ReplaceCommandsRule(List<string> commands) : IRule
+    {
+        public string Id => "WM9995";
+
+        public RuleCategory Category => RuleCategory.Normalization;
+
+        public RuleSeverity Severity => RuleSeverity.Info;
+
+        public string Description => "Test semantic sequence logging.";
+
+        public void Apply(ManifestContext context)
+        {
+            context.Manifests.Installer.Installers![0].Commands = [.. commands];
+        }
     }
 }
