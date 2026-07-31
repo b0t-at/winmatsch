@@ -28,23 +28,33 @@ internal static class HumanCorrectionDetector
         {
             var key = new SemanticChangeKey(humanChange.DocumentKey, humanChange.SemanticPath);
             generatedChanges.TryGetValue(key, out RawManifestChange? generatedChange);
+            string? botValue = botSnapshot.TryGetEffectiveInstallerValue(
+                humanChange.SemanticPath,
+                out string? effectiveBotValue)
+                ? effectiveBotValue
+                : humanChange.Before;
+            string? humanValue = humanSnapshot.TryGetEffectiveInstallerValue(
+                humanChange.SemanticPath,
+                out string? effectiveHumanValue)
+                ? effectiveHumanValue
+                : humanChange.After;
             string? generatedValue = generatedSnapshot.TryGetEffectiveInstallerValue(
                 humanChange.SemanticPath,
                 out string? effectiveValue)
                 ? effectiveValue
-                : generatedChange?.After ?? humanChange.Before;
+                : generatedChange?.After ?? botValue;
 
-            if (!string.Equals(humanChange.Before, humanChange.After, StringComparison.Ordinal)
+            if (!string.Equals(botValue, humanValue, StringComparison.Ordinal)
                 && ManifestSnapshot.SemanticValueEquals(
                     humanChange.FieldPath,
-                    humanChange.Before,
+                    botValue,
                     generatedValue))
             {
                 context.AddHumanCorrectionReview(new(
                     generatedChange?.ManifestPath ?? humanChange.ManifestPath,
                     generatedChange?.FieldPath ?? humanChange.FieldPath,
-                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, humanChange.Before),
-                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, humanChange.After),
+                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, botValue),
+                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, humanValue),
                     RuleLogSanitizer.Sanitize(humanChange.FieldPath, generatedValue)));
             }
         }

@@ -364,6 +364,36 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Inherited_bot_value_is_used_when_a_human_added_an_installer_override()
+    {
+        static PackageManifests Create(string rootProductCode, string? firstOverride)
+        {
+            Installer first = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+            first.ProductCode = firstOverride;
+            Installer second = TestManifests.CreateInstaller(url: "https://example.test/b.exe");
+            PackageManifests manifests = TestManifests.Create(first, second);
+            manifests.Installer.ProductCode = rootProductCode;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("A", firstOverride: null),
+            Previous = Create("A", firstOverride: "B"),
+            Manifests = Create("A", firstOverride: null),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal)
+                && review.BotValue == "A"
+                && review.HumanValue == "B"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
     public void Hoisted_generated_value_cannot_hide_a_reverted_installer_correction()
     {
         static Installer Installer(string url, string productCode)
@@ -765,6 +795,7 @@ public class RuleRuntimeTests
     [InlineData("Download from https://example.test/token%253Dsuper-secret/file.exe")]
     [InlineData("Download from https://example.test/file?x=1;sig=super-secret")]
     [InlineData("Download from https://example.test:99999/file?sig=super-secret")]
+    [InlineData("https%3A%2F%2Fexample.test%2Ffile%3Fsig%3Dsuper-secret")]
     public void Embedded_signed_or_encoded_urls_cannot_leak_from_structured_values(string value)
     {
         string? sanitized = RuleLogSanitizer.Sanitize("SourceEvidence", value);
@@ -819,6 +850,34 @@ public class RuleRuntimeTests
 
         Assert.False(context.RequiresReview);
         Assert.Empty(context.HumanCorrectionReviews);
+    }
+
+    [Fact]
+    public void Plain_bit_architecture_urls_remain_distinct_when_installers_reorder()
+    {
+        static PackageManifests Create(bool reversed)
+        {
+            Installer bit32 = TestManifests.CreateInstaller(
+                Architecture.X86,
+                url: "https://example.test/app-32bit.exe");
+            Installer bit64 = TestManifests.CreateInstaller(
+                Architecture.X64,
+                url: "https://example.test/app-64bit.exe");
+            return reversed
+                ? TestManifests.Create(bit64, bit32)
+                : TestManifests.Create(bit32, bit64);
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(reversed: false),
+            Previous = Create(reversed: true),
+            Manifests = Create(reversed: false),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
     }
 
     [Fact]
@@ -939,6 +998,94 @@ public class RuleRuntimeTests
             review => review.FieldPath == "ShortDescription"
                 && review.HumanValue == "A-corrected"
                 && review.GeneratedValue == "A");
+    }
+
+    [Fact]
+    public void Identical_added_duplicate_locales_have_unique_review_keys()
+    {
+        static LocaleManifest Locale() => new()
+        {
+            PackageIdentifier = new PackageIdentifier("Test.App"),
+            PackageVersion = new PackageVersion(TestManifests.DefaultVersion),
+            PackageLocale = new LanguageTag("fr-FR"),
+            Publisher = TestManifests.DefaultPublisher,
+            PackageName = TestManifests.DefaultPackageName,
+            License = "MIT",
+            ShortDescription = "French",
+        };
+
+        PackageManifests originalBot = TestManifests.Create(TestManifests.CreateInstaller());
+        PackageManifests merged = TestManifests.Create(TestManifests.CreateInstaller());
+        merged.Locales = [Locale(), Locale()];
+        PackageManifests generated = TestManifests.Create(TestManifests.CreateInstaller());
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.True(context.RequiresReview);
+        Assert.NotEmpty(context.HumanCorrectionReviews);
+    }
+
+    [Fact]
+    public void Duplicate_locale_similarity_matching_has_a_bounded_fallback()
+    {
+        static LocaleManifest Locale(int index, string prefix) => new()
+        {
+            PackageIdentifier = new PackageIdentifier("Test.App"),
+            PackageVersion = new PackageVersion(TestManifests.DefaultVersion),
+            PackageLocale = new LanguageTag("fr-FR"),
+            Publisher = TestManifests.DefaultPublisher,
+            PackageName = TestManifests.DefaultPackageName,
+            License = "MIT",
+            ShortDescription = $"{prefix}{index}",
+        };
+
+        const int localeCount = 1001;
+        PackageManifests originalBot = TestManifests.Create(TestManifests.CreateInstaller());
+        originalBot.Locales =
+        [
+            .. Enumerable.Range(0, localeCount).Select(index => Locale(index, "A")),
+        ];
+        PackageManifests merged = TestManifests.Create(TestManifests.CreateInstaller());
+        merged.Locales =
+        [
+            .. Enumerable.Range(0, localeCount).Select(index => Locale(index, "B")),
+        ];
+        PackageManifests generated = TestManifests.Create(TestManifests.CreateInstaller());
+        generated.Locales =
+        [
+            .. Enumerable.Range(0, localeCount).Select(index => Locale(index, "A")),
+        ];
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.True(context.RequiresReview);
+    }
+
+    [Fact]
+    public void Review_gating_collections_cannot_be_cast_back_to_mutable_lists()
+    {
+        var context = new ManifestContext
+        {
+            Manifests = TestManifests.Create(TestManifests.CreateInstaller()),
+        };
+
+        Assert.False(context.Changes is List<RuleChange>);
+        Assert.False(context.Executions is List<RuleExecution>);
+        Assert.False(context.HumanCorrectionReviews is List<HumanCorrectionReview>);
+        Assert.True(((IList<RuleChange>)context.Changes).IsReadOnly);
+        Assert.True(((IList<HumanCorrectionReview>)context.HumanCorrectionReviews).IsReadOnly);
     }
 
     [Fact]

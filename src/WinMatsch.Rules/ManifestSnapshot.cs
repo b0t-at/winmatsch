@@ -10,6 +10,7 @@ internal sealed class ManifestSnapshot
 {
     private const int InstallerMatchThreshold = 150;
     private const int MaximumInstallerMatchComparisons = 1_000_000;
+    private const int MaximumLocaleMatchComparisons = 1_000_000;
     private readonly IReadOnlyDictionary<string, DocumentSnapshot> _documents;
 
     private ManifestSnapshot(IReadOnlyDictionary<string, DocumentSnapshot> documents)
@@ -335,35 +336,97 @@ internal sealed class ManifestSnapshot
                 .Order(StringComparer.Ordinal)
                 .ToArray();
 
-            var candidates = new List<DocumentMatchCandidate>();
+            var usedBefore = new HashSet<int>();
+            var usedAfter = new HashSet<int>();
+            var afterByContent = new Dictionary<string, Queue<int>>(StringComparer.Ordinal);
+            for (int afterIndex = 0; afterIndex < afterKeys.Length; afterIndex++)
+            {
+                string content = CanonicalNode(after._documents[afterKeys[afterIndex]].Root);
+                if (!afterByContent.TryGetValue(content, out Queue<int>? indices))
+                {
+                    indices = new();
+                    afterByContent.Add(content, indices);
+                }
+
+                indices.Enqueue(afterIndex);
+            }
+
             for (int beforeIndex = 0; beforeIndex < beforeKeys.Length; beforeIndex++)
             {
-                for (int afterIndex = 0; afterIndex < afterKeys.Length; afterIndex++)
+                string content = CanonicalNode(_documents[beforeKeys[beforeIndex]].Root);
+                if (afterByContent.TryGetValue(content, out Queue<int>? indices)
+                    && indices.Count > 0)
                 {
-                    candidates.Add(new(
-                        beforeIndex,
-                        afterIndex,
-                        DocumentSimilarity(
-                            _documents[beforeKeys[beforeIndex]].Root,
-                            after._documents[afterKeys[afterIndex]].Root)));
+                    int afterIndex = indices.Dequeue();
+                    usedBefore.Add(beforeIndex);
+                    usedAfter.Add(afterIndex);
+                    string beforeKey = beforeKeys[beforeIndex];
+                    string afterKey = afterKeys[afterIndex];
+                    pairs.Add(new(beforeKey, _documents[beforeKey], after._documents[afterKey]));
                 }
             }
 
-            var usedBefore = new HashSet<int>();
-            var usedAfter = new HashSet<int>();
-            foreach (DocumentMatchCandidate candidate in candidates
-                         .OrderByDescending(static candidate => candidate.Score)
-                         .ThenBy(static candidate => candidate.BeforeIndex)
-                         .ThenBy(static candidate => candidate.AfterIndex))
+            int remainingBefore = beforeKeys.Length - usedBefore.Count;
+            int remainingAfter = afterKeys.Length - usedAfter.Count;
+            if ((long)remainingBefore * remainingAfter <= MaximumLocaleMatchComparisons)
             {
-                if (!usedBefore.Contains(candidate.BeforeIndex)
-                    && !usedAfter.Contains(candidate.AfterIndex))
+                var candidates = new List<DocumentMatchCandidate>();
+                for (int beforeIndex = 0; beforeIndex < beforeKeys.Length; beforeIndex++)
                 {
-                    usedBefore.Add(candidate.BeforeIndex);
-                    usedAfter.Add(candidate.AfterIndex);
-                    string beforeKey = beforeKeys[candidate.BeforeIndex];
-                    string afterKey = afterKeys[candidate.AfterIndex];
-                    pairs.Add(new(beforeKey, _documents[beforeKey], after._documents[afterKey]));
+                    if (usedBefore.Contains(beforeIndex))
+                    {
+                        continue;
+                    }
+
+                    for (int afterIndex = 0; afterIndex < afterKeys.Length; afterIndex++)
+                    {
+                        if (!usedAfter.Contains(afterIndex))
+                        {
+                            candidates.Add(new(
+                                beforeIndex,
+                                afterIndex,
+                                DocumentSimilarity(
+                                    _documents[beforeKeys[beforeIndex]].Root,
+                                    after._documents[afterKeys[afterIndex]].Root)));
+                        }
+                    }
+                }
+
+                foreach (DocumentMatchCandidate candidate in candidates
+                             .OrderByDescending(static candidate => candidate.Score)
+                             .ThenBy(static candidate => candidate.BeforeIndex)
+                             .ThenBy(static candidate => candidate.AfterIndex))
+                {
+                    if (!usedBefore.Contains(candidate.BeforeIndex)
+                        && !usedAfter.Contains(candidate.AfterIndex))
+                    {
+                        usedBefore.Add(candidate.BeforeIndex);
+                        usedAfter.Add(candidate.AfterIndex);
+                        string beforeKey = beforeKeys[candidate.BeforeIndex];
+                        string afterKey = afterKeys[candidate.AfterIndex];
+                        pairs.Add(new(beforeKey, _documents[beforeKey], after._documents[afterKey]));
+                    }
+                }
+            }
+            else
+            {
+                int[] unmatchedBefore = Enumerable.Range(0, beforeKeys.Length)
+                    .Where(index => !usedBefore.Contains(index))
+                    .ToArray();
+                int[] unmatchedAfter = Enumerable.Range(0, afterKeys.Length)
+                    .Where(index => !usedAfter.Contains(index))
+                    .ToArray();
+                int count = Math.Min(unmatchedBefore.Length, unmatchedAfter.Length);
+                for (int i = 0; i < count; i++)
+                {
+                    int beforeIndex = unmatchedBefore[i];
+                    int afterIndex = unmatchedAfter[i];
+                    usedBefore.Add(beforeIndex);
+                    usedAfter.Add(afterIndex);
+                    pairs.Add(new(
+                        beforeKeys[beforeIndex],
+                        _documents[beforeKeys[beforeIndex]],
+                        after._documents[afterKeys[afterIndex]]));
                 }
             }
 
@@ -375,11 +438,15 @@ internal sealed class ManifestSnapshot
                 }
             }
 
+            var addedOccurrences = new Dictionary<string, int>(StringComparer.Ordinal);
             for (int i = 0; i < afterKeys.Length; i++)
             {
                 if (!usedAfter.Contains(i))
                 {
-                    string semanticKey = $"{localeBase}#added:{Hash(CanonicalNode(after._documents[afterKeys[i]].Root))}";
+                    string hash = Hash(CanonicalNode(after._documents[afterKeys[i]].Root));
+                    int occurrence = addedOccurrences.GetValueOrDefault(hash);
+                    addedOccurrences[hash] = occurrence + 1;
+                    string semanticKey = $"{localeBase}#added:{hash}#{occurrence}";
                     pairs.Add(new(semanticKey, null, after._documents[afterKeys[i]]));
                 }
             }
@@ -1107,9 +1174,11 @@ internal sealed class ManifestSnapshot
                 || digits.SequenceEqual("32")
                     && (prefix.EndsWith("win", StringComparison.OrdinalIgnoreCase)
                         || prefix.EndsWith("arm", StringComparison.OrdinalIgnoreCase)
-                        || prefix.EndsWith("aarch", StringComparison.OrdinalIgnoreCase))
+                        || prefix.EndsWith("aarch", StringComparison.OrdinalIgnoreCase)
+                        || path.AsSpan(i).StartsWith("bit", StringComparison.OrdinalIgnoreCase))
                 || digits.SequenceEqual("64")
-                    && prefix.EndsWith("aarch", StringComparison.OrdinalIgnoreCase)
+                    && (prefix.EndsWith("aarch", StringComparison.OrdinalIgnoreCase)
+                        || path.AsSpan(i).StartsWith("bit", StringComparison.OrdinalIgnoreCase))
                 || digits.SequenceEqual("386")
                     && prefix.EndsWith("i", StringComparison.OrdinalIgnoreCase)
                 || (digits.SequenceEqual("7") || digits.SequenceEqual("8"))

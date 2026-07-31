@@ -41,6 +41,11 @@ internal static class RuleLogSanitizer
 
     private static string SanitizeText(string value)
     {
+        if (TryDecodeSensitiveText(value, out string decoded))
+        {
+            value = decoded;
+        }
+
         var result = new System.Text.StringBuilder(value.Length);
         int position = 0;
         while (position < value.Length)
@@ -76,6 +81,45 @@ internal static class RuleLogSanitizer
 
         string sanitized = result.ToString();
         return ContainsBoundedCredential(sanitized) ? "[REDACTED]" : sanitized;
+    }
+
+    private static bool TryDecodeSensitiveText(string value, out string decoded)
+    {
+        string current = value;
+        const int maximumDecodeIterations = 5;
+        for (int iteration = 0; iteration < maximumDecodeIterations; iteration++)
+        {
+            string next = Uri.UnescapeDataString(current);
+            if (string.Equals(next, current, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            current = next;
+            if (current.Length > 65_536)
+            {
+                decoded = "[REDACTED]";
+                return true;
+            }
+
+            if (iteration == maximumDecodeIterations - 1 && current.Contains('%'))
+            {
+                decoded = "[REDACTED]";
+                return true;
+            }
+        }
+
+        if (!string.Equals(current, value, StringComparison.Ordinal)
+            && (current.Contains("http://", StringComparison.OrdinalIgnoreCase)
+                || current.Contains("https://", StringComparison.OrdinalIgnoreCase)
+                || ContainsBoundedCredential(current)))
+        {
+            decoded = current;
+            return true;
+        }
+
+        decoded = null!;
+        return false;
     }
 
     private static bool TrySanitizeUri(string value, out string? sanitized)

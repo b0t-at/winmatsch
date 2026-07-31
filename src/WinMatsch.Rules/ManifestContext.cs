@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using WinMatsch.Core;
 
 namespace WinMatsch.Rules;
@@ -15,6 +16,20 @@ public sealed class ManifestContext
     private readonly List<RuleExecution> _executions = [];
     private readonly List<HumanCorrectionReview> _humanCorrectionReviews = [];
     private readonly Dictionary<string, RuleChangeEvidence> _changeEvidence = new(StringComparer.Ordinal);
+    private readonly ReadOnlyCollection<RuleFinding> _findingsView;
+    private readonly ReadOnlyCollection<RuleTraceEntry> _traceView;
+    private readonly ReadOnlyCollection<RuleChange> _changesView;
+    private readonly ReadOnlyCollection<RuleExecution> _executionsView;
+    private readonly ReadOnlyCollection<HumanCorrectionReview> _humanCorrectionReviewsView;
+
+    public ManifestContext()
+    {
+        _findingsView = _findings.AsReadOnly();
+        _traceView = _trace.AsReadOnly();
+        _changesView = _changes.AsReadOnly();
+        _executionsView = _executions.AsReadOnly();
+        _humanCorrectionReviewsView = _humanCorrectionReviews.AsReadOnly();
+    }
 
     /// <summary>The manifests being produced. Normalization and quirk rules mutate these in place.</summary>
     public required PackageManifests Manifests { get; init; }
@@ -34,19 +49,19 @@ public sealed class ManifestContext
     public RuleOptions Options { get; init; } = new();
 
     /// <summary>The findings collected so far, in the deterministic order they were added.</summary>
-    public IReadOnlyList<RuleFinding> Findings => _findings;
+    public IReadOnlyList<RuleFinding> Findings => _findingsView;
 
     /// <summary>The explain log; only populated when <see cref="RuleOptions.Explain"/> is set.</summary>
-    public IReadOnlyList<RuleTraceEntry> Trace => _trace;
+    public IReadOnlyList<RuleTraceEntry> Trace => _traceView;
 
     /// <summary>Applied changes and log-only proposals, in deterministic execution order.</summary>
-    public IReadOnlyList<RuleChange> Changes => _changes;
+    public IReadOnlyList<RuleChange> Changes => _changesView;
 
     /// <summary>The effective mode selected for every rule in pipeline order.</summary>
-    public IReadOnlyList<RuleExecution> Executions => _executions;
+    public IReadOnlyList<RuleExecution> Executions => _executionsView;
 
     /// <summary>Known human corrections that generated output would revert.</summary>
-    public IReadOnlyList<HumanCorrectionReview> HumanCorrectionReviews => _humanCorrectionReviews;
+    public IReadOnlyList<HumanCorrectionReview> HumanCorrectionReviews => _humanCorrectionReviewsView;
 
     /// <summary>True when a known human correction would be reverted and review is required.</summary>
     public bool RequiresReview => _humanCorrectionReviews.Count != 0;
