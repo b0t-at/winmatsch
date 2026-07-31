@@ -109,6 +109,49 @@ public sealed class ConfigurationPrecedenceTests
             probe.LastContext.Configuration.Repository);
     }
 
+    [Fact]
+    public async Task Unreadable_config_file_is_a_configuration_error_not_a_crash()
+    {
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule());
+        harness.FileReadErrors["locked.yaml"] = new IOException("The file is locked by another process.");
+
+        CliRunResult result = await harness.RunAsync(["probe", "--config", "locked.yaml"]);
+
+        Assert.Equal(ExitCodes.ConfigurationError, result.ExitCode);
+        Assert.Equal(string.Empty, result.StandardOutput);
+        Assert.Contains("locked", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("   at ", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Access_denied_config_file_is_a_configuration_error()
+    {
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule());
+        harness.FileReadErrors["secret.yaml"] = new UnauthorizedAccessException("Access denied.");
+
+        CliRunResult result = await harness.RunAsync(["probe", "--config", "secret.yaml"]);
+
+        Assert.Equal(ExitCodes.ConfigurationError, result.ExitCode);
+        Assert.Contains("Access denied", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Unclassified_context_creation_failure_maps_to_exit_code_1_not_a_crash()
+    {
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule());
+        harness.FileReadErrors["odd.yaml"] = new InvalidOperationException("boom");
+
+        CliRunResult result = await harness.RunAsync(["probe", "--config", "odd.yaml"]);
+
+        Assert.Equal(ExitCodes.UnexpectedError, result.ExitCode);
+        Assert.Equal(string.Empty, result.StandardOutput);
+        Assert.Contains("Unexpected error", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("   at ", result.StandardError, StringComparison.Ordinal);
+    }
+
     private static string DefaultConfigPath(CliHarness harness) =>
         Path.Combine(harness.HomeDirectory!, ".config", "winmatsch", "config.yaml");
 }

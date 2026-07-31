@@ -57,6 +57,20 @@ public class TokenResolverTests
     }
 
     [Fact]
+    public async Task Malformed_environment_value_throws_format_exception_without_the_secret()
+    {
+        const string brokenSecret = "ghp_broken token";
+        var resolver = new TokenResolver(new FakeTokenStore(), _ => brokenSecret);
+
+        FormatException exception =
+            await Assert.ThrowsAsync<FormatException>(() => resolver.ResolveAsync());
+
+        Assert.Contains(TokenResolver.TokenEnvironmentVariable, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(brokenSecret, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("ghp_broken", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Keyring_is_used_when_no_other_source_is_set()
     {
         var store = new FakeTokenStore { Token = new GitHubToken("ghp_keyring") };

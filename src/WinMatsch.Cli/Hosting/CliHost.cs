@@ -123,10 +123,25 @@ public sealed class CliHost
         {
             context = CreateContext(parseResult, cancellationToken);
         }
-        catch (Exception exception) when (exception is FormatException or FileNotFoundException)
+        catch (Exception exception)
+            when (exception is FormatException or IOException or UnauthorizedAccessException)
         {
+            // FileNotFoundException (missing --config) is an IOException; unreadable
+            // configuration files (locked, deny-read ACL) land here too.
             error.WriteLine($"Configuration error: {exception.Message}");
             return ExitCodes.ConfigurationError;
+        }
+        catch (OperationCanceledException)
+        {
+            error.WriteLine("The operation was cancelled.");
+            return ExitCodes.Cancelled;
+        }
+#pragma warning disable CA1031 // Nothing may escape the host; unclassified failures map to exit code 1.
+        catch (Exception exception)
+#pragma warning restore CA1031
+        {
+            error.WriteLine($"Unexpected error: {exception.Message}");
+            return ExitCodes.UnexpectedError;
         }
 
         try
@@ -147,6 +162,14 @@ public sealed class CliHost
         {
             error.WriteLine(exception.Message);
             return ExitCodes.OperationFailed;
+        }
+        catch (FormatException exception)
+        {
+            // By repository convention FormatException always carries a bad user-supplied
+            // value (configuration, environment, or option content) discovered lazily, such
+            // as a malformed GITHUB_TOKEN resolved at handler time.
+            error.WriteLine($"Configuration error: {exception.Message}");
+            return ExitCodes.ConfigurationError;
         }
         catch (OperationCanceledException)
         {

@@ -40,7 +40,20 @@ public sealed class TokenResolver
         string? fromEnvironment = _environment(TokenEnvironmentVariable);
         if (!string.IsNullOrWhiteSpace(fromEnvironment))
         {
-            return new ResolvedToken(new GitHubToken(fromEnvironment.Trim()), TokenSource.EnvironmentVariable);
+            try
+            {
+                return new ResolvedToken(
+                    new GitHubToken(fromEnvironment.Trim()),
+                    TokenSource.EnvironmentVariable);
+            }
+            catch (ArgumentException exception)
+            {
+                // The raw value must never appear in the message; it is a (broken) secret.
+                throw new FormatException(
+                    $"{TokenEnvironmentVariable} is not a valid token: it must not contain " +
+                    "whitespace or control characters.",
+                    exception);
+            }
         }
 
         if (_store.IsAvailable)

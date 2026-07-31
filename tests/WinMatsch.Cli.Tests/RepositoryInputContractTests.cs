@@ -76,6 +76,20 @@ public sealed class RepositoryInputContractTests
         Assert.DoesNotContain("{", result.StandardOutput, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Whitespace_padded_repo_option_is_trimmed_not_broken()
+    {
+        var harness = new CliHarness();
+        var probe = new ProbeModule();
+        harness.Modules.Add(probe);
+
+        CliRunResult result = await harness.RunAsync(["probe", "--repo", " microsoft/winget-pkgs "]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.NotNull(probe.LastContext);
+        Assert.Equal("microsoft/winget-pkgs", probe.LastContext.Configuration.Repository.ToString());
+    }
+
     private static void AssertConfigurationErrorContract(CliRunResult result)
     {
         Assert.Equal(ExitCodes.ConfigurationError, result.ExitCode);

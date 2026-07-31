@@ -18,6 +18,9 @@ public sealed class CliHarness
     /// <summary>Fake text files keyed by full path; the disk is never consulted.</summary>
     public Dictionary<string, string> Files { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>Paths whose read throws, for exercising unreadable-file behavior.</summary>
+    public Dictionary<string, Exception> FileReadErrors { get; } = new(StringComparer.Ordinal);
+
     public List<ICommandModule> Modules { get; } = [];
 
     public FakeTokenStore TokenStore { get; } = new();
@@ -57,7 +60,15 @@ public sealed class CliHarness
             Error = error,
             EnvironmentVariables = name =>
                 EnvironmentVariables.TryGetValue(name, out string? value) ? value : null,
-            ReadTextFile = path => Files.TryGetValue(path, out string? content) ? content : null,
+            ReadTextFile = path =>
+            {
+                if (FileReadErrors.TryGetValue(path, out Exception? failure))
+                {
+                    throw failure;
+                }
+
+                return Files.TryGetValue(path, out string? content) ? content : null;
+            },
             IsInputRedirected = IsInputRedirected,
             IsOutputRedirected = IsOutputRedirected,
             IsErrorRedirected = IsErrorRedirected,

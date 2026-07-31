@@ -84,6 +84,28 @@ public sealed class SecretRedactionTests
     }
 
     [Fact]
+    public async Task Malformed_github_token_environment_variable_is_a_configuration_error()
+    {
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule(async context =>
+        {
+            await context.Tokens.RequireAsync(context.CancellationToken);
+            return ExitCodes.Success;
+        }));
+        const string brokenSecret = "ghp_broken token\twith whitespace";
+        harness.EnvironmentVariables["GITHUB_TOKEN"] = brokenSecret;
+
+        CliRunResult result = await harness.RunAsync(["probe"]);
+
+        Assert.Equal(ExitCodes.ConfigurationError, result.ExitCode);
+        Assert.Equal(string.Empty, result.StandardOutput);
+        Assert.Contains("GITHUB_TOKEN", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain(brokenSecret, result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("ghp_broken", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("   at ", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Missing_required_token_maps_to_missing_input_with_guidance()
     {
         var harness = new CliHarness();

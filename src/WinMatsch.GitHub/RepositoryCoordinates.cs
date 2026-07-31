@@ -21,10 +21,11 @@ public sealed record RepositoryCoordinates
     public string Name { get; }
 
     /// <summary>
-    /// Parses user-supplied <c>owner/name</c> input. Every invalid syntax — null, empty,
-    /// whitespace, a missing or extra separator, or an empty owner or name part — throws
-    /// <see cref="FormatException"/>, so configuration binding maps it to a configuration
-    /// error instead of leaking an argument exception.
+    /// Parses user-supplied <c>owner/name</c> input. Surrounding whitespace on the owner and
+    /// name parts is trimmed (matching the environment layer); every invalid syntax — null,
+    /// empty, whitespace, a missing or extra separator, or an empty owner or name part —
+    /// throws <see cref="FormatException"/>, so configuration binding maps it to a
+    /// configuration error instead of leaking an argument exception.
     /// </summary>
     public static RepositoryCoordinates Parse(string? value)
     {
@@ -42,7 +43,7 @@ public sealed record RepositoryCoordinates
 
         try
         {
-            return new RepositoryCoordinates(parts[0], parts[1]);
+            return new RepositoryCoordinates(parts[0].Trim(), parts[1].Trim());
         }
         catch (ArgumentException exception)
         {

@@ -14,6 +14,18 @@ public sealed class RepositoryCoordinatesTests
         Assert.Equal("microsoft/winget-pkgs", repository.ToString());
     }
 
+    [Theory]
+    [InlineData(" microsoft/winget-pkgs")]
+    [InlineData("microsoft / winget-pkgs")]
+    [InlineData("microsoft/winget-pkgs ")]
+    public void Parse_trims_surrounding_whitespace_from_owner_and_name(string value)
+    {
+        RepositoryCoordinates repository = RepositoryCoordinates.Parse(value);
+
+        Assert.Equal("microsoft", repository.Owner);
+        Assert.Equal("winget-pkgs", repository.Name);
+    }
+
     [Fact]
     public void Constructor_rejects_invalid_parts_with_argument_exceptions()
     {
