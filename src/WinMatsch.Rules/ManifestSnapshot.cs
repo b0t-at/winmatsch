@@ -841,7 +841,7 @@ internal sealed class ManifestSnapshot
             score += EqualScalar(candidate, target, "InstallerUrl") ? 10_000 : 0;
             score += EqualScalar(candidate, target, "InstallerSha256") ? 5_000 : 0;
             score += EqualScalar(candidate, target, "Architecture") ? 2_000 : 0;
-            score += EqualNode(candidate, target, "InstallerSwitches") ? 3_000 : 0;
+            score += InstallerSwitchesScore(candidate, target, excludedField);
             score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "InstallerType", excludedField) ? 500 : 0;
             score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "Scope", excludedField) ? 400 : 0;
             score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "InstallerLocale", excludedField) ? 300 : 0;
@@ -866,14 +866,44 @@ internal sealed class ManifestSnapshot
             ScalarValue(GetMappingValue(right, field)),
             StringComparison.OrdinalIgnoreCase);
 
-    private static bool EqualNode(
+    private static int InstallerSwitchesScore(
         YamlMappingNode left,
         YamlMappingNode right,
-        string field)
-        => string.Equals(
-            GetMappingValue(left, field) is { } leftValue ? CanonicalNode(leftValue) : null,
-            GetMappingValue(right, field) is { } rightValue ? CanonicalNode(rightValue) : null,
-            StringComparison.Ordinal);
+        string excludedField)
+    {
+        YamlMappingNode? leftSwitches = GetMappingValue(left, "InstallerSwitches") as YamlMappingNode;
+        YamlMappingNode? rightSwitches = GetMappingValue(right, "InstallerSwitches") as YamlMappingNode;
+
+        const string prefix = "InstallerSwitches.";
+        string? excludedSwitch = excludedField.StartsWith(prefix, StringComparison.Ordinal)
+            ? excludedField[prefix.Length..]
+            : null;
+        string[] fields =
+        [
+            "Silent",
+            "SilentWithProgress",
+            "Interactive",
+            "InstallLocation",
+            "Log",
+            "Upgrade",
+            "Custom",
+            "Repair",
+        ];
+        int score = 0;
+        foreach (string field in fields)
+        {
+            if (!string.Equals(field, excludedSwitch, StringComparison.Ordinal)
+                && string.Equals(
+                    leftSwitches is null ? null : ScalarValue(GetMappingValue(leftSwitches, field)),
+                    rightSwitches is null ? null : ScalarValue(GetMappingValue(rightSwitches, field)),
+                    StringComparison.Ordinal))
+            {
+                score += 375;
+            }
+        }
+
+        return score;
+    }
 
     private static bool EqualEffectiveScalar(
         YamlMappingNode left,

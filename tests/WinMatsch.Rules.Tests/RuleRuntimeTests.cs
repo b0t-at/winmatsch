@@ -658,6 +658,48 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Nested_switch_correction_is_excluded_from_installer_pairing()
+    {
+        static PackageManifests Create(string rootSilent, string? userSilent, string? machineSilent)
+        {
+            Installer user = TestManifests.CreateInstaller(
+                url: "https://example.test/universal.exe",
+                scope: Scope.User);
+            user.InstallerSwitches = userSilent is null ? null : new() { Silent = userSilent };
+            Installer machine = TestManifests.CreateInstaller(
+                url: "https://example.test/universal.exe",
+                scope: Scope.Machine);
+            machine.InstallerSwitches = machineSilent is null ? null : new() { Silent = machineSilent };
+            PackageManifests manifests = TestManifests.Create(user, machine);
+            manifests.Installer.InstallerSwitches = new() { Silent = rootSilent };
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("/old", userSilent: null, machineSilent: null),
+            Previous = Create("/new", userSilent: null, machineSilent: "/old"),
+            Manifests = Create("/new", userSilent: "/old", machineSilent: "/old"),
+        };
+        ManifestSnapshot humanSnapshot = ManifestSnapshot.Capture(context.Previous);
+        ManifestSnapshot generatedSnapshot = ManifestSnapshot.Capture(context.Manifests);
+        Assert.True(
+            generatedSnapshot.TryFindChangedEffectiveInstallerValue(
+                "InstallerSwitches.Silent",
+                "/old",
+                humanSnapshot,
+                out string? matched));
+        Assert.Equal("/old", matched);
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath == "InstallerSwitches.Silent"
+                && review.GeneratedValue == "[REDACTED]");
+    }
+
+    [Fact]
     public void Mixed_generated_values_without_the_bot_value_do_not_trigger_review()
     {
         static PackageManifests Create(string? rootProductCode, string first, string second)
