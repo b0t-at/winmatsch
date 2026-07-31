@@ -1,3 +1,4 @@
+using System.Text;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using Xunit;
@@ -240,5 +241,55 @@ public sealed class ManifestSchemaValidatorTests
 
         Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD1001");
         Assert.Contains(report.Findings, static finding => finding.Code == "VLD1003");
+    }
+
+    [Fact]
+    public void Depth_budget_is_enforced_before_representation_tree_construction()
+    {
+        string nested = $"{new string('[', 70)}null{new string(']', 70)}";
+        string yaml = $"""
+            PackageIdentifier: Example.App
+            PackageVersion: 1.0.0
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.12.0
+            Extra: {nested}
+
+            """;
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Version);
+
+        ValidationFinding finding = Assert.Single(report.Findings);
+        Assert.Equal("VLD1001", finding.Code);
+        Assert.Contains("nesting cannot exceed", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Node_budget_is_enforced_before_representation_tree_construction()
+    {
+        var yaml = new StringBuilder(
+            """
+            PackageIdentifier: Example.App
+            PackageVersion: 1.0.0
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.12.0
+            Extra:
+
+            """);
+        for (int index = 0; index <= 100_000; index++)
+        {
+            _ = yaml.AppendLine("  - null");
+        }
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml.ToString()),
+            ManifestType.Version);
+
+        ValidationFinding finding = Assert.Single(report.Findings);
+        Assert.Equal("VLD1001", finding.Code);
+        Assert.Contains("more than 100000 YAML nodes", finding.Message, StringComparison.Ordinal);
     }
 }

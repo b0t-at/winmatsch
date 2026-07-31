@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 using Json.Schema;
 using WinMatsch.Core;
 using YamlDotNet.Core;
+using YamlDotNet.Core.Events;
 using YamlDotNet.RepresentationModel;
 
 namespace WinMatsch.Validation;
@@ -207,6 +208,7 @@ public static partial class ManifestSchemaValidator
                 $"A manifest cannot exceed {MaxManifestBytes} UTF-8 bytes.");
         }
 
+        ValidateYamlEvents(yaml);
         var stream = new YamlStream();
         using var reader = new StringReader(yaml);
         stream.Load(reader);
@@ -224,6 +226,47 @@ public static partial class ManifestSchemaValidator
         }
 
         return (JsonDocument.Parse(output.ToArray()), root);
+    }
+
+    private static void ValidateYamlEvents(string yaml)
+    {
+        using var reader = new StringReader(yaml);
+        var parser = new Parser(reader);
+        int depth = 0;
+        int nodes = 0;
+        while (parser.MoveNext())
+        {
+            ParsingEvent parsingEvent = parser.Current
+                ?? throw new InvalidDataException("YAML parser returned an empty event.");
+            if (parsingEvent is AnchorAlias)
+            {
+                throw new InvalidDataException(
+                    "YAML anchors and aliases are not permitted in manifests.");
+            }
+
+            if (parsingEvent is NodeEvent node)
+            {
+                nodes++;
+                if (nodes > MaxYamlNodes)
+                {
+                    throw new InvalidDataException(
+                        $"A manifest cannot contain more than {MaxYamlNodes} YAML nodes.");
+                }
+
+                if (!node.Anchor.IsEmpty)
+                {
+                    throw new InvalidDataException(
+                        "YAML anchors and aliases are not permitted in manifests.");
+                }
+            }
+
+            depth += parsingEvent.NestingIncrease;
+            if (depth > MaxYamlDepth)
+            {
+                throw new InvalidDataException(
+                    $"YAML nesting cannot exceed {MaxYamlDepth} levels.");
+            }
+        }
     }
 
     private static void WriteNode(
