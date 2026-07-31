@@ -588,6 +588,60 @@ internal sealed class ManifestSnapshot
         return false;
     }
 
+    internal bool TryFindEffectiveInstallerValue(
+        string semanticPath,
+        string? expected,
+        out string? matched)
+    {
+        const string installerPrefix = "Installers{installer:";
+        if (semanticPath.StartsWith(installerPrefix, StringComparison.Ordinal))
+        {
+            if (TryGetEffectiveInstallerValue(semanticPath, out string? value)
+                && SemanticValueEquals(semanticPath, expected, value))
+            {
+                matched = value;
+                return true;
+            }
+
+            matched = null;
+            return false;
+        }
+
+        int separator = semanticPath.IndexOfAny(['.', '{']);
+        string rootField = separator < 0 ? semanticPath : semanticPath[..separator];
+        if (!InstallerFieldAccessors.All.Any(
+                accessor => string.Equals(accessor.Name, rootField, StringComparison.Ordinal)))
+        {
+            matched = null;
+            return false;
+        }
+
+        YamlMappingNode root = GetRoot("installer");
+        if (TryResolveSemanticPath(root, semanticPath, out string? rootValue)
+            && SemanticValueEquals(semanticPath, expected, rootValue))
+        {
+            matched = rootValue;
+            return true;
+        }
+
+        if (GetMappingValue(root, "Installers") is YamlSequenceNode installers)
+        {
+            foreach (YamlNode node in installers.Children)
+            {
+                if (node is YamlMappingNode installer
+                    && TryResolveSemanticPath(installer, semanticPath, out string? installerValue)
+                    && SemanticValueEquals(semanticPath, expected, installerValue))
+                {
+                    matched = installerValue;
+                    return true;
+                }
+            }
+        }
+
+        matched = null;
+        return false;
+    }
+
     private bool TryGetUniformInstallerValue(string semanticPath, out string? value)
     {
         int separator = semanticPath.IndexOfAny(['.', '{']);

@@ -147,7 +147,11 @@ internal static class RuleLogSanitizer
 
     private static bool TrySanitizeUri(string value, out string? sanitized)
     {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri))
+        int query = value.IndexOf('?');
+        int fragment = value.IndexOf('#');
+        int suffix = query < 0 ? fragment : fragment < 0 ? query : Math.Min(query, fragment);
+        string valueWithoutSuffix = suffix < 0 ? value : value[..suffix];
+        if (!Uri.TryCreate(valueWithoutSuffix, UriKind.Absolute, out Uri? uri))
         {
             sanitized = "[REDACTED]";
             return true;

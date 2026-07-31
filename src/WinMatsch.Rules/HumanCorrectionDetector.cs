@@ -43,19 +43,27 @@ internal static class HumanCorrectionDetector
                 out string? effectiveValue)
                 ? effectiveValue
                 : generatedChange?.After ?? botValue;
+            bool generatedRestoresBot = generatedSnapshot.TryFindEffectiveInstallerValue(
+                humanChange.SemanticPath,
+                botValue,
+                out string? matchedGeneratedValue);
 
             if (!string.Equals(botValue, humanValue, StringComparison.Ordinal)
-                && ManifestSnapshot.SemanticValueEquals(
-                    humanChange.FieldPath,
-                    botValue,
-                    generatedValue))
+                && (generatedRestoresBot
+                    || ManifestSnapshot.SemanticValueEquals(
+                        humanChange.FieldPath,
+                        botValue,
+                        generatedValue)))
             {
+                string? reviewGeneratedValue = generatedRestoresBot
+                    ? matchedGeneratedValue
+                    : generatedValue;
                 context.AddHumanCorrectionReview(new(
                     generatedChange?.ManifestPath ?? humanChange.ManifestPath,
                     generatedChange?.FieldPath ?? humanChange.FieldPath,
                     RuleLogSanitizer.Sanitize(humanChange.FieldPath, botValue),
                     RuleLogSanitizer.Sanitize(humanChange.FieldPath, humanValue),
-                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, generatedValue)));
+                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, reviewGeneratedValue)));
             }
         }
     }

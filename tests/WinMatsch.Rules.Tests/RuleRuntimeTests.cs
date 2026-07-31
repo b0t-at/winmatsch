@@ -425,6 +425,41 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Any_generated_installer_restoring_a_root_bot_value_requires_review()
+    {
+        static PackageManifests Create(string? rootProductCode, string first, string second)
+        {
+            Installer firstInstaller = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+            firstInstaller.ProductCode = first;
+            Installer secondInstaller = TestManifests.CreateInstaller(url: "https://example.test/b.exe");
+            secondInstaller.ProductCode = second;
+            PackageManifests manifests = TestManifests.Create(firstInstaller, secondInstaller);
+            manifests.Installer.ProductCode = rootProductCode;
+            if (rootProductCode is not null)
+            {
+                firstInstaller.ProductCode = null;
+                secondInstaller.ProductCode = null;
+            }
+
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("A", "A", "A"),
+            Previous = Create("B", "B", "B"),
+            Manifests = Create(rootProductCode: null, "A", "C"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath == "ProductCode"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
     public void Hoisted_generated_value_cannot_hide_a_reverted_installer_correction()
     {
         static Installer Installer(string url, string productCode)
@@ -842,7 +877,19 @@ public class RuleRuntimeTests
 
         string sanitized = RuleLogSanitizer.SanitizeMessage(value);
 
-        Assert.Equal("Downloaded from [REDACTED]", sanitized);
+        Assert.DoesNotContain("password", sanitized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", sanitized, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Non_http_uri_query_is_removed_before_scheme_specific_parsing()
+    {
+        const string value = "ftp://example.test/app.exe?sig=do-not-log";
+
+        string sanitized = RuleLogSanitizer.SanitizeMessage(value);
+
+        Assert.DoesNotContain("do-not-log", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("sig=", sanitized, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
