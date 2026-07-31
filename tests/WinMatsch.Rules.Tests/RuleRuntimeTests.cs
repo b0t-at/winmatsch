@@ -304,6 +304,45 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Installer_matching_handles_version_shape_changes_and_effective_root_fields()
+    {
+        static PackageManifests Create(string url, string productCode)
+        {
+            Installer installer = TestManifests.CreateInstaller(url: url);
+            installer.InstallerType = null;
+            installer.Scope = null;
+            installer.ProductCode = productCode;
+            PackageManifests manifests = TestManifests.Create(installer);
+            manifests.Installer.InstallerType = InstallerType.Msi;
+            manifests.Installer.Scope = Scope.Machine;
+            return manifests;
+        }
+
+        PackageManifests originalBot = Create(
+            "https://example.test/app-x64-1.2.3.exe",
+            "BOT-CODE");
+        PackageManifests merged = Create(
+            "https://example.test/app-x64-1.2.3.exe",
+            "HUMAN-CODE");
+        PackageManifests generated = Create(
+            "https://example.test/app-x64-2.0.exe",
+            "BOT-CODE");
+        var context = new ManifestContext
+        {
+            Manifests = generated,
+            Previous = merged,
+            OriginalBotSubmission = originalBot,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal)
+                && review.HumanValue == "HUMAN-CODE");
+    }
+
+    [Fact]
     public void Human_inserted_installer_is_not_hidden_by_index_shifts()
     {
         Installer original = TestManifests.CreateInstaller(url: "https://example.test/app-x64.exe");
@@ -501,6 +540,30 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Placeholder_fallback_records_required_fields_changed_to_null_exactly()
+    {
+        Installer installer = TestManifests.CreateInstaller(url: "   ");
+        ManifestContext context = TestManifests.CreateContext(TestManifests.Create(installer));
+        var configuration = new RuleRuntimeConfiguration(
+            commandOverrides: new Dictionary<string, RuleMode>
+            {
+                [RuleIds.ScrubEmptyStrings] = RuleMode.LogOnly,
+            });
+
+        RulePipeline.Create(
+            [new ScrubEmptyStringsRule()],
+            configuration,
+            OverridePackSet.Empty).Run(context);
+
+        Assert.Equal("   ", installer.InstallerUrl);
+        RuleChange change = Assert.Single(
+            context.Changes,
+            item => item.FieldPath.EndsWith(".InstallerUrl", StringComparison.Ordinal));
+        Assert.Equal("   ", change.Before);
+        Assert.Null(change.After);
+    }
+
+    [Fact]
     public void Catalogue_ids_keep_the_exact_policy_names()
     {
         Assert.Equal("ARCH-1", RuleCatalogueIds.Arch1);
@@ -513,6 +576,7 @@ public class RuleRuntimeTests
     [InlineData("Authorization: Bearer abcdefghijklmnopqrstuvwxyz")]
     [InlineData("Authorization: Bearer abc.def~ghi+jkl/mno")]
     [InlineData("Authorization: Basic dXNlcjpwYXNzKysv")]
+    [InlineData("Authorization: Basic YTpi")]
     [InlineData("Cookie: session=top-secret")]
     [InlineData("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwxyz")]
     public void Common_authorization_material_is_redacted(string message)
@@ -585,6 +649,17 @@ public class RuleRuntimeTests
         new DirectLoggingRule(message).Apply(context);
 
         Assert.Equal("[REDACTED]", Assert.Single(context.Trace).Message);
+    }
+
+    [Theory]
+    [InlineData("Download from https://example.test/file?sig=super-secret")]
+    [InlineData("Download from https://example.test/token%3Dsuper-secret/file.exe")]
+    public void Embedded_signed_or_encoded_urls_cannot_leak_from_structured_values(string value)
+    {
+        string? sanitized = RuleLogSanitizer.Sanitize("SourceEvidence", value);
+
+        Assert.DoesNotContain("super-secret", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("?sig=", sanitized, StringComparison.Ordinal);
     }
 
     private sealed class ReplaceUrlRule : IRule

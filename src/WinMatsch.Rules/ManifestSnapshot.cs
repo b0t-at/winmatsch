@@ -21,25 +21,44 @@ internal sealed class ManifestSnapshot
     }
 
     public static ManifestSnapshot Capture(PackageManifests manifests)
+        => Capture(manifests, manifests);
+
+    private static ManifestSnapshot Capture(
+        PackageManifests serializableManifests,
+        PackageManifests identitySource)
     {
-        ArgumentNullException.ThrowIfNull(manifests);
+        ArgumentNullException.ThrowIfNull(serializableManifests);
+        ArgumentNullException.ThrowIfNull(identitySource);
         var documents = new SortedDictionary<string, DocumentSnapshot>(StringComparer.Ordinal);
 
-        Add(documents, "version", GetVersionPath(manifests), ManifestYamlWriter.Serialize(manifests.Version));
-        Add(documents, "installer", GetInstallerPath(manifests), SerializeInstaller(manifests.Installer, out _));
+        Add(
+            documents,
+            "version",
+            GetVersionPath(identitySource),
+            ManifestYamlWriter.Serialize(serializableManifests.Version));
+        Add(
+            documents,
+            "installer",
+            GetInstallerPath(identitySource),
+            SerializeInstaller(serializableManifests.Installer, out _));
         Add(
             documents,
             "defaultLocale",
-            GetDefaultLocalePath(manifests),
-            ManifestYamlWriter.Serialize(manifests.DefaultLocale));
+            GetDefaultLocalePath(identitySource),
+            ManifestYamlWriter.Serialize(serializableManifests.DefaultLocale));
 
-        for (int i = 0; i < manifests.Locales.Count; i++)
+        for (int i = 0; i < serializableManifests.Locales.Count; i++)
         {
-            LocaleManifest locale = manifests.Locales[i];
-            string documentKey = locale.PackageLocale is { } packageLocale
+            LocaleManifest locale = serializableManifests.Locales[i];
+            LocaleManifest identityLocale = identitySource.Locales[i];
+            string documentKey = identityLocale.PackageLocale is { } packageLocale
                 ? $"locale:{packageLocale.Value.ToUpperInvariant()}"
                 : $"locale:missing:{i}";
-            Add(documents, documentKey, GetLocalePath(manifests, locale, i), ManifestYamlWriter.Serialize(locale));
+            Add(
+                documents,
+                documentKey,
+                GetLocalePath(identitySource, identityLocale, i),
+                ManifestYamlWriter.Serialize(locale));
         }
 
         return new(documents);
@@ -61,7 +80,8 @@ internal sealed class ManifestSnapshot
         {
             try
             {
-                snapshot = Capture(ManifestClone.CreateSerializable(manifests));
+                snapshot = Capture(ManifestClone.CreateSerializable(manifests), manifests);
+                snapshot.RemoveMissingRequiredValues(manifests);
                 return true;
             }
             catch (InvalidOperationException)
@@ -71,6 +91,190 @@ internal sealed class ManifestSnapshot
             }
         }
     }
+
+    private void RemoveMissingRequiredValues(PackageManifests original)
+        {
+            YamlMappingNode version = GetRoot("version");
+            RemoveWhenMissing(version, "PackageIdentifier", original.Version.PackageIdentifier);
+            RemoveWhenMissing(version, "PackageVersion", original.Version.PackageVersion);
+            RemoveWhenMissing(version, "DefaultLocale", original.Version.DefaultLocale);
+            RemoveWhenMissing(version, "ManifestVersion", original.Version.ManifestVersion);
+
+            YamlMappingNode installerManifest = GetRoot("installer");
+            RemoveWhenMissing(installerManifest, "PackageIdentifier", original.Installer.PackageIdentifier);
+            RemoveWhenMissing(installerManifest, "PackageVersion", original.Installer.PackageVersion);
+            RemoveWhenMissing(installerManifest, "ManifestVersion", original.Installer.ManifestVersion);
+            RemoveMissingInstallerFields(installerManifest, original.Installer);
+            if (original.Installer.Installers is not { Count: > 0 } originalInstallers)
+            {
+                RemoveMappingKey(installerManifest, "Installers");
+            }
+            else if (GetMappingValue(installerManifest, "Installers") is YamlSequenceNode installerSequence)
+            {
+                for (int i = 0; i < originalInstallers.Count; i++)
+                {
+                    if (installerSequence.Children[i] is not YamlMappingNode installer)
+                    {
+                        continue;
+                    }
+
+                    Installer originalInstaller = originalInstallers[i];
+                    RemoveWhenMissing(installer, "Architecture", originalInstaller.Architecture);
+                    RemoveWhenMissing(installer, "InstallerUrl", originalInstaller.InstallerUrl);
+                    RemoveWhenMissing(installer, "InstallerSha256", originalInstaller.InstallerSha256);
+                    RemoveMissingInstallerFields(installer, originalInstaller);
+                }
+            }
+
+            RemoveMissingLocaleValues(GetRoot("defaultLocale"), original.DefaultLocale);
+            for (int i = 0; i < original.Locales.Count; i++)
+            {
+                LocaleManifest locale = original.Locales[i];
+                string documentKey = locale.PackageLocale is { } packageLocale
+                    ? $"locale:{packageLocale.Value.ToUpperInvariant()}"
+                    : $"locale:missing:{i}";
+                RemoveMissingLocaleValues(GetRoot(documentKey), locale);
+            }
+        }
+
+        private YamlMappingNode GetRoot(string documentKey)
+            => (YamlMappingNode)_documents[documentKey].Root;
+
+        private static void RemoveMissingLocaleValues(YamlMappingNode mapping, LocaleManifest original)
+        {
+            RemoveWhenMissing(mapping, "PackageIdentifier", original.PackageIdentifier);
+            RemoveWhenMissing(mapping, "PackageVersion", original.PackageVersion);
+            RemoveWhenMissing(mapping, "PackageLocale", original.PackageLocale);
+            RemoveWhenMissing(mapping, "ManifestVersion", original.ManifestVersion);
+            if (original is DefaultLocaleManifest defaultLocale)
+            {
+                RemoveWhenMissing(mapping, "Publisher", defaultLocale.Publisher);
+                RemoveWhenMissing(mapping, "PackageName", defaultLocale.PackageName);
+                RemoveWhenMissing(mapping, "License", defaultLocale.License);
+                RemoveWhenMissing(mapping, "ShortDescription", defaultLocale.ShortDescription);
+            }
+
+            if (original.Icons is { } icons
+                && GetMappingValue(mapping, "Icons") is YamlSequenceNode iconSequence)
+            {
+                for (int i = 0; i < icons.Count; i++)
+                {
+                    if (iconSequence.Children[i] is YamlMappingNode icon)
+                    {
+                        RemoveWhenMissing(icon, "IconUrl", icons[i].IconUrl);
+                        RemoveWhenMissing(icon, "IconFileType", icons[i].IconFileType);
+                    }
+                }
+            }
+        }
+
+        private static void RemoveMissingInstallerFields(YamlMappingNode mapping, InstallerFieldsBase original)
+        {
+            RemoveMissingSequenceMappingValues(
+                mapping,
+                "ExpectedReturnCodes",
+                original.ExpectedReturnCodes,
+                static (item, value) =>
+                {
+                    RemoveWhenMissing(item, "InstallerReturnCode", value.InstallerReturnCode);
+                    RemoveWhenMissing(item, "ReturnResponse", value.ReturnResponse);
+                });
+            RemoveMissingSequenceMappingValues(
+                mapping,
+                "NestedInstallerFiles",
+                original.NestedInstallerFiles,
+                static (item, value) => RemoveWhenMissing(item, "RelativeFilePath", value.RelativeFilePath));
+
+            if (original.Dependencies?.PackageDependencies is { } dependencies
+                && GetMappingValue(mapping, "Dependencies") is YamlMappingNode dependencyMapping)
+            {
+                RemoveMissingSequenceMappingValues(
+                    dependencyMapping,
+                    "PackageDependencies",
+                    dependencies,
+                    static (item, value) => RemoveWhenMissing(item, "PackageIdentifier", value.PackageIdentifier));
+            }
+
+            if (original.InstallationMetadata?.Files is { } files
+                && GetMappingValue(mapping, "InstallationMetadata") is YamlMappingNode metadataMapping)
+            {
+                RemoveMissingSequenceMappingValues(
+                    metadataMapping,
+                    "Files",
+                    files,
+                    static (item, value) => RemoveWhenMissing(item, "RelativeFilePath", value.RelativeFilePath));
+            }
+
+            if (original.Authentication is { } authentication
+                && GetMappingValue(mapping, "Authentication") is YamlMappingNode authenticationMapping)
+            {
+                RemoveWhenMissing(
+                    authenticationMapping,
+                    "AuthenticationType",
+                    authentication.AuthenticationType);
+            }
+        }
+
+        private static void RemoveMissingSequenceMappingValues<T>(
+            YamlMappingNode parent,
+            string key,
+            IReadOnlyList<T>? originals,
+            Action<YamlMappingNode, T> removeMissing)
+        {
+            if (originals is null || GetMappingValue(parent, key) is not YamlSequenceNode sequence)
+            {
+                return;
+            }
+
+            for (int i = 0; i < originals.Count; i++)
+            {
+                if (sequence.Children[i] is YamlMappingNode mapping)
+                {
+                    removeMissing(mapping, originals[i]);
+                }
+            }
+        }
+
+        private static void RemoveWhenMissing<T>(YamlMappingNode mapping, string key, T? value)
+        {
+            if (value is null)
+            {
+                RemoveMappingKey(mapping, key);
+            }
+        }
+
+        private static YamlNode? GetMappingValue(YamlMappingNode mapping, string key)
+        {
+            foreach ((YamlNode keyNode, YamlNode valueNode) in mapping.Children)
+            {
+                if (keyNode is YamlScalarNode { Value: { } value }
+                    && string.Equals(value, key, StringComparison.Ordinal))
+                {
+                    return valueNode;
+                }
+            }
+
+            return null;
+        }
+
+        private static void RemoveMappingKey(YamlMappingNode mapping, string key)
+        {
+            YamlNode? matchedKey = null;
+            foreach (YamlNode keyNode in mapping.Children.Keys)
+            {
+                if (keyNode is YamlScalarNode { Value: { } value }
+                    && string.Equals(value, key, StringComparison.Ordinal))
+                {
+                    matchedKey = keyNode;
+                    break;
+                }
+            }
+
+            if (matchedKey is not null)
+            {
+                mapping.Children.Remove(matchedKey);
+            }
+        }
 
     public IReadOnlyList<RawManifestChange> Diff(ManifestSnapshot after)
     {
@@ -185,14 +389,34 @@ internal sealed class ManifestSnapshot
             {
                 beforeValues.TryGetValue(key, out YamlNode? beforeChild);
                 afterValues.TryGetValue(key, out YamlNode? afterChild);
-                DiffNode(
-                    documentKey,
-                    manifestPath,
-                    AppendProperty(fieldPath, key),
-                    AppendProperty(semanticPath, key),
-                    beforeChild,
-                    afterChild,
-                    changes);
+                if (documentKey == "installer"
+                    && fieldPath.Length == 0
+                    && key == "Installers"
+                    && beforeChild is YamlSequenceNode beforeInstallers
+                    && afterChild is YamlSequenceNode afterInstallers)
+                {
+                    DiffInstallerSequence(
+                        documentKey,
+                        manifestPath,
+                        "Installers",
+                        "Installers",
+                        beforeInstallers,
+                        afterInstallers,
+                        beforeMapping,
+                        afterMapping,
+                        changes);
+                }
+                else
+                {
+                    DiffNode(
+                        documentKey,
+                        manifestPath,
+                        AppendProperty(fieldPath, key),
+                        AppendProperty(semanticPath, key),
+                        beforeChild,
+                        afterChild,
+                        changes);
+                }
             }
 
             return;
@@ -200,28 +424,14 @@ internal sealed class ManifestSnapshot
 
         if (before is YamlSequenceNode beforeSequence && after is YamlSequenceNode afterSequence)
         {
-            if (documentKey == "installer" && fieldPath == "Installers")
-            {
-                DiffInstallerSequence(
-                    documentKey,
-                    manifestPath,
-                    fieldPath,
-                    semanticPath,
-                    beforeSequence,
-                    afterSequence,
-                    changes);
-            }
-            else
-            {
-                DiffSequence(
-                    documentKey,
-                    manifestPath,
-                    fieldPath,
-                    semanticPath,
-                    beforeSequence,
-                    afterSequence,
-                    changes);
-            }
+            DiffSequence(
+                documentKey,
+                manifestPath,
+                fieldPath,
+                semanticPath,
+                beforeSequence,
+                afterSequence,
+                changes);
 
             return;
         }
@@ -270,21 +480,24 @@ internal sealed class ManifestSnapshot
         string semanticPath,
         YamlSequenceNode before,
         YamlSequenceNode after,
+        YamlMappingNode beforeRoot,
+        YamlMappingNode afterRoot,
         ICollection<RawManifestChange> changes)
     {
-        List<SequencePair> pairs = MatchInstallerItems(before, after);
+        List<SequencePair> pairs = MatchInstallerItems(before, after, beforeRoot, afterRoot);
         var matchedBefore = new HashSet<int>(pairs.Select(static pair => pair.BeforeIndex));
         var matchedAfter = new HashSet<int>(pairs.Select(static pair => pair.AfterIndex));
+        int[] beforeOccurrences = GetInstallerOccurrenceOrdinals(before, beforeRoot);
+        int[] afterOccurrences = GetInstallerOccurrenceOrdinals(after, afterRoot);
 
         foreach (SequencePair pair in pairs.OrderBy(static pair => pair.AfterIndex))
         {
-            string identity = InstallerIdentity(before.Children[pair.BeforeIndex]);
-            int occurrence = InstallerOccurrenceAt(before, pair.BeforeIndex, identity);
+            string identity = InstallerIdentity(before.Children[pair.BeforeIndex], beforeRoot);
             DiffNode(
                 documentKey,
                 manifestPath,
                 $"{fieldPath}[{pair.AfterIndex}]",
-                $"{semanticPath}{{installer:{Hash(identity)}#{occurrence}}}",
+                $"{semanticPath}{{installer:{Hash(identity)}#{beforeOccurrences[pair.BeforeIndex]}}}",
                 before.Children[pair.BeforeIndex],
                 after.Children[pair.AfterIndex],
                 changes);
@@ -294,12 +507,12 @@ internal sealed class ManifestSnapshot
         {
             if (!matchedBefore.Contains(i))
             {
-                string identity = InstallerIdentity(before.Children[i]);
+                string identity = InstallerIdentity(before.Children[i], beforeRoot);
                 FlattenAddedOrRemoved(
                     documentKey,
                     manifestPath,
                     $"{fieldPath}[{i}]",
-                    $"{semanticPath}{{installer:{Hash(identity)}#{InstallerOccurrenceAt(before, i, identity)}}}",
+                    $"{semanticPath}{{installer:{Hash(identity)}#{beforeOccurrences[i]}}}",
                     before.Children[i],
                     beforeValue: null,
                     adding: false,
@@ -311,12 +524,12 @@ internal sealed class ManifestSnapshot
         {
             if (!matchedAfter.Contains(i))
             {
-                string identity = InstallerIdentity(after.Children[i]);
+                string identity = InstallerIdentity(after.Children[i], afterRoot);
                 FlattenAddedOrRemoved(
                     documentKey,
                     manifestPath,
                     $"{fieldPath}[{i}]",
-                    $"{semanticPath}{{installer:{Hash(identity)}#{InstallerOccurrenceAt(after, i, identity)}}}",
+                    $"{semanticPath}{{installer:{Hash(identity)}#{afterOccurrences[i]}}}",
                     after.Children[i],
                     beforeValue: null,
                     adding: true,
@@ -327,10 +540,18 @@ internal sealed class ManifestSnapshot
 
     private static List<SequencePair> MatchInstallerItems(
         YamlSequenceNode before,
-        YamlSequenceNode after)
+        YamlSequenceNode after,
+        YamlMappingNode beforeRoot,
+        YamlMappingNode afterRoot)
     {
-        InstallerMatchValues[] beforeValues = [.. before.Children.Select(GetInstallerMatchValues)];
-        InstallerMatchValues[] afterValues = [.. after.Children.Select(GetInstallerMatchValues)];
+        InstallerMatchValues[] beforeValues =
+        [
+            .. before.Children.Select(node => GetInstallerMatchValues(node, beforeRoot)),
+        ];
+        InstallerMatchValues[] afterValues =
+        [
+            .. after.Children.Select(node => GetInstallerMatchValues(node, afterRoot)),
+        ];
         var matchedBefore = new HashSet<int>();
         var matchedAfter = new HashSet<int>();
         var pairs = new List<SequencePair>();
@@ -513,7 +734,9 @@ internal sealed class ManifestSnapshot
     private static bool EqualNonEmpty(string? left, string? right)
         => left is not null && right is not null && string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
-    private static InstallerMatchValues GetInstallerMatchValues(YamlNode node)
+    private static InstallerMatchValues GetInstallerMatchValues(
+        YamlNode node,
+        YamlMappingNode? root = null)
     {
         if (node is not YamlMappingNode mapping)
         {
@@ -521,15 +744,16 @@ internal sealed class ManifestSnapshot
         }
 
         Dictionary<string, YamlNode> values = ToMapping(mapping);
+        Dictionary<string, YamlNode>? rootValues = root is null ? null : ToMapping(root);
         string? urlPattern = GetScalar(values, "InstallerUrl") is { } url
             ? NormalizeInstallerUrl(url)
             : null;
-        string? installerType = GetScalar(values, "InstallerType");
-        string? scope = GetScalar(values, "Scope");
-        string? locale = GetScalar(values, "InstallerLocale");
-        string? nestedInstallerType = GetScalar(values, "NestedInstallerType");
+        string? installerType = GetEffectiveScalar(values, rootValues, "InstallerType");
+        string? scope = GetEffectiveScalar(values, rootValues, "Scope");
+        string? locale = GetEffectiveScalar(values, rootValues, "InstallerLocale");
+        string? nestedInstallerType = GetEffectiveScalar(values, rootValues, "NestedInstallerType");
         string? architecture = GetScalar(values, "Architecture");
-        string? productCode = GetScalar(values, "ProductCode");
+        string? productCode = GetEffectiveScalar(values, rootValues, "ProductCode");
         string primary = string.Join(
             '\u001f',
             urlPattern ?? string.Empty,
@@ -548,9 +772,9 @@ internal sealed class ManifestSnapshot
             productCode);
     }
 
-    private static string InstallerIdentity(YamlNode node)
+    private static string InstallerIdentity(YamlNode node, YamlMappingNode? root = null)
     {
-        InstallerMatchValues values = GetInstallerMatchValues(node);
+        InstallerMatchValues values = GetInstallerMatchValues(node, root);
         return string.IsNullOrEmpty(values.PrimaryIdentity)
             ? CanonicalNode(node)
             : values.PrimaryIdentity;
@@ -560,6 +784,13 @@ internal sealed class ManifestSnapshot
         => values.TryGetValue(key, out YamlNode? node) && node is YamlScalarNode scalar
             ? scalar.Value
             : null;
+
+    private static string? GetEffectiveScalar(
+        Dictionary<string, YamlNode> values,
+        Dictionary<string, YamlNode>? rootValues,
+        string key)
+        => GetScalar(values, key)
+            ?? (rootValues is null ? null : GetScalar(rootValues, key));
 
     private static string NormalizeInstallerUrl(string value)
     {
@@ -586,24 +817,48 @@ internal sealed class ManifestSnapshot
             bool architectureToken = start > 0
                 && char.ToLowerInvariant(path[start - 1]) == 'x'
                 && (digits.SequenceEqual("64") || digits.SequenceEqual("86"));
-            normalized.Append(architectureToken ? digits : "#");
+            if (architectureToken)
+            {
+                normalized.Append(digits);
+                continue;
+            }
+
+            normalized.Append('#');
+            while (i < path.Length && path[i] == '.')
+            {
+                int dot = i;
+                i++;
+                int componentStart = i;
+                while (i < path.Length && char.IsAsciiDigit(path[i]))
+                {
+                    i++;
+                }
+
+                if (componentStart == i)
+                {
+                    i = dot;
+                    break;
+                }
+            }
         }
 
         return normalized.ToString();
     }
 
-    private static int InstallerOccurrenceAt(YamlSequenceNode sequence, int index, string identity)
+    private static int[] GetInstallerOccurrenceOrdinals(
+        YamlSequenceNode sequence,
+        YamlMappingNode root)
     {
-        int occurrence = 0;
-        for (int i = 0; i < index; i++)
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var ordinals = new int[sequence.Children.Count];
+        for (int i = 0; i < sequence.Children.Count; i++)
         {
-            if (string.Equals(InstallerIdentity(sequence.Children[i]), identity, StringComparison.Ordinal))
-            {
-                occurrence++;
-            }
+            string identity = InstallerIdentity(sequence.Children[i], root);
+            ordinals[i] = counts.GetValueOrDefault(identity);
+            counts[identity] = ordinals[i] + 1;
         }
 
-        return occurrence;
+        return ordinals;
     }
 
     private static void DiffSequence(
@@ -617,6 +872,8 @@ internal sealed class ManifestSnapshot
     {
         string[] beforeValues = [.. before.Children.Select(CanonicalNode)];
         string[] afterValues = [.. after.Children.Select(CanonicalNode)];
+        int[] beforeOccurrences = GetOccurrenceOrdinals(beforeValues);
+        int[] afterOccurrences = GetOccurrenceOrdinals(afterValues);
         if (beforeValues.AsSpan().SequenceEqual(afterValues))
         {
             return;
@@ -648,17 +905,18 @@ internal sealed class ManifestSnapshot
                 anchor.BeforeIndex,
                 afterStart,
                 anchor.AfterIndex,
+                beforeOccurrences,
+                afterOccurrences,
                 changes);
 
             if (anchor.BeforeIndex < before.Children.Count)
             {
                 string identity = beforeValues[anchor.BeforeIndex];
-                int occurrence = OccurrenceAt(beforeValues, anchor.BeforeIndex, identity);
                 DiffNode(
                     documentKey,
                     manifestPath,
                     $"{fieldPath}[{anchor.AfterIndex}]",
-                    $"{semanticPath}{{item:{Hash(identity)}#{occurrence}}}",
+                    $"{semanticPath}{{item:{Hash(identity)}#{beforeOccurrences[anchor.BeforeIndex]}}}",
                     before.Children[anchor.BeforeIndex],
                     after.Children[anchor.AfterIndex],
                     changes);
@@ -680,6 +938,8 @@ internal sealed class ManifestSnapshot
         int beforeEnd,
         int afterStart,
         int afterEnd,
+        int[] beforeOccurrences,
+        int[] afterOccurrences,
         ICollection<RawManifestChange> changes)
     {
         int paired = Math.Min(beforeEnd - beforeStart, afterEnd - afterStart);
@@ -692,7 +952,7 @@ internal sealed class ManifestSnapshot
                 documentKey,
                 manifestPath,
                 $"{fieldPath}[{afterIndex}]",
-                $"{semanticPath}{{item:{Hash(identity)}#{SequenceOccurrenceAt(before, beforeIndex, identity)}}}",
+                $"{semanticPath}{{item:{Hash(identity)}#{beforeOccurrences[beforeIndex]}}}",
                 before.Children[beforeIndex],
                 after.Children[afterIndex],
                 changes);
@@ -705,7 +965,7 @@ internal sealed class ManifestSnapshot
                 documentKey,
                 manifestPath,
                 $"{fieldPath}[{beforeIndex}]",
-                $"{semanticPath}{{item:{Hash(identity)}#{SequenceOccurrenceAt(before, beforeIndex, identity)}}}",
+                $"{semanticPath}{{item:{Hash(identity)}#{beforeOccurrences[beforeIndex]}}}",
                 before.Children[beforeIndex],
                 beforeValue: null,
                 adding: false,
@@ -719,7 +979,7 @@ internal sealed class ManifestSnapshot
                 documentKey,
                 manifestPath,
                 $"{fieldPath}[{afterIndex}]",
-                $"{semanticPath}{{item:{Hash(identity)}#{SequenceOccurrenceAt(after, afterIndex, identity)}}}",
+                $"{semanticPath}{{item:{Hash(identity)}#{afterOccurrences[afterIndex]}}}",
                 after.Children[afterIndex],
                 beforeValue: null,
                 adding: true,
@@ -811,32 +1071,17 @@ internal sealed class ManifestSnapshot
         return pairs;
     }
 
-    private static int OccurrenceAt(string[] values, int index, string identity)
+    private static int[] GetOccurrenceOrdinals(string[] values)
     {
-        int occurrence = 0;
-        for (int i = 0; i < index; i++)
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var ordinals = new int[values.Length];
+        for (int i = 0; i < values.Length; i++)
         {
-            if (string.Equals(values[i], identity, StringComparison.Ordinal))
-            {
-                occurrence++;
-            }
+            ordinals[i] = counts.GetValueOrDefault(values[i]);
+            counts[values[i]] = ordinals[i] + 1;
         }
 
-        return occurrence;
-    }
-
-    private static int SequenceOccurrenceAt(YamlSequenceNode sequence, int index, string identity)
-    {
-        int occurrence = 0;
-        for (int i = 0; i < index; i++)
-        {
-            if (string.Equals(CanonicalNode(sequence.Children[i]), identity, StringComparison.Ordinal))
-            {
-                occurrence++;
-            }
-        }
-
-        return occurrence;
+        return ordinals;
     }
 
     private static void FlattenAddedOrRemoved(
@@ -885,12 +1130,14 @@ internal sealed class ManifestSnapshot
 
         if (node is YamlSequenceNode sequence)
         {
+            string[] identities = [.. sequence.Children.Select(CanonicalNode)];
+            int[] occurrences = GetOccurrenceOrdinals(identities);
             for (int i = 0; i < sequence.Children.Count; i++)
             {
-                string identity = CanonicalNode(sequence.Children[i]);
+                string identity = identities[i];
                 FlattenNode(
                     $"{fieldPath}[{i}]",
-                    $"{semanticPath}{{item:{Hash(identity)}#{SequenceOccurrenceAt(sequence, i, identity)}}}",
+                    $"{semanticPath}{{item:{Hash(identity)}#{occurrences[i]}}}",
                     sequence.Children[i],
                     values);
             }

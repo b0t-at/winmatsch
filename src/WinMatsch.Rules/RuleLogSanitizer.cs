@@ -30,54 +30,80 @@ internal static class RuleLogSanitizer
             }
         }
 
-        if (Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
-            && (uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-                || uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
-        {
-            var safe = new UriBuilder(uri)
-            {
-                UserName = string.Empty,
-                Password = string.Empty,
-                Query = string.Empty,
-                Fragment = string.Empty,
-            };
-            string sanitizedUri = safe.Uri.AbsoluteUri;
-            return ContainsBoundedCredential(sanitizedUri) ? "[REDACTED]" : sanitizedUri;
-        }
-
-        return ContainsBoundedCredential(value) ? "[REDACTED]" : value;
+        return SanitizeText(value);
     }
 
     public static string SanitizeMessage(string message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        var result = new System.Text.StringBuilder(message.Length);
+        return SanitizeText(message);
+    }
+
+    private static string SanitizeText(string value)
+    {
+        var result = new System.Text.StringBuilder(value.Length);
         int position = 0;
-        while (position < message.Length)
+        while (position < value.Length)
         {
-            int http = message.IndexOf("http://", position, StringComparison.OrdinalIgnoreCase);
-            int https = message.IndexOf("https://", position, StringComparison.OrdinalIgnoreCase);
+            int http = value.IndexOf("http://", position, StringComparison.OrdinalIgnoreCase);
+            int https = value.IndexOf("https://", position, StringComparison.OrdinalIgnoreCase);
             int start = http < 0 ? https : https < 0 ? http : Math.Min(http, https);
             if (start < 0)
             {
-                result.Append(message, position, message.Length - position);
+                result.Append(value, position, value.Length - position);
                 break;
             }
 
-            result.Append(message, position, start - position);
+            result.Append(value, position, start - position);
             int end = start;
-            while (end < message.Length && !IsUriTerminator(message[end]))
+            while (end < value.Length && !IsUriTerminator(value[end]))
             {
                 end++;
             }
 
-            string candidate = message[start..end];
-            result.Append(Sanitize(string.Empty, candidate));
+            string candidate = value[start..end];
+            if (TrySanitizeUri(candidate, out string? sanitizedUri))
+            {
+                result.Append(sanitizedUri);
+            }
+            else
+            {
+                result.Append(candidate);
+            }
+
             position = end;
         }
 
         string sanitized = result.ToString();
         return ContainsBoundedCredential(sanitized) ? "[REDACTED]" : sanitized;
+    }
+
+    private static bool TrySanitizeUri(string value, out string? sanitized)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
+            || !(uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                || uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+        {
+            sanitized = null;
+            return false;
+        }
+
+        string decodedPath = Uri.UnescapeDataString(uri.AbsolutePath);
+        if (ContainsBoundedCredential(decodedPath))
+        {
+            sanitized = "[REDACTED]";
+            return true;
+        }
+
+        var safe = new UriBuilder(uri)
+        {
+            UserName = string.Empty,
+            Password = string.Empty,
+            Query = string.Empty,
+            Fragment = string.Empty,
+        };
+        sanitized = safe.Uri.AbsoluteUri;
+        return true;
     }
 
     private static bool ContainsBoundedCredential(string value)
@@ -135,8 +161,8 @@ internal static class RuleLogSanitizer
             }
         }
 
-        return ContainsAuthorizationScheme(value, "bearer")
-            || ContainsAuthorizationScheme(value, "basic")
+        return ContainsBearerToken(value)
+            || ContainsBasicCredentials(value)
             || LooksLikeJwt(value);
     }
 
@@ -146,7 +172,37 @@ internal static class RuleLogSanitizer
     private static bool IsIdentifierCharacter(char value)
         => char.IsAsciiLetterOrDigit(value) || value == '_';
 
-    private static bool ContainsAuthorizationScheme(string value, string scheme)
+    private static bool ContainsBearerToken(string value)
+    {
+        foreach (ReadOnlyMemory<char> token in FindAuthorizationTokens(value, "bearer"))
+        {
+            if (token.Length > 0 && IsAuthorizationToken(token.Span))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsBasicCredentials(string value)
+    {
+        foreach (ReadOnlyMemory<char> token in FindAuthorizationTokens(value, "basic"))
+        {
+            string encoded = token.ToString();
+            int maximumDecodedLength = ((encoded.Length + 3) / 4) * 3;
+            byte[] decoded = new byte[maximumDecodedLength];
+            if (Convert.TryFromBase64String(encoded, decoded, out int bytesWritten)
+                && decoded.AsSpan(0, bytesWritten).Contains((byte)':'))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<ReadOnlyMemory<char>> FindAuthorizationTokens(string value, string scheme)
     {
         int searchStart = 0;
         while (searchStart < value.Length)
@@ -154,7 +210,7 @@ internal static class RuleLogSanitizer
             int index = value.IndexOf(scheme, searchStart, StringComparison.OrdinalIgnoreCase);
             if (index < 0)
             {
-                return false;
+                yield break;
             }
 
             int end = index + scheme.Length;
@@ -175,17 +231,11 @@ internal static class RuleLogSanitizer
                     tokenEnd++;
                 }
 
-                ReadOnlySpan<char> token = value.AsSpan(tokenStart, tokenEnd - tokenStart);
-                if (token.Length >= 12 && IsAuthorizationToken(token))
-                {
-                    return true;
-                }
+                yield return value.AsMemory(tokenStart, tokenEnd - tokenStart);
             }
 
             searchStart = end;
         }
-
-        return false;
     }
 
     private static bool LooksLikeJwt(string value)

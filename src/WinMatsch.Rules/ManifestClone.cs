@@ -175,12 +175,14 @@ internal static class ManifestClone
         manifests.Version.PackageIdentifier ??= _placeholderIdentifier;
         manifests.Version.PackageVersion ??= _placeholderVersion;
         manifests.Version.DefaultLocale ??= _placeholderLocale;
+        manifests.Version.ManifestType = ManifestType.Version;
         manifests.Version.ManifestVersion ??= ManifestVersion.Default;
 
         EnsureSerializable(manifests.Installer);
         EnsureSerializable(manifests.DefaultLocale);
         foreach (LocaleManifest locale in manifests.Locales)
         {
+            locale.ManifestType = ManifestType.Locale;
             EnsureSerializable(locale);
         }
     }
@@ -189,6 +191,7 @@ internal static class ManifestClone
     {
         manifest.PackageIdentifier ??= _placeholderIdentifier;
         manifest.PackageVersion ??= _placeholderVersion;
+        manifest.ManifestType = ManifestType.Installer;
         manifest.ManifestVersion ??= ManifestVersion.Default;
         manifest.Installers ??= [];
         if (manifest.Installers.Count == 0)
@@ -214,6 +217,7 @@ internal static class ManifestClone
         manifest.ManifestVersion ??= ManifestVersion.Default;
         if (manifest is DefaultLocaleManifest defaultLocale)
         {
+            defaultLocale.ManifestType = ManifestType.DefaultLocale;
             defaultLocale.Publisher ??= "Missing";
             defaultLocale.PackageName ??= "Missing";
             defaultLocale.License ??= "Unknown";
