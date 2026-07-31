@@ -15,4 +15,10 @@
     <ProjectReference Include="..\..\src\WinMatsch.Core\WinMatsch.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\schemas\manifest.*.1.12.0.json"
+             Link="Schemas\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

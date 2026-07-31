@@ -1,13 +1,13 @@
 namespace WinMatsch.Core;
 
 /// <summary>
-/// The version of the WinGet manifest schema a manifest conforms to, e.g. <c>1.10.0</c>.
+/// The version of the WinGet manifest schema a manifest conforms to, e.g. <c>1.12.0</c>.
 /// Always three numeric parts, each between 0 and 9999.
 /// </summary>
 public sealed class ManifestVersion : IEquatable<ManifestVersion>, IComparable<ManifestVersion>
 {
     /// <summary>The manifest schema version this tool emits by default.</summary>
-    public static readonly ManifestVersion Default = new("1.10.0");
+    public static readonly ManifestVersion Default = new("1.12.0");
 
     /// <summary>Creates a manifest version from its string representation.</summary>
     /// <exception cref="ArgumentException">The value is not a valid manifest schema version.</exception>
@@ -38,7 +38,7 @@ public sealed class ManifestVersion : IEquatable<ManifestVersion>, IComparable<M
         Patch = numbers[2];
     }
 
-    /// <summary>The raw version string, e.g. <c>1.10.0</c>.</summary>
+    /// <summary>The raw version string, e.g. <c>1.12.0</c>.</summary>
     public string Value { get; }
 
     public ushort Major { get; }

@@ -109,7 +109,7 @@ public static class ManifestYamlReader
         fields.Platform = reader.EnumList("Platform", YamlValues.ParsePlatform);
         fields.MinimumOSVersion = reader.Value("MinimumOSVersion", static s => new MinimumOSVersion(s));
         fields.InstallerType = reader.Enum("InstallerType", YamlValues.ParseInstallerType);
-        fields.NestedInstallerType = reader.Enum("NestedInstallerType", YamlValues.ParseInstallerType);
+        fields.NestedInstallerType = reader.Enum("NestedInstallerType", YamlValues.ParseNestedInstallerType);
         fields.NestedInstallerFiles = reader.MappingList("NestedInstallerFiles", static r => new NestedInstallerFile
         {
             RelativeFilePath = r.String("RelativeFilePath"),
@@ -170,7 +170,9 @@ public static class ManifestYamlReader
         fields.InstallLocationRequired = reader.Boolean("InstallLocationRequired");
         fields.RequireExplicitUpgrade = reader.Boolean("RequireExplicitUpgrade");
         fields.DisplayInstallWarnings = reader.Boolean("DisplayInstallWarnings");
-        fields.UnsupportedOSArchitectures = reader.EnumList("UnsupportedOSArchitectures", YamlValues.ParseArchitecture);
+        fields.UnsupportedOSArchitectures = reader.EnumList(
+            "UnsupportedOSArchitectures",
+            YamlValues.ParseUnsupportedOSArchitecture);
         fields.UnsupportedArguments = reader.EnumList("UnsupportedArguments", YamlValues.ParseUnsupportedArgument);
         fields.AppsAndFeaturesEntries = reader.MappingList("AppsAndFeaturesEntries", static r => new AppsAndFeaturesEntry
         {

@@ -11,6 +11,7 @@ public static class ManifestYamlWriter
     public static string Serialize(InstallerManifest manifest, ManifestWriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        RequireManifestType(manifest.ManifestType, ManifestType.Installer);
 
         var emitter = new YamlEmitter();
         WriteHeader(emitter, manifest.ManifestType, manifest.ManifestVersion, options);
@@ -22,7 +23,7 @@ public static class ManifestYamlWriter
         emitter.ScalarSequence("Platform", manifest.Platform, static p => p.ToYaml());
         emitter.Scalar("MinimumOSVersion", manifest.MinimumOSVersion?.Value);
         emitter.Scalar("InstallerType", manifest.InstallerType?.ToYaml());
-        emitter.Scalar("NestedInstallerType", manifest.NestedInstallerType?.ToYaml());
+        emitter.Scalar("NestedInstallerType", manifest.NestedInstallerType?.ToNestedInstallerTypeYaml());
         WriteNestedInstallerFiles(emitter, manifest.NestedInstallerFiles);
         emitter.Scalar("Scope", manifest.Scope?.ToYaml());
         WriteInstallerFieldsTail(emitter, manifest);
@@ -42,6 +43,7 @@ public static class ManifestYamlWriter
     public static string Serialize(VersionManifest manifest, ManifestWriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        RequireManifestType(manifest.ManifestType, ManifestType.Version);
 
         var emitter = new YamlEmitter();
         WriteHeader(emitter, manifest.ManifestType, manifest.ManifestVersion, options);
@@ -57,6 +59,8 @@ public static class ManifestYamlWriter
     public static string Serialize(LocaleManifest manifest, ManifestWriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        ManifestType expectedType = manifest is DefaultLocaleManifest ? ManifestType.DefaultLocale : ManifestType.Locale;
+        RequireManifestType(manifest.ManifestType, expectedType);
 
         var emitter = new YamlEmitter();
         WriteHeader(emitter, manifest.ManifestType, manifest.ManifestVersion, options);
@@ -79,6 +83,10 @@ public static class ManifestYamlWriter
         emitter.Scalar("Description", manifest.Description);
         if (manifest is DefaultLocaleManifest defaultLocale)
         {
+            Require(defaultLocale.Publisher, "Publisher");
+            Require(defaultLocale.PackageName, "PackageName");
+            Require(defaultLocale.License, "License");
+            Require(defaultLocale.ShortDescription, "ShortDescription");
             emitter.Scalar("Moniker", defaultLocale.Moniker);
         }
 
@@ -100,8 +108,8 @@ public static class ManifestYamlWriter
         });
         emitter.MappingSequence("Icons", manifest.Icons, static (e, icon) =>
         {
-            e.Scalar("IconUrl", icon.IconUrl);
-            e.Scalar("IconFileType", icon.IconFileType?.ToYaml());
+            e.Scalar("IconUrl", Require(icon.IconUrl, "Icons.IconUrl"));
+            e.Scalar("IconFileType", Require(icon.IconFileType, "Icons.IconFileType").ToYaml());
             e.Scalar("IconResolution", icon.IconResolution?.ToYaml());
             e.Scalar("IconTheme", icon.IconTheme?.ToYaml());
             e.Scalar("IconSha256", icon.IconSha256?.Value);
@@ -118,7 +126,7 @@ public static class ManifestYamlWriter
         emitter.Scalar("MinimumOSVersion", installer.MinimumOSVersion?.Value);
         emitter.Scalar("Architecture", Require(installer.Architecture, "Architecture").ToYaml());
         emitter.Scalar("InstallerType", installer.InstallerType?.ToYaml());
-        emitter.Scalar("NestedInstallerType", installer.NestedInstallerType?.ToYaml());
+        emitter.Scalar("NestedInstallerType", installer.NestedInstallerType?.ToNestedInstallerTypeYaml());
         WriteNestedInstallerFiles(emitter, installer.NestedInstallerFiles);
         emitter.Scalar("Scope", installer.Scope?.ToYaml());
         emitter.Scalar("InstallerUrl", Require(installer.InstallerUrl, "InstallerUrl"));
@@ -153,8 +161,8 @@ public static class ManifestYamlWriter
         emitter.NumberSequence("InstallerSuccessCodes", fields.InstallerSuccessCodes);
         emitter.MappingSequence("ExpectedReturnCodes", fields.ExpectedReturnCodes, static (e, code) =>
         {
-            e.Scalar("InstallerReturnCode", code.InstallerReturnCode);
-            e.Scalar("ReturnResponse", code.ReturnResponse?.ToYaml());
+            e.Scalar("InstallerReturnCode", Require(code.InstallerReturnCode, "ExpectedReturnCodes.InstallerReturnCode"));
+            e.Scalar("ReturnResponse", Require(code.ReturnResponse, "ExpectedReturnCodes.ReturnResponse").ToYaml());
             e.Scalar("ReturnResponseUrl", code.ReturnResponseUrl);
         });
         emitter.Scalar("UpgradeBehavior", fields.UpgradeBehavior?.ToYaml());
@@ -186,13 +194,21 @@ public static class ManifestYamlWriter
         emitter.StringSequence("Capabilities", fields.Capabilities);
         emitter.StringSequence("RestrictedCapabilities", fields.RestrictedCapabilities);
 
-        if (fields.Markets is { } markets
-            && (markets.AllowedMarkets is { Count: > 0 } || markets.ExcludedMarkets is { Count: > 0 }))
+        if (fields.Markets is { } markets)
         {
+            bool hasAllowedMarkets = markets.AllowedMarkets is not null;
+            bool hasExcludedMarkets = markets.ExcludedMarkets is not null;
+            if (hasAllowedMarkets == hasExcludedMarkets)
+            {
+                throw new InvalidOperationException(
+                    "Cannot serialize the manifest: Markets must contain exactly one "
+                    + "AllowedMarkets or ExcludedMarkets list.");
+            }
+
             emitter.Mapping("Markets", e =>
             {
-                e.StringSequence("AllowedMarkets", markets.AllowedMarkets);
-                e.StringSequence("ExcludedMarkets", markets.ExcludedMarkets);
+                WriteMarketList(e, "AllowedMarkets", markets.AllowedMarkets);
+                WriteMarketList(e, "ExcludedMarkets", markets.ExcludedMarkets);
             });
         }
 
@@ -201,7 +217,10 @@ public static class ManifestYamlWriter
         emitter.Scalar("InstallLocationRequired", fields.InstallLocationRequired);
         emitter.Scalar("RequireExplicitUpgrade", fields.RequireExplicitUpgrade);
         emitter.Scalar("DisplayInstallWarnings", fields.DisplayInstallWarnings);
-        emitter.ScalarSequence("UnsupportedOSArchitectures", fields.UnsupportedOSArchitectures, static a => a.ToYaml());
+        emitter.ScalarSequence(
+            "UnsupportedOSArchitectures",
+            fields.UnsupportedOSArchitectures,
+            static architecture => architecture.ToUnsupportedOSArchitectureYaml());
         emitter.ScalarSequence("UnsupportedArguments", fields.UnsupportedArguments, static a => a.ToYaml());
         emitter.MappingSequence("AppsAndFeaturesEntries", fields.AppsAndFeaturesEntries, static (e, entry) =>
         {
@@ -222,7 +241,7 @@ public static class ManifestYamlWriter
                 e.Scalar("DefaultInstallLocation", metadata.DefaultInstallLocation);
                 e.MappingSequence("Files", metadata.Files, static (fe, file) =>
                 {
-                    fe.Scalar("RelativeFilePath", file.RelativeFilePath);
+                    fe.Scalar("RelativeFilePath", Require(file.RelativeFilePath, "InstallationMetadata.Files.RelativeFilePath"));
                     fe.Scalar("FileSha256", file.FileSha256?.Value);
                     fe.Scalar("FileType", file.FileType?.ToYaml());
                     fe.Scalar("InvocationParameter", file.InvocationParameter);
@@ -235,11 +254,11 @@ public static class ManifestYamlWriter
         emitter.Scalar("RepairBehavior", fields.RepairBehavior?.ToYaml());
         emitter.Scalar("ArchiveBinariesDependOnPath", fields.ArchiveBinariesDependOnPath);
 
-        if (fields.Authentication is { } authentication && authentication.AuthenticationType is not null)
+        if (fields.Authentication is { } authentication)
         {
             emitter.Mapping("Authentication", e =>
             {
-                e.Scalar("AuthenticationType", authentication.AuthenticationType?.ToYaml());
+                e.Scalar("AuthenticationType", Require(authentication.AuthenticationType, "Authentication.AuthenticationType").ToYaml());
                 if (authentication.MicrosoftEntraIdAuthenticationInfo is { } info
                     && (info.Resource is not null || info.Scope is not null))
                 {
@@ -257,9 +276,21 @@ public static class ManifestYamlWriter
     {
         emitter.MappingSequence("NestedInstallerFiles", files, static (e, file) =>
         {
-            e.Scalar("RelativeFilePath", file.RelativeFilePath);
+            e.Scalar("RelativeFilePath", Require(file.RelativeFilePath, "NestedInstallerFiles.RelativeFilePath"));
             e.Scalar("PortableCommandAlias", file.PortableCommandAlias);
         });
+    }
+
+    private static void WriteMarketList(YamlEmitter emitter, string key, IReadOnlyList<string>? markets)
+    {
+        if (markets is { Count: 0 })
+        {
+            emitter.EmptySequence(key);
+        }
+        else
+        {
+            emitter.StringSequence(key, markets);
+        }
     }
 
     private static void WriteHeader(YamlEmitter emitter, ManifestType type, ManifestVersion version, ManifestWriteOptions? options)
@@ -295,4 +326,13 @@ public static class ManifestYamlWriter
 
     private static InvalidOperationException MissingRequiredField(string fieldName)
         => new($"Cannot serialize the manifest: required field '{fieldName}' is not set.");
+
+    private static void RequireManifestType(ManifestType actual, ManifestType expected)
+    {
+        if (actual != expected)
+        {
+            throw new InvalidOperationException(
+                $"Cannot serialize a {expected.ToYaml()} manifest with ManifestType '{actual.ToYaml()}'.");
+        }
+    }
 }

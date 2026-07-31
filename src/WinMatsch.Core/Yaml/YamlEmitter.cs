@@ -122,6 +122,8 @@ internal sealed partial class YamlEmitter
         }
     }
 
+    public void EmptySequence(string key) => WriteKeyValue(key, "[]");
+
     /// <summary>Writes a nested mapping. The caller is responsible for skipping empty mappings.</summary>
     public void Mapping(string key, Action<YamlEmitter> body)
     {

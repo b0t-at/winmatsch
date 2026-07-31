@@ -14,7 +14,7 @@ public enum IconResolution
     /// <summary>YAML value: <c>custom</c>.</summary>
     Custom,
 
-    /// <summary>YAML value: <c>16</c> (16x16 pixels). Other fixed resolutions follow the same convention.</summary>
+    /// <summary>YAML value: <c>16x16</c>. Other fixed resolutions follow the same convention.</summary>
     Size16,
     Size20,
     Size24,
