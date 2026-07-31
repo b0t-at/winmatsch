@@ -403,6 +403,45 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Hoisted_nested_value_cannot_hide_a_reverted_installer_correction()
+    {
+        static Installer Installer(string url, string silent)
+        {
+            Installer installer = TestManifests.CreateInstaller(url: url);
+            installer.InstallerSwitches = new() { Silent = silent };
+            return installer;
+        }
+
+        PackageManifests originalBot = TestManifests.Create(
+            Installer("https://example.test/a.exe", "/old"),
+            Installer("https://example.test/c.exe", "/other"));
+        PackageManifests merged = TestManifests.Create(
+            Installer("https://example.test/a.exe", "/human"),
+            Installer("https://example.test/c.exe", "/other"));
+        PackageManifests generated = TestManifests.Create(
+            Installer("https://example.test/a.exe", "/old"),
+            Installer("https://example.test/c.exe", "/old"));
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create(
+            [new HoistCommonInstallerFieldsRule()],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        Assert.Equal("/old", generated.Installer.InstallerSwitches?.Silent);
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.EndsWith(".InstallerSwitches.Silent", StringComparison.Ordinal)
+                && review.HumanValue == "[REDACTED]"
+                && review.GeneratedValue == "[REDACTED]");
+    }
+
+    [Fact]
     public void Human_inserted_installer_is_not_hidden_by_index_shifts()
     {
         Installer original = TestManifests.CreateInstaller(url: "https://example.test/app-x64.exe");
@@ -725,6 +764,7 @@ public class RuleRuntimeTests
     [InlineData("Download from https://example.test/token%3Dsuper-secret/file.exe")]
     [InlineData("Download from https://example.test/token%253Dsuper-secret/file.exe")]
     [InlineData("Download from https://example.test/file?x=1;sig=super-secret")]
+    [InlineData("Download from https://example.test:99999/file?sig=super-secret")]
     public void Embedded_signed_or_encoded_urls_cannot_leak_from_structured_values(string value)
     {
         string? sanitized = RuleLogSanitizer.Sanitize("SourceEvidence", value);
@@ -807,6 +847,62 @@ public class RuleRuntimeTests
         RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
 
         Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
+    public void Aarch_architecture_urls_remain_distinct_when_installers_reorder()
+    {
+        static PackageManifests Create(bool reversed)
+        {
+            Installer aarch32 = TestManifests.CreateInstaller(
+                Architecture.Arm,
+                url: "https://example.test/app-aarch32-1.0.exe");
+            Installer aarch64 = TestManifests.CreateInstaller(
+                Architecture.Arm64,
+                url: "https://example.test/app-aarch64-1.0.exe");
+            return reversed
+                ? TestManifests.Create(aarch64, aarch32)
+                : TestManifests.Create(aarch32, aarch64);
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(reversed: false),
+            Previous = Create(reversed: true),
+            Manifests = Create(reversed: false),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
+    public void Duplicate_locale_values_do_not_abort_mutating_rules()
+    {
+        static LocaleManifest Locale() => new()
+        {
+            PackageIdentifier = new PackageIdentifier("Test.App"),
+            PackageVersion = new PackageVersion(TestManifests.DefaultVersion),
+            PackageLocale = new LanguageTag("fr-FR"),
+            Publisher = TestManifests.DefaultPublisher,
+            PackageName = TestManifests.DefaultPackageName,
+            License = "MIT",
+            ShortDescription = "French",
+        };
+
+        Installer installer = TestManifests.CreateInstaller();
+        installer.ProductCode = "ab12cd34-ef56-7890-abcd-ef1234567890";
+        PackageManifests manifests = TestManifests.Create(installer);
+        manifests.Locales = [Locale(), Locale()];
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        RulePipeline.Create(
+            [new NormalizeProductCodesRule()],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        Assert.Equal("{AB12CD34-EF56-7890-ABCD-EF1234567890}", installer.ProductCode);
     }
 
     [Fact]

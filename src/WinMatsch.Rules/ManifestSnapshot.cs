@@ -45,16 +45,14 @@ internal sealed class ManifestSnapshot
             GetDefaultLocalePath(identitySource),
             ManifestYamlWriter.Serialize(serializableManifests.DefaultLocale));
 
+        string[] localeDocumentKeys = GetLocaleDocumentKeys(identitySource.Locales);
         for (int i = 0; i < serializableManifests.Locales.Count; i++)
         {
             LocaleManifest locale = serializableManifests.Locales[i];
             LocaleManifest identityLocale = identitySource.Locales[i];
-            string documentKey = identityLocale.PackageLocale is { } packageLocale
-                ? $"locale:{packageLocale.Value.ToUpperInvariant()}"
-                : $"locale:missing:{i}";
             Add(
                 documents,
-                documentKey,
+                localeDocumentKeys[i],
                 GetLocalePath(identitySource, identityLocale, i),
                 ManifestYamlWriter.Serialize(locale));
         }
@@ -125,13 +123,11 @@ internal sealed class ManifestSnapshot
             }
 
             RemoveMissingLocaleValues(GetRoot("defaultLocale"), original.DefaultLocale);
+            string[] localeDocumentKeys = GetLocaleDocumentKeys(original.Locales);
             for (int i = 0; i < original.Locales.Count; i++)
             {
                 LocaleManifest locale = original.Locales[i];
-                string documentKey = locale.PackageLocale is { } packageLocale
-                    ? $"locale:{packageLocale.Value.ToUpperInvariant()}"
-                    : $"locale:missing:{i}";
-                RemoveMissingLocaleValues(GetRoot(documentKey), locale);
+                RemoveMissingLocaleValues(GetRoot(localeDocumentKeys[i]), locale);
             }
         }
 
@@ -337,19 +333,13 @@ internal sealed class ManifestSnapshot
             return false;
         }
 
-        string field = semanticPath[(close + 2)..];
-        if (field.Contains('.') || field.Contains('{'))
-        {
-            value = null;
-            return false;
-        }
+        string fieldPath = semanticPath[(close + 2)..];
 
         string identityToken = semanticPath[prefix.Length..close];
         YamlMappingNode root = GetRoot("installer");
         if (GetMappingValue(root, "Installers") is not YamlSequenceNode installers)
         {
-            value = ScalarValue(GetMappingValue(root, field));
-            return true;
+            return TryResolveSemanticPath(root, fieldPath, out value);
         }
 
         int[] occurrences = GetInstallerOccurrenceOrdinals(installers, root);
@@ -363,13 +353,117 @@ internal sealed class ManifestSnapshot
                 continue;
             }
 
-            value = ScalarValue(GetMappingValue(installer, field))
-                ?? ScalarValue(GetMappingValue(root, field));
-            return true;
+            if (TryResolveSemanticPath(installer, fieldPath, out value))
+            {
+                return true;
+            }
+
+            return TryResolveSemanticPath(root, fieldPath, out value);
         }
 
         value = null;
         return false;
+    }
+
+    private static bool TryResolveSemanticPath(YamlNode start, string path, out string? value)
+    {
+        YamlNode? current = start;
+        int position = 0;
+        while (position < path.Length)
+        {
+            if (path[position] == '.')
+            {
+                position++;
+                continue;
+            }
+
+            if (path[position] == '{')
+            {
+                int close = path.IndexOf('}', position + 1);
+                if (close < 0
+                    || current is not YamlSequenceNode sequence
+                    || !TryResolveSequenceItem(sequence, path[(position + 1)..close], out current))
+                {
+                    value = null;
+                    return false;
+                }
+
+                position = close + 1;
+                continue;
+            }
+
+            int end = position;
+            while (end < path.Length && path[end] is not '.' and not '{')
+            {
+                end++;
+            }
+
+            if (current is not YamlMappingNode mapping
+                || GetMappingValue(mapping, path[position..end]) is not { } child)
+            {
+                value = null;
+                return false;
+            }
+
+            current = child;
+            position = end;
+        }
+
+        value = ScalarValue(current);
+        return true;
+    }
+
+    private static bool TryResolveSequenceItem(
+        YamlSequenceNode sequence,
+        string identityToken,
+        out YamlNode? value)
+    {
+        const string prefix = "item:";
+        if (!identityToken.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            value = null;
+            return false;
+        }
+
+        string[] identities = [.. sequence.Children.Select(CanonicalNode)];
+        int[] occurrences = GetOccurrenceOrdinals(identities);
+        for (int i = 0; i < identities.Length; i++)
+        {
+            string candidate = $"{Hash(identities[i])}#{occurrences[i]}";
+            if (string.Equals(candidate, identityToken[prefix.Length..], StringComparison.Ordinal))
+            {
+                value = sequence.Children[i];
+                return true;
+            }
+        }
+
+        value = null;
+        return false;
+    }
+
+    private static string[] GetLocaleDocumentKeys(IReadOnlyList<LocaleManifest> locales)
+    {
+        string[] baseKeys =
+        [
+            .. locales.Select(
+                static (locale, index) => locale.PackageLocale is { } packageLocale
+                    ? $"locale:{packageLocale.Value.ToUpperInvariant()}"
+                    : $"locale:missing:{index}"),
+        ];
+        Dictionary<string, int> totals = baseKeys
+            .GroupBy(static key => key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(static group => group.Key, static group => group.Count(), StringComparer.OrdinalIgnoreCase);
+        var occurrences = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var keys = new string[baseKeys.Length];
+        for (int i = 0; i < baseKeys.Length; i++)
+        {
+            string baseKey = baseKeys[i];
+            int occurrence = occurrences.GetValueOrDefault(baseKey);
+            occurrences[baseKey] = occurrence + 1;
+            keys[i] = totals[baseKey] == 1 ? baseKey : $"{baseKey}#{occurrence}";
+        }
+
+        return keys;
     }
 
     private static string GetVersionPath(PackageManifests manifests)
@@ -855,7 +949,10 @@ internal sealed class ManifestSnapshot
                     && prefix.EndsWith("x", StringComparison.OrdinalIgnoreCase)
                 || digits.SequenceEqual("32")
                     && (prefix.EndsWith("win", StringComparison.OrdinalIgnoreCase)
-                        || prefix.EndsWith("arm", StringComparison.OrdinalIgnoreCase))
+                        || prefix.EndsWith("arm", StringComparison.OrdinalIgnoreCase)
+                        || prefix.EndsWith("aarch", StringComparison.OrdinalIgnoreCase))
+                || digits.SequenceEqual("64")
+                    && prefix.EndsWith("aarch", StringComparison.OrdinalIgnoreCase)
                 || digits.SequenceEqual("386")
                     && prefix.EndsWith("i", StringComparison.OrdinalIgnoreCase)
                 || (digits.SequenceEqual("7") || digits.SequenceEqual("8"))

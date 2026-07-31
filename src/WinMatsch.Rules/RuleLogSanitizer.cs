@@ -84,8 +84,11 @@ internal static class RuleLogSanitizer
             || !(uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
                 || uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
         {
-            sanitized = null;
-            return false;
+            bool potentiallySensitive = value.Contains('?')
+                || value.Contains('#')
+                || value.AsSpan(value.IndexOf("://", StringComparison.Ordinal) + 3).Contains('@');
+            sanitized = potentiallySensitive ? "[REDACTED]" : null;
+            return potentiallySensitive;
         }
 
         string decodedPath = uri.AbsolutePath;
