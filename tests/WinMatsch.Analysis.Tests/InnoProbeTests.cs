@@ -83,6 +83,10 @@ public class InnoProbeTests
     [InlineData("x64compatible", Architecture.X64)]
     [InlineData("arm64", Architecture.Arm64)]
     [InlineData("(x64compatible and (not arm64))", Architecture.X64)]
+    [InlineData("x86os", Architecture.X86)]
+    [InlineData("x86compatible and x64os", Architecture.X64)]
+    [InlineData("x86compatible and arm64", Architecture.Arm64)]
+    [InlineData("x64compatible and arm64", Architecture.Arm64)]
     public void Current_architecture_expressions_map_when_unambiguous(string expression, Architecture expected)
     {
         var options = new InnoFixtures.Options
@@ -104,6 +108,7 @@ public class InnoProbeTests
     [InlineData("x64compatible and (")]
     [InlineData("x64compatible or")]
     [InlineData("x64compatible-suffix")]
+    [InlineData("not (x86compatible or arm64)")]
     public void Non_single_or_malformed_architecture_expression_is_inconclusive(string expression)
     {
         var options = new InnoFixtures.Options
@@ -176,6 +181,63 @@ public class InnoProbeTests
         InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
 
         Assert.Equal(Architecture.Arm64, metadata.EffectiveArchitecture);
+    }
+
+    [Fact]
+    public void Strict_x86os_header_is_not_promoted_by_x64_payload()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86os",
+            ArchitecturesInstallIn64BitMode = "",
+            PayloadMachines = [Machine.Amd64],
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal([Architecture.X64], metadata.EmbeddedPayloadArchitectures);
+        Assert.Equal(Architecture.X86, metadata.EffectiveArchitecture);
+        Assert.True(metadata.ArchitectureIsConclusive);
+    }
+
+    [Theory]
+    [InlineData(@"{autopf}\Contoso Commander")]
+    [InlineData(@"{pf}\Contoso Commander")]
+    public void Arm64_payload_uses_x64compatible_64_bit_program_files_mode(string defaultDirName)
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "x64compatible",
+            DefaultDirName = defaultDirName,
+            PayloadMachines = [Machine.Arm64],
+        };
+
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Equal(Architecture.Arm64, installer.Architecture);
+        Assert.Equal(@"%ProgramFiles%\Contoso Commander", installer.InstallationMetadata!.DefaultInstallLocation);
+    }
+
+    [Theory]
+    [InlineData(Machine.Amd64, @"%ProgramFiles%\Contoso Commander")]
+    [InlineData(Machine.Arm64, @"%ProgramFiles(x86)%\Contoso Commander")]
+    public void Mixed_64_bit_mode_predicate_is_evaluated_for_payload_architecture(
+        Machine payloadMachine,
+        string expectedPath)
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "x64compatible and not (arm64)",
+            PayloadMachines = [payloadMachine],
+        };
+
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Equal(expectedPath, installer.InstallationMetadata!.DefaultInstallLocation);
     }
 
     [Fact]
@@ -333,6 +395,22 @@ public class InnoProbeTests
     }
 
     [Fact]
+    public void Malformed_x86compatible_expression_does_not_enable_payload_override()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible and (",
+            ArchitecturesInstallIn64BitMode = "",
+            PayloadMachines = [Machine.Amd64],
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Null(metadata.EffectiveArchitecture);
+        Assert.False(metadata.ArchitectureIsConclusive);
+    }
+
+    [Fact]
     public void Helper_payload_does_not_override_non_x86compatible_header()
     {
         var options = new InnoFixtures.Options
@@ -462,6 +540,37 @@ public class InnoProbeTests
         Assert.Null(arp.DisplayVersion);
         Assert.Null(arp.Publisher);
         Assert.Null(arp.ProductCode);
+    }
+
+    [Fact]
+    public void Escaped_literal_app_id_is_unescaped_before_product_code_generation()
+    {
+        var options = new InnoFixtures.Options
+        {
+            AppId = "{{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}",
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Equal("{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}", metadata.AppId);
+        Assert.Equal("{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1", metadata.ProductCode);
+        Assert.Equal(metadata.ProductCode, installer.ProductCode);
+    }
+
+    [Fact]
+    public void Escaped_runtime_app_id_is_still_rejected()
+    {
+        var options = new InnoFixtures.Options { AppId = "{{code:GetId}" };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Null(metadata.AppId);
+        Assert.Null(metadata.ProductCode);
+        Assert.Null(installer.ProductCode);
     }
 
     [Theory]

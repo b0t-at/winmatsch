@@ -161,14 +161,23 @@ public sealed class InnoProbe : IExeFormatProbe
         Architecture stubArchitecture,
         InnoProbeOptions options)
     {
+        if (!InnoArchitectureExpression.TryEvaluate(
+                header.ArchitecturesAllowed,
+                options,
+                out InnoArchitectureExpression.Evaluation allowed))
+        {
+            return stubArchitecture == Architecture.X86 ? (null, false) : (stubArchitecture, false);
+        }
+
         (Architecture? headerArchitecture, bool headerConclusive) =
-            GetHeaderArchitecture(header, stubArchitecture, options);
+            GetHeaderArchitecture(allowed, stubArchitecture);
         Architecture[] payloadArchitectures = payloads
             .Select(payload => payload.Architecture)
             .Distinct()
             .ToArray();
-        if (IsX86CompatibleOnly(header.ArchitecturesAllowed, options)
-            && payloadArchitectures.Length == 1)
+        if (payloadArchitectures.Length == 1
+            && TryGetArchitectureTarget(payloadArchitectures[0], out int payloadTarget)
+            && (allowed.PositiveX86CompatibleTargets & payloadTarget) != 0)
         {
             return (payloadArchitectures[0], true);
         }
@@ -177,30 +186,18 @@ public sealed class InnoProbe : IExeFormatProbe
     }
 
     private static (Architecture? Architecture, bool Conclusive) GetHeaderArchitecture(
-        InnoParsedHeader header,
-        Architecture stubArchitecture,
-        InnoProbeOptions options)
+        InnoArchitectureExpression.Evaluation allowed,
+        Architecture stubArchitecture)
     {
-        if (!InnoArchitectureExpression.TryEvaluate(header.ArchitecturesAllowed, options, out int allowedTargets)
-            || !InnoArchitectureExpression.TryEvaluate(
-                header.ArchitecturesInstallIn64BitMode,
-                options,
-                out int mode64Targets))
+        int targets = allowed.Targets;
+        int inferredTargets = allowed.PositiveArchitectureHints & targets;
+        bool negationBroadenedTargets = (targets & ~allowed.PositiveTargetCoverage) != 0;
+        if (!negationBroadenedTargets
+            && inferredTargets is InnoArchitectureExpression.X86
+                or InnoArchitectureExpression.X64
+                or InnoArchitectureExpression.Arm64)
         {
-            return stubArchitecture == Architecture.X86 ? (null, false) : (stubArchitecture, false);
-        }
-
-        int targets = allowedTargets | mode64Targets;
-        if (targets is InnoArchitectureExpression.X86
-            or InnoArchitectureExpression.X64
-            or InnoArchitectureExpression.Arm64)
-        {
-            return (targets switch
-            {
-                InnoArchitectureExpression.X86 => Architecture.X86,
-                InnoArchitectureExpression.X64 => Architecture.X64,
-                _ => Architecture.Arm64,
-            }, true);
+            return (GetArchitectureFromTarget(inferredTargets), true);
         }
 
         if (targets == 0 && stubArchitecture != Architecture.X86)
@@ -211,9 +208,25 @@ public sealed class InnoProbe : IExeFormatProbe
         return (null, false);
     }
 
-    private static bool IsX86CompatibleOnly(string? expression, InnoProbeOptions options)
-        => InnoArchitectureExpression.TryEvaluate(expression, options, out int targets)
-            && targets == InnoArchitectureExpression.X86;
+    private static Architecture GetArchitectureFromTarget(int target)
+        => target switch
+        {
+            InnoArchitectureExpression.X86 => Architecture.X86,
+            InnoArchitectureExpression.X64 => Architecture.X64,
+            _ => Architecture.Arm64,
+        };
+
+    private static bool TryGetArchitectureTarget(Architecture architecture, out int target)
+    {
+        target = architecture switch
+        {
+            Architecture.X86 => InnoArchitectureExpression.X86,
+            Architecture.X64 => InnoArchitectureExpression.X64,
+            Architecture.Arm64 => InnoArchitectureExpression.Arm64,
+            _ => 0,
+        };
+        return target != 0;
+    }
 
     private string? NormalizeInstallLocation(InnoSetupMetadata metadata)
     {
@@ -269,15 +282,18 @@ public sealed class InnoProbe : IExeFormatProbe
             return false;
         }
 
-        if (!InnoArchitectureExpression.TryEvaluate(expression, options, out int targets))
+        if (!InnoArchitectureExpression.TryEvaluate(
+                expression,
+                options,
+                out InnoArchitectureExpression.Evaluation evaluation))
         {
             return null;
         }
 
         return metadata.EffectiveArchitecture switch
         {
-            Architecture.X64 => (targets & InnoArchitectureExpression.X64) != 0,
-            Architecture.Arm64 => (targets & InnoArchitectureExpression.Arm64) != 0,
+            Architecture.X64 => (evaluation.Targets & InnoArchitectureExpression.X64) != 0,
+            Architecture.Arm64 => (evaluation.Targets & InnoArchitectureExpression.Arm64) != 0,
             Architecture.X86 => false,
             _ => null,
         };
@@ -335,6 +351,11 @@ public sealed class InnoProbe : IExeFormatProbe
         if (safe is null)
         {
             return null;
+        }
+
+        if (safe.StartsWith("{{", StringComparison.Ordinal))
+        {
+            safe = safe[1..];
         }
 
         return Guid.TryParseExact(safe, "B", out _) ? safe : SafeArpValue(safe);

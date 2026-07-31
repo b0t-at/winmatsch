@@ -8,9 +8,47 @@ internal static class InnoArchitectureExpression
 
     private const int All = X86 | X64 | Arm64;
 
-    internal static bool TryEvaluate(string? expression, InnoProbeOptions options, out int targets)
+    // Keep predicate provenance alongside each OS truth set so equivalent masks from
+    // strict or negated expressions cannot acquire x86compatible override semantics.
+    internal readonly record struct Evaluation(
+        int Targets,
+        int PositiveTargetCoverage,
+        int NegativeTargetCoverage,
+        int PositiveArchitectureHints,
+        int NegativeArchitectureHints,
+        int TargetsWithoutPositiveX86Compatible,
+        int TargetsWithoutNegativeX86Compatible)
     {
-        targets = 0;
+        internal int PositiveX86CompatibleTargets => Targets & ~TargetsWithoutPositiveX86Compatible;
+
+        internal Evaluation Negate()
+            => new(
+                All & ~Targets,
+                NegativeTargetCoverage,
+                PositiveTargetCoverage,
+                NegativeArchitectureHints,
+                PositiveArchitectureHints,
+                All & ~TargetsWithoutNegativeX86Compatible,
+                All & ~TargetsWithoutPositiveX86Compatible);
+
+        internal Evaluation Combine(Evaluation other, bool conjunction)
+            => new(
+                conjunction ? Targets & other.Targets : Targets | other.Targets,
+                PositiveTargetCoverage | other.PositiveTargetCoverage,
+                NegativeTargetCoverage | other.NegativeTargetCoverage,
+                PositiveArchitectureHints | other.PositiveArchitectureHints,
+                NegativeArchitectureHints | other.NegativeArchitectureHints,
+                conjunction
+                    ? TargetsWithoutPositiveX86Compatible & other.TargetsWithoutPositiveX86Compatible
+                    : TargetsWithoutPositiveX86Compatible | other.TargetsWithoutPositiveX86Compatible,
+                conjunction
+                    ? TargetsWithoutNegativeX86Compatible & other.TargetsWithoutNegativeX86Compatible
+                    : TargetsWithoutNegativeX86Compatible | other.TargetsWithoutNegativeX86Compatible);
+    }
+
+    internal static bool TryEvaluate(string? expression, InnoProbeOptions options, out Evaluation evaluation)
+    {
+        evaluation = default;
         if (string.IsNullOrWhiteSpace(expression))
         {
             return true;
@@ -22,7 +60,7 @@ internal static class InnoArchitectureExpression
         }
 
         var parser = new Parser(expression, options);
-        return parser.TryParse(out targets);
+        return parser.TryParse(out evaluation);
     }
 
     private enum TokenKind
@@ -45,7 +83,7 @@ internal static class InnoArchitectureExpression
         private int _tokenCount;
         private int _nesting;
         private TokenKind _token;
-        private int _identifierTargets;
+        private Evaluation _identifier;
 
         internal Parser(string expression, InnoProbeOptions options)
         {
@@ -55,25 +93,25 @@ internal static class InnoArchitectureExpression
             _tokenCount = 0;
             _nesting = 0;
             _token = TokenKind.Invalid;
-            _identifierTargets = 0;
+            _identifier = default;
         }
 
-        internal bool TryParse(out int targets)
+        internal bool TryParse(out Evaluation evaluation)
         {
-            targets = 0;
+            evaluation = default;
             ReadNextToken();
-            if (!TryParseOr(out targets) || _token != TokenKind.End)
+            if (!TryParseOr(out evaluation) || _token != TokenKind.End)
             {
-                targets = 0;
+                evaluation = default;
                 return false;
             }
 
             return true;
         }
 
-        private bool TryParseOr(out int targets)
+        private bool TryParseOr(out Evaluation evaluation)
         {
-            if (!TryParseAnd(out targets))
+            if (!TryParseAnd(out evaluation))
             {
                 return false;
             }
@@ -81,20 +119,20 @@ internal static class InnoArchitectureExpression
             while (_token == TokenKind.Or)
             {
                 ReadNextToken();
-                if (!TryParseAnd(out int right))
+                if (!TryParseAnd(out Evaluation right))
                 {
                     return false;
                 }
 
-                targets |= right;
+                evaluation = evaluation.Combine(right, conjunction: false);
             }
 
             return true;
         }
 
-        private bool TryParseAnd(out int targets)
+        private bool TryParseAnd(out Evaluation evaluation)
         {
-            if (!TryParseUnary(out targets))
+            if (!TryParseUnary(out evaluation))
             {
                 return false;
             }
@@ -102,46 +140,46 @@ internal static class InnoArchitectureExpression
             while (_token == TokenKind.And)
             {
                 ReadNextToken();
-                if (!TryParseUnary(out int right))
+                if (!TryParseUnary(out Evaluation right))
                 {
                     return false;
                 }
 
-                targets &= right;
+                evaluation = evaluation.Combine(right, conjunction: true);
             }
 
             return true;
         }
 
-        private bool TryParseUnary(out int targets)
+        private bool TryParseUnary(out Evaluation evaluation)
         {
             if (_token == TokenKind.Not)
             {
                 ReadNextToken();
-                if (!TryParseUnary(out targets))
+                if (!TryParseUnary(out evaluation))
                 {
                     return false;
                 }
 
-                targets = All & ~targets;
+                evaluation = evaluation.Negate();
                 return true;
             }
 
             if (_token == TokenKind.Identifier)
             {
-                targets = _identifierTargets;
+                evaluation = _identifier;
                 ReadNextToken();
                 return true;
             }
 
             if (_token != TokenKind.OpenParenthesis || ++_nesting > _options.MaximumArchitectureExpressionNesting)
             {
-                targets = 0;
+                evaluation = default;
                 return false;
             }
 
             ReadNextToken();
-            bool parsed = TryParseOr(out targets) && _token == TokenKind.CloseParenthesis;
+            bool parsed = TryParseOr(out evaluation) && _token == TokenKind.CloseParenthesis;
             _nesting--;
             if (!parsed)
             {
@@ -213,33 +251,49 @@ internal static class InnoArchitectureExpression
             }
             else
             {
-                _identifierTargets = GetIdentifierTargets(word);
-                _token = _identifierTargets == 0 ? TokenKind.Invalid : TokenKind.Identifier;
+                _identifier = GetIdentifier(word);
+                _token = _identifier.Targets == 0 ? TokenKind.Invalid : TokenKind.Identifier;
             }
         }
 
-        private static int GetIdentifierTargets(ReadOnlySpan<char> identifier)
+        private static Evaluation GetIdentifier(ReadOnlySpan<char> identifier)
         {
-            if (identifier.Equals("x86", StringComparison.OrdinalIgnoreCase)
-                || identifier.Equals("x86os", StringComparison.OrdinalIgnoreCase)
-                || identifier.Equals("x86compatible", StringComparison.OrdinalIgnoreCase))
+            if (identifier.Equals("x86compatible", StringComparison.OrdinalIgnoreCase))
             {
-                return X86;
+                return Positive(All, X86, x86Compatible: true);
             }
 
-            if (identifier.Equals("x64", StringComparison.OrdinalIgnoreCase)
-                || identifier.Equals("x64os", StringComparison.OrdinalIgnoreCase)
-                || identifier.Equals("x64compatible", StringComparison.OrdinalIgnoreCase))
+            if (identifier.Equals("x64compatible", StringComparison.OrdinalIgnoreCase)
+                || identifier.Equals("win64", StringComparison.OrdinalIgnoreCase))
             {
-                return X64;
+                return Positive(X64 | Arm64, X64);
             }
 
             if (identifier.Equals("arm64", StringComparison.OrdinalIgnoreCase))
             {
-                return Arm64;
+                return Positive(Arm64, Arm64);
             }
 
-            return identifier.Equals("win64", StringComparison.OrdinalIgnoreCase) ? X64 | Arm64 : 0;
+            if (identifier.Equals("x86", StringComparison.OrdinalIgnoreCase)
+                || identifier.Equals("x86os", StringComparison.OrdinalIgnoreCase))
+            {
+                return Positive(X86, X86);
+            }
+
+            return identifier.Equals("x64", StringComparison.OrdinalIgnoreCase)
+                || identifier.Equals("x64os", StringComparison.OrdinalIgnoreCase)
+                ? Positive(X64, X64)
+                : default;
         }
+
+        private static Evaluation Positive(int targets, int architectureHint, bool x86Compatible = false)
+            => new(
+                targets,
+                targets,
+                0,
+                architectureHint,
+                0,
+                x86Compatible ? 0 : targets,
+                targets);
     }
 }
