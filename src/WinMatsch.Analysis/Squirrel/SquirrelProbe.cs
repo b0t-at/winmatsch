@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using WinMatsch.Analysis.Advanced;
 using WinMatsch.Analysis.Pe;
@@ -6,24 +7,20 @@ using WinMatsch.Core;
 namespace WinMatsch.Analysis.Squirrel;
 
 /// <summary>
-/// Detects Squirrel.Windows and Clowd.Squirrel setup bootstrappers: executables whose PE
-/// overlay carries a zip payload — either a zip wrapping the release <c>.nupkg</c> (classic
-/// Squirrel <c>Setup.exe</c>) or the nupkg itself appended directly (Clowd.Squirrel) — or
-/// whose version strings carry the Squirrel bootstrap branding when the payload is packaged
-/// elsewhere (resource-embedded variants). The <c>.nuspec</c> inside the release package is
-/// the identity truth: Squirrel creates its Apps &amp; Features entry from the package id,
-/// version and authors under <c>HKCU\...\Uninstall\&lt;id&gt;</c>. Squirrel (and every
-/// Electron app shipping it) installs to <c>%LocalAppData%</c> without elevation, so the
-/// scope is always per-user and the classification is always an EXE bootstrapper — never the
-/// format of anything found inside the payload. A payload-less "portable" twin of the same
-/// application returns null: only bootstrap evidence claims the format.
+/// Detects classic Squirrel.Windows setup resources and Clowd.Squirrel package bundles.
+/// The outer bootstrapper decides the format, scope, type, and switches; package metadata
+/// supplies the per-user Apps &amp; Features identity.
 /// </summary>
 public sealed class SquirrelProbe : IExeFormatProbe
 {
-    /// <summary>Zip local file header signature: <c>PK\x03\x04</c>.</summary>
-    private static readonly byte[] _zipSignature = [0x50, 0x4B, 0x03, 0x04];
+    private static readonly byte[] _clowdBundleSignature =
+    [
+        0x94, 0xF0, 0xB1, 0x7B, 0x68, 0x93, 0xE0, 0x29,
+        0x37, 0xEB, 0x34, 0xEF, 0x53, 0xAA, 0xE7, 0xD4,
+        0x2B, 0x54, 0xF5, 0x70, 0x7E, 0xF5, 0xD6, 0xF5,
+        0x78, 0x54, 0x98, 0x3E, 0x5E, 0x94, 0xED, 0x7D,
+    ];
 
-    /// <summary>Version-info tokens that positively identify a Squirrel bootstrap stub.</summary>
     private static readonly string[] _markerTokens =
     [
         "SquirrelSetup",
@@ -32,178 +29,105 @@ public sealed class SquirrelProbe : IExeFormatProbe
         "Clowd.Squirrel",
     ];
 
-    /// <summary>Overlay window scanned for the zip signature.</summary>
-    private const int MaxSignatureScanBytes = 1024 * 1024;
-
-    /// <summary>Upper bound on a nested nupkg copied to memory; larger payloads degrade to stub metadata.</summary>
+    private const string ClassicResourceType = "DATA";
+    private const int ClassicResourceId = 131;
     private const long MaxNupkgBytes = 256L * 1024 * 1024;
-
-    /// <summary>Upper bound on the nuspec manifest read from the package.</summary>
     private const long MaxNuspecBytes = 4L * 1024 * 1024;
 
-    /// <summary>Upper bound on zip entries inspected while looking for the release package.</summary>
-    private const int MaxEntriesScanned = 65536;
-
-    /// <summary>
-    /// Returns the installer's analysis, or null when the executable carries neither a
-    /// Squirrel release payload nor the bootstrap branding.
-    /// </summary>
-    /// <exception cref="InvalidDataException">
-    /// The file is positively a Squirrel bootstrapper (branding marker or a <c>.nupkg</c>
-    /// payload entry) but its zip container, release package, or nuspec manifest is
-    /// truncated, corrupt, or malformed.
-    /// </exception>
     public InstallerAnalysis? Probe(PeFile peFile, Stream stream)
     {
         ArgumentNullException.ThrowIfNull(peFile);
         ArgumentNullException.ThrowIfNull(stream);
 
         bool hasMarker = HasSquirrelMarker(peFile.VersionInfo);
-
-        long overlayStart = PeOverlay.GetStart(stream);
-        long zipStart = overlayStart > 0
-            ? PeOverlay.FindSignature(stream, overlayStart, _zipSignature, MaxSignatureScanBytes)
-            : -1;
-        if (zipStart < 0)
+        byte[]? classicPayload = PeResourceReader.Read(stream, ClassicResourceType, ClassicResourceId);
+        if (classicPayload is not null)
         {
-            // No zip payload: a branded bootstrapper still claims (payload packaged
-            // elsewhere); anything else — e.g. the portable twin of the app — does not.
-            return hasMarker ? Compose(peFile, metadata: null, nupkgName: null) : null;
+            using var payload = new MemoryStream(classicPayload, writable: false);
+            NuspecMetadata metadata = ReadClassicPayload(payload, out string nupkgName);
+            return Compose(peFile, metadata, nupkgName);
         }
 
-        var view = new SubStream(stream, zipStart, stream.Length - zipStart);
-        ZipArchive payload;
-        try
+        long imageEnd = PeOverlay.GetStart(stream);
+        BundleLocation? bundle = FindClowdBundle(stream, imageEnd);
+        if (bundle is not null)
         {
-            payload = new ZipArchive(view, ZipArchiveMode.Read, leaveOpen: true);
-        }
-        catch (InvalidDataException)
-        {
-            if (hasMarker)
-            {
-                throw new InvalidDataException(
-                    "The file is a Squirrel bootstrapper, but its payload archive is truncated or corrupt.");
-            }
-
-            return null;
+            using var package = new SubStream(stream, bundle.Value.Offset, bundle.Value.Length);
+            NuspecMetadata metadata = ReadPackage(package, "The Clowd.Squirrel release package");
+            return Compose(peFile, metadata, nupkgName: null);
         }
 
-        using (payload)
-        {
-            (ZipArchiveEntry? nupkgEntry, ZipArchiveEntry? rootNuspec) = FindPayloadEntries(payload);
-
-            if (nupkgEntry is not null)
-            {
-                // Classic Squirrel: Setup.exe overlay is a zip wrapping the release nupkg.
-                NuspecMetadata? metadata = ReadNestedNupkg(nupkgEntry);
-                return Compose(peFile, metadata, Path.GetFileName(nupkgEntry.FullName));
-            }
-
-            if (rootNuspec is not null)
-            {
-                // Clowd.Squirrel: the overlay zip is the release nupkg itself.
-                NuspecMetadata metadata = ReadNuspec(rootNuspec);
-                return Compose(peFile, metadata, nupkgName: null);
-            }
-
-            return hasMarker ? Compose(peFile, metadata: null, nupkgName: null) : null;
-        }
+        return hasMarker ? Compose(peFile, metadata: null, nupkgName: null) : null;
     }
 
-    /// <summary>
-    /// Scans the overlay zip (bounded) for the release <c>.nupkg</c> entry or, failing that,
-    /// a root-level <c>.nuspec</c> marking the overlay as a nupkg itself.
-    /// </summary>
-    private static (ZipArchiveEntry? NupkgEntry, ZipArchiveEntry? RootNuspec) FindPayloadEntries(ZipArchive payload)
+    private static NuspecMetadata ReadClassicPayload(Stream payload, out string nupkgName)
     {
-        ZipArchiveEntry? nupkgEntry = null;
-        ZipArchiveEntry? rootNuspec = null;
-        int scanned = 0;
-        foreach (ZipArchiveEntry entry in payload.Entries)
+        ZipArchiveBounds.Validate(payload, "The classic Squirrel payload resource");
+        using var archive = OpenZip(payload, "The classic Squirrel payload resource");
+        ZipArchiveEntry? nupkg = archive.Entries.FirstOrDefault(static entry =>
+            entry.FullName.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase));
+        if (nupkg is null)
         {
-            if (++scanned > MaxEntriesScanned)
-            {
-                break;
-            }
-
-            if (nupkgEntry is null && entry.FullName.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase))
-            {
-                nupkgEntry = entry;
-                break;
-            }
-
-            if (rootNuspec is null
-                && entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)
-                && !entry.FullName.Contains('/', StringComparison.Ordinal))
-            {
-                rootNuspec = entry;
-            }
+            throw new InvalidDataException(
+                "The classic Squirrel payload resource contains no release package.");
         }
 
-        return (nupkgEntry, rootNuspec);
+        nupkgName = Path.GetFileName(nupkg.FullName);
+        return ReadNestedPackage(nupkg);
     }
 
-    /// <summary>
-    /// Copies the nested release package into memory (bounded) and reads its nuspec. Returns
-    /// null when the package is too large to introspect — the claim degrades to stub metadata.
-    /// </summary>
-    /// <exception cref="InvalidDataException">The package is corrupt or has no nuspec.</exception>
-    private static NuspecMetadata? ReadNestedNupkg(ZipArchiveEntry nupkgEntry)
+    private static NuspecMetadata ReadNestedPackage(ZipArchiveEntry entry)
     {
-        if (nupkgEntry.Length > MaxNupkgBytes)
+        if (entry.Length > MaxNupkgBytes)
         {
-            return null;
+            throw new InvalidDataException("The Squirrel release package exceeds the supported size.");
         }
 
-        using var buffer = new MemoryStream();
-        using (Stream entryStream = nupkgEntry.Open())
-        {
-            CopyBounded(entryStream, buffer, MaxNupkgBytes);
-        }
-
-        buffer.Position = 0;
-        ZipArchive package;
+        using var package = new MemoryStream();
         try
         {
-            package = new ZipArchive(buffer, ZipArchiveMode.Read, leaveOpen: true);
+            using Stream source = entry.Open();
+            CopyBounded(source, package, MaxNupkgBytes);
         }
         catch (InvalidDataException ex)
         {
             throw new InvalidDataException(
-                "The Squirrel bootstrapper's release package is truncated or corrupt.", ex);
+                "The Squirrel release package is truncated or corrupt.", ex);
         }
 
-        using (package)
+        package.Position = 0;
+        return ReadPackage(package, "The Squirrel release package");
+    }
+
+    private static NuspecMetadata ReadPackage(Stream package, string description)
+    {
+        ZipArchiveBounds.Validate(package, description);
+        using ZipArchive archive = OpenZip(package, description);
+        ZipArchiveEntry? nuspec = archive.Entries.FirstOrDefault(static entry =>
+            entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)
+            && !entry.FullName.Contains('/', StringComparison.Ordinal)
+            && !entry.FullName.Contains('\\', StringComparison.Ordinal));
+        if (nuspec is null)
         {
-            ZipArchiveEntry? nuspec = null;
-            int scanned = 0;
-            foreach (ZipArchiveEntry entry in package.Entries)
-            {
-                if (++scanned > MaxEntriesScanned)
-                {
-                    break;
-                }
+            throw new InvalidDataException($"{description} has no root nuspec manifest.");
+        }
 
-                if (entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)
-                    && !entry.FullName.Contains('/', StringComparison.Ordinal))
-                {
-                    nuspec = entry;
-                    break;
-                }
-            }
+        return ReadNuspec(nuspec);
+    }
 
-            if (nuspec is null)
-            {
-                throw new InvalidDataException(
-                    "The Squirrel bootstrapper's release package has no nuspec manifest.");
-            }
-
-            return ReadNuspec(nuspec);
+    private static ZipArchive OpenZip(Stream stream, string description)
+    {
+        stream.Position = 0;
+        try
+        {
+            return new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new InvalidDataException($"{description} is truncated or corrupt.", ex);
         }
     }
 
-    /// <summary>Reads a nuspec entry with a size bound.</summary>
-    /// <exception cref="InvalidDataException">The manifest is oversized, truncated, or malformed.</exception>
     private static NuspecMetadata ReadNuspec(ZipArchiveEntry nuspecEntry)
     {
         if (nuspecEntry.Length > MaxNuspecBytes)
@@ -221,16 +145,68 @@ public sealed class SquirrelProbe : IExeFormatProbe
         return NuspecReader.Parse(buffer);
     }
 
-    /// <summary>
-    /// Builds the analysis. Squirrel installs per-user from <c>%LocalAppData%</c> without
-    /// elevation regardless of what the payload contains, so scope, type and switches come
-    /// from the bootstrapper; the nuspec contributes the identity Squirrel writes to ARP,
-    /// and the release package's file name may promote the stub's architecture.
-    /// </summary>
+    private static BundleLocation? FindClowdBundle(Stream stream, long imageEnd)
+    {
+        if (imageEnd <= 16 || imageEnd > stream.Length)
+        {
+            return null;
+        }
+
+        const int blockSize = 64 * 1024;
+        byte[] block = new byte[blockSize + _clowdBundleSignature.Length - 1];
+        int carry = 0;
+        long absolute = 0;
+        while (absolute < imageEnd)
+        {
+            int requested = (int)Math.Min(blockSize, imageEnd - absolute);
+            stream.Position = absolute;
+            int read = stream.ReadAtLeast(block.AsSpan(carry, requested), requested, throwOnEndOfStream: false);
+            if (read != requested)
+            {
+                return null;
+            }
+
+            int available = carry + read;
+            int index = block.AsSpan(0, available).IndexOf(_clowdBundleSignature);
+            if (index >= 0)
+            {
+                long signatureOffset = absolute - carry + index;
+                if (signatureOffset < 16)
+                {
+                    throw new InvalidDataException(
+                        "The Clowd.Squirrel bundle locator is truncated.");
+                }
+
+                Span<byte> locator = stackalloc byte[16];
+                stream.Position = signatureOffset - locator.Length;
+                stream.ReadExactly(locator);
+                long offset = BinaryPrimitives.ReadInt64LittleEndian(locator);
+                long length = BinaryPrimitives.ReadInt64LittleEndian(locator[8..]);
+                if (offset <= 0
+                    || length <= 0
+                    || offset < imageEnd
+                    || offset > stream.Length
+                    || length > stream.Length - offset
+                    || length > MaxNupkgBytes)
+                {
+                    throw new InvalidDataException(
+                        "The Clowd.Squirrel bundle locator contains an invalid package offset or length.");
+                }
+
+                return new BundleLocation(offset, length);
+            }
+
+            carry = Math.Min(_clowdBundleSignature.Length - 1, available);
+            block.AsSpan(available - carry, carry).CopyTo(block);
+            absolute += read;
+        }
+
+        return null;
+    }
+
     private static InstallerAnalysis Compose(PeFile peFile, NuspecMetadata? metadata, string? nupkgName)
     {
         VersionInfo version = peFile.VersionInfo;
-
         var installer = new Installer
         {
             Architecture = (nupkgName is null ? null : UrlArchitectureDetector.Detect(nupkgName))
@@ -271,10 +247,6 @@ public sealed class SquirrelProbe : IExeFormatProbe
         };
     }
 
-    /// <summary>
-    /// True when the stub's version strings carry Squirrel bootstrap branding. The bare word
-    /// "Squirrel" is deliberately not enough — only the bootstrap-specific tokens count.
-    /// </summary>
     private static bool HasSquirrelMarker(VersionInfo version)
         => ContainsMarker(version.FileDescription)
             || ContainsMarker(version.ProductName)
@@ -282,28 +254,9 @@ public sealed class SquirrelProbe : IExeFormatProbe
             || ContainsMarker(version.OriginalFilename);
 
     private static bool ContainsMarker(string? value)
-    {
-        if (value is null)
-        {
-            return false;
-        }
+        => value is not null
+            && _markerTokens.Any(token => value.Contains(token, StringComparison.OrdinalIgnoreCase));
 
-        foreach (string token in _markerTokens)
-        {
-            if (value.Contains(token, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// Copies at most <paramref name="maxBytes"/> from a decompression stream whose declared
-    /// size cannot be trusted.
-    /// </summary>
-    /// <exception cref="InvalidDataException">The stream expands beyond <paramref name="maxBytes"/>.</exception>
     private static void CopyBounded(Stream source, Stream destination, long maxBytes)
     {
         byte[] buffer = new byte[81920];
@@ -320,4 +273,6 @@ public sealed class SquirrelProbe : IExeFormatProbe
             destination.Write(buffer, 0, read);
         }
     }
+
+    private readonly record struct BundleLocation(long Offset, long Length);
 }

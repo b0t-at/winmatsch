@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Text;
 using SharpCompress.Archives.SevenZip;
 using SharpCompress.Common;
 using SharpCompress.Readers;
@@ -8,206 +10,270 @@ using WinMatsch.Core;
 namespace WinMatsch.Analysis.Advanced;
 
 /// <summary>
-/// Detects Advanced Installer setup executables: 7-Zip SFX containers whose PE overlay carries
-/// a 7z archive wrapping the real MSI package. The probe locates the <c>7z¼¯'\x1C</c> signature
-/// in the overlay, opens the archive, and analyzes the first embedded <c>.msi</c> entry with
-/// <see cref="MsiAnalyzer"/> to harvest architecture, scope, product code, locale, and the Apps
-/// &amp; Features evidence. The outer container always decides the classification: the analysis
-/// is reported as <see cref="DetectedInstallerFormat.AdvancedInstaller"/> with
-/// <see cref="InstallerType.Exe"/> and the SFX silent switches (<c>/exenoui /qn</c>), never as
-/// the inner MSI — the MSI only contributes payload metadata the stub itself cannot carry.
-/// Outer version-info strings win over inner MSI strings for the display metadata because the
-/// vendor brands the wrapper, while the inner ARP row is kept verbatim as matching evidence.
+/// Detects Advanced Installer executables from their <c>ADVINSTSFX</c> footer and file
+/// table. Direct MSI records and MSI files in table-declared 7z records are inspected,
+/// while the outer EXE retains format and switch precedence.
 /// </summary>
 public sealed class AdvancedInstallerProbe : IExeFormatProbe
 {
-    /// <summary>7z archive signature: <c>'7' 'z' BC AF 27 1C</c>.</summary>
-    private static readonly byte[] _sevenZipSignature = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+    private static readonly byte[] _footerSignature = "ADVINSTSFX"u8.ToArray();
+    private const int FooterSize = 74;
+    private const int SignatureOffset = 64;
+    private const int FooterSearchBytes = 16 * 1024;
+    private const int FileEntrySize = 24;
+    private const int MaxFileEntries = 4096;
+    private const int MaxEntryNameCharacters = 4096;
+    private const long MaxPayloadBytes = 256L * 1024 * 1024;
+    private const int XorPrefixBytes = 0x200;
 
-    /// <summary>Overlay window scanned for the 7z signature (SFX stubs put it at or near the overlay start).</summary>
-    private const int MaxSignatureScanBytes = 1024 * 1024;
-
-    /// <summary>Upper bound on the inner MSI copied to memory; larger payloads degrade to outer-only metadata.</summary>
-    private const long MaxInnerMsiBytes = 256L * 1024 * 1024;
-
-    /// <summary>Upper bound on archive entries inspected while looking for the MSI payload.</summary>
-    private const int MaxEntriesScanned = 65536;
-
-    /// <summary>
-    /// Returns the installer's analysis, or null when the executable's overlay carries no
-    /// 7z-SFX payload that identifies an Advanced Installer package.
-    /// </summary>
-    /// <exception cref="InvalidDataException">
-    /// The file is positively an Advanced Installer setup (version-info marker or an embedded
-    /// <c>.msi</c> entry) but its 7z container or MSI payload is truncated or corrupt.
-    /// </exception>
     public InstallerAnalysis? Probe(PeFile peFile, Stream stream)
     {
         ArgumentNullException.ThrowIfNull(peFile);
         ArgumentNullException.ThrowIfNull(stream);
 
-        long overlayStart = PeOverlay.GetStart(stream);
-        if (overlayStart <= 0)
+        Footer? footer = FindFooter(stream);
+        if (footer is null)
         {
             return null;
         }
 
-        long archiveStart = PeOverlay.FindSignature(stream, overlayStart, _sevenZipSignature, MaxSignatureScanBytes);
-        if (archiveStart < 0)
+        List<FileEntry> entries = ReadFileTable(stream, footer.Value);
+        List<InnerMsi> payloads = [];
+        foreach (FileEntry entry in entries)
         {
-            return null;
-        }
-
-        bool hasMarker = HasAdvancedInstallerMarker(peFile.VersionInfo);
-        if (!TryFindMsiEntry(stream, archiveStart, out SevenZipArchive? archive, out SevenZipArchiveEntry? msiEntry))
-        {
-            // 7z signature present but the archive is unreadable: only the vendor marker makes
-            // this positively an Advanced Installer; otherwise the overlay is just noise.
-            return hasMarker
-                ? throw new InvalidDataException(
-                    "The file is an Advanced Installer setup, but its 7z payload archive is truncated or corrupt.")
-                : null;
-        }
-
-        using (archive)
-        {
-            if (msiEntry is null && !hasMarker)
+            if (entry.IsMsi)
             {
-                // A readable 7z SFX without an MSI payload is a generic self-extractor.
-                return null;
+                byte[]? data = ReadFile(stream, entry);
+                if (data is not null)
+                {
+                    payloads.Add(AnalyzeMsi(data, entry.Name));
+                }
+            }
+            else if (entry.IsSevenZip)
+            {
+                byte[]? data = ReadFile(stream, entry);
+                if (data is not null)
+                {
+                    payloads.AddRange(ReadSevenZipMsis(data));
+                }
+            }
+        }
+
+        return Compose(peFile, payloads);
+    }
+
+    private static Footer? FindFooter(Stream stream)
+    {
+        if (stream.Length < FooterSize)
+        {
+            return null;
+        }
+
+        int windowLength = (int)Math.Min(stream.Length, FooterSearchBytes);
+        byte[] window = new byte[windowLength];
+        long windowOffset = stream.Length - windowLength;
+        stream.Position = windowOffset;
+        stream.ReadExactly(window);
+        int signatureIndex = window.AsSpan().LastIndexOf(_footerSignature);
+        if (signatureIndex < SignatureOffset)
+        {
+            return null;
+        }
+
+        long footerOffset = windowOffset + signatureIndex - SignatureOffset;
+        Span<byte> bytes = stackalloc byte[FooterSize];
+        stream.Position = footerOffset;
+        stream.ReadExactly(bytes);
+        uint recordedOffset = BinaryPrimitives.ReadUInt32LittleEndian(bytes[4..]);
+        uint version = BinaryPrimitives.ReadUInt32LittleEndian(bytes[12..]);
+        if (recordedOffset != footerOffset || version != 100)
+        {
+            return null;
+        }
+
+        uint fileCount = BinaryPrimitives.ReadUInt32LittleEndian(bytes[8..]);
+        uint infoOffset = BinaryPrimitives.ReadUInt32LittleEndian(bytes[16..]);
+        uint tablePointer = BinaryPrimitives.ReadUInt32LittleEndian(bytes[20..]);
+        uint fileDataStart = BinaryPrimitives.ReadUInt32LittleEndian(bytes[24..]);
+        if (fileCount > MaxFileEntries
+            || tablePointer >= footerOffset
+            || fileDataStart > tablePointer
+            || infoOffset > stream.Length)
+        {
+            throw new InvalidDataException(
+                "The Advanced Installer ADVINSTSFX footer contains invalid table offsets or counts.");
+        }
+
+        return new Footer(footerOffset, fileCount, tablePointer);
+    }
+
+    private static List<FileEntry> ReadFileTable(Stream stream, Footer footer)
+    {
+        var entries = new List<FileEntry>((int)footer.FileCount);
+        stream.Position = footer.TablePointer;
+        byte[] raw = new byte[FileEntrySize];
+        for (uint i = 0; i < footer.FileCount; i++)
+        {
+            if (stream.Position > footer.Offset - FileEntrySize)
+            {
+                throw new InvalidDataException("The Advanced Installer file table is truncated.");
             }
 
-            InstallerAnalysis? inner = msiEntry is null ? null : AnalyzeInnerMsi(msiEntry);
-            return Compose(peFile, inner);
+            stream.ReadExactly(raw);
+            uint type0 = BinaryPrimitives.ReadUInt32LittleEndian(raw);
+            uint type1 = BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(4));
+            uint xorFlag = BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(8));
+            uint size = BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(12));
+            uint offset = BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(16));
+            uint nameCharacters = BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(20));
+            if (nameCharacters > MaxEntryNameCharacters
+                || nameCharacters > (footer.Offset - stream.Position) / 2)
+            {
+                throw new InvalidDataException("The Advanced Installer file table contains an invalid entry name.");
+            }
+
+            byte[] nameBytes = new byte[checked((int)nameCharacters * 2)];
+            stream.ReadExactly(nameBytes);
+            string name = Encoding.Unicode.GetString(nameBytes).TrimEnd('\0');
+            if (offset > stream.Length || size > stream.Length - offset)
+            {
+                throw new InvalidDataException(
+                    $"The Advanced Installer file table entry '{name}' points outside the executable.");
+            }
+
+            entries.Add(new FileEntry(type0, type1, xorFlag, offset, size, name));
+        }
+
+        return entries;
+    }
+
+    private static byte[]? ReadFile(Stream stream, FileEntry entry)
+    {
+        if (entry.Size > MaxPayloadBytes)
+        {
+            return null;
+        }
+
+        byte[] data = new byte[entry.Size];
+        stream.Position = entry.Offset;
+        stream.ReadExactly(data);
+        if (entry.XorFlag == 2)
+        {
+            for (int i = 0; i < Math.Min(data.Length, XorPrefixBytes); i++)
+            {
+                data[i] ^= 0xFF;
+            }
+        }
+
+        return data;
+    }
+
+    private static InnerMsi AnalyzeMsi(byte[] data, string name)
+    {
+        try
+        {
+            using var payload = new MemoryStream(data, writable: false);
+            InstallerAnalysis analysis = new MsiAnalyzer().Analyze(payload, name);
+            payload.Position = 0;
+            bool hidden = AdvancedMsiProperties.IsArpSystemComponent(payload);
+            return new InnerMsi(analysis, hidden);
+        }
+        catch (Exception ex) when (IsPayloadReadFailure(ex))
+        {
+            throw new InvalidDataException(
+                $"The Advanced Installer embedded MSI '{name}' is truncated or corrupt.", ex);
         }
     }
 
-    /// <summary>
-    /// Opens the overlay archive and locates the first <c>.msi</c> entry. Returns false when
-    /// the archive headers cannot be parsed; the archive is returned open (caller disposes)
-    /// so the entry's payload stays readable.
-    /// </summary>
-    private static bool TryFindMsiEntry(
-        Stream stream,
-        long archiveStart,
-        out SevenZipArchive? archive,
-        out SevenZipArchiveEntry? msiEntry)
+    private static List<InnerMsi> ReadSevenZipMsis(byte[] data)
     {
-        archive = null;
-        msiEntry = null;
         try
         {
-            var view = new SubStream(stream, archiveStart, stream.Length - archiveStart);
-            archive = SevenZipArchive.Open(view, new ReaderOptions { LeaveStreamOpen = true });
+            using var stream = new MemoryStream(data, writable: false);
+            using SevenZipArchive archive = SevenZipArchive.Open(
+                stream,
+                new ReaderOptions { LeaveStreamOpen = true });
+            List<InnerMsi> payloads = [];
             int scanned = 0;
             foreach (SevenZipArchiveEntry entry in archive.Entries)
             {
-                if (++scanned > MaxEntriesScanned)
+                if (++scanned > MaxFileEntries)
                 {
-                    break;
+                    throw new InvalidDataException("The Advanced Installer nested 7z contains too many entries.");
                 }
 
-                if (!entry.IsDirectory
-                    && entry.Key is { } key
-                    && key.EndsWith(".msi", StringComparison.OrdinalIgnoreCase))
+                if (entry.IsDirectory
+                    || entry.Key is not { } name
+                    || !name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase)
+                    || entry.Size > MaxPayloadBytes)
                 {
-                    msiEntry = entry;
-                    break;
+                    continue;
                 }
+
+                using Stream source = entry.OpenEntryStream();
+                using var payload = new MemoryStream();
+                CopyBounded(source, payload, MaxPayloadBytes);
+                payloads.Add(AnalyzeMsi(payload.ToArray(), name));
             }
 
-            return true;
-        }
-        catch (Exception ex) when (IsArchiveReadFailure(ex))
-        {
-            archive?.Dispose();
-            archive = null;
-            msiEntry = null;
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Extracts the embedded MSI into memory (bounded) and analyzes it. Returns null when the
-    /// entry is too large to introspect — the outer claim then degrades to stub metadata.
-    /// </summary>
-    /// <exception cref="InvalidDataException">The MSI payload is truncated or corrupt.</exception>
-    private static InstallerAnalysis? AnalyzeInnerMsi(SevenZipArchiveEntry msiEntry)
-    {
-        if (msiEntry.Size > MaxInnerMsiBytes)
-        {
-            return null;
-        }
-
-        using var payload = new MemoryStream();
-        try
-        {
-            using Stream entryStream = msiEntry.OpenEntryStream();
-            CopyBounded(entryStream, payload, MaxInnerMsiBytes);
+            return payloads;
         }
         catch (Exception ex) when (IsArchiveReadFailure(ex))
         {
             throw new InvalidDataException(
-                "The Advanced Installer setup's embedded MSI payload is truncated or corrupt.", ex);
+                "The Advanced Installer nested 7z payload is truncated or corrupt.", ex);
         }
-
-        payload.Position = 0;
-        return new MsiAnalyzer().Analyze(payload, "embedded.msi");
     }
 
-    /// <summary>
-    /// Builds the analysis. The outer container decides format, installer type and switches;
-    /// the inner MSI contributes payload facts the stub cannot know (architecture, scope,
-    /// product code, locale, ARP row). Outer version strings win for display metadata.
-    /// </summary>
-    private static InstallerAnalysis Compose(PeFile peFile, InstallerAnalysis? inner)
+    private static InstallerAnalysis Compose(PeFile peFile, List<InnerMsi> payloads)
     {
-        Installer? innerInstaller = inner?.Installers[0];
         VersionInfo version = peFile.VersionInfo;
+        List<Installer> installers = payloads.Count == 0
+            ? [CreateInstaller(peFile, inner: null)]
+            : payloads.Select(payload => CreateInstaller(peFile, payload)).ToList();
+        InstallerAnalysis? visible = payloads.FirstOrDefault(static payload => !payload.Hidden)?.Analysis;
 
-        var installer = new Installer
+        return new InstallerAnalysis
         {
-            Architecture = innerInstaller?.Architecture ?? peFile.Architecture,
+            Format = DetectedInstallerFormat.AdvancedInstaller,
+            Installers = installers,
+            ProductName = version.ProductName ?? visible?.ProductName,
+            Publisher = version.CompanyName ?? visible?.Publisher,
+            ProductVersion = version.ProductVersion ?? visible?.ProductVersion,
+            Copyright = version.LegalCopyright ?? visible?.Copyright,
+        };
+    }
+
+    private static Installer CreateInstaller(PeFile peFile, InnerMsi? inner)
+    {
+        Installer? source = inner?.Analysis.Installers[0];
+        bool hidden = inner?.Hidden == true;
+        return new Installer
+        {
+            Architecture = source?.Architecture ?? peFile.Architecture,
             InstallerType = InstallerType.Exe,
-            Scope = innerInstaller?.Scope ?? peFile.ScopeHint,
+            Scope = source?.Scope ?? peFile.ScopeHint,
             ElevationRequirement = peFile.RequestedElevation,
-            InstallerLocale = innerInstaller?.InstallerLocale,
-            ProductCode = innerInstaller?.ProductCode,
+            InstallerLocale = source?.InstallerLocale,
+            ProductCode = hidden ? null : source?.ProductCode,
             InstallerSwitches = new InstallerSwitches
             {
                 Silent = "/exenoui /qn",
                 SilentWithProgress = "/exebasicui /qb",
             },
-            AppsAndFeaturesEntries = innerInstaller?.AppsAndFeaturesEntries,
-        };
-
-        return new InstallerAnalysis
-        {
-            Format = DetectedInstallerFormat.AdvancedInstaller,
-            Installers = [installer],
-            ProductName = version.ProductName ?? inner?.ProductName,
-            Publisher = version.CompanyName ?? inner?.Publisher,
-            ProductVersion = version.ProductVersion ?? inner?.ProductVersion,
-            Copyright = version.LegalCopyright ?? inner?.Copyright,
+            AppsAndFeaturesEntries = hidden ? null : source?.AppsAndFeaturesEntries,
         };
     }
 
-    /// <summary>
-    /// True when the stub's version strings carry the Advanced Installer branding (the SFX
-    /// stub ships with "Advanced Installer" / Caphyon vendor strings).
-    /// </summary>
-    private static bool HasAdvancedInstallerMarker(VersionInfo version)
-        => ContainsMarker(version.FileDescription)
-            || ContainsMarker(version.ProductName)
-            || ContainsMarker(version.CompanyName)
-            || ContainsMarker(version.OriginalFilename);
+    private static bool IsPayloadReadFailure(Exception ex)
+        => ex is InvalidDataException
+            or EndOfStreamException
+            or ArgumentException
+            or IndexOutOfRangeException
+            or NotSupportedException
+            or OverflowException
+            or IOException;
 
-    private static bool ContainsMarker(string? value)
-        => value is not null
-            && (value.Contains("Advanced Installer", StringComparison.OrdinalIgnoreCase)
-                || value.Contains("Caphyon", StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>Exception shapes SharpCompress and stream plumbing surface on hostile or truncated archives.</summary>
     private static bool IsArchiveReadFailure(Exception ex)
         => ex is SharpCompressException
             or InvalidDataException
@@ -217,17 +283,9 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
             or NotSupportedException
             or OverflowException
             or IOException
-            // SharpCompress reports malformed 7z headers as ArchiveOperationException
-            // (an InvalidOperationException) and can fault with NullReferenceException
-            // on hostile header layouts; both mean "unreadable archive" here.
             or InvalidOperationException
             or NullReferenceException;
 
-    /// <summary>
-    /// Copies at most <paramref name="maxBytes"/> from a decompression stream whose declared
-    /// size cannot be trusted.
-    /// </summary>
-    /// <exception cref="InvalidDataException">The stream expands beyond <paramref name="maxBytes"/>.</exception>
     private static void CopyBounded(Stream source, Stream destination, long maxBytes)
     {
         byte[] buffer = new byte[81920];
@@ -244,4 +302,15 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
             destination.Write(buffer, 0, read);
         }
     }
+
+    private readonly record struct Footer(long Offset, uint FileCount, uint TablePointer);
+
+    private sealed record FileEntry(uint Type0, uint Type1, uint XorFlag, uint Offset, uint Size, string Name)
+    {
+        public bool IsMsi => Type0 == 1 && Type1 == 0;
+
+        public bool IsSevenZip => Type0 == 3 && Type1 == 7;
+    }
+
+    private sealed record InnerMsi(InstallerAnalysis Analysis, bool Hidden);
 }

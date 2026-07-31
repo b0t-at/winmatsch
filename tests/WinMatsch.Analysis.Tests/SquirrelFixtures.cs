@@ -1,14 +1,15 @@
+using System.Buffers.Binary;
+using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using System.Text;
 
 namespace WinMatsch.Analysis.Tests;
 
 /// <summary>
-/// Builds Squirrel.Windows / Clowd.Squirrel setup executables for probe tests: a PE stub
-/// with a zip overlay that either wraps the release <c>.nupkg</c> (classic Squirrel
-/// <c>Setup.exe</c>) or is the nupkg itself (Clowd.Squirrel). Zips are hand-written with
-/// stored (uncompressed) entries so tests fully control declared sizes for hostile-input
-/// scenarios.
+/// Independently encodes classic Squirrel's named DATA/131 resource and Clowd.Squirrel's
+/// in-image bundle locator. Zips are hand-written with stored entries.
 /// </summary>
 internal static class SquirrelFixtures
 {
@@ -63,25 +64,57 @@ internal static class SquirrelFixtures
         return BuildStoredZip(entries);
     }
 
-    /// <summary>Builds a classic Squirrel Setup.exe: stub + zip overlay wrapping the nupkg.</summary>
+    private static readonly byte[] _clowdBundleSignature =
+    [
+        0x94, 0xF0, 0xB1, 0x7B, 0x68, 0x93, 0xE0, 0x29,
+        0x37, 0xEB, 0x34, 0xEF, 0x53, 0xAA, 0xE7, 0xD4,
+        0x2B, 0x54, 0xF5, 0x70, 0x7E, 0xF5, 0xD6, 0xF5,
+        0x78, 0x54, 0x98, 0x3E, 0x5E, 0x94, 0xED, 0x7D,
+    ];
+
+    /// <summary>Builds a classic Squirrel Setup.exe with the release zip in DATA resource 131.</summary>
     public static byte[] BuildClassicSetup(
         byte[] nupkg,
         string nupkgName = "Contoso.Chat-1.2.3-full.nupkg",
-        Machine machine = Machine.I386,
-        VersionStrings? version = null,
-        string? manifestXml = null,
-        long? nupkgDeclaredSize = null)
-        => AdvancedInstallerFixtures.Concat(
-            PeFixtures.BuildExe(machine, version, manifestXml),
-            BuildStoredZip([("RELEASES", Encoding.UTF8.GetBytes("stub-releases-index")), (nupkgName, nupkg)], declaredSizeOverrideForLastEntry: nupkgDeclaredSize));
+        Machine machine = Machine.I386)
+        => BuildResourceSetup(
+            BuildStoredZip(
+                [("RELEASES", Encoding.UTF8.GetBytes("stub-releases-index")), (nupkgName, nupkg)]),
+            typeName: "DATA",
+            resourceId: 131,
+            machine);
 
-    /// <summary>Builds a Clowd.Squirrel-style setup: stub + the nupkg appended directly as overlay.</summary>
+    /// <summary>Builds a Clowd.Squirrel setup with an in-image locator bounding the appended nupkg.</summary>
     public static byte[] BuildClowdSetup(
         byte[] nupkg,
-        Machine machine = Machine.I386,
-        VersionStrings? version = null,
-        string? manifestXml = null)
-        => AdvancedInstallerFixtures.Concat(PeFixtures.BuildExe(machine, version, manifestXml), nupkg);
+        Machine machine = Machine.I386)
+    {
+        byte[] marker = new byte[16 + _clowdBundleSignature.Length];
+        _clowdBundleSignature.CopyTo(marker, 16);
+        byte[] stub = BuildPeWithNamedResource("BUNDLE", 1, marker, machine);
+        int signatureOffset = stub.AsSpan().IndexOf(_clowdBundleSignature);
+        BinaryPrimitives.WriteInt64LittleEndian(stub.AsSpan(signatureOffset - 16), stub.Length);
+        BinaryPrimitives.WriteInt64LittleEndian(stub.AsSpan(signatureOffset - 8), nupkg.Length);
+        return AdvancedInstallerFixtures.Concat(stub, nupkg);
+    }
+
+    public static byte[] BuildResourceSetup(
+        byte[] payload,
+        string typeName,
+        int resourceId,
+        Machine machine = Machine.I386)
+        => BuildPeWithNamedResource(typeName, resourceId, payload, machine);
+
+    public static byte[] BuildDirectoryBomb(ushort entryCount, uint centralDirectorySize = 0)
+    {
+        byte[] zip = new byte[22];
+        BinaryPrimitives.WriteUInt32LittleEndian(zip, 0x06054B50);
+        BinaryPrimitives.WriteUInt16LittleEndian(zip.AsSpan(8), entryCount);
+        BinaryPrimitives.WriteUInt16LittleEndian(zip.AsSpan(10), entryCount);
+        BinaryPrimitives.WriteUInt32LittleEndian(zip.AsSpan(12), centralDirectorySize);
+        BinaryPrimitives.WriteUInt32LittleEndian(zip.AsSpan(16), 0);
+        return zip;
+    }
 
     /// <summary>
     /// Hand-writes a zip with stored (method 0) entries. When
@@ -170,5 +203,92 @@ internal static class SquirrelFixtures
         Span<byte> buffer = stackalloc byte[4];
         BitConverter.TryWriteBytes(buffer, value);
         stream.Write(buffer);
+    }
+
+    private static byte[] BuildPeWithNamedResource(
+        string typeName,
+        int resourceId,
+        byte[] resourceData,
+        Machine machine)
+    {
+        var metadata = new MetadataBuilder();
+        metadata.AddModule(
+            0,
+            metadata.GetOrAddString("setup.exe"),
+            metadata.GetOrAddGuid(Guid.NewGuid()),
+            default,
+            default);
+        metadata.AddAssembly(
+            metadata.GetOrAddString("setup"),
+            new Version(1, 0, 0, 0),
+            culture: default,
+            publicKey: default,
+            flags: 0,
+            hashAlgorithm: AssemblyHashAlgorithm.None);
+        metadata.AddTypeDefinition(
+            default,
+            default,
+            metadata.GetOrAddString("<Module>"),
+            baseType: default,
+            fieldList: MetadataTokens.FieldDefinitionHandle(1),
+            methodList: MetadataTokens.MethodDefinitionHandle(1));
+
+        var builder = new ManagedPEBuilder(
+            new PEHeaderBuilder(machine: machine, imageCharacteristics: Characteristics.ExecutableImage),
+            new MetadataRootBuilder(metadata),
+            ilStream: new BlobBuilder(),
+            nativeResources: new NamedResourceSection(typeName, resourceId, resourceData));
+        var output = new BlobBuilder();
+        builder.Serialize(output);
+        return output.ToArray();
+    }
+
+    private sealed class NamedResourceSection(string typeName, int resourceId, byte[] data) : ResourceSectionBuilder
+    {
+        protected override void Serialize(BlobBuilder builder, SectionLocation location)
+        {
+            const int typeDirectoryOffset = 24;
+            const int nameDirectoryOffset = 48;
+            const int dataEntryOffset = 72;
+            const int typeNameOffset = 88;
+            int typeNameBytes = 2 + (typeName.Length * 2);
+            int dataOffset = (typeNameOffset + typeNameBytes + 3) & ~3;
+
+            WriteDirectoryHeader(builder, namedCount: 1, idCount: 0);
+            builder.WriteUInt32(0x80000000u | typeNameOffset);
+            builder.WriteUInt32(0x80000000u | typeDirectoryOffset);
+
+            WriteDirectoryHeader(builder, namedCount: 0, idCount: 1);
+            builder.WriteUInt32((uint)resourceId);
+            builder.WriteUInt32(0x80000000u | nameDirectoryOffset);
+
+            WriteDirectoryHeader(builder, namedCount: 0, idCount: 1);
+            builder.WriteUInt32(0x0409);
+            builder.WriteUInt32(dataEntryOffset);
+
+            builder.WriteUInt32((uint)(location.RelativeVirtualAddress + dataOffset));
+            builder.WriteUInt32((uint)data.Length);
+            builder.WriteUInt32(0);
+            builder.WriteUInt32(0);
+
+            builder.WriteUInt16((ushort)typeName.Length);
+            builder.WriteBytes(Encoding.Unicode.GetBytes(typeName));
+            while (builder.Count < dataOffset)
+            {
+                builder.WriteByte(0);
+            }
+
+            builder.WriteBytes(data);
+        }
+
+        private static void WriteDirectoryHeader(BlobBuilder builder, ushort namedCount, ushort idCount)
+        {
+            builder.WriteUInt32(0);
+            builder.WriteUInt32(0);
+            builder.WriteUInt16(0);
+            builder.WriteUInt16(0);
+            builder.WriteUInt16(namedCount);
+            builder.WriteUInt16(idCount);
+        }
     }
 }

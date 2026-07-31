@@ -21,7 +21,7 @@ public class AdvancedInstallerProbeTests
     ];
 
     [Fact]
-    public void Plain_pe_without_overlay_returns_null()
+    public void Plain_pe_without_footer_returns_null()
     {
         using MemoryStream stream = PeFixtures.BuildExeStream(version: new VersionStrings(ProductName: "Tool"));
         using var peFile = new PeFile(stream);
@@ -31,19 +31,24 @@ public class AdvancedInstallerProbeTests
     }
 
     [Fact]
-    public void Overlay_without_7z_signature_returns_null()
+    public void Arbitrary_raw_overlay_7z_sfx_is_not_advanced_installer()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildSfx(new byte[256]);
+        byte[] archive = SevenZipFixtures.Build(
+            ("product.msi", MsiFixtures.BuildMsi(_typicalProperties, "x64;1033")));
 
-        Assert.Null(Probe(sfx));
+        Assert.Null(Probe(AdvancedInstallerFixtures.BuildRawOverlay(archive)));
     }
 
     [Fact]
-    public void Sfx_with_embedded_msi_is_detected_with_payload_evidence()
+    public void Footer_text_without_a_valid_self_pointer_is_not_sufficient()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildInstaller(_typicalProperties);
+        Assert.Null(Probe(AdvancedInstallerFixtures.BuildRawOverlay("ADVINSTSFX"u8.ToArray())));
+    }
 
-        InstallerAnalysis? analysis = Probe(sfx);
+    [Fact]
+    public void Direct_msi_record_is_detected_by_type_even_with_a_bin_name()
+    {
+        InstallerAnalysis? analysis = Probe(AdvancedInstallerFixtures.BuildInstaller(_typicalProperties));
 
         Assert.NotNull(analysis);
         Assert.Equal(DetectedInstallerFormat.AdvancedInstaller, analysis.Format);
@@ -54,152 +59,146 @@ public class AdvancedInstallerProbeTests
         Assert.Equal("{5A2FEA1B-0F30-4F86-9F92-01A45C5A1E30}", installer.ProductCode);
         Assert.Equal(new LanguageTag("en-US"), installer.InstallerLocale);
         Assert.Equal("/exenoui /qn", installer.InstallerSwitches!.Silent);
-        Assert.Equal("/exebasicui /qb", installer.InstallerSwitches.SilentWithProgress);
         AppsAndFeaturesEntry arp = Assert.Single(installer.AppsAndFeaturesEntries!);
         Assert.Equal("Contoso Editor", arp.DisplayName);
-        Assert.Equal("Contoso Ltd", arp.Publisher);
     }
 
     [Fact]
-    public void Outer_version_strings_win_over_inner_msi_metadata()
+    public void Nested_7z_record_and_xor_flag_are_honored()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildInstaller(
+        byte[] setup = AdvancedInstallerFixtures.BuildInstaller(
+            _typicalProperties,
+            nestedSevenZip: true,
+            xorPayload: true);
+
+        Installer installer = Assert.Single(Probe(setup)!.Installers);
+
+        Assert.Equal(Architecture.X64, installer.Architecture);
+        Assert.Equal("{5A2FEA1B-0F30-4F86-9F92-01A45C5A1E30}", installer.ProductCode);
+    }
+
+    [Fact]
+    public void Msi_extension_on_a_non_msi_record_does_not_supply_identity()
+    {
+        byte[] msi = MsiFixtures.BuildMsi(_typicalProperties, "x64;1033");
+        byte[] setup = AdvancedInstallerFixtures.BuildContainer(
+            [new AdvancedInstallerFixtures.FixtureEntry(0, 3, 0, "decoy.msi", msi)],
+            version: AdvancedInstallerFixtures.BrandedStub);
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(setup));
+
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Null(installer.ProductCode);
+        Assert.Null(installer.AppsAndFeaturesEntries);
+        Assert.Equal("Contoso Studio", analysis.ProductName);
+    }
+
+    [Fact]
+    public void Outer_version_strings_win_over_visible_inner_msi_metadata()
+    {
+        byte[] setup = AdvancedInstallerFixtures.BuildInstaller(
             _typicalProperties,
             version: AdvancedInstallerFixtures.BrandedStub);
 
-        InstallerAnalysis? analysis = Probe(sfx);
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(setup));
 
-        Assert.NotNull(analysis);
         Assert.Equal("Contoso Studio", analysis.ProductName);
+        Assert.Equal("Contoso Ltd", analysis.Publisher);
         Assert.Equal("3.1.0", analysis.ProductVersion);
-        // The inner MSI is WiX-built, but the outer container decides the classification.
         Assert.Equal(InstallerType.Exe, Assert.Single(analysis.Installers).InstallerType);
     }
 
     [Fact]
-    public void Inner_msi_metadata_fills_gaps_when_the_stub_has_no_version_strings()
+    public void Visible_inner_msi_metadata_fills_outer_gaps()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildInstaller(_typicalProperties);
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(
+            Probe(AdvancedInstallerFixtures.BuildInstaller(_typicalProperties)));
 
-        InstallerAnalysis? analysis = Probe(sfx);
-
-        Assert.NotNull(analysis);
         Assert.Equal("Contoso Editor", analysis.ProductName);
         Assert.Equal("Contoso Ltd", analysis.Publisher);
         Assert.Equal("2.5.0", analysis.ProductVersion);
     }
 
-    // The MSI's summary-information template names the payload's architecture; the 32-bit
-    // stub is just the bootstrapper and must not decide it.
+    [Fact]
+    public void Hidden_inner_msi_does_not_leak_product_code_or_arp_identity()
+    {
+        (string Name, string Value)[] hidden = [.. _typicalProperties, ("ARPSYSTEMCOMPONENT", "1")];
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(
+            Probe(AdvancedInstallerFixtures.BuildInstaller(hidden)));
+
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(Architecture.X64, installer.Architecture);
+        Assert.Equal(Scope.Machine, installer.Scope);
+        Assert.Equal(new LanguageTag("en-US"), installer.InstallerLocale);
+        Assert.Null(installer.ProductCode);
+        Assert.Null(installer.AppsAndFeaturesEntries);
+        Assert.Null(analysis.ProductName);
+        Assert.Null(analysis.Publisher);
+        Assert.Null(analysis.ProductVersion);
+    }
+
     [Theory]
     [InlineData("Intel;1033", Architecture.X86)]
     [InlineData("x64;1033", Architecture.X64)]
     [InlineData("Arm64;1033", Architecture.Arm64)]
-    public void Architecture_comes_from_the_inner_msi_template(string template, Architecture expected)
+    public void Architecture_comes_from_the_inner_msi(string template, Architecture expected)
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildInstaller([], template: template, machine: Machine.I386);
+        byte[] setup = AdvancedInstallerFixtures.BuildInstaller([], template: template, machine: Machine.I386);
 
-        InstallerAnalysis? analysis = Probe(sfx);
-
-        Assert.NotNull(analysis);
-        Assert.Equal(expected, Assert.Single(analysis.Installers).Architecture);
+        Assert.Equal(expected, Assert.Single(Probe(setup)!.Installers).Architecture);
     }
 
     [Fact]
-    public void Readable_archive_without_msi_and_without_marker_returns_null()
+    public void Structurally_identified_container_with_a_truncated_table_throws()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildSfx(
-            SevenZipFixtures.Build(("readme.txt", "hello"u8.ToArray())));
+        byte[] setup = AdvancedInstallerFixtures.BuildInstaller(_typicalProperties);
+        int signature = setup.AsSpan().LastIndexOf("ADVINSTSFX"u8);
+        int footer = signature - 64;
+        BitConverter.GetBytes((uint)(footer - 2)).CopyTo(setup, footer + 20);
 
-        Assert.Null(Probe(sfx));
+        Assert.Throws<InvalidDataException>(() => Probe(setup));
     }
 
     [Fact]
-    public void Branded_stub_without_msi_payload_still_claims_the_format()
+    public void Corrupt_direct_msi_throws_an_explicit_error()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildSfx(
-            SevenZipFixtures.Build(("readme.txt", "hello"u8.ToArray())),
-            version: AdvancedInstallerFixtures.BrandedStub);
+        byte[] setup = AdvancedInstallerFixtures.BuildContainer(
+            [new AdvancedInstallerFixtures.FixtureEntry(1, 0, 0, "bad.bin", "not an msi"u8.ToArray())]);
 
-        InstallerAnalysis? analysis = Probe(sfx);
-
-        Assert.NotNull(analysis);
-        Assert.Equal(DetectedInstallerFormat.AdvancedInstaller, analysis.Format);
-        Assert.Equal("Contoso Studio", analysis.ProductName);
-        Installer installer = Assert.Single(analysis.Installers);
-        Assert.Null(installer.ProductCode);
-        Assert.Null(installer.AppsAndFeaturesEntries);
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => Probe(setup));
+        Assert.Contains("embedded MSI", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Corrupt_archive_with_branding_throws()
+    public void Corrupt_nested_7z_throws_an_explicit_error()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildSfx(
-            CorruptSevenZipOverlay(),
-            version: AdvancedInstallerFixtures.BrandedStub);
+        byte[] setup = AdvancedInstallerFixtures.BuildContainer(
+            [new AdvancedInstallerFixtures.FixtureEntry(3, 7, 0, "bad.dat", "not a 7z"u8.ToArray())]);
 
-        Assert.Throws<InvalidDataException>(() => Probe(sfx));
-    }
-
-    [Fact]
-    public void Corrupt_archive_without_branding_returns_null()
-    {
-        byte[] sfx = AdvancedInstallerFixtures.BuildSfx(CorruptSevenZipOverlay());
-
-        Assert.Null(Probe(sfx));
-    }
-
-    [Fact]
-    public void Oversized_declared_msi_degrades_to_outer_metadata_without_extraction()
-    {
-        byte[] archive = SevenZipFixtures.Build(
-            [("product.msi", MsiFixtures.BuildMsi(_typicalProperties))],
-            firstEntryDeclaredSize: 512L * 1024 * 1024);
-        byte[] sfx = AdvancedInstallerFixtures.BuildSfx(archive, version: AdvancedInstallerFixtures.BrandedStub);
-
-        InstallerAnalysis? analysis = Probe(sfx);
-
-        Assert.NotNull(analysis);
-        Assert.Equal(DetectedInstallerFormat.AdvancedInstaller, analysis.Format);
-        Installer installer = Assert.Single(analysis.Installers);
-        Assert.Null(installer.ProductCode);
-        Assert.Null(installer.AppsAndFeaturesEntries);
-    }
-
-    [Fact]
-    public void Corrupt_inner_msi_payload_throws()
-    {
-        byte[] archive = SevenZipFixtures.Build(("product.msi", "this is not an msi"u8.ToArray()));
-        byte[] sfx = AdvancedInstallerFixtures.BuildSfx(archive);
-
-        Assert.Throws<InvalidDataException>(() => Probe(sfx));
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => Probe(setup));
+        Assert.Contains("nested 7z", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
     public void Elevation_manifest_of_the_stub_is_reported()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildInstaller(
+        byte[] setup = AdvancedInstallerFixtures.BuildInstaller(
             _typicalProperties,
             manifestXml: PeFixtures.ManifestXml("requireAdministrator"));
 
-        InstallerAnalysis? analysis = Probe(sfx);
-
-        Assert.NotNull(analysis);
         Assert.Equal(
             ElevationRequirement.ElevationRequired,
-            Assert.Single(analysis.Installers).ElevationRequirement);
+            Assert.Single(Probe(setup)!.Installers).ElevationRequirement);
     }
 
-    // Precedence evidence: the other exe probes must not claim an Advanced Installer SFX,
-    // so registering AdvancedInstallerProbe ahead of them can never mask a real match.
     [Fact]
-    public void Other_exe_probes_do_not_claim_the_sfx()
+    public void Other_exe_probes_do_not_claim_the_container()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildInstaller(_typicalProperties);
-
-        using var stream = new MemoryStream(sfx);
+        byte[] setup = AdvancedInstallerFixtures.BuildInstaller(_typicalProperties);
+        using var stream = new MemoryStream(setup);
         using var peFile = new PeFile(stream);
-        stream.Position = 0;
+
         Assert.Null(new BurnProbe().Probe(peFile, stream));
         stream.Position = 0;
         Assert.Null(new NsisProbe().Probe(peFile, stream));
@@ -208,32 +207,18 @@ public class AdvancedInstallerProbeTests
     [Fact]
     public void The_stream_is_left_open_after_probing()
     {
-        byte[] sfx = AdvancedInstallerFixtures.BuildInstaller(_typicalProperties);
-
-        using var stream = new MemoryStream(sfx);
+        byte[] setup = AdvancedInstallerFixtures.BuildInstaller(_typicalProperties);
+        using var stream = new MemoryStream(setup);
         using var peFile = new PeFile(stream);
-        stream.Position = 0;
+
         new AdvancedInstallerProbe().Probe(peFile, stream);
 
         Assert.True(stream.CanRead);
     }
 
-    /// <summary>A 7z signature followed by garbage instead of a parseable archive.</summary>
-    private static byte[] CorruptSevenZipOverlay()
+    private static InstallerAnalysis? Probe(byte[] setup)
     {
-        byte[] overlay = new byte[128];
-        new byte[] { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C }.CopyTo(overlay, 0);
-        for (int i = 6; i < overlay.Length; i++)
-        {
-            overlay[i] = 0xFF;
-        }
-
-        return overlay;
-    }
-
-    private static InstallerAnalysis? Probe(byte[] sfx)
-    {
-        using var stream = new MemoryStream(sfx);
+        using var stream = new MemoryStream(setup);
         using var peFile = new PeFile(stream);
         stream.Position = 0;
         return new AdvancedInstallerProbe().Probe(peFile, stream);
