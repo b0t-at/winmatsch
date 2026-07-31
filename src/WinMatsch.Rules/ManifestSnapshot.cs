@@ -714,9 +714,11 @@ internal sealed class ManifestSnapshot
 
         string installerSemanticPrefix = semanticPath[..(close + 1)];
         RawManifestChange? pairing = pairingChanges.FirstOrDefault(
-            change => change.DocumentKey == "installer"
-                && change.SemanticPath.StartsWith(
-                    $"{installerSemanticPrefix}.",
+            change => change.IsPairing
+                && change.DocumentKey == "installer"
+                && string.Equals(
+                    change.SemanticPath,
+                    installerSemanticPrefix,
                     StringComparison.Ordinal));
         if (pairing is null
             || !TryGetInstallerIndex(pairing.FieldPath, out int installerIndex))
@@ -1060,11 +1062,21 @@ internal sealed class ManifestSnapshot
         foreach (SequencePair pair in pairs.OrderBy(static pair => pair.AfterIndex))
         {
             string identity = InstallerIdentity(before.Children[pair.BeforeIndex], beforeRoot);
+            string installerSemanticPath =
+                $"{semanticPath}{{installer:{Hash(identity)}#{beforeOccurrences[pair.BeforeIndex]}}}";
+            changes.Add(new(
+                documentKey,
+                manifestPath,
+                $"{fieldPath}[{pair.AfterIndex}]",
+                installerSemanticPath,
+                Before: null,
+                After: null,
+                IsPairing: true));
             DiffNode(
                 documentKey,
                 manifestPath,
                 $"{fieldPath}[{pair.AfterIndex}]",
-                $"{semanticPath}{{installer:{Hash(identity)}#{beforeOccurrences[pair.BeforeIndex]}}}",
+                installerSemanticPath,
                 before.Children[pair.BeforeIndex],
                 after.Children[pair.AfterIndex],
                 changes);
@@ -1733,4 +1745,5 @@ internal sealed record RawManifestChange(
     string FieldPath,
     string SemanticPath,
     string? Before,
-    string? After);
+    string? After,
+    bool IsPairing = false);

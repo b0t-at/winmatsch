@@ -17,9 +17,13 @@ internal static class HumanCorrectionDetector
             return;
         }
 
-        IReadOnlyList<RawManifestChange> humanChanges = botSnapshot.Diff(humanSnapshot);
+        IReadOnlyList<RawManifestChange> humanChanges = botSnapshot
+            .Diff(humanSnapshot)
+            .Where(static change => !change.IsPairing)
+            .ToArray();
         IReadOnlyList<RawManifestChange> generatedChangeList = botSnapshot.Diff(generatedSnapshot);
         Dictionary<SemanticChangeKey, RawManifestChange> generatedChanges = generatedChangeList
+            .Where(static change => !change.IsPairing)
             .ToDictionary(
                 static change => new SemanticChangeKey(change.DocumentKey, change.SemanticPath),
                 static change => change);

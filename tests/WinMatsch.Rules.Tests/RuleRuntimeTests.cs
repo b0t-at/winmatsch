@@ -369,6 +369,36 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Root_identity_change_keeps_installer_pairing_for_other_corrections()
+    {
+        static PackageManifests Create(InstallerType rootType, string productCode)
+        {
+            Installer installer = TestManifests.CreateInstaller(
+                installerType: null,
+                url: "https://example.test/app.exe");
+            installer.ProductCode = productCode;
+            PackageManifests manifests = TestManifests.Create(installer);
+            manifests.Installer.InstallerType = rootType;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(InstallerType.Msi, "A"),
+            Previous = Create(InstallerType.Msi, "B"),
+            Manifests = Create(InstallerType.Inno, "A"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal)
+                && review.HumanValue == "B"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
     public void Versioned_url_pattern_reversion_requires_review()
     {
         static PackageManifests Create(string url)

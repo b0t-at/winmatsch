@@ -231,6 +231,11 @@ public sealed class RulePipeline
     {
         foreach (RawManifestChange change in changes)
         {
+            if (change.IsPairing)
+            {
+                continue;
+            }
+
             RuleChangeEvidence evidence = evidenceContext.FindChangeEvidence(
                     rule.Id,
                     change.ManifestPath,
