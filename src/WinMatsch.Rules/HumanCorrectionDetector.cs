@@ -42,7 +42,9 @@ internal static class HumanCorrectionDetector
                 humanChange.SemanticPath,
                 out string? effectiveValue)
                 ? effectiveValue
-                : generatedChange?.After ?? botValue;
+                : generatedChange is null
+                    ? botValue
+                    : generatedChange.After;
             bool generatedRestoresBot = generatedSnapshot.TryFindEffectiveInstallerValue(
                 humanChange.SemanticPath,
                 botValue,

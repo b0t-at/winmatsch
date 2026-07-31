@@ -460,6 +460,38 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Mixed_generated_values_without_the_bot_value_do_not_trigger_review()
+    {
+        static PackageManifests Create(string? rootProductCode, string first, string second)
+        {
+            Installer firstInstaller = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+            firstInstaller.ProductCode = first;
+            Installer secondInstaller = TestManifests.CreateInstaller(url: "https://example.test/b.exe");
+            secondInstaller.ProductCode = second;
+            PackageManifests manifests = TestManifests.Create(firstInstaller, secondInstaller);
+            manifests.Installer.ProductCode = rootProductCode;
+            if (rootProductCode is not null)
+            {
+                firstInstaller.ProductCode = null;
+                secondInstaller.ProductCode = null;
+            }
+
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("A", "A", "A"),
+            Previous = Create("B", "B", "B"),
+            Manifests = Create(rootProductCode: null, "C", "D"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
     public void Hoisted_generated_value_cannot_hide_a_reverted_installer_correction()
     {
         static Installer Installer(string url, string productCode)
