@@ -303,6 +303,22 @@ internal sealed class ManifestSnapshot
             ? ManifestPaths.GetInstallerFileName(identifier)
             : "installer.yaml";
 
+    internal static bool SemanticValueEquals(string fieldPath, string? left, string? right)
+    {
+        if (string.Equals(left, right, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return left is not null
+            && right is not null
+            && fieldPath.EndsWith(".InstallerUrl", StringComparison.Ordinal)
+            && string.Equals(
+                NormalizeInstallerUrl(left),
+                NormalizeInstallerUrl(right),
+                StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string GetVersionPath(PackageManifests manifests)
         => manifests.Version.PackageIdentifier is { } identifier
             ? ManifestPaths.GetVersionFileName(identifier)

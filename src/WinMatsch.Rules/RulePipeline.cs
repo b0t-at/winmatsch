@@ -56,7 +56,6 @@ public sealed class RulePipeline
         _overridePacks = overridePacks;
         _disabledRuleIds = new ReadOnlyCollection<string>(
             runtimeConfiguration.CommandOverrides
-                .Concat(runtimeConfiguration.UserOverrides)
                 .Where(static pair => pair.Value == RuleMode.Disabled)
                 .Select(static pair => pair.Key)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -67,7 +66,10 @@ public sealed class RulePipeline
     /// <summary>The rules in execution order, including disabled ones.</summary>
     public IReadOnlyList<IRule> Rules => _rules;
 
-    /// <summary>The ids of rules this pipeline skips.</summary>
+    /// <summary>
+    /// Rule ids unconditionally disabled by the highest-precedence command layer. Package and
+    /// user modes are context-dependent and are reported through <see cref="ManifestContext.Executions"/>.
+    /// </summary>
     public IReadOnlyCollection<string> DisabledRuleIds => _disabledRuleIds;
 
     /// <summary>Creates a pipeline with explicit runtime mode and package override inputs.</summary>

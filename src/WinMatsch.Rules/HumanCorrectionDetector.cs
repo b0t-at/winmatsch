@@ -31,7 +31,10 @@ internal static class HumanCorrectionDetector
             string? generatedValue = generatedChange?.After ?? humanChange.Before;
 
             if (!string.Equals(humanChange.Before, humanChange.After, StringComparison.Ordinal)
-                && string.Equals(humanChange.Before, generatedValue, StringComparison.Ordinal))
+                && ManifestSnapshot.SemanticValueEquals(
+                    humanChange.FieldPath,
+                    humanChange.Before,
+                    generatedValue))
             {
                 context.AddHumanCorrectionReview(new(
                     generatedChange?.ManifestPath ?? humanChange.ManifestPath,

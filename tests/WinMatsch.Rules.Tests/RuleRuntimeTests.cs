@@ -343,6 +343,27 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Versioned_url_pattern_reversion_requires_review()
+    {
+        static PackageManifests Create(string url)
+            => TestManifests.Create(TestManifests.CreateInstaller(url: url));
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("https://example.test/app-win64-1.0.exe"),
+            Previous = Create("https://example.test/app-win32-1.0.exe"),
+            Manifests = Create("https://example.test/app-win64-2.0.exe"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.EndsWith(".InstallerUrl", StringComparison.Ordinal)
+                && review.HumanValue == "https://example.test/app-win32-1.0.exe");
+    }
+
+    [Fact]
     public void Human_inserted_installer_is_not_hidden_by_index_shifts()
     {
         Installer original = TestManifests.CreateInstaller(url: "https://example.test/app-x64.exe");
@@ -634,6 +655,8 @@ public class RuleRuntimeTests
     [InlineData("{\"client_secret\":\"oauth-secret\"}")]
     [InlineData("--access-token oauth-secret")]
     [InlineData("--oauth-token oauth-secret")]
+    [InlineData("oauth_client_secret=oauth-secret")]
+    [InlineData("{\"oauthClientSecret\":\"oauth-secret\"}")]
     public void Syntactically_bounded_credential_markers_are_redacted(string message)
     {
         ManifestContext context = TestManifests.CreateContext(
@@ -661,6 +684,7 @@ public class RuleRuntimeTests
     [Theory]
     [InlineData("Download from https://example.test/file?sig=super-secret")]
     [InlineData("Download from https://example.test/token%3Dsuper-secret/file.exe")]
+    [InlineData("Download from https://example.test/token%253Dsuper-secret/file.exe")]
     public void Embedded_signed_or_encoded_urls_cannot_leak_from_structured_values(string value)
     {
         string? sanitized = RuleLogSanitizer.Sanitize("SourceEvidence", value);
@@ -715,6 +739,28 @@ public class RuleRuntimeTests
 
         Assert.False(context.RequiresReview);
         Assert.Empty(context.HumanCorrectionReviews);
+    }
+
+    [Fact]
+    public void Disabled_rule_ids_only_reports_unconditional_command_disables()
+    {
+        var configuration = new RuleRuntimeConfiguration(
+            userOverrides: new Dictionary<string, RuleMode>
+            {
+                [RuleIds.NormalizeProductCodes] = RuleMode.Disabled,
+            },
+            commandOverrides: new Dictionary<string, RuleMode>
+            {
+                [RuleIds.NormalizeProductCodes] = RuleMode.Apply,
+                [RuleIds.ScrubEmptyStrings] = RuleMode.Disabled,
+            });
+        RulePipeline pipeline = RulePipeline.Create(
+            [new NormalizeProductCodesRule(), new ScrubEmptyStringsRule()],
+            configuration,
+            OverridePackSet.Empty);
+
+        Assert.DoesNotContain(RuleIds.NormalizeProductCodes, pipeline.DisabledRuleIds);
+        Assert.Contains(RuleIds.ScrubEmptyStrings, pipeline.DisabledRuleIds);
     }
 
     private sealed class ReplaceUrlRule : IRule

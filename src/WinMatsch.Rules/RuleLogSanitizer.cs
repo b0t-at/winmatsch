@@ -88,7 +88,31 @@ internal static class RuleLogSanitizer
             return false;
         }
 
-        string decodedPath = Uri.UnescapeDataString(uri.AbsolutePath);
+        string decodedPath = uri.AbsolutePath;
+        const int maximumDecodeIterations = 5;
+        for (int iteration = 0; iteration < maximumDecodeIterations; iteration++)
+        {
+            string next = Uri.UnescapeDataString(decodedPath);
+            if (string.Equals(next, decodedPath, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            decodedPath = next;
+            if (decodedPath.Length > 65_536)
+            {
+                sanitized = "[REDACTED]";
+                return true;
+            }
+
+            if (iteration == maximumDecodeIterations - 1
+                && decodedPath.Contains('%'))
+            {
+                sanitized = "[REDACTED]";
+                return true;
+            }
+        }
+
         if (ContainsBoundedCredential(decodedPath))
         {
             sanitized = "[REDACTED]";
@@ -117,18 +141,21 @@ internal static class RuleLogSanitizer
             "api_token",
             "oauth_token",
             "client_secret",
+            "oauth_client_secret",
             "access-token",
             "refresh-token",
             "id-token",
             "api-token",
             "oauth-token",
             "client-secret",
+            "oauth-client-secret",
             "accessToken",
             "refreshToken",
             "idToken",
             "apiToken",
             "oauthToken",
             "clientSecret",
+            "oauthClientSecret",
             "password",
             "passwd",
             "secret",
