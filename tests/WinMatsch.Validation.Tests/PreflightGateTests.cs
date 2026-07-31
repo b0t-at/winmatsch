@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
@@ -196,7 +197,7 @@ public sealed class PreflightGateTests
     }
 
     [Fact]
-    public async Task Nested_paths_and_aliases_are_validated_across_installers()
+    public async Task Nested_paths_are_safe_and_aliases_may_repeat_across_alternative_installers()
     {
         PackageManifests manifests = TestPackageFactory.CreateManifests();
         manifests.Installer.InstallerType = InstallerType.Zip;
@@ -231,7 +232,7 @@ public sealed class PreflightGateTests
             .ValidateAsync(TestPackageFactory.CreateRequest(manifests));
 
         Assert.Contains(report.Findings, static finding => finding.Code == "VLD3005");
-        Assert.Contains(report.Findings, static finding => finding.Code == "VLD3010");
+        Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD3010");
     }
 
     [Fact]
@@ -416,7 +417,9 @@ public sealed class PreflightGateTests
             ];
             PreflightRequest valid = TestPackageFactory.CreateRequest(manifests);
             InstallerArtifact artifact = Assert.Single(valid.InstallerArtifacts);
-            DownloadResult download = CopyDownload(artifact.Download, archivePath);
+            DownloadResult download = TestPackageFactory.CopyDownload(
+                artifact.Download,
+                filePath: archivePath);
             PreflightRequest request = Copy(
                 valid,
                 artifacts: [artifact with { Download = download }]);
@@ -430,6 +433,154 @@ public sealed class PreflightGateTests
         {
             File.Delete(archivePath);
         }
+    }
+
+    [Fact]
+    public async Task Root_nested_metadata_can_be_shared_by_alternative_architectures()
+    {
+        string archivePath = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-validation-{Guid.NewGuid():N}.zip");
+        try
+        {
+            using (ZipArchive archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+            {
+                _ = archive.CreateEntry("bin/tool.exe");
+            }
+
+            PackageManifests manifests = TestPackageFactory.CreateManifests();
+            manifests.Installer.InstallerType = InstallerType.Zip;
+            manifests.Installer.NestedInstallerType = InstallerType.Portable;
+            manifests.Installer.NestedInstallerFiles =
+            [
+                new NestedInstallerFile
+                {
+                    RelativeFilePath = "bin/tool.exe",
+                    PortableCommandAlias = "tool",
+                },
+            ];
+            manifests.Installer.Installers!.Add(new Installer
+            {
+                Architecture = Architecture.Arm64,
+                InstallerUrl = TestPackageFactory.InstallerUrl,
+                InstallerSha256 = new Sha256Hash(TestPackageFactory.Hash),
+            });
+            PreflightRequest valid = TestPackageFactory.CreateRequest(manifests);
+            InstallerArtifact artifact = Assert.Single(valid.InstallerArtifacts);
+            PreflightRequest request = Copy(
+                valid,
+                artifacts:
+                [
+                    artifact with
+                    {
+                        Download = TestPackageFactory.CopyDownload(
+                            artifact.Download,
+                            filePath: archivePath),
+                    },
+                ]);
+
+            ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+                .ValidateAsync(request);
+
+            Assert.True(report.IsValid, report.ToText());
+            Assert.DoesNotContain(
+                report.Findings,
+                static finding => finding.Code is "VLD3006" or "VLD3010");
+        }
+        finally
+        {
+            File.Delete(archivePath);
+        }
+    }
+
+    [Fact]
+    public async Task Zip_entry_count_is_rejected_before_central_directory_materialization()
+    {
+        string archivePath = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-validation-{Guid.NewGuid():N}.zip");
+        try
+        {
+            byte[] endRecord = new byte[22];
+            BinaryPrimitives.WriteUInt32LittleEndian(endRecord, 0x06054B50);
+            BinaryPrimitives.WriteUInt16LittleEndian(endRecord.AsSpan(8), 10_001);
+            BinaryPrimitives.WriteUInt16LittleEndian(endRecord.AsSpan(10), 10_001);
+            await File.WriteAllBytesAsync(archivePath, endRecord);
+
+            PackageManifests manifests = TestPackageFactory.CreateManifests();
+            manifests.Installer.InstallerType = InstallerType.Zip;
+            Installer installer = Assert.Single(manifests.Installer.Installers!);
+            installer.NestedInstallerType = InstallerType.Portable;
+            installer.NestedInstallerFiles =
+            [
+                new NestedInstallerFile
+                {
+                    RelativeFilePath = "bin/tool.exe",
+                    PortableCommandAlias = "tool",
+                },
+            ];
+            PreflightRequest valid = TestPackageFactory.CreateRequest(manifests);
+            InstallerArtifact artifact = Assert.Single(valid.InstallerArtifacts);
+            PreflightRequest request = Copy(
+                valid,
+                artifacts:
+                [
+                    artifact with
+                    {
+                        Download = TestPackageFactory.CopyDownload(
+                            artifact.Download,
+                            filePath: archivePath),
+                    },
+                ]);
+
+            ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+                .ValidateAsync(request);
+
+            Assert.Contains(
+                report.Findings,
+                static finding => finding.Code == "VLD3012"
+                    && finding.Message.Contains("10001 entries", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.Delete(archivePath);
+        }
+    }
+
+    [Fact]
+    public async Task Changed_redirect_target_blocks_boundary_even_when_revalidation_reports_unchanged()
+    {
+        var network = new FakePreflightNetwork
+        {
+            RevalidatedFinalUrl = "https://cdn2.example.com/setup.exe",
+        };
+        var boundary = new FakeBoundary();
+
+        ValidationReport report = await new PreflightGate(network)
+            .ExecuteAsync(TestPackageFactory.CreateRequest(), boundary);
+
+        Assert.Contains(report.Findings, static finding => finding.Code == "VLD6011");
+        Assert.Equal(0, boundary.InvocationCount);
+    }
+
+    [Fact]
+    public async Task Downloader_policy_failure_becomes_a_deterministic_probe_error()
+    {
+        PackageManifests manifests = TestPackageFactory.CreateManifests();
+        const string insecureUrl = "http://example.com/setup.exe";
+        Assert.Single(manifests.Installer.Installers!).InstallerUrl = insecureUrl;
+        var network = new FakePreflightNetwork
+        {
+            InvalidOperationProbeUrl = insecureUrl,
+        };
+
+        ValidationReport report = await new PreflightGate(network)
+            .ValidateAsync(TestPackageFactory.CreateRequest(manifests));
+
+        ValidationFinding finding = Assert.Single(
+            report.Findings,
+            static finding => finding.Code == "VLD5004");
+        Assert.Equal(ValidationSeverity.Error, finding.Severity);
     }
 
     [Theory]
@@ -465,22 +616,4 @@ public sealed class PreflightGateTests
             Options = source.Options,
         };
 
-    private static DownloadResult CopyDownload(DownloadResult source, string filePath)
-        => new()
-        {
-            FilePath = filePath,
-            FileName = Path.GetFileName(filePath),
-            Sha256 = source.Sha256,
-            SizeInBytes = source.SizeInBytes,
-            LastModified = source.LastModified,
-            ETag = source.ETag,
-            ResponseDate = source.ResponseDate,
-            FreshUntil = source.FreshUntil,
-            RetrievedAt = source.RetrievedAt,
-            InitialUrl = source.InitialUrl,
-            FinalUrl = source.FinalUrl,
-            ContentType = source.ContentType,
-            IsFromCache = source.IsFromCache,
-            MayBeStored = source.MayBeStored,
-        };
 }

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
@@ -15,6 +16,9 @@ public static class ManifestSchemaValidator
     public const string SchemaVersion = "1.12.0";
 
     private const string Draft7Identifier = "http://json-schema.org/draft-07/schema#";
+    private const int MaxManifestBytes = 16 * 1024 * 1024;
+    private const int MaxYamlDepth = 64;
+    private const int MaxYamlNodes = 100_000;
 
     private static readonly Dictionary<ManifestType, SchemaEntry> _schemas = LoadSchemas();
 
@@ -58,6 +62,13 @@ public static class ManifestSchemaValidator
             return new ValidationReport(
             [
                 Error("VLD1001", exception.Message, document.RepositoryPath),
+            ]);
+        }
+        catch (ArgumentException exception)
+        {
+            return new ValidationReport(
+            [
+                Error("VLD1001", $"Invalid YAML: {exception.Message}", document.RepositoryPath),
             ]);
         }
 
@@ -153,6 +164,12 @@ public static class ManifestSchemaValidator
 
     private static (JsonDocument Document, YamlMappingNode Root) ConvertYamlToJson(string yaml)
     {
+        if (Encoding.UTF8.GetByteCount(yaml) > MaxManifestBytes)
+        {
+            throw new InvalidDataException(
+                $"A manifest cannot exceed {MaxManifestBytes} UTF-8 bytes.");
+        }
+
         var stream = new YamlStream();
         using var reader = new StringReader(yaml);
         stream.Load(reader);
@@ -165,14 +182,38 @@ public static class ManifestSchemaValidator
         using var output = new MemoryStream();
         using (var writer = new Utf8JsonWriter(output))
         {
-            WriteNode(writer, root);
+            int nodesRemaining = MaxYamlNodes;
+            WriteNode(writer, root, depth: 0, ref nodesRemaining);
         }
 
         return (JsonDocument.Parse(output.ToArray()), root);
     }
 
-    private static void WriteNode(Utf8JsonWriter writer, YamlNode node)
+    private static void WriteNode(
+        Utf8JsonWriter writer,
+        YamlNode node,
+        int depth,
+        ref int nodesRemaining)
     {
+        if (!node.Anchor.IsEmpty)
+        {
+            throw new InvalidDataException(
+                "YAML anchors and aliases are not permitted in manifests.");
+        }
+
+        if (depth > MaxYamlDepth)
+        {
+            throw new InvalidDataException(
+                $"YAML nesting cannot exceed {MaxYamlDepth} levels.");
+        }
+
+        nodesRemaining--;
+        if (nodesRemaining < 0)
+        {
+            throw new InvalidDataException(
+                $"A manifest cannot contain more than {MaxYamlNodes} YAML nodes.");
+        }
+
         switch (node)
         {
             case YamlMappingNode mapping:
@@ -185,7 +226,7 @@ public static class ManifestSchemaValidator
                     }
 
                     writer.WritePropertyName(key.Value);
-                    WriteNode(writer, valueNode);
+                    WriteNode(writer, valueNode, depth + 1, ref nodesRemaining);
                 }
 
                 writer.WriteEndObject();
@@ -194,7 +235,7 @@ public static class ManifestSchemaValidator
                 writer.WriteStartArray();
                 foreach (YamlNode item in sequence.Children)
                 {
-                    WriteNode(writer, item);
+                    WriteNode(writer, item, depth + 1, ref nodesRemaining);
                 }
 
                 writer.WriteEndArray();
@@ -210,7 +251,13 @@ public static class ManifestSchemaValidator
     private static void WriteScalar(Utf8JsonWriter writer, YamlScalarNode scalar)
     {
         string? value = scalar.Value;
-        if (scalar.Style != ScalarStyle.Plain)
+        if (!scalar.Tag.IsEmpty && !scalar.Tag.IsNonSpecific)
+        {
+            WriteExplicitlyTaggedScalar(writer, scalar.Tag.Value, value);
+            return;
+        }
+
+        if (scalar.Tag == "!" || scalar.Style != ScalarStyle.Plain)
         {
             writer.WriteStringValue(value);
             return;
@@ -227,14 +274,143 @@ public static class ManifestSchemaValidator
         {
             writer.WriteBooleanValue(boolean);
         }
-        else if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long integer))
+        else if (TryParseYamlInteger(value, out long integer))
         {
             writer.WriteNumberValue(integer);
+        }
+        else if (TryParseYamlFloat(value, out decimal number))
+        {
+            writer.WriteNumberValue(number);
         }
         else
         {
             writer.WriteStringValue(value);
         }
+    }
+
+    private static void WriteExplicitlyTaggedScalar(
+        Utf8JsonWriter writer,
+        string tag,
+        string? value)
+    {
+        switch (tag)
+        {
+            case "tag:yaml.org,2002:str":
+                writer.WriteStringValue(value);
+                return;
+            case "tag:yaml.org,2002:null" when value is null
+                || value.Length == 0
+                || value.Equals("null", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("~", StringComparison.Ordinal):
+                writer.WriteNullValue();
+                return;
+            case "tag:yaml.org,2002:bool" when bool.TryParse(value, out bool boolean):
+                writer.WriteBooleanValue(boolean);
+                return;
+            case "tag:yaml.org,2002:int" when value is not null
+                && TryParseYamlInteger(value, out long integer):
+                writer.WriteNumberValue(integer);
+                return;
+            case "tag:yaml.org,2002:float" when value is not null
+                && TryParseYamlFloat(value, out decimal number):
+                writer.WriteNumberValue(number);
+                return;
+            default:
+                throw new InvalidDataException(
+                    $"YAML scalar tag '{tag}' is unsupported or has an invalid value.");
+        }
+    }
+
+    private static bool TryParseYamlInteger(string value, out long integer)
+    {
+        string normalized = value.Replace("_", string.Empty, StringComparison.Ordinal);
+        int sign = 1;
+        int prefixIndex = 0;
+        if (normalized.StartsWith('+'))
+        {
+            prefixIndex = 1;
+        }
+        else if (normalized.StartsWith('-'))
+        {
+            sign = -1;
+            prefixIndex = 1;
+        }
+
+        ReadOnlySpan<char> unsigned = normalized.AsSpan(prefixIndex);
+        int radix;
+        if (unsigned.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            radix = 16;
+            unsigned = unsigned[2..];
+        }
+        else if (unsigned.StartsWith("0o", StringComparison.OrdinalIgnoreCase))
+        {
+            radix = 8;
+            unsigned = unsigned[2..];
+        }
+        else
+        {
+            return long.TryParse(
+                normalized,
+                NumberStyles.AllowLeadingSign,
+                CultureInfo.InvariantCulture,
+                out integer);
+        }
+
+        if (unsigned.IsEmpty)
+        {
+            integer = default;
+            return false;
+        }
+
+        BigInteger parsed = BigInteger.Zero;
+        foreach (char character in unsigned)
+        {
+            int digit = character switch
+            {
+                >= '0' and <= '9' => character - '0',
+                >= 'a' and <= 'f' => character - 'a' + 10,
+                >= 'A' and <= 'F' => character - 'A' + 10,
+                _ => -1,
+            };
+            if (digit < 0 || digit >= radix)
+            {
+                integer = default;
+                return false;
+            }
+
+            parsed = (parsed * radix) + digit;
+        }
+
+        parsed *= sign;
+        if (parsed < long.MinValue || parsed > long.MaxValue)
+        {
+            integer = default;
+            return false;
+        }
+
+        integer = (long)parsed;
+        return true;
+    }
+
+    private static bool TryParseYamlFloat(string value, out decimal number)
+    {
+        string normalized = value.Replace("_", string.Empty, StringComparison.Ordinal);
+        if (normalized.IndexOfAny(['.', 'e', 'E']) < 0
+            || normalized.Equals(".inf", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("+.inf", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("-.inf", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals(".nan", StringComparison.OrdinalIgnoreCase))
+        {
+            number = default;
+            return false;
+        }
+
+        return decimal.TryParse(
+            normalized,
+            NumberStyles.Float,
+            CultureInfo.InvariantCulture,
+            out number);
     }
 
     private static void ValidatePropertyCasing(

@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
@@ -6,6 +7,15 @@ namespace WinMatsch.Validation;
 
 internal static class ManifestSemanticValidator
 {
+    private const int MaxArchiveEntries = 10_000;
+    private const int MaxArchivePathLength = 2_048;
+    private const long MaxArchiveEntryBytes = 256L * 1024 * 1024;
+    private const long MaxExpandedArchiveBytes = 1024L * 1024 * 1024;
+    private const long MaxCentralDirectoryBytes = 64L * 1024 * 1024;
+    private const uint EndOfCentralDirectorySignature = 0x06054B50;
+    private const uint Zip64EndOfCentralDirectorySignature = 0x06064B50;
+    private const uint Zip64LocatorSignature = 0x07064B50;
+
     public static SemanticValidationResult Validate(
         ParsedPackage package,
         PreflightRequest request,
@@ -156,8 +166,6 @@ internal static class ManifestSemanticValidator
 
         var keys = new Dictionary<EffectiveInstallerKey, int>();
         var urlSemantics = new Dictionary<string, (InstallerSemantics Semantics, int Index)>(StringComparer.Ordinal);
-        var nestedPaths = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var aliases = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         for (int i = 0; i < installers.Count; i++)
         {
@@ -180,13 +188,7 @@ internal static class ManifestSemanticValidator
             }
 
             ValidateUrlSemantics(manifest, installer, i, urlSemantics, findings);
-            ValidateNestedInstaller(
-                manifest,
-                installer,
-                i,
-                nestedPaths,
-                aliases,
-                findings);
+            ValidateNestedInstaller(manifest, installer, i, findings);
         }
     }
 
@@ -233,8 +235,6 @@ internal static class ManifestSemanticValidator
         InstallerManifest manifest,
         Installer installer,
         int installerIndex,
-        Dictionary<string, int> nestedPaths,
-        Dictionary<string, int> aliases,
         List<ValidationFinding> findings)
     {
         InstallerType? type = installer.InstallerType ?? manifest.InstallerType;
@@ -266,6 +266,8 @@ internal static class ManifestSemanticValidator
             return;
         }
 
+        var nestedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < nestedFiles.Count; i++)
         {
             NestedInstallerFile nested = nestedFiles[i];
@@ -277,7 +279,7 @@ internal static class ManifestSemanticValidator
                     "RelativeFilePath must be a non-rooted archive path without empty, '.' or '..' segments.",
                     $"{nestedPath}.RelativeFilePath"));
             }
-            else if (!nestedPaths.TryAdd(nested.RelativeFilePath!, installerIndex))
+            else if (!nestedPaths.Add(NormalizeArchivePath(nested.RelativeFilePath!)))
             {
                 findings.Add(Error(
                     "VLD3006",
@@ -313,7 +315,7 @@ internal static class ManifestSemanticValidator
                     "PortableCommandAlias must be a single non-whitespace command name without path or drive separators.",
                     $"{nestedPath}.PortableCommandAlias"));
             }
-            else if (!aliases.TryAdd(alias, installerIndex))
+            else if (!aliases.Add(alias))
             {
                 findings.Add(Error(
                     "VLD3010",
@@ -334,6 +336,8 @@ internal static class ManifestSemanticValidator
 
         return !path.Split(['/', '\\']).Any(static segment => segment is "" or "." or "..");
     }
+
+    private static string NormalizeArchivePath(string path) => path.Replace('\\', '/');
 
     private static bool IsSafeAlias(string alias)
         => !string.IsNullOrWhiteSpace(alias)
@@ -411,7 +415,38 @@ internal static class ManifestSemanticValidator
     {
         try
         {
+            ValidateZipDirectory(filePath);
             using ZipArchive archive = ZipFile.OpenRead(filePath);
+            if (archive.Entries.Count > MaxArchiveEntries)
+            {
+                throw new InvalidDataException(
+                    $"Archive contains {archive.Entries.Count} entries; the validation limit is {MaxArchiveEntries}.");
+            }
+
+            long expandedBytes = 0;
+            foreach (ZipArchiveEntry entry in archive.Entries)
+            {
+                if (entry.FullName.Length > MaxArchivePathLength)
+                {
+                    throw new InvalidDataException(
+                        $"Archive entry path exceeds {MaxArchivePathLength} characters.");
+                }
+
+                if (entry.Length < 0 || entry.Length > MaxArchiveEntryBytes)
+                {
+                    throw new InvalidDataException(
+                        $"Archive entry '{entry.FullName}' declares {entry.Length} bytes; "
+                        + $"the per-entry limit is {MaxArchiveEntryBytes}.");
+                }
+
+                expandedBytes = checked(expandedBytes + entry.Length);
+                if (expandedBytes > MaxExpandedArchiveBytes)
+                {
+                    throw new InvalidDataException(
+                        $"Archive expands beyond the {MaxExpandedArchiveBytes}-byte validation limit.");
+                }
+            }
+
             return
             [
                 .. archive.Entries
@@ -431,8 +466,153 @@ internal static class ManifestSemanticValidator
         {
             findings.Add(ArchiveError(exception.Message, installerIndex, filePath));
         }
+        catch (OverflowException exception)
+        {
+            findings.Add(ArchiveError(
+                $"Archive declares an overflowing expanded size: {exception.Message}",
+                installerIndex,
+                filePath));
+        }
 
         return null;
+    }
+
+    private static void ValidateZipDirectory(string filePath)
+    {
+        using FileStream stream = File.Open(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+        const int minimumRecordLength = 22;
+        const int maximumCommentLength = ushort.MaxValue;
+        int tailLength = checked((int)Math.Min(
+            stream.Length,
+            minimumRecordLength + maximumCommentLength));
+        if (tailLength < minimumRecordLength)
+        {
+            throw new InvalidDataException("Archive is too short to contain a ZIP central directory.");
+        }
+
+        byte[] tail = new byte[tailLength];
+        stream.Position = stream.Length - tailLength;
+        stream.ReadExactly(tail);
+        int recordIndex = FindEndOfCentralDirectory(tail);
+        if (recordIndex < 0)
+        {
+            throw new InvalidDataException("Archive has no valid ZIP end-of-central-directory record.");
+        }
+
+        ReadOnlySpan<byte> record = tail.AsSpan(recordIndex);
+        ushort diskNumber = BinaryPrimitives.ReadUInt16LittleEndian(record[4..]);
+        ushort centralDirectoryDisk = BinaryPrimitives.ReadUInt16LittleEndian(record[6..]);
+        ushort entriesOnDisk = BinaryPrimitives.ReadUInt16LittleEndian(record[8..]);
+        ushort totalEntries = BinaryPrimitives.ReadUInt16LittleEndian(record[10..]);
+        uint directorySize = BinaryPrimitives.ReadUInt32LittleEndian(record[12..]);
+        uint directoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(record[16..]);
+        if (diskNumber != 0 || centralDirectoryDisk != 0 || entriesOnDisk != totalEntries)
+        {
+            throw new InvalidDataException("Multi-disk ZIP archives are not supported.");
+        }
+
+        ulong resolvedEntries = totalEntries;
+        ulong resolvedSize = directorySize;
+        ulong resolvedOffset = directoryOffset;
+        if (totalEntries == ushort.MaxValue
+            || directorySize == uint.MaxValue
+            || directoryOffset == uint.MaxValue)
+        {
+            long endRecordOffset = stream.Length - tailLength + recordIndex;
+            (resolvedEntries, resolvedSize, resolvedOffset) =
+                ReadZip64DirectoryInfo(stream, endRecordOffset);
+        }
+
+        if (resolvedEntries > MaxArchiveEntries)
+        {
+            throw new InvalidDataException(
+                $"Archive declares {resolvedEntries} entries; the validation limit is {MaxArchiveEntries}.");
+        }
+
+        if (resolvedSize > MaxCentralDirectoryBytes)
+        {
+            throw new InvalidDataException(
+                $"Archive central directory declares {resolvedSize} bytes; "
+                + $"the validation limit is {MaxCentralDirectoryBytes}.");
+        }
+
+        ulong fileLength = checked((ulong)stream.Length);
+        if (resolvedOffset > fileLength
+            || resolvedSize > fileLength - resolvedOffset)
+        {
+            throw new InvalidDataException("Archive central directory extends beyond the file.");
+        }
+    }
+
+    private static int FindEndOfCentralDirectory(ReadOnlySpan<byte> tail)
+    {
+        for (int index = tail.Length - 22; index >= 0; index--)
+        {
+            if (BinaryPrimitives.ReadUInt32LittleEndian(tail[index..]) != EndOfCentralDirectorySignature)
+            {
+                continue;
+            }
+
+            ushort commentLength = BinaryPrimitives.ReadUInt16LittleEndian(tail[(index + 20)..]);
+            if (index + 22 + commentLength == tail.Length)
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static (ulong Entries, ulong Size, ulong Offset) ReadZip64DirectoryInfo(
+        FileStream stream,
+        long endRecordOffset)
+    {
+        if (endRecordOffset < 20)
+        {
+            throw new InvalidDataException("ZIP64 archive has no locator record.");
+        }
+
+        Span<byte> locator = stackalloc byte[20];
+        stream.Position = endRecordOffset - locator.Length;
+        stream.ReadExactly(locator);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(locator) != Zip64LocatorSignature
+            || BinaryPrimitives.ReadUInt32LittleEndian(locator[4..]) != 0
+            || BinaryPrimitives.ReadUInt32LittleEndian(locator[16..]) != 1)
+        {
+            throw new InvalidDataException("ZIP64 locator is invalid or describes multiple disks.");
+        }
+
+        ulong recordOffset = BinaryPrimitives.ReadUInt64LittleEndian(locator[8..]);
+        if (recordOffset > checked((ulong)Math.Max(0, stream.Length - 56)))
+        {
+            throw new InvalidDataException("ZIP64 end-of-central-directory record is outside the file.");
+        }
+
+        Span<byte> record = stackalloc byte[56];
+        stream.Position = checked((long)recordOffset);
+        stream.ReadExactly(record);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(record) != Zip64EndOfCentralDirectorySignature
+            || BinaryPrimitives.ReadUInt32LittleEndian(record[16..]) != 0
+            || BinaryPrimitives.ReadUInt32LittleEndian(record[20..]) != 0)
+        {
+            throw new InvalidDataException("ZIP64 end-of-central-directory record is invalid.");
+        }
+
+        ulong entriesOnDisk = BinaryPrimitives.ReadUInt64LittleEndian(record[24..]);
+        ulong totalEntries = BinaryPrimitives.ReadUInt64LittleEndian(record[32..]);
+        if (entriesOnDisk != totalEntries)
+        {
+            throw new InvalidDataException("Multi-disk ZIP64 archives are not supported.");
+        }
+
+        return (
+            totalEntries,
+            BinaryPrimitives.ReadUInt64LittleEndian(record[40..]),
+            BinaryPrimitives.ReadUInt64LittleEndian(record[48..]));
     }
 
     private static ValidationFinding ArchiveError(

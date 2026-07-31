@@ -121,6 +121,10 @@ public sealed class PreflightGate
             {
                 findings.Add(ProbeFailure(target, exception.Message));
             }
+            catch (InvalidOperationException exception)
+            {
+                findings.Add(ProbeFailure(target, exception.Message));
+            }
         }
     }
 
@@ -221,6 +225,17 @@ public sealed class PreflightGate
                         "Installer content changed during immediate pre-commit revalidation.",
                         expected.Url));
                 }
+                else if (!string.Equals(
+                             result.Result.FinalUrl,
+                             artifact.Download.FinalUrl,
+                             StringComparison.Ordinal))
+                {
+                    findings.Add(Error(
+                        "VLD6011",
+                        $"Installer redirect target changed from '{artifact.Download.FinalUrl}' "
+                        + $"to '{result.Result.FinalUrl}' during immediate revalidation.",
+                        expected.Url));
+                }
                 else if (result.Result.Sha256 != expected.Sha256)
                 {
                     findings.Add(Error(
@@ -237,6 +252,13 @@ public sealed class PreflightGate
                     expected.Url));
             }
             catch (ArgumentException exception)
+            {
+                findings.Add(Error(
+                    "VLD6010",
+                    $"Immediate installer revalidation failed: {exception.Message}",
+                    expected.Url));
+            }
+            catch (InvalidOperationException exception)
             {
                 findings.Add(Error(
                     "VLD6010",

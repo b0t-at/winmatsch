@@ -19,6 +19,9 @@
   <ItemGroup>
     <EmbeddedResource Include="..\..\schemas\manifest.*.1.12.0.json"
                       LogicalName="WinMatsch.Validation.Schemas.%(Filename)%(Extension)" />
+    <None Update="THIRD-PARTY-NOTICES.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -75,4 +75,77 @@ public sealed class ManifestSchemaValidatorTests
             static finding => finding.Code == "VLD1002"
                 && finding.Message.Contains("PackageIdentifier", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void Anchors_and_aliases_are_rejected_without_recursive_expansion()
+    {
+        const string yaml = """
+            PackageIdentifier: &identity Example.App
+            PackageVersion: *identity
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.12.0
+
+            """;
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Version);
+
+        ValidationFinding finding = Assert.Single(report.Findings);
+        Assert.Equal("VLD1001", finding.Code);
+        Assert.Contains("anchors and aliases", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Plain_numeric_scalars_remain_numbers_and_explicit_string_tags_are_honored()
+    {
+        const string numericYaml = """
+            PackageIdentifier: Example.App
+            PackageVersion: 1.0
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.12.0
+
+            """;
+        const string stringYaml = """
+            PackageIdentifier: Example.App
+            PackageVersion: !!str 1
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.12.0
+
+            """;
+
+        ValidationReport numeric = ManifestSchemaValidator.Validate(
+            new ManifestDocument("numeric.yaml", numericYaml),
+            ManifestType.Version);
+        ValidationReport explicitlyString = ManifestSchemaValidator.Validate(
+            new ManifestDocument("string.yaml", stringYaml),
+            ManifestType.Version);
+
+        Assert.Contains(numeric.Findings, static finding => finding.Code == "VLD1003");
+        Assert.True(explicitlyString.IsValid, explicitlyString.ToText());
+    }
+
+    [Fact]
+    public void Duplicate_mapping_keys_return_a_diagnostic_instead_of_throwing()
+    {
+        const string yaml = """
+            PackageIdentifier: Example.App
+            PackageVersion: 1.0.0
+            DefaultLocale: en-US
+            DefaultLocale: de-DE
+            ManifestType: version
+            ManifestVersion: 1.12.0
+
+            """;
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Version);
+
+        Assert.False(report.IsValid);
+        Assert.Contains(report.Findings, static finding => finding.Code == "VLD1001");
+    }
 }

@@ -106,6 +106,28 @@ internal static class TestPackageFactory
             FinalUrl = url,
             RetrievedAt = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero),
         };
+
+    public static DownloadResult CopyDownload(
+        DownloadResult source,
+        string? filePath = null,
+        string? finalUrl = null)
+        => new()
+        {
+            FilePath = filePath ?? source.FilePath,
+            FileName = filePath is null ? source.FileName : Path.GetFileName(filePath),
+            Sha256 = source.Sha256,
+            SizeInBytes = source.SizeInBytes,
+            LastModified = source.LastModified,
+            ETag = source.ETag,
+            ResponseDate = source.ResponseDate,
+            FreshUntil = source.FreshUntil,
+            RetrievedAt = source.RetrievedAt,
+            InitialUrl = source.InitialUrl,
+            FinalUrl = finalUrl ?? source.FinalUrl,
+            ContentType = source.ContentType,
+            IsFromCache = source.IsFromCache,
+            MayBeStored = source.MayBeStored,
+        };
 }
 
 internal sealed class FakePreflightNetwork : IPreflightNetwork
@@ -119,7 +141,11 @@ internal sealed class FakePreflightNetwork : IPreflightNetwork
 
     public string? FailingProbeUrl { get; init; }
 
+    public string? InvalidOperationProbeUrl { get; init; }
+
     public bool ReturnChangedContent { get; init; }
+
+    public string? RevalidatedFinalUrl { get; init; }
 
     public int ProbeCount { get; private set; }
 
@@ -133,6 +159,11 @@ internal sealed class FakePreflightNetwork : IPreflightNetwork
         if (string.Equals(url, FailingProbeUrl, StringComparison.Ordinal))
         {
             throw new DownloadHttpException(System.Net.HttpStatusCode.NotFound, url);
+        }
+
+        if (string.Equals(url, InvalidOperationProbeUrl, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Insecure HTTP downloads are disabled.");
         }
 
         return Task.FromResult(new DownloadProbeResult
@@ -155,7 +186,9 @@ internal sealed class FakePreflightNetwork : IPreflightNetwork
             Status = ReturnChangedContent
                 ? DownloadRevalidationStatus.ContentChanged
                 : DownloadRevalidationStatus.Unchanged,
-            Result = previous,
+            Result = RevalidatedFinalUrl is null
+                ? previous
+                : TestPackageFactory.CopyDownload(previous, finalUrl: RevalidatedFinalUrl),
         });
     }
 }
