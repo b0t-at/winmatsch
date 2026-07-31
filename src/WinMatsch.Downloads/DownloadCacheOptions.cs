@@ -8,4 +8,7 @@ public sealed class DownloadCacheOptions
     public int MaxEntries { get; set; } = 64;
 
     public long MaxBytes { get; set; } = 5L * 1024 * 1024 * 1024;
+
+    /// <summary>The clock used for cache TTL and HTTP freshness expiration.</summary>
+    public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
 }

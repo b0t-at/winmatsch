@@ -17,11 +17,9 @@ public sealed class InstallerDownloader : IDisposable
     private const string TempFileSuffix = ".part";
     private const string InvalidFileNameChars = "\"<>:/\\|?*";
 
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _destinationGates =
-        new(StringComparer.OrdinalIgnoreCase);
-
     private readonly HttpClient _httpClient;
     private readonly DownloaderOptions _options;
+    private readonly TimeProvider _timeProvider;
     private readonly DownloadCache? _cache;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _downloadGates = new(StringComparer.Ordinal);
     private bool _disposed;
@@ -38,6 +36,7 @@ public sealed class InstallerDownloader : IDisposable
         ArgumentNullException.ThrowIfNull(handler);
         _options = options ?? new DownloaderOptions();
         ValidateOptions(_options);
+        _timeProvider = _options.TimeProvider;
         _httpClient = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = Timeout.InfiniteTimeSpan,
@@ -52,6 +51,7 @@ public sealed class InstallerDownloader : IDisposable
                     TimeToLive = _options.CacheTtl,
                     MaxEntries = _options.CacheMaxEntries,
                     MaxBytes = _options.CacheMaxBytes,
+                    TimeProvider = _timeProvider,
                 });
         }
     }
@@ -74,55 +74,43 @@ public sealed class InstallerDownloader : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         Uri initialUri = ValidateUrl(url);
-        string destinationIdentity = GetDestinationIdentity(destinationDirectory);
-        SemaphoreSlim destinationGate = _destinationGates.GetOrAdd(
-            destinationIdentity,
-            static _ => new SemaphoreSlim(1, 1));
-        await destinationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        CreateDestinationDirectory(destinationDirectory);
+        if (_cache is null)
+        {
+            DownloadAttemptResult attempt = await DownloadFromOriginAsync(
+                url,
+                initialUri,
+                destinationDirectory,
+                progress,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            return attempt.Result;
+        }
+
+        SemaphoreSlim gate = _downloadGates.GetOrAdd(initialUri.AbsoluteUri, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            CreateDestinationDirectory(destinationDirectory);
-            if (_cache is null)
+            DownloadResult? cached = await _cache.TryRestoreAsync(url, destinationDirectory, cancellationToken).ConfigureAwait(false);
+            if (cached is not null)
             {
-                DownloadAttemptResult attempt = await DownloadFromOriginAsync(
-                    url,
-                    initialUri,
-                    destinationDirectory,
-                    progress,
-                    null,
-                    cancellationToken).ConfigureAwait(false);
-                return attempt.Result;
+                return cached;
             }
 
-            SemaphoreSlim gate = _downloadGates.GetOrAdd(initialUri.AbsoluteUri, static _ => new SemaphoreSlim(1, 1));
-            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                DownloadResult? cached = await _cache.TryRestoreAsync(url, destinationDirectory, cancellationToken).ConfigureAwait(false);
-                if (cached is not null)
-                {
-                    return cached;
-                }
-
-                DownloadAttemptResult attempt = await DownloadFromOriginAsync(
-                    url,
-                    initialUri,
-                    destinationDirectory,
-                    progress,
-                    null,
-                    cancellationToken).ConfigureAwait(false);
-                DownloadResult downloaded = attempt.Result;
-                await _cache.StoreAsync(downloaded, cancellationToken).ConfigureAwait(false);
-                return downloaded;
-            }
-            finally
-            {
-                gate.Release();
-            }
+            DownloadAttemptResult attempt = await DownloadFromOriginAsync(
+                url,
+                initialUri,
+                destinationDirectory,
+                progress,
+                null,
+                cancellationToken).ConfigureAwait(false);
+            DownloadResult downloaded = attempt.Result;
+            await _cache.StoreAsync(downloaded, cancellationToken).ConfigureAwait(false);
+            return downloaded;
         }
         finally
         {
-            destinationGate.Release();
+            gate.Release();
         }
     }
 
@@ -141,62 +129,50 @@ public sealed class InstallerDownloader : IDisposable
         Uri initialUri = ValidateUrl(previous.InitialUrl);
         string destinationDirectory = Path.GetDirectoryName(previous.FilePath)
             ?? throw new InvalidOperationException("The downloaded file has no parent directory.");
-        string destinationIdentity = GetDestinationIdentity(destinationDirectory);
-        SemaphoreSlim destinationGate = _destinationGates.GetOrAdd(
-            destinationIdentity,
-            static _ => new SemaphoreSlim(1, 1));
-        await destinationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        DownloadContentIdentity localIdentity = await ComputeFileIdentityAsync(previous.FilePath, cancellationToken).ConfigureAwait(false);
+        if (localIdentity != previous.ContentIdentity)
         {
-            DownloadContentIdentity localIdentity = await ComputeFileIdentityAsync(previous.FilePath, cancellationToken).ConfigureAwait(false);
-            if (localIdentity != previous.ContentIdentity)
-            {
-                throw new DownloadContentChangedException(previous.ContentIdentity, localIdentity, previous.FilePath);
-            }
+            throw new DownloadContentChangedException(previous.ContentIdentity, localIdentity, previous.FilePath);
+        }
 
-            DownloadAttemptResult attempt = await DownloadFromOriginAsync(
-                previous.InitialUrl,
-                initialUri,
-                destinationDirectory,
-                progress,
-                previous,
-                cancellationToken).ConfigureAwait(false);
-            if (attempt.NotModified)
+        DownloadAttemptResult attempt = await DownloadFromOriginAsync(
+            previous.InitialUrl,
+            initialUri,
+            destinationDirectory,
+            progress,
+            previous,
+            cancellationToken).ConfigureAwait(false);
+        if (attempt.NotModified)
+        {
+            DownloadContentIdentity confirmedIdentity = await ComputeFileIdentityAsync(previous.FilePath, cancellationToken).ConfigureAwait(false);
+            if (confirmedIdentity != previous.ContentIdentity)
             {
-                DownloadContentIdentity confirmedIdentity = await ComputeFileIdentityAsync(previous.FilePath, cancellationToken).ConfigureAwait(false);
-                if (confirmedIdentity != previous.ContentIdentity)
-                {
-                    throw new DownloadContentChangedException(previous.ContentIdentity, confirmedIdentity, previous.FilePath);
-                }
+                throw new DownloadContentChangedException(previous.ContentIdentity, confirmedIdentity, previous.FilePath);
             }
+        }
 
-            if (_cache is not null)
-            {
-                await _cache.StoreAsync(attempt.Result, cancellationToken).ConfigureAwait(false);
-            }
+        if (_cache is not null)
+        {
+            await _cache.StoreAsync(attempt.Result, cancellationToken).ConfigureAwait(false);
+        }
 
-            if (attempt.NotModified)
-            {
-                return new DownloadRevalidationResult
-                {
-                    Status = DownloadRevalidationStatus.Unchanged,
-                    Result = attempt.Result,
-                    WasNotModifiedResponse = true,
-                };
-            }
-
+        if (attempt.NotModified)
+        {
             return new DownloadRevalidationResult
             {
-                Status = attempt.Result.ContentIdentity == previous.ContentIdentity
-                    ? DownloadRevalidationStatus.Unchanged
-                    : DownloadRevalidationStatus.ContentChanged,
+                Status = DownloadRevalidationStatus.Unchanged,
                 Result = attempt.Result,
+                WasNotModifiedResponse = true,
             };
         }
-        finally
+
+        return new DownloadRevalidationResult
         {
-            destinationGate.Release();
-        }
+            Status = attempt.Result.ContentIdentity == previous.ContentIdentity
+                ? DownloadRevalidationStatus.Unchanged
+                : DownloadRevalidationStatus.ContentChanged,
+            Result = attempt.Result,
+        };
     }
 
     /// <summary>
@@ -219,7 +195,7 @@ public sealed class InstallerDownloader : IDisposable
                     if (headResponse.StatusCode is not (HttpStatusCode.MethodNotAllowed or HttpStatusCode.NotImplemented))
                     {
                         EnsureSuccessOrThrowTransient(headResponse, url);
-                        return CreateProbeResult(url, headExchange.FinalUri, headResponse, DownloadProbeMethod.Head);
+                        return CreateProbeResult(url, headExchange, DownloadProbeMethod.Head);
                     }
                 }
 
@@ -228,7 +204,7 @@ public sealed class InstallerDownloader : IDisposable
                 using RedirectedResponse rangeExchange = await SendFollowingRedirectsAsync(range, attemptToken).ConfigureAwait(false);
                 HttpResponseMessage rangeResponse = rangeExchange.Response;
                 EnsureSuccessOrThrowTransient(rangeResponse, url);
-                return CreateProbeResult(url, rangeExchange.FinalUri, rangeResponse, DownloadProbeMethod.RangeGet);
+                return CreateProbeResult(url, rangeExchange, DownloadProbeMethod.RangeGet);
             },
             url,
             cancellationToken).ConfigureAwait(false);
@@ -328,7 +304,6 @@ public sealed class InstallerDownloader : IDisposable
         using RedirectedResponse exchange = await SendFollowingRedirectsAsync(request, cancellationToken).ConfigureAwait(false);
         HttpResponseMessage response = exchange.Response;
 
-        DateTimeOffset retrievedAt = DateTimeOffset.UtcNow;
         if (response.StatusCode == HttpStatusCode.NotModified && previous is not null)
         {
             EntityTagHeaderValue? responseETag = response.Headers.ETag;
@@ -337,7 +312,7 @@ public sealed class InstallerDownloader : IDisposable
                 && string.Equals(expectedStrongETag.Tag, responseETag.Tag, StringComparison.Ordinal))
             {
                 return new DownloadAttemptResult(
-                    CloneAfterNotModified(previous, response, exchange.FinalUri, retrievedAt),
+                    CloneAfterNotModified(previous, exchange),
                     NotModified: true);
             }
 
@@ -361,8 +336,8 @@ public sealed class InstallerDownloader : IDisposable
         Uri responseUri = exchange.FinalUri;
         long? totalBytes = response.Content.Headers.ContentLength;
         string fileName = previous?.FileName ?? ResolveFileName(response, initialUri, responseUri);
-        string finalPath = previous?.FilePath ?? Path.Combine(destinationDirectory, fileName);
-        string tempPath = finalPath + TempFileSuffix + "." + Guid.NewGuid().ToString("N");
+        string preferredPath = previous?.FilePath ?? Path.Combine(destinationDirectory, fileName);
+        string tempPath = preferredPath + TempFileSuffix + "." + Guid.NewGuid().ToString("N");
 
         long bytesReceived = 0;
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -425,14 +400,6 @@ public sealed class InstallerDownloader : IDisposable
                 }
             }
 
-            try
-            {
-                File.Move(tempPath, finalPath, overwrite: true);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                throw new DownloadFileException(finalPath, $"Failed to atomically replace '{finalPath}'.", exception);
-            }
         }
         catch
         {
@@ -440,16 +407,39 @@ public sealed class InstallerDownloader : IDisposable
             throw;
         }
 
+        var identity = new DownloadContentIdentity(
+            Sha256Hash.FromHashBytes(hash.GetHashAndReset()),
+            bytesReceived);
+        string finalPath;
+        try
+        {
+            finalPath = await DownloadDestination.PublishAsync(
+                tempPath,
+                preferredPath,
+                identity,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            TryDeleteFile(tempPath);
+            throw;
+        }
+
+        DateTimeOffset retrievedAt = _timeProvider.GetUtcNow();
         var result = new DownloadResult
         {
             FilePath = finalPath,
-            FileName = fileName,
-            Sha256 = Sha256Hash.FromHashBytes(hash.GetHashAndReset()),
+            FileName = Path.GetFileName(finalPath),
+            Sha256 = identity.Sha256,
             SizeInBytes = bytesReceived,
             LastModified = response.Content.Headers.LastModified,
             ETag = response.Headers.ETag?.ToString(),
             ResponseDate = response.Headers.Date,
-            FreshUntil = GetFreshUntil(response, retrievedAt),
+            FreshUntil = GetFreshUntil(
+                response,
+                exchange.RequestTime,
+                exchange.ResponseTime,
+                retrievedAt),
             RetrievedAt = retrievedAt,
             InitialUrl = initialUrl,
             FinalUrl = responseUri.AbsoluteUri,
@@ -510,12 +500,19 @@ public sealed class InstallerDownloader : IDisposable
         {
             for (int redirectCount = 0; ; redirectCount++)
             {
+                DateTimeOffset requestTime = _timeProvider.GetUtcNow();
                 HttpResponseMessage response = await _httpClient
                     .SendAsync(currentRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
                     .ConfigureAwait(false);
+                DateTimeOffset responseTime = _timeProvider.GetUtcNow();
                 if ((int)response.StatusCode is not (>= 300 and < 400) || response.Headers.Location is not { } location)
                 {
-                    return new RedirectedResponse(response, currentUri, ownedRequests);
+                    return new RedirectedResponse(
+                        response,
+                        currentUri,
+                        requestTime,
+                        responseTime,
+                        ownedRequests);
                 }
 
                 if (redirectCount >= maxRedirects)
@@ -552,21 +549,24 @@ public sealed class InstallerDownloader : IDisposable
 
     private static DownloadProbeResult CreateProbeResult(
         string initialUrl,
-        Uri finalUri,
-        HttpResponseMessage response,
+        RedirectedResponse exchange,
         DownloadProbeMethod method)
     {
-        DateTimeOffset now = DateTimeOffset.UtcNow;
+        HttpResponseMessage response = exchange.Response;
         return new DownloadProbeResult
         {
             InitialUrl = initialUrl,
-            FinalUrl = finalUri.AbsoluteUri,
+            FinalUrl = exchange.FinalUri.AbsoluteUri,
             Method = method,
             SizeInBytes = response.Content.Headers.ContentRange?.Length ?? response.Content.Headers.ContentLength,
             ETag = response.Headers.ETag?.ToString(),
             LastModified = response.Content.Headers.LastModified,
             ResponseDate = response.Headers.Date,
-            FreshUntil = GetFreshUntil(response, now),
+            FreshUntil = GetFreshUntil(
+                response,
+                exchange.RequestTime,
+                exchange.ResponseTime,
+                exchange.ResponseTime),
             ContentType = response.Content.Headers.ContentType?.ToString(),
             SupportsRanges = (response.StatusCode == HttpStatusCode.PartialContent
                 && response.Content.Headers.ContentRange is not null)
@@ -576,49 +576,81 @@ public sealed class InstallerDownloader : IDisposable
 
     private static DownloadResult CloneAfterNotModified(
         DownloadResult previous,
-        HttpResponseMessage response,
-        Uri finalUri,
-        DateTimeOffset retrievedAt)
+        RedirectedResponse exchange)
         => new()
         {
             FilePath = previous.FilePath,
             FileName = previous.FileName,
             Sha256 = previous.Sha256,
             SizeInBytes = previous.SizeInBytes,
-            LastModified = response.Content.Headers.LastModified ?? previous.LastModified,
-            ETag = response.Headers.ETag?.ToString() ?? previous.ETag,
-            ResponseDate = response.Headers.Date ?? previous.ResponseDate,
-            FreshUntil = GetFreshUntil(response, retrievedAt) ?? previous.FreshUntil,
-            RetrievedAt = retrievedAt,
+            LastModified = exchange.Response.Content.Headers.LastModified ?? previous.LastModified,
+            ETag = exchange.Response.Headers.ETag?.ToString() ?? previous.ETag,
+            ResponseDate = exchange.Response.Headers.Date ?? previous.ResponseDate,
+            FreshUntil = GetFreshUntil(
+                exchange.Response,
+                exchange.RequestTime,
+                exchange.ResponseTime,
+                exchange.ResponseTime) ?? previous.FreshUntil,
+            RetrievedAt = exchange.ResponseTime,
             InitialUrl = previous.InitialUrl,
-            FinalUrl = finalUri.AbsoluteUri,
-            ContentType = response.Content.Headers.ContentType?.ToString() ?? previous.ContentType,
-            MayBeStored = response.Headers.CacheControl?.NoStore != true && previous.MayBeStored,
+            FinalUrl = exchange.FinalUri.AbsoluteUri,
+            ContentType = exchange.Response.Content.Headers.ContentType?.ToString() ?? previous.ContentType,
+            MayBeStored = exchange.Response.Headers.CacheControl?.NoStore != true && previous.MayBeStored,
         };
 
-    private static DateTimeOffset? GetFreshUntil(HttpResponseMessage response, DateTimeOffset retrievedAt)
+    private static DateTimeOffset? GetFreshUntil(
+        HttpResponseMessage response,
+        DateTimeOffset requestTime,
+        DateTimeOffset responseTime,
+        DateTimeOffset currentTime)
     {
         if (response.Headers.CacheControl is { NoCache: true } or { NoStore: true })
         {
-            return retrievedAt;
+            return currentTime;
         }
 
-        if (response.Headers.CacheControl?.MaxAge is { } maxAge)
+        DateTimeOffset dateValue = response.Headers.Date ?? responseTime;
+        TimeSpan? freshnessLifetime = response.Headers.CacheControl?.MaxAge;
+        if (freshnessLifetime is null && response.Content.Headers.Expires is { } expires)
         {
-            TimeSpan apparentAge = response.Headers.Date is { } responseDate && retrievedAt > responseDate
-                ? retrievedAt - responseDate
-                : TimeSpan.Zero;
-            TimeSpan currentAge = response.Headers.Age is { } age && age > apparentAge
-                ? age
-                : apparentAge;
-            TimeSpan remainingFreshness = maxAge - currentAge;
-            return remainingFreshness > TimeSpan.Zero
-                ? retrievedAt + remainingFreshness
-                : retrievedAt;
+            freshnessLifetime = ClampNonNegative(expires - dateValue);
         }
 
-        return response.Content.Headers.Expires;
+        if (freshnessLifetime is null)
+        {
+            return null;
+        }
+
+        TimeSpan apparentAge = ClampNonNegative(responseTime - dateValue);
+        TimeSpan responseDelay = ClampNonNegative(responseTime - requestTime);
+        TimeSpan ageValue = ClampNonNegative(response.Headers.Age ?? TimeSpan.Zero);
+        TimeSpan correctedAgeValue = AddClamped(ageValue, responseDelay);
+        TimeSpan correctedInitialAge = apparentAge > correctedAgeValue
+            ? apparentAge
+            : correctedAgeValue;
+        TimeSpan residentTime = ClampNonNegative(currentTime - responseTime);
+        TimeSpan currentAge = AddClamped(correctedInitialAge, residentTime);
+        TimeSpan remainingFreshness = freshnessLifetime.Value > currentAge
+            ? freshnessLifetime.Value - currentAge
+            : TimeSpan.Zero;
+
+        try
+        {
+            return currentTime + remainingFreshness;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return DateTimeOffset.MaxValue;
+        }
     }
+
+    private static TimeSpan ClampNonNegative(TimeSpan value)
+        => value > TimeSpan.Zero ? value : TimeSpan.Zero;
+
+    private static TimeSpan AddClamped(TimeSpan left, TimeSpan right)
+        => left.Ticks > TimeSpan.MaxValue.Ticks - right.Ticks
+            ? TimeSpan.MaxValue
+            : left + right;
 
     private Uri ValidateUrl(string url)
     {
@@ -691,9 +723,6 @@ public sealed class InstallerDownloader : IDisposable
         => EntityTagHeaderValue.TryParse(value, out EntityTagHeaderValue? etag) && !etag.IsWeak
             ? etag
             : null;
-
-    private static string GetDestinationIdentity(string destinationDirectory)
-        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(destinationDirectory));
 
     private static void CreateDestinationDirectory(string destinationDirectory)
     {
@@ -829,6 +858,8 @@ public sealed class InstallerDownloader : IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Timeout must be positive.");
         }
+
+        ArgumentNullException.ThrowIfNull(options.TimeProvider);
     }
 
     private sealed record DownloadAttemptResult(DownloadResult Result, bool NotModified);
@@ -840,16 +871,24 @@ public sealed class InstallerDownloader : IDisposable
         public RedirectedResponse(
             HttpResponseMessage response,
             Uri finalUri,
+            DateTimeOffset requestTime,
+            DateTimeOffset responseTime,
             IReadOnlyList<HttpRequestMessage> ownedRequests)
         {
             Response = response;
             FinalUri = finalUri;
+            RequestTime = requestTime;
+            ResponseTime = responseTime;
             _ownedRequests = ownedRequests;
         }
 
         public HttpResponseMessage Response { get; }
 
         public Uri FinalUri { get; }
+
+        public DateTimeOffset RequestTime { get; }
+
+        public DateTimeOffset ResponseTime { get; }
 
         public void Dispose()
         {

@@ -78,6 +78,89 @@ internal sealed class ProgressCollector : IProgress<DownloadProgress>
     }
 }
 
+internal sealed class ManualTimeProvider(DateTimeOffset utcNow) : TimeProvider
+{
+    private long _utcTicks = utcNow.UtcTicks;
+
+    public override DateTimeOffset GetUtcNow()
+        => new(Interlocked.Read(ref _utcTicks), TimeSpan.Zero);
+
+    public void Advance(TimeSpan amount)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(amount, TimeSpan.Zero);
+        Interlocked.Add(ref _utcTicks, amount.Ticks);
+    }
+}
+
+internal sealed class ClockAdvancingStream(
+    byte[] payload,
+    ManualTimeProvider timeProvider,
+    TimeSpan readDelay) : MemoryStream(payload, writable: false)
+{
+    private int _advanced;
+
+    public override ValueTask<int> ReadAsync(
+        Memory<byte> buffer,
+        CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.Exchange(ref _advanced, 1) == 0)
+        {
+            timeProvider.Advance(readDelay);
+        }
+
+        return base.ReadAsync(buffer, cancellationToken);
+    }
+}
+
+internal sealed class CoordinatedHttpMessageHandler(
+    int participants,
+    Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
+{
+    private readonly TaskCompletionSource _participantsArrived =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _inFlight;
+    private int _maxObservedConcurrency;
+    private int _requestCount;
+
+    public int MaxObservedConcurrency => Volatile.Read(ref _maxObservedConcurrency);
+
+    public int RequestCount => Volatile.Read(ref _requestCount);
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _requestCount);
+        int inFlight = Interlocked.Increment(ref _inFlight);
+        UpdateMaxConcurrency(inFlight);
+        if (inFlight >= participants)
+        {
+            _participantsArrived.TrySetResult();
+        }
+
+        try
+        {
+            await _participantsArrived.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+            HttpResponseMessage response = responder(request);
+            response.RequestMessage ??= request;
+            return response;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _inFlight);
+        }
+    }
+
+    private void UpdateMaxConcurrency(int observed)
+    {
+        int current;
+        while (observed > (current = Volatile.Read(ref _maxObservedConcurrency)))
+        {
+            Interlocked.CompareExchange(ref _maxObservedConcurrency, observed, current);
+        }
+    }
+}
+
 internal sealed class ConstrainedFallbackHandler : HttpMessageHandler
 {
     private TrackingContent? _headContent;

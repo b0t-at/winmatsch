@@ -27,7 +27,8 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     public async Task DownloadAsync_CapturesEtagDateFreshnessAndStableIdentity()
     {
         byte[] payload = Payload(128);
-        DateTimeOffset date = DateTimeOffset.UtcNow;
+        var date = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero);
+        var timeProvider = new ManualTimeProvider(date);
         using StubHttpMessageHandler handler = new((request, _) =>
         {
             HttpResponseMessage response = Ok(request, payload);
@@ -37,7 +38,9 @@ public sealed class RevalidationProbeCacheTests : IDisposable
             response.Headers.Age = TimeSpan.FromMinutes(5);
             return response;
         });
-        using InstallerDownloader downloader = new(handler);
+        using InstallerDownloader downloader = new(
+            handler,
+            new DownloaderOptions { TimeProvider = timeProvider });
 
         DownloadResult result = await downloader.DownloadAsync("https://example.com/setup.exe", _tempDir);
 
@@ -48,6 +51,75 @@ public sealed class RevalidationProbeCacheTests : IDisposable
         Assert.False(result.IsFreshAt(result.RetrievedAt.AddMinutes(10)));
         Assert.Equal(result.Sha256, result.ContentIdentity.Sha256);
         Assert.Equal(result.SizeInBytes, result.ContentIdentity.SizeInBytes);
+    }
+
+    [Fact]
+    public async Task DownloadAsync_Rfc9111AgeIncludesFinalResponseDelayAndResidentTime()
+    {
+        byte[] payload = Payload(128);
+        var start = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero);
+        var timeProvider = new ManualTimeProvider(start);
+        using StubHttpMessageHandler handler = new((request, _) =>
+        {
+            if (request.RequestUri!.Host == "example.com")
+            {
+                timeProvider.Advance(TimeSpan.FromSeconds(20));
+                var redirect = new HttpResponseMessage(HttpStatusCode.Redirect) { RequestMessage = request };
+                redirect.Headers.Location = new Uri("https://cdn.example.com/setup.exe");
+                return redirect;
+            }
+
+            DateTimeOffset finalRequestTime = timeProvider.GetUtcNow();
+            timeProvider.Advance(TimeSpan.FromSeconds(10));
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(
+                    new ClockAdvancingStream(payload, timeProvider, TimeSpan.FromSeconds(20))),
+                RequestMessage = request,
+            };
+            response.Headers.Date = finalRequestTime;
+            response.Headers.Age = TimeSpan.FromSeconds(40);
+            response.Headers.CacheControl = new CacheControlHeaderValue
+            {
+                MaxAge = TimeSpan.FromSeconds(120),
+            };
+            return response;
+        });
+        using InstallerDownloader downloader = new(
+            handler,
+            new DownloaderOptions { TimeProvider = timeProvider });
+
+        DownloadResult result = await downloader.DownloadAsync("https://example.com/setup.exe", _tempDir);
+
+        Assert.Equal(start.AddSeconds(50), result.RetrievedAt);
+        Assert.Equal(start.AddSeconds(100), result.FreshUntil);
+        Assert.True(result.IsFreshAt(start.AddSeconds(99)));
+        Assert.False(result.IsFreshAt(start.AddSeconds(100)));
+    }
+
+    [Fact]
+    public async Task DownloadAsync_Rfc9111ExpiresUsesDateLifetimeAndCorrectedAge()
+    {
+        byte[] payload = Payload(128);
+        var start = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero);
+        var timeProvider = new ManualTimeProvider(start);
+        using StubHttpMessageHandler handler = new((request, _) =>
+        {
+            timeProvider.Advance(TimeSpan.FromSeconds(5));
+            HttpResponseMessage response = Ok(request, payload);
+            response.Headers.Date = start.AddSeconds(-10);
+            response.Headers.Age = TimeSpan.FromSeconds(30);
+            response.Content.Headers.Expires = start.AddSeconds(110);
+            return response;
+        });
+        using InstallerDownloader downloader = new(
+            handler,
+            new DownloaderOptions { TimeProvider = timeProvider });
+
+        DownloadResult result = await downloader.DownloadAsync("https://example.com/setup.exe", _tempDir);
+
+        Assert.Equal(start.AddSeconds(5), result.RetrievedAt);
+        Assert.Equal(start.AddSeconds(90), result.FreshUntil);
     }
 
     [Fact]
@@ -197,6 +269,8 @@ public sealed class RevalidationProbeCacheTests : IDisposable
         Assert.Equal("\"v2\"", revalidated.Result.ETag);
         Assert.NotEqual(initial.ContentIdentity, revalidated.Result.ContentIdentity);
         Assert.Equal(changed, await File.ReadAllBytesAsync(revalidated.Result.FilePath));
+        Assert.NotEqual(initial.FilePath, revalidated.Result.FilePath);
+        Assert.Equal(original, await File.ReadAllBytesAsync(initial.FilePath));
     }
 
     [Fact]
@@ -281,7 +355,7 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     }
 
     [Fact]
-    public async Task RevalidateAsync_SerializesCompetingOperationsForSameDestination()
+    public async Task RevalidateAsync_FinalizesCompetingOperationsWithoutSerializingNetwork()
     {
         byte[] payload = Payload(256);
         using StubHttpMessageHandler handler = new((request, _) => Ok(request, payload))
@@ -296,7 +370,7 @@ public sealed class RevalidationProbeCacheTests : IDisposable
             downloader.RevalidateAsync(initial));
 
         Assert.All(results, result => Assert.Equal(DownloadRevalidationStatus.Unchanged, result.Status));
-        Assert.Equal(1, handler.MaxObservedConcurrency);
+        Assert.Equal(2, handler.MaxObservedConcurrency);
         Assert.Equal(3, handler.RequestCount);
         Assert.All(results, result => Assert.Equal(result.Result.ContentIdentity, initial.ContentIdentity));
         Assert.Equal(payload, await File.ReadAllBytesAsync(initial.FilePath));
@@ -508,6 +582,45 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task Cache_UsesInjectedClockForHttpFreshnessExpiration()
+    {
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        var start = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero);
+        var timeProvider = new ManualTimeProvider(start);
+        using StubHttpMessageHandler handler = new((request, _) =>
+        {
+            HttpResponseMessage response = Ok(request, Payload(100));
+            response.Headers.Date = timeProvider.GetUtcNow();
+            response.Headers.CacheControl = new CacheControlHeaderValue
+            {
+                MaxAge = TimeSpan.FromHours(1),
+            };
+            return response;
+        });
+        using InstallerDownloader downloader = CreateCachedDownloader(
+            handler,
+            cacheDirectory,
+            ttl: TimeSpan.FromHours(2),
+            timeProvider: timeProvider);
+        await downloader.DownloadAsync("https://example.com/setup.exe", Path.Combine(_tempDir, "first"));
+        timeProvider.Advance(TimeSpan.FromMinutes(59));
+
+        DownloadResult fresh = await downloader.DownloadAsync(
+            "https://example.com/setup.exe",
+            Path.Combine(_tempDir, "second"));
+        timeProvider.Advance(TimeSpan.FromMinutes(2));
+        IReadOnlyList<DownloadCacheEntryInfo> inspection = await downloader.Cache!.InspectAsync();
+        DownloadResult refreshed = await downloader.DownloadAsync(
+            "https://example.com/setup.exe",
+            Path.Combine(_tempDir, "third"));
+
+        Assert.True(fresh.IsFromCache);
+        Assert.Equal(DownloadCacheEntryState.Stale, Assert.Single(inspection).State);
+        Assert.False(refreshed.IsFromCache);
+        Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
     public async Task Cache_CorruptPayloadRaisesDistinctFailure()
     {
         string cacheDirectory = Path.Combine(_tempDir, "cache");
@@ -707,7 +820,8 @@ public sealed class RevalidationProbeCacheTests : IDisposable
         string cacheDirectory,
         TimeSpan? ttl = null,
         int maxEntries = 64,
-        long maxBytes = 10_000_000)
+        long maxBytes = 10_000_000,
+        TimeProvider? timeProvider = null)
         => new(
             handler,
             new DownloaderOptions
@@ -717,6 +831,7 @@ public sealed class RevalidationProbeCacheTests : IDisposable
                 CacheMaxEntries = maxEntries,
                 CacheMaxBytes = maxBytes,
                 RetryBaseDelay = TimeSpan.Zero,
+                TimeProvider = timeProvider ?? TimeProvider.System,
             });
 
     private static HttpResponseMessage Ok(

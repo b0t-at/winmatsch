@@ -255,7 +255,7 @@ public sealed class InstallerDownloaderTests : IDisposable
     }
 
     [Fact]
-    public async Task DownloadAsync_OverwritesExistingFile()
+    public async Task DownloadAsync_PreservesExistingDifferentFileAndUsesContentAddressedPath()
     {
         byte[] payload = CreatePayload(128);
         using StubHttpMessageHandler stub = new((request, _) => Ok(request, payload));
@@ -266,8 +266,10 @@ public sealed class InstallerDownloaderTests : IDisposable
 
         DownloadResult result = await downloader.DownloadAsync("https://example.com/a.exe", _tempDir);
 
-        Assert.Equal(targetPath, result.FilePath);
-        Assert.Equal(payload, await File.ReadAllBytesAsync(targetPath));
+        Assert.NotEqual(targetPath, result.FilePath);
+        Assert.Equal([1, 2, 3], await File.ReadAllBytesAsync(targetPath));
+        Assert.Equal(payload, await File.ReadAllBytesAsync(result.FilePath));
+        Assert.StartsWith("sha256-", result.FileName, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -298,16 +300,13 @@ public sealed class InstallerDownloaderTests : IDisposable
         const int UrlCount = 6;
         const int MaxConcurrency = 2;
         string[] urls = [.. Enumerable.Range(0, UrlCount).Select(i => $"https://example.com/files/file{i}.bin")];
-        using StubHttpMessageHandler stub = new((request, _) =>
+        using CoordinatedHttpMessageHandler handler = new(MaxConcurrency, request =>
         {
             // Payload size encodes the file index so order can be verified from the results.
             int index = int.Parse(Path.GetFileNameWithoutExtension(request.RequestUri!.AbsolutePath)["file".Length..], CultureInfo.InvariantCulture);
             return Ok(request, CreatePayload(1_000 + index));
-        })
-        {
-            PerRequestDelay = TimeSpan.FromMilliseconds(40),
-        };
-        using InstallerDownloader downloader = new(stub);
+        });
+        using InstallerDownloader downloader = new(handler);
 
         IReadOnlyList<DownloadResult> results = await downloader.DownloadManyAsync(urls, _tempDir, MaxConcurrency);
 
@@ -319,8 +318,50 @@ public sealed class InstallerDownloaderTests : IDisposable
             Assert.Equal(1_000 + i, results[i].SizeInBytes);
         }
 
-        Assert.Equal(UrlCount, stub.RequestCount);
-        Assert.InRange(stub.MaxObservedConcurrency, 1, MaxConcurrency);
+        Assert.Equal(UrlCount, handler.RequestCount);
+        Assert.Equal(MaxConcurrency, handler.MaxObservedConcurrency);
+    }
+
+    [Fact]
+    public async Task DownloadManyAsync_ContentAddressesDistinctPayloadsWithSameResolvedFileName()
+    {
+        const int MaxConcurrency = 2;
+        string[] urls =
+        [
+            "https://example.com/first/setup.exe",
+            "https://example.com/second/setup.exe",
+        ];
+        byte[][] payloads =
+        [
+            CreatePayload(1_001),
+            CreatePayload(1_002),
+        ];
+        using CoordinatedHttpMessageHandler handler = new(MaxConcurrency, request =>
+        {
+            int index = request.RequestUri!.AbsolutePath.Contains("/first/", StringComparison.Ordinal) ? 0 : 1;
+            return Ok(request, payloads[index]);
+        });
+        using InstallerDownloader downloader = new(handler);
+
+        IReadOnlyList<DownloadResult> results = await downloader.DownloadManyAsync(
+            urls,
+            _tempDir,
+            MaxConcurrency);
+
+        Assert.Equal(MaxConcurrency, handler.MaxObservedConcurrency);
+        Assert.NotEqual(results[0].FilePath, results[1].FilePath);
+        for (int index = 0; index < results.Count; index++)
+        {
+            DownloadResult result = results[index];
+            byte[] persisted = await File.ReadAllBytesAsync(result.FilePath);
+            Assert.Equal(payloads[index], persisted);
+            Assert.Equal(Convert.ToHexString(SHA256.HashData(persisted)), result.Sha256.Normalized);
+            Assert.Equal(persisted.LongLength, result.SizeInBytes);
+            Assert.Equal(Path.GetFileName(result.FilePath), result.FileName);
+        }
+
+        Assert.Equal(2, Directory.EnumerateFiles(_tempDir).Count());
+        Assert.DoesNotContain(Directory.EnumerateFiles(_tempDir), path => path.Contains(".part.", StringComparison.Ordinal));
     }
 
     [Fact]

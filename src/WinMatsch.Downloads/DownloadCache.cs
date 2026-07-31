@@ -22,6 +22,7 @@ public sealed class DownloadCache
 
     private readonly string _directory;
     private readonly DownloadCacheOptions _options;
+    private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _gate;
 
     public DownloadCache(string directory, DownloadCacheOptions? options = null)
@@ -30,6 +31,7 @@ public sealed class DownloadCache
         _directory = Path.GetFullPath(directory);
         _options = options ?? new DownloadCacheOptions();
         ValidateOptions(_options);
+        _timeProvider = _options.TimeProvider;
         _gate = _cacheGates.GetOrAdd(_directory, static _ => new SemaphoreSlim(1, 1));
     }
 
@@ -66,7 +68,7 @@ public sealed class DownloadCache
                 throw Corruption(payloadPath, "The cache metadata exists but its payload is missing.");
             }
 
-            DateTimeOffset now = DateTimeOffset.UtcNow;
+            DateTimeOffset now = _timeProvider.GetUtcNow();
             if (metadata.ExpiresAt <= now)
             {
                 DeleteEntry(key);
@@ -85,24 +87,19 @@ public sealed class DownloadCache
                     exception);
             }
 
-            string destinationPath = Path.Combine(destinationDirectory, metadata.FileName);
-            string tempPath = destinationPath + TempSuffix + "." + Guid.NewGuid().ToString("N");
+            string preferredPath = Path.Combine(destinationDirectory, metadata.FileName);
+            string tempPath = preferredPath + TempSuffix + "." + Guid.NewGuid().ToString("N");
             DownloadContentIdentity actual;
+            string destinationPath;
             try
             {
                 actual = await RestorePayloadAsync(payloadPath, tempPath, cancellationToken).ConfigureAwait(false);
                 EnsureIdentity(metadata, actual, payloadPath);
-                try
-                {
-                    File.Move(tempPath, destinationPath, overwrite: true);
-                }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-                {
-                    throw DestinationFailure(
-                        destinationPath,
-                        $"Failed to atomically restore the cached installer to '{destinationPath}'.",
-                        exception);
-                }
+                destinationPath = await DownloadDestination.PublishAsync(
+                    tempPath,
+                    preferredPath,
+                    actual,
+                    cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -167,7 +164,7 @@ public sealed class DownloadCache
                 throw;
             }
 
-            DateTimeOffset now = DateTimeOffset.UtcNow;
+            DateTimeOffset now = _timeProvider.GetUtcNow();
             DateTimeOffset ttlExpiry = now + _options.TimeToLive;
             DateTimeOffset expiresAt = result.FreshUntil is { } freshUntil && freshUntil < ttlExpiry
                 ? freshUntil
@@ -215,7 +212,7 @@ public sealed class DownloadCache
 
                     string payloadPath = GetPayloadPath(metadata.PayloadFileName);
                     DownloadCacheEntryState state = DownloadCacheEntryState.Stale;
-                    if (metadata.ExpiresAt > DateTimeOffset.UtcNow)
+                    if (metadata.ExpiresAt > _timeProvider.GetUtcNow())
                     {
                         if (!File.Exists(payloadPath))
                         {
@@ -616,7 +613,7 @@ public sealed class DownloadCache
         => new()
         {
             FilePath = filePath,
-            FileName = metadata.FileName,
+            FileName = Path.GetFileName(filePath),
             Sha256 = new Sha256Hash(metadata.Sha256),
             SizeInBytes = metadata.SizeInBytes,
             LastModified = metadata.LastModified,
@@ -771,6 +768,8 @@ public sealed class DownloadCache
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Cache byte capacity must be at least one.");
         }
+
+        ArgumentNullException.ThrowIfNull(options.TimeProvider);
     }
 
     private sealed class CacheMetadata

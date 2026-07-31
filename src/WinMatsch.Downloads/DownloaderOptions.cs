@@ -49,4 +49,9 @@ public sealed class DownloaderOptions
 
     /// <summary>The maximum aggregate payload size retained in the persistent cache.</summary>
     public long CacheMaxBytes { get; set; } = 5L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// The clock used for HTTP age and freshness calculations. Override in deterministic hosts or tests.
+    /// </summary>
+    public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
 }
