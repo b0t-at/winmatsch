@@ -34,4 +34,19 @@ public sealed class DownloaderOptions
     /// Generous by default because installers can be huge.
     /// </summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Optional persistent cache directory. A null or empty value disables caching so callers retain
+    /// full control over persistence.
+    /// </summary>
+    public string? CacheDirectory { get; set; }
+
+    /// <summary>The maximum age of a cache entry when the origin did not provide a shorter freshness lifetime.</summary>
+    public TimeSpan CacheTtl { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>The maximum number of payloads retained in the persistent cache.</summary>
+    public int CacheMaxEntries { get; set; } = 64;
+
+    /// <summary>The maximum aggregate payload size retained in the persistent cache.</summary>
+    public long CacheMaxBytes { get; set; } = 5L * 1024 * 1024 * 1024;
 }

@@ -3,8 +3,8 @@ using WinMatsch.Core;
 namespace WinMatsch.Downloads;
 
 /// <summary>
-/// The outcome of a completed installer download, carrying the response metadata that manifest
-/// generation needs later (hash, size, redirect target, Last-Modified).
+/// The outcome of a completed installer download, carrying the stable content identity and
+/// response validators needed to revalidate the artifact immediately before submission.
 /// </summary>
 public sealed class DownloadResult
 {
@@ -23,6 +23,18 @@ public sealed class DownloadResult
     /// <summary>The value of the Last-Modified response header, or null when the server did not send one.</summary>
     public DateTimeOffset? LastModified { get; init; }
 
+    /// <summary>The entity tag exactly as returned by the server, including weakness and quotes.</summary>
+    public string? ETag { get; init; }
+
+    /// <summary>The value of the HTTP Date response header, or null when absent.</summary>
+    public DateTimeOffset? ResponseDate { get; init; }
+
+    /// <summary>The instant after which HTTP freshness metadata requires revalidation, or null when unspecified.</summary>
+    public DateTimeOffset? FreshUntil { get; init; }
+
+    /// <summary>The time at which this representation was downloaded or revalidated.</summary>
+    public DateTimeOffset RetrievedAt { get; init; }
+
     /// <summary>The URL exactly as requested.</summary>
     public required string InitialUrl { get; init; }
 
@@ -34,4 +46,16 @@ public sealed class DownloadResult
 
     /// <summary>The value of the Content-Type response header, or null when absent.</summary>
     public string? ContentType { get; init; }
+
+    /// <summary>Whether this result was restored from the persistent cache instead of the network.</summary>
+    public bool IsFromCache { get; init; }
+
+    /// <summary>Whether origin cache directives permit this representation to be persisted.</summary>
+    public bool MayBeStored { get; init; } = true;
+
+    /// <summary>A validator-independent identity that changes only when the payload bytes change.</summary>
+    public DownloadContentIdentity ContentIdentity => new(Sha256, SizeInBytes);
+
+    /// <summary>Returns whether the server-provided freshness metadata considers the result fresh at <paramref name="instant"/>.</summary>
+    public bool IsFreshAt(DateTimeOffset instant) => FreshUntil is { } freshUntil && instant < freshUntil;
 }

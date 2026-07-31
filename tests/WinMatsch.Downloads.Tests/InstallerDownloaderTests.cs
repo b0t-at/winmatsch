@@ -225,10 +225,11 @@ public sealed class InstallerDownloaderTests : IDisposable
             new HttpResponseMessage(HttpStatusCode.NotFound) { RequestMessage = request });
         using InstallerDownloader downloader = new(stub, new DownloaderOptions { RetryBaseDelay = TimeSpan.FromMilliseconds(1) });
 
-        HttpRequestException exception = await Assert.ThrowsAsync<HttpRequestException>(
+        DownloadHttpException exception = await Assert.ThrowsAsync<DownloadHttpException>(
             () => downloader.DownloadAsync("https://example.com/a.exe", _tempDir));
 
         Assert.Equal(HttpStatusCode.NotFound, exception.StatusCode);
+        Assert.Equal(DownloadFailureKind.PermanentHttp, exception.FailureKind);
         Assert.Equal(1, stub.RequestCount);
     }
 
@@ -280,8 +281,12 @@ public sealed class InstallerDownloaderTests : IDisposable
         });
         using InstallerDownloader downloader = new(stub, new DownloaderOptions { MaxRetryAttempts = 0 });
 
-        await Assert.ThrowsAnyAsync<IOException>(() => downloader.DownloadAsync("https://example.com/big.exe", _tempDir));
+        DownloadNetworkException exception = await Assert.ThrowsAsync<DownloadNetworkException>(
+            () => downloader.DownloadAsync("https://example.com/big.exe", _tempDir));
 
+        HttpRequestException transportException = Assert.IsType<HttpRequestException>(exception.InnerException);
+        Assert.IsType<IOException>(transportException.InnerException);
+        Assert.Equal(DownloadFailureKind.TransientNetwork, exception.FailureKind);
         Assert.False(File.Exists(Path.Combine(_tempDir, "big.exe.part")));
         Assert.False(File.Exists(Path.Combine(_tempDir, "big.exe")));
         Assert.Empty(Directory.EnumerateFileSystemEntries(_tempDir));
@@ -336,7 +341,7 @@ public sealed class InstallerDownloaderTests : IDisposable
         };
         using InstallerDownloader downloader = new(stub);
 
-        HttpRequestException exception = await Assert.ThrowsAsync<HttpRequestException>(
+        DownloadHttpException exception = await Assert.ThrowsAsync<DownloadHttpException>(
             () => downloader.DownloadManyAsync(urls, _tempDir, maxConcurrency: 2));
 
         Assert.Equal(HttpStatusCode.NotFound, exception.StatusCode);
