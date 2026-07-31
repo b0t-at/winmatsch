@@ -273,5 +273,17 @@ internal static class ManifestClone
         {
             authentication.AuthenticationType ??= AuthenticationType.None;
         }
+
+        if (fields.Markets is { } markets)
+        {
+            if (markets.AllowedMarkets is null && markets.ExcludedMarkets is null)
+            {
+                markets.AllowedMarkets = [];
+            }
+            else if (markets.AllowedMarkets is not null && markets.ExcludedMarkets is not null)
+            {
+                markets.ExcludedMarkets = null;
+            }
+        }
     }
 }

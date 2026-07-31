@@ -492,6 +492,32 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Missing_bot_value_restored_by_one_mixed_installer_requires_review()
+    {
+        static PackageManifests Create(string? rootProductCode, string? first, string? second)
+        {
+            Installer firstInstaller = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+            firstInstaller.ProductCode = first;
+            Installer secondInstaller = TestManifests.CreateInstaller(url: "https://example.test/b.exe");
+            secondInstaller.ProductCode = second;
+            PackageManifests manifests = TestManifests.Create(firstInstaller, secondInstaller);
+            manifests.Installer.ProductCode = rootProductCode;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(rootProductCode: null, first: null, second: null),
+            Previous = Create("B", first: null, second: null),
+            Manifests = Create(rootProductCode: null, "C", second: null),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.True(context.RequiresReview);
+    }
+
+    [Fact]
     public void Missing_bot_value_with_mixed_generated_values_does_not_trigger_review()
     {
         static PackageManifests Create(string? rootProductCode, string? first, string? second)
@@ -765,6 +791,34 @@ public class RuleRuntimeTests
         Assert.Equal("{AB12CD34-EF56-7890-ABCD-EF1234567890}", change.After);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Log_only_runs_with_reader_accepted_invalid_market_shapes(bool bothLists)
+    {
+        Installer installer = TestManifests.CreateInstaller();
+        installer.ProductCode = "ab12cd34-ef56-7890-abcd-ef1234567890";
+        installer.Markets = bothLists
+            ? new Markets { AllowedMarkets = ["US"], ExcludedMarkets = ["FR"] }
+            : new Markets();
+        ManifestContext context = TestManifests.CreateContext(TestManifests.Create(installer));
+        var configuration = new RuleRuntimeConfiguration(
+            commandOverrides: new Dictionary<string, RuleMode>
+            {
+                [RuleIds.NormalizeProductCodes] = RuleMode.LogOnly,
+            });
+
+        RulePipeline.Create(
+            [new NormalizeProductCodesRule()],
+            configuration,
+            OverridePackSet.Empty).Run(context);
+
+        Assert.Equal("ab12cd34-ef56-7890-abcd-ef1234567890", installer.ProductCode);
+        Assert.Contains(
+            context.Changes,
+            change => change.After == "{AB12CD34-EF56-7890-ABCD-EF1234567890}");
+    }
+
     [Fact]
     public void Log_only_runs_when_unrelated_required_manifest_fields_are_missing()
     {
@@ -985,6 +1039,15 @@ public class RuleRuntimeTests
         string sanitized = RuleLogSanitizer.SanitizeMessage(message);
 
         Assert.Equal("[REDACTED]", sanitized);
+    }
+
+    [Fact]
+    public void Backtick_wrapping_does_not_bypass_jwt_redaction()
+    {
+        const string message =
+            "Received `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwxyz`";
+
+        Assert.Equal("[REDACTED]", RuleLogSanitizer.SanitizeMessage(message));
     }
 
     [Fact]

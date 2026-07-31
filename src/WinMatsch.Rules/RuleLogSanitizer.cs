@@ -359,20 +359,52 @@ internal static class RuleLogSanitizer
 
     private static bool LooksLikeJwt(string value)
     {
-        foreach (string candidate in value.Split(
-                     [' ', '\t', '\r', '\n', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\''],
-                     StringSplitOptions.RemoveEmptyEntries))
+        for (int start = 0; start < value.Length; start++)
         {
-            string trimmed = candidate.TrimEnd('.', ':', '!', '?');
-            string[] segments = trimmed.Split('.');
-            if (segments.Length == 3
-                && segments.All(static segment => segment.Length >= 6 && segment.All(IsBase64UrlCharacter)))
+            if (!IsBase64UrlCharacter(value[start]))
+            {
+                continue;
+            }
+
+            int firstEnd = ReadBase64UrlSegment(value, start);
+            if (firstEnd - start < 6 || firstEnd >= value.Length || value[firstEnd] != '.')
+            {
+                start = firstEnd;
+                continue;
+            }
+
+            int secondStart = firstEnd + 1;
+            int secondEnd = ReadBase64UrlSegment(value, secondStart);
+            if (secondEnd - secondStart < 6 || secondEnd >= value.Length || value[secondEnd] != '.')
+            {
+                start = secondEnd;
+                continue;
+            }
+
+            int thirdStart = secondEnd + 1;
+            int thirdEnd = ReadBase64UrlSegment(value, thirdStart);
+            if (thirdEnd - thirdStart >= 6
+                && (thirdEnd == value.Length
+                    || !IsBase64UrlCharacter(value[thirdEnd]) && value[thirdEnd] != '.'))
             {
                 return true;
             }
+
+            start = thirdEnd;
         }
 
         return false;
+    }
+
+    private static int ReadBase64UrlSegment(string value, int start)
+    {
+        int end = start;
+        while (end < value.Length && IsBase64UrlCharacter(value[end]))
+        {
+            end++;
+        }
+
+        return end;
     }
 
     private static bool IsBase64UrlCharacter(char value)

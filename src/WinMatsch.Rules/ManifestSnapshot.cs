@@ -164,6 +164,7 @@ internal sealed class ManifestSnapshot
 
         private static void RemoveMissingInstallerFields(YamlMappingNode mapping, InstallerFieldsBase original)
         {
+            RestoreInvalidMarkets(mapping, original.Markets);
             RemoveMissingSequenceMappingValues(
                 mapping,
                 "ExpectedReturnCodes",
@@ -206,6 +207,32 @@ internal sealed class ManifestSnapshot
                     authenticationMapping,
                     "AuthenticationType",
                     authentication.AuthenticationType);
+            }
+        }
+
+        private static void RestoreInvalidMarkets(YamlMappingNode mapping, Markets? original)
+        {
+            if (original is null
+                || GetMappingValue(mapping, "Markets") is not YamlMappingNode markets)
+            {
+                return;
+            }
+
+            if (original.AllowedMarkets is null)
+            {
+                RemoveMappingKey(markets, "AllowedMarkets");
+            }
+
+            if (original.ExcludedMarkets is null)
+            {
+                RemoveMappingKey(markets, "ExcludedMarkets");
+            }
+            else if (GetMappingValue(markets, "ExcludedMarkets") is null)
+            {
+                markets.Add(
+                    "ExcludedMarkets",
+                    new YamlSequenceNode(
+                        original.ExcludedMarkets.Select(static value => new YamlScalarNode(value))));
             }
         }
 
@@ -647,9 +674,13 @@ internal sealed class ManifestSnapshot
         {
             foreach (YamlNode node in installers.Children)
             {
-                if (node is YamlMappingNode installer
-                    && TryResolveSemanticPath(installer, semanticPath, out string? installerValue)
-                    && SemanticValueEquals(semanticPath, expected, installerValue))
+                if (node is not YamlMappingNode installer)
+                {
+                    continue;
+                }
+
+                _ = TryResolveSemanticPath(installer, semanticPath, out string? installerValue);
+                if (SemanticValueEquals(semanticPath, expected, installerValue))
                 {
                     matched = installerValue;
                     return true;
