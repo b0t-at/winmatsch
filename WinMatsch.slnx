@@ -1,14 +1,23 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/WinMatsch.Analysis/WinMatsch.Analysis.csproj" />
+    <Project Path="src/WinMatsch.Cli/WinMatsch.Cli.csproj" />
     <Project Path="src/WinMatsch.Core/WinMatsch.Core.csproj" />
     <Project Path="src/WinMatsch.Downloads/WinMatsch.Downloads.csproj" />
+    <Project Path="src/WinMatsch.GitHub/WinMatsch.GitHub.csproj" />
     <Project Path="src/WinMatsch.Rules/WinMatsch.Rules.csproj" />
+    <Project Path="src/WinMatsch.Validation/WinMatsch.Validation.csproj" />
+    <Project Path="src/WinMatsch.Workflows/WinMatsch.Workflows.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/WinMatsch.Analysis.Tests/WinMatsch.Analysis.Tests.csproj" />
+    <Project Path="tests/WinMatsch.Cli.Tests/WinMatsch.Cli.Tests.csproj" />
     <Project Path="tests/WinMatsch.Core.Tests/WinMatsch.Core.Tests.csproj" />
     <Project Path="tests/WinMatsch.Downloads.Tests/WinMatsch.Downloads.Tests.csproj" />
+    <Project Path="tests/WinMatsch.E2E.Tests/WinMatsch.E2E.Tests.csproj" />
+    <Project Path="tests/WinMatsch.GitHub.Tests/WinMatsch.GitHub.Tests.csproj" />
     <Project Path="tests/WinMatsch.Rules.Tests/WinMatsch.Rules.Tests.csproj" />
+    <Project Path="tests/WinMatsch.Validation.Tests/WinMatsch.Validation.Tests.csproj" />
+    <Project Path="tests/WinMatsch.Workflows.Tests/WinMatsch.Workflows.Tests.csproj" />
   </Folder>
 </Solution>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Application workflows that coordinate manifest generation, validation, repository operations, and dry-run plans.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinMatsch.Analysis\WinMatsch.Analysis.csproj" />
+    <ProjectReference Include="..\WinMatsch.Core\WinMatsch.Core.csproj" />
+    <ProjectReference Include="..\WinMatsch.Downloads\WinMatsch.Downloads.csproj" />
+    <ProjectReference Include="..\WinMatsch.GitHub\WinMatsch.GitHub.csproj" />
+    <ProjectReference Include="..\WinMatsch.Rules\WinMatsch.Rules.csproj" />
+    <ProjectReference Include="..\WinMatsch.Validation\WinMatsch.Validation.csproj" />
+  </ItemGroup>
+
+</Project>

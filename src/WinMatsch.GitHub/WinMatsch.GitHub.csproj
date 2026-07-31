@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>AOT-friendly GitHub GraphQL and REST client for WinGet repository and pull-request workflows.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinMatsch.Core\WinMatsch.Core.csproj" />
+  </ItemGroup>
+
+</Project>

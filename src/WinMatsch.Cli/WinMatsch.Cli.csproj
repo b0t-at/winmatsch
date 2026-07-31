@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <Description>Cross-platform command-line host for WinMatsch workflows.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinMatsch.Workflows\WinMatsch.Workflows.csproj" />
+  </ItemGroup>
+
+</Project>
