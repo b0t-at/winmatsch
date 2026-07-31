@@ -369,6 +369,28 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Renamed_installer_preserving_a_human_added_field_does_not_trigger_review()
+    {
+        static PackageManifests Create(string url, string? productCode)
+        {
+            Installer installer = TestManifests.CreateInstaller(url: url);
+            installer.ProductCode = productCode;
+            return TestManifests.Create(installer);
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("https://example.test/old-app.exe", productCode: null),
+            Previous = Create("https://example.test/old-app.exe", "B"),
+            Manifests = Create("https://example.test/renamed-app.exe", "B"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
     public void Root_identity_change_keeps_installer_pairing_for_other_corrections()
     {
         static PackageManifests Create(InstallerType rootType, string productCode)

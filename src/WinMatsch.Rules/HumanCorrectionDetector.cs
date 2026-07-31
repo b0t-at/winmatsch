@@ -59,10 +59,20 @@ internal static class HumanCorrectionDetector
             string? generatedValue = generatedEffectiveResolved
                 ? effectiveValue
                 : generatedChange is null ? botValue : generatedChange.After;
-            bool generatedRestoresBot = generatedSnapshot.TryFindEffectiveInstallerValue(
-                humanChange.SemanticPath,
-                botValue,
-                out string? matchedGeneratedValue);
+            string? matchedGeneratedValue = null;
+            bool generatedRestoresBot = generatedEffectiveResolved
+                ? ManifestSnapshot.SemanticValueEquals(
+                    humanChange.FieldPath,
+                    botValue,
+                    effectiveValue)
+                : generatedSnapshot.TryFindEffectiveInstallerValue(
+                    humanChange.SemanticPath,
+                    botValue,
+                    out matchedGeneratedValue);
+            if (generatedEffectiveResolved && generatedRestoresBot)
+            {
+                matchedGeneratedValue = effectiveValue;
+            }
 
             if (!string.Equals(botValue, humanValue, StringComparison.Ordinal)
                 && (generatedRestoresBot
