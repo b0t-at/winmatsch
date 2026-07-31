@@ -35,6 +35,7 @@ public sealed class InstallerDiagnosticService : IInstallerDiagnosticService
         try
         {
             ResolvedInstaller installer;
+            bool explicitUri = request.Input.Contains("://", StringComparison.Ordinal);
             if (Uri.TryCreate(request.Input, UriKind.Absolute, out Uri? uri)
                 && (string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
                     || string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
@@ -56,13 +57,12 @@ public sealed class InstallerDiagnosticService : IInstallerDiagnosticService
                     download.FileName,
                     true,
                     download.IsFromCache,
-                    download.Sha256.Value,
-                    download.SizeInBytes);
+                    download.Sha256.Value);
             }
-            else if (uri is not null && !uri.IsFile)
+            else if (explicitUri)
             {
                 throw new NotSupportedException(
-                    $"Installer URI scheme '{uri.Scheme}' is unsupported. Use a local path or HTTPS URL.");
+                    $"Installer URI scheme '{uri?.Scheme ?? "<unknown>"}' is unsupported. Use a local path or HTTPS URL.");
             }
             else
             {
@@ -73,14 +73,12 @@ public sealed class InstallerDiagnosticService : IInstallerDiagnosticService
                 }
 
                 var fileInfo = new FileInfo(path);
-                string sha256 = await ComputeSha256Async(path, cancellationToken).ConfigureAwait(false);
                 installer = new ResolvedInstaller(
                     path,
                     fileInfo.Name,
                     false,
                     false,
-                    sha256,
-                    fileInfo.Length);
+                    null);
             }
 
             if (!FileAnalyzer.CanAnalyze(installer.FileName))
@@ -91,16 +89,26 @@ public sealed class InstallerDiagnosticService : IInstallerDiagnosticService
 
             InstallerAnalysis analysis;
             PayloadDependencyAnalysis dependencies;
-            await using (FileStream stream = File.OpenRead(installer.Path))
+            string sha256;
+            long sizeInBytes;
+            await using FileStream stream = File.OpenRead(installer.Path);
+            sizeInBytes = stream.Length;
+            byte[] hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
+            sha256 = Convert.ToHexString(hash);
+            if (installer.ExpectedSha256 is not null
+                && !string.Equals(sha256, installer.ExpectedSha256, StringComparison.Ordinal))
             {
-                analysis = FileAnalyzer.Analyze(stream, installer.FileName);
+                throw new InvalidDataException(
+                    $"Downloaded installer '{installer.FileName}' changed before analysis.");
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            await using (FileStream stream = File.OpenRead(installer.Path))
-            {
-                dependencies = new PayloadDependencyAnalyzer().Analyze(stream, installer.FileName);
-            }
+            stream.Position = 0;
+            analysis = FileAnalyzer.Analyze(stream, installer.FileName);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            stream.Position = 0;
+            dependencies = new PayloadDependencyAnalyzer().Analyze(stream, installer.FileName);
 
             cancellationToken.ThrowIfCancellationRequested();
             string confidence = GetConfidence(analysis);
@@ -109,8 +117,8 @@ public sealed class InstallerDiagnosticService : IInstallerDiagnosticService
                 installer.FileName,
                 installer.IsRemote,
                 installer.IsFromCache,
-                installer.Sha256,
-                installer.SizeInBytes,
+                sha256,
+                sizeInBytes,
                 confidence,
                 analysis,
                 dependencies);
@@ -140,15 +148,6 @@ public sealed class InstallerDiagnosticService : IInstallerDiagnosticService
         }
 
         return analysis.Format == DetectedInstallerFormat.GenericInstallerExe ? "medium" : "high";
-    }
-
-    private static async Task<string> ComputeSha256Async(
-        string path,
-        CancellationToken cancellationToken)
-    {
-        await using FileStream stream = File.OpenRead(path);
-        byte[] hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
-        return Convert.ToHexString(hash);
     }
 
     private static string CreateScratchDirectory()
@@ -183,6 +182,5 @@ public sealed class InstallerDiagnosticService : IInstallerDiagnosticService
         string FileName,
         bool IsRemote,
         bool IsFromCache,
-        string Sha256,
-        long SizeInBytes);
+        string? ExpectedSha256);
 }

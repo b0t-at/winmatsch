@@ -49,6 +49,25 @@ public sealed class DiagnosticServicesTests
     }
 
     [Fact]
+    public async Task Analyze_treats_colon_relative_input_as_a_local_path()
+    {
+        bool downloaderCreated = false;
+        var service = new InstallerDiagnosticService(options =>
+        {
+            downloaderCreated = true;
+            return new WinMatsch.Downloads.InstallerDownloader(options);
+        });
+
+        Exception? exception = await Record.ExceptionAsync(() =>
+            service.AnalyzeAsync(
+                new InstallerAnalysisRequest("release:setup.exe", false, null)));
+
+        Assert.NotNull(exception);
+        Assert.False(downloaderCreated);
+        Assert.DoesNotContain("URI scheme", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Offline_validation_never_claims_origin_hash_validation_passed()
     {
         string directory = CreateTemporaryDirectory();

@@ -148,15 +148,54 @@ public sealed class DiagnosticsCommandModuleTests
     }
 
     [Fact]
+    public async Task Repository_timeout_is_an_operation_failure_not_user_cancellation()
+    {
+        var repository = new FakeRepositoryDiagnosticService
+        {
+            Failure = new TaskCanceledException("HTTP timeout"),
+        };
+        CliHarness harness = CreateHarness(repository: repository);
+        harness.EnvironmentVariables["GITHUB_TOKEN"] = "test-token";
+
+        CliRunResult result = await harness.RunAsync(
+            ["show", "Example.App", "2.0.0"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Equal(string.Empty, result.StandardOutput);
+        Assert.Contains("remote request timed out", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Repository_transport_failure_is_an_operation_failure()
+    {
+        var repository = new FakeRepositoryDiagnosticService
+        {
+            Failure = new HttpRequestException("DNS failure"),
+        };
+        CliHarness harness = CreateHarness(repository: repository);
+        harness.EnvironmentVariables["GITHUB_TOKEN"] = "test-token";
+
+        CliRunResult result = await harness.RunAsync(
+            ["list-versions", "Example.App"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Equal(string.Empty, result.StandardOutput);
+        Assert.Contains("DNS failure", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Cancellation_maps_to_cancelled_without_stack_trace()
     {
+        using var cancellation = new CancellationTokenSource();
         var analyzer = new FakeInstallerDiagnosticService
         {
-            Failure = new OperationCanceledException(),
+            Cancellation = cancellation,
         };
         CliHarness harness = CreateHarness(analyzer: analyzer);
 
-        CliRunResult result = await harness.RunAsync(["analyze", "fixture.exe"]);
+        CliRunResult result = await harness.RunAsync(
+            ["analyze", "fixture.exe"],
+            cancellation.Token);
 
         Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
         Assert.Equal(string.Empty, result.StandardOutput);
@@ -184,10 +223,18 @@ internal sealed class FakeInstallerDiagnosticService : IInstallerDiagnosticServi
 {
     public Exception? Failure { get; init; }
 
+    public CancellationTokenSource? Cancellation { get; init; }
+
     public Task<InstallerDiagnosticResult> AnalyzeAsync(
         InstallerAnalysisRequest request,
         CancellationToken cancellationToken = default)
     {
+        if (Cancellation is not null)
+        {
+            Cancellation.Cancel();
+            return Task.FromCanceled<InstallerDiagnosticResult>(cancellationToken);
+        }
+
         if (Failure is not null)
         {
             return Task.FromException<InstallerDiagnosticResult>(Failure);
@@ -253,6 +300,8 @@ internal sealed class FakeManifestValidationService : IManifestValidationService
 
 internal sealed class FakeRepositoryDiagnosticService : IRepositoryDiagnosticService
 {
+    public Exception? Failure { get; init; }
+
     public bool LastNormalize { get; private set; }
 
     public int LastSkip { get; private set; }
@@ -266,6 +315,11 @@ internal sealed class FakeRepositoryDiagnosticService : IRepositoryDiagnosticSer
         bool normalize,
         CancellationToken cancellationToken = default)
     {
+        if (Failure is not null)
+        {
+            return Task.FromException<PackageVersionResult>(Failure);
+        }
+
         LastNormalize = normalize;
         return Task.FromResult(new PackageVersionResult(
             repository,
@@ -287,6 +341,11 @@ internal sealed class FakeRepositoryDiagnosticService : IRepositoryDiagnosticSer
         int limit,
         CancellationToken cancellationToken = default)
     {
+        if (Failure is not null)
+        {
+            return Task.FromException<PackageVersionsResult>(Failure);
+        }
+
         LastSkip = skip;
         LastLimit = limit;
         return Task.FromResult(new PackageVersionsResult(

@@ -71,6 +71,13 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                 WriteAnalyzeResult(context, result);
                 return ExitCodes.Success;
             }
+            catch (OperationCanceledException exception)
+                when (!context.CancellationToken.IsCancellationRequested)
+            {
+                throw new CliOperationException(
+                    $"Installer analysis failed: the remote request timed out. {exception.Message}",
+                    exception);
+            }
             catch (OperationCanceledException)
             {
                 throw;
@@ -132,6 +139,13 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                     ? ExitCodes.Success
                     : ExitCodes.OperationFailed;
             }
+            catch (OperationCanceledException exception)
+                when (!context.CancellationToken.IsCancellationRequested)
+            {
+                throw new CliOperationException(
+                    $"Manifest validation failed: the remote request timed out. {exception.Message}",
+                    exception);
+            }
             catch (OperationCanceledException)
             {
                 throw;
@@ -186,6 +200,13 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                     .ConfigureAwait(false);
                 WriteShowResult(context, result);
                 return ExitCodes.Success;
+            }
+            catch (OperationCanceledException exception)
+                when (!context.CancellationToken.IsCancellationRequested)
+            {
+                throw new CliOperationException(
+                    $"Repository read failed: the remote request timed out. {exception.Message}",
+                    exception);
             }
             catch (OperationCanceledException)
             {
@@ -255,6 +276,13 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                 WriteVersionsResult(context, result);
                 return ExitCodes.Success;
             }
+            catch (OperationCanceledException exception)
+                when (!context.CancellationToken.IsCancellationRequested)
+            {
+                throw new CliOperationException(
+                    $"Repository read failed: the remote request timed out. {exception.Message}",
+                    exception);
+            }
             catch (OperationCanceledException)
             {
                 throw;
@@ -312,6 +340,8 @@ public sealed class DiagnosticsCommandModule : ICommandModule
             or UnauthorizedAccessException
             or NotSupportedException
             or ArgumentException
+            or HttpRequestException
+            or JsonException
             or DownloadException
             or GitHubApiException
             or DiagnosticNotFoundException;
