@@ -72,9 +72,21 @@ public sealed class InstallerDiagnosticService : IInstallerDiagnosticService
                     throw new FileNotFoundException($"Installer file '{request.Input}' does not exist.", path);
                 }
 
+                scratchDirectory = CreateScratchDirectory();
                 var fileInfo = new FileInfo(path);
+                string snapshotPath = Path.Combine(scratchDirectory, fileInfo.Name);
+                await using (FileStream source = File.Open(
+                                 path,
+                                 FileMode.Open,
+                                 FileAccess.Read,
+                                 FileShare.Read))
+                await using (FileStream destination = File.Create(snapshotPath))
+                {
+                    await source.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+                }
+
                 installer = new ResolvedInstaller(
-                    path,
+                    snapshotPath,
                     fileInfo.Name,
                     false,
                     false,
