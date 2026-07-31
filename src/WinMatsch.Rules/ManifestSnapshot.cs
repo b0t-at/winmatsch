@@ -833,6 +833,20 @@ internal sealed class ManifestSnapshot
         YamlMappingNode targetRoot,
         string excludedField)
     {
+        Dictionary<string, int> candidateCounts = CountNormalizedInstallerUrls(candidates);
+        Dictionary<string, int> targetCounts = CountNormalizedInstallerUrls(targets);
+        long comparisonCount = targetCounts.Sum(
+            pair => (long)pair.Value * candidateCounts.GetValueOrDefault(pair.Key));
+        if (comparisonCount > MaximumInstallerMatchComparisons)
+        {
+            return MatchInstallersBySignature(
+                candidates,
+                candidateRoot,
+                targets,
+                targetRoot,
+                excludedField);
+        }
+
         var scoredPairs = new List<InstallerPairCandidate>();
         for (int targetIndex = 0; targetIndex < targets.Children.Count; targetIndex++)
         {
@@ -885,6 +899,176 @@ internal sealed class ManifestSnapshot
         }
 
         return result;
+    }
+
+    private static Dictionary<string, int> CountNormalizedInstallerUrls(YamlSequenceNode installers)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (YamlNode node in installers.Children)
+        {
+            if (node is YamlMappingNode installer
+                && ScalarValue(GetMappingValue(installer, "InstallerUrl")) is { } url)
+            {
+                string normalized = NormalizeInstallerUrl(url);
+                counts[normalized] = counts.GetValueOrDefault(normalized) + 1;
+            }
+        }
+
+        return counts;
+    }
+
+    private static int?[] MatchInstallersBySignature(
+        YamlSequenceNode candidates,
+        YamlMappingNode candidateRoot,
+        YamlSequenceNode targets,
+        YamlMappingNode targetRoot,
+        string excludedField)
+    {
+        var byUrlAndSignature = new Dictionary<string, Dictionary<string, Queue<int>>>(
+            StringComparer.OrdinalIgnoreCase);
+        var byUrl = new Dictionary<string, Queue<int>>(StringComparer.OrdinalIgnoreCase);
+        for (int index = 0; index < candidates.Children.Count; index++)
+        {
+            if (candidates.Children[index] is not YamlMappingNode candidate
+                || ScalarValue(GetMappingValue(candidate, "InstallerUrl")) is not { } url)
+            {
+                continue;
+            }
+
+            string normalizedUrl = NormalizeInstallerUrl(url);
+            string signature = InstallerPairSignature(candidate, candidateRoot, excludedField);
+            if (!byUrlAndSignature.TryGetValue(
+                    normalizedUrl,
+                    out Dictionary<string, Queue<int>>? signatures))
+            {
+                signatures = new(StringComparer.Ordinal);
+                byUrlAndSignature.Add(normalizedUrl, signatures);
+                byUrl.Add(normalizedUrl, new());
+            }
+
+            if (!signatures.TryGetValue(signature, out Queue<int>? indices))
+            {
+                indices = new();
+                signatures.Add(signature, indices);
+            }
+
+            indices.Enqueue(index);
+            byUrl[normalizedUrl].Enqueue(index);
+        }
+
+        var used = new HashSet<int>();
+        var result = new int?[targets.Children.Count];
+        for (int targetIndex = 0; targetIndex < targets.Children.Count; targetIndex++)
+        {
+            if (targets.Children[targetIndex] is not YamlMappingNode target
+                || ScalarValue(GetMappingValue(target, "InstallerUrl")) is not { } url)
+            {
+                continue;
+            }
+
+            string normalizedUrl = NormalizeInstallerUrl(url);
+            string signature = InstallerPairSignature(target, targetRoot, excludedField);
+            int? matched = null;
+            if (byUrlAndSignature.TryGetValue(
+                    normalizedUrl,
+                    out Dictionary<string, Queue<int>>? signatures)
+                && signatures.TryGetValue(signature, out Queue<int>? exact))
+            {
+                matched = DequeueUnused(exact, used);
+            }
+
+            if (matched is null
+                && byUrl.TryGetValue(normalizedUrl, out Queue<int>? fallback))
+            {
+                matched = DequeueUnused(fallback, used);
+            }
+
+            if (matched is int candidateIndex)
+            {
+                used.Add(candidateIndex);
+                result[targetIndex] = candidateIndex;
+            }
+        }
+
+        return result;
+    }
+
+    private static int? DequeueUnused(Queue<int> indices, HashSet<int> used)
+    {
+        while (indices.Count > 0)
+        {
+            int index = indices.Dequeue();
+            if (!used.Contains(index))
+            {
+                return index;
+            }
+        }
+
+        return null;
+    }
+
+    private static string InstallerPairSignature(
+        YamlMappingNode installer,
+        YamlMappingNode root,
+        string excludedField)
+    {
+        string[] fields =
+        [
+            "Architecture",
+            "InstallerType",
+            "Scope",
+            "InstallerLocale",
+            "NestedInstallerType",
+            "ProductCode",
+        ];
+        var signature = new StringBuilder();
+        foreach (string field in fields)
+        {
+            if (!string.Equals(field, excludedField, StringComparison.Ordinal))
+            {
+                signature.Append(ScalarValue(
+                    GetMappingValue(installer, field) ?? GetMappingValue(root, field)));
+            }
+
+            signature.Append('\u001f');
+        }
+
+        signature.Append(InstallerSwitchesSignature(installer, excludedField));
+        return signature.ToString();
+    }
+
+    private static string InstallerSwitchesSignature(
+        YamlMappingNode installer,
+        string excludedField)
+    {
+        YamlMappingNode? switches = GetMappingValue(installer, "InstallerSwitches") as YamlMappingNode;
+        string[] fields =
+        [
+            "Silent",
+            "SilentWithProgress",
+            "Interactive",
+            "InstallLocation",
+            "Log",
+            "Upgrade",
+            "Custom",
+            "Repair",
+        ];
+        var signature = new StringBuilder();
+        foreach (string field in fields)
+        {
+            if (!string.Equals(
+                    $"InstallerSwitches.{field}",
+                    excludedField,
+                    StringComparison.Ordinal))
+            {
+                signature.Append(
+                    switches is null ? null : ScalarValue(GetMappingValue(switches, field)));
+            }
+
+            signature.Append('\u001f');
+        }
+
+        return signature.ToString();
     }
 
     private static bool EqualScalar(

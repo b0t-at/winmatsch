@@ -308,7 +308,7 @@ internal static class RuleLogSanitizer
     {
         foreach (ReadOnlyMemory<char> token in FindAuthorizationTokens(value, "basic"))
         {
-            string encoded = token.ToString();
+            string encoded = token.ToString().TrimEnd('.', ',', ';', '`', '>');
             int maximumDecodedLength = ((encoded.Length + 3) / 4) * 3;
             byte[] decoded = new byte[maximumDecodedLength];
             if (Convert.TryFromBase64String(encoded, decoded, out int bytesWritten)

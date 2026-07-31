@@ -1363,6 +1363,48 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Sentence_punctuation_does_not_bypass_basic_auth_redaction()
+    {
+        Assert.Equal("[REDACTED]", RuleLogSanitizer.SanitizeMessage("Basic YTpi."));
+    }
+
+    [Fact]
+    public void Large_installer_pairing_uses_a_bounded_fallback()
+    {
+        const int installerCount = 1024;
+        static Installer Installer(int index, string productCode)
+        {
+            Installer installer = TestManifests.CreateInstaller(
+                architecture: index % 2 == 0 ? Architecture.X64 : Architecture.X86,
+                url: "https://example.test/universal.zip",
+                scope: index % 2 == 0 ? Scope.User : Scope.Machine);
+            installer.Commands = [$"command-{index}"];
+            installer.ProductCode = productCode;
+            return installer;
+        }
+
+        PackageManifests originalBot = TestManifests.Create(
+            [.. Enumerable.Range(0, installerCount).Select(index => Installer(index, "A"))]);
+        originalBot.Installer.ProductCode = "A";
+        PackageManifests merged = TestManifests.Create(
+            [.. Enumerable.Range(0, installerCount).Select(index => Installer(index, "B"))]);
+        merged.Installer.ProductCode = "B";
+        PackageManifests generated = TestManifests.Create(
+            [.. Enumerable.Range(0, installerCount).Select(index => Installer(index, "B"))]);
+        generated.Installer.ProductCode = "B";
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
     public void Backtick_wrapping_does_not_bypass_jwt_redaction()
     {
         const string message =
