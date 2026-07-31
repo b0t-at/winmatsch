@@ -109,6 +109,7 @@ public class InnoProbeTests
     [InlineData("x64compatible or")]
     [InlineData("x64compatible-suffix")]
     [InlineData("not (x86compatible or arm64)")]
+    [InlineData("win64")]
     public void Non_single_or_malformed_architecture_expression_is_inconclusive(string expression)
     {
         var options = new InnoFixtures.Options
@@ -201,14 +202,15 @@ public class InnoProbeTests
     }
 
     [Theory]
-    [InlineData(@"{autopf}\Contoso Commander")]
-    [InlineData(@"{pf}\Contoso Commander")]
-    public void Arm64_payload_uses_x64compatible_64_bit_program_files_mode(string defaultDirName)
+    [InlineData(@"{autopf}\Contoso Commander", "x64compatible")]
+    [InlineData(@"{pf}\Contoso Commander", "x64compatible")]
+    [InlineData(@"{autopf}\Contoso Commander", "win64")]
+    public void Arm64_payload_uses_64_bit_program_files_mode(string defaultDirName, string modeExpression)
     {
         var options = new InnoFixtures.Options
         {
             ArchitecturesAllowed = "x86compatible",
-            ArchitecturesInstallIn64BitMode = "x64compatible",
+            ArchitecturesInstallIn64BitMode = modeExpression,
             DefaultDirName = defaultDirName,
             PayloadMachines = [Machine.Arm64],
         };
@@ -218,6 +220,27 @@ public class InnoProbeTests
 
         Assert.Equal(Architecture.Arm64, installer.Architecture);
         Assert.Equal(@"%ProgramFiles%\Contoso Commander", installer.InstallationMetadata!.DefaultInstallLocation);
+    }
+
+    [Theory]
+    [InlineData(Machine.Amd64, Architecture.X64)]
+    [InlineData(Machine.Arm64, Architecture.Arm64)]
+    public void Win64_does_not_enable_x86compatible_payload_override(
+        Machine payloadMachine,
+        Architecture payloadArchitecture)
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "win64",
+            ArchitecturesInstallIn64BitMode = "win64",
+            PayloadMachines = [payloadMachine],
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal([payloadArchitecture], metadata.EmbeddedPayloadArchitectures);
+        Assert.Null(metadata.EffectiveArchitecture);
+        Assert.False(metadata.ArchitectureIsConclusive);
     }
 
     [Theory]

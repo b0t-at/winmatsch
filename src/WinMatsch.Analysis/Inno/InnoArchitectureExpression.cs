@@ -263,10 +263,14 @@ internal static class InnoArchitectureExpression
                 return Positive(All, X86, x86Compatible: true);
             }
 
-            if (identifier.Equals("x64compatible", StringComparison.OrdinalIgnoreCase)
-                || identifier.Equals("win64", StringComparison.OrdinalIgnoreCase))
+            if (identifier.Equals("x64compatible", StringComparison.OrdinalIgnoreCase))
             {
                 return Positive(X64 | Arm64, X64);
+            }
+
+            if (identifier.Equals("win64", StringComparison.OrdinalIgnoreCase))
+            {
+                return Positive(X64 | Arm64, 0);
             }
 
             if (identifier.Equals("arm64", StringComparison.OrdinalIgnoreCase))
