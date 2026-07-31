@@ -29,6 +29,9 @@ internal sealed record InnoParsedHeader(
     string? AppVersion,
     string? Publisher,
     string? DefaultDirName,
+    string? UninstallDisplayName,
+    string? CreateUninstallRegKey,
+    string? Uninstallable,
     string? ArchitecturesAllowed,
     string? ArchitecturesInstallIn64BitMode,
     InnoPrivilegeLevel Privileges,
@@ -223,7 +226,7 @@ internal static partial class InnoFormatReader
         {
             using var input = new MemoryStream(packed, writable: false);
             using Stream decoder = version >= new Version(4, 1, 6)
-                ? CreateLzma1(input)
+                ? CreateLzma1(input, options.MaximumLzmaDictionaryBytes)
                 : new ZLibStream(input, CompressionMode.Decompress);
             return ReadToLimit(decoder, options.MaximumExpandedHeaderBytes, "Inno Setup header");
         }
@@ -303,7 +306,7 @@ internal static partial class InnoFormatReader
         _ = reader.ReadString(); // DefaultGroupName
         _ = reader.ReadString(); // BaseFilename
         _ = reader.ReadString(); // UninstallFilesDir
-        _ = reader.ReadString(); // UninstallName
+        string? uninstallDisplayName = reader.ReadString();
         _ = reader.ReadString(); // UninstallIcon
         _ = reader.ReadString(); // AppMutex
         _ = reader.ReadString(); // DefaultUserName
@@ -313,8 +316,8 @@ internal static partial class InnoFormatReader
         _ = reader.ReadString(); // AppContact
         _ = reader.ReadString(); // AppComments
         _ = reader.ReadString(); // AppModifyPath
-        _ = reader.ReadString(); // CreateUninstallRegistryKey
-        _ = reader.ReadString(); // Uninstallable
+        string? createUninstallRegKey = reader.ReadString();
+        string? uninstallable = reader.ReadString();
         _ = reader.ReadString(); // CloseApplicationsFilter
         _ = reader.ReadString(); // SetupMutex
         if (version >= new Version(5, 6, 1))
@@ -334,7 +337,7 @@ internal static partial class InnoFormatReader
         reader.SkipString(ansi: true); // LicenseText
         reader.SkipString(ansi: true); // InfoBefore
         reader.SkipString(ansi: true); // InfoAfter
-        reader.SkipString(); // CompiledCode
+        reader.SkipLengthPrefixedBytes(options.MaximumCompiledCodeBytes, "compiled code");
 
         if (!unicode)
         {
@@ -416,6 +419,9 @@ internal static partial class InnoFormatReader
             NullIfEmpty(appVersion),
             NullIfEmpty(publisher),
             NullIfEmpty(defaultDirName),
+            NullIfEmpty(uninstallDisplayName),
+            NullIfEmpty(createUninstallRegKey),
+            NullIfEmpty(uninstallable),
             NullIfEmpty(architecturesAllowed),
             NullIfEmpty(architectures64),
             privileges,
@@ -449,7 +455,7 @@ internal static partial class InnoFormatReader
         return new InnoLanguage(NullIfEmpty(name), languageId, codePage, locale);
     }
 
-    internal static int GetSetupFlagByteCount(Version version, bool unicode)
+    private static int GetSetupFlagByteCount(Version version, bool unicode)
     {
         int count = 0;
         Add(1); // DisableStartupPrompt
@@ -556,20 +562,28 @@ internal static partial class InnoFormatReader
         InnoProbeOptions options)
     {
         long start = offsets.DataOffset > 0 ? offsets.DataOffset : offsets.HeaderOffset;
-        int length = (int)Math.Min(Math.Max(0, stream.Length - start), options.MaximumPayloadScanBytes);
+        int length = (int)Math.Min(
+            Math.Max(0, stream.Length - start),
+            Math.Min(options.MaximumPayloadScanBytes, options.MaximumAggregatePayloadBytes));
         if (length == 0)
         {
             return [];
         }
 
+        var budget = new PayloadInspectionBudget(options.MaximumAggregatePayloadBytes);
         byte[] data = new byte[length];
         stream.Position = start;
         stream.ReadExactly(data);
+        budget.Consume(length);
         List<(Architecture Architecture, long Size)> result = FindPeImages(data, options.MaximumPayloadCandidates);
 
         ReadOnlySpan<byte> magic = "zlb\x1a"u8;
         int search = 0;
-        while (search <= data.Length - magic.Length && result.Count < options.MaximumPayloadCandidates)
+        int attempts = 0;
+        while (search <= data.Length - magic.Length
+               && attempts < options.MaximumPayloadMarkerAttempts
+               && budget.Remaining >= 2
+               && result.Count < options.MaximumPayloadCandidates)
         {
             int relative = data.AsSpan(search).IndexOf(magic);
             if (relative < 0)
@@ -578,7 +592,8 @@ internal static partial class InnoFormatReader
             }
 
             int payloadOffset = search + relative + magic.Length;
-            TryInspectCompressedPayload(data, payloadOffset, compression, options, result);
+            attempts++;
+            TryInspectCompressedPayload(data, payloadOffset, compression, options, budget, result);
             search = payloadOffset;
         }
 
@@ -590,20 +605,34 @@ internal static partial class InnoFormatReader
         int offset,
         InnoCompression compression,
         InnoProbeOptions options,
+        PayloadInspectionBudget budget,
         List<(Architecture Architecture, long Size)> result)
     {
+        int inputLimit = Math.Min(data.Length - offset, budget.Remaining / 2);
+        int outputLimit = Math.Min(options.MaximumExpandedPayloadBytes, budget.Remaining - inputLimit);
+        if (inputLimit <= 0 || outputLimit <= 0)
+        {
+            return;
+        }
+
+        using var input = new PayloadInputStream(data, offset, inputLimit);
+        int expandedCharge = 0;
         try
         {
-            using var input = new MemoryStream(data, offset, data.Length - offset, writable: false);
             using Stream decoded = compression switch
             {
                 InnoCompression.Stored => input,
-                InnoCompression.Zlib => new ZLibStream(input, CompressionMode.Decompress),
-                InnoCompression.Lzma1 => CreateLzma1(input),
-                InnoCompression.Lzma2 => CreateLzma2(input),
+                InnoCompression.Zlib => new ZLibStream(input, CompressionMode.Decompress, leaveOpen: true),
+                InnoCompression.Lzma1 => CreateLzma1(input, options.MaximumLzmaDictionaryBytes),
+                InnoCompression.Lzma2 => CreateLzma2(input, options.MaximumLzmaDictionaryBytes),
                 _ => throw new InvalidDataException(),
             };
-            byte[] expanded = ReadToLimit(decoded, options.MaximumExpandedPayloadBytes, "Inno Setup payload");
+            byte[] expanded = ReadToLimit(
+                decoded,
+                outputLimit,
+                "Inno Setup payload",
+                bytesRead => expandedCharge = bytesRead);
+            expandedCharge = expanded.Length;
             result.AddRange(FindPeImages(expanded, options.MaximumPayloadCandidates - result.Count));
         }
         catch (Exception exception) when (
@@ -614,6 +643,11 @@ internal static partial class InnoFormatReader
         {
             // A zlb marker can occur in compressed bytes. Payload evidence is optional; a
             // candidate that does not decode is ignored rather than invalidating the header.
+        }
+        finally
+        {
+            long processed = Math.Max(1, input.BytesRead + expandedCharge);
+            budget.Consume((int)Math.Min(processed, budget.Remaining));
         }
     }
 
@@ -627,58 +661,140 @@ internal static partial class InnoFormatReader
                 continue;
             }
 
-            int peOffset = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(i + 0x3C));
-            long signature = i + (long)peOffset;
-            if (peOffset < 0 || signature + 24 > data.Length
-                || BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan((int)signature)) != 0x00004550)
+            if (!TryInspectPe(data, i, out Architecture architecture, out long imageSize))
             {
                 continue;
             }
 
-            Machine machine = (Machine)BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan((int)signature + 4));
-            Architecture? architecture = machine switch
-            {
-                Machine.I386 => Architecture.X86,
-                Machine.Amd64 => Architecture.X64,
-                Machine.Arm64 => Architecture.Arm64,
-                Machine.Arm or Machine.Thumb or Machine.ArmThumb2 => Architecture.Arm,
-                _ => null,
-            };
-            if (architecture is null)
-            {
-                continue;
-            }
-
-            int sections = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan((int)signature + 6));
-            int optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan((int)signature + 20));
-            long table = signature + 24 + optionalSize;
-            long imageSize = 0;
-            if (sections is > 0 and <= 96 && table + (sections * 40L) <= data.Length)
-            {
-                for (int section = 0; section < sections; section++)
-                {
-                    int entry = (int)table + (section * 40);
-                    uint rawSize = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 16));
-                    uint rawOffset = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 20));
-                    imageSize = Math.Max(imageSize, rawOffset + (long)rawSize);
-                }
-            }
-
-            result.Add((architecture.Value, Math.Max(imageSize, 64)));
+            result.Add((architecture, imageSize));
             i += 63;
         }
 
         return result;
     }
 
-    private static LzmaStream CreateLzma1(Stream input)
+    private static bool TryInspectPe(
+        byte[] data,
+        int imageOffset,
+        out Architecture architecture,
+        out long imageSize)
+    {
+        architecture = default;
+        imageSize = 0;
+        int available = data.Length - imageOffset;
+        int peOffset = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(imageOffset + 0x3C));
+        long signature = imageOffset + (long)peOffset;
+        if (peOffset < 64
+            || signature + 24 > data.Length
+            || BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan((int)signature)) != 0x00004550)
+        {
+            return false;
+        }
+
+        Machine machine = (Machine)BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan((int)signature + 4));
+        architecture = machine switch
+        {
+            Machine.I386 => Architecture.X86,
+            Machine.Amd64 => Architecture.X64,
+            Machine.Arm64 => Architecture.Arm64,
+            Machine.Arm or Machine.Thumb or Machine.ArmThumb2 => Architecture.Arm,
+            _ => (Architecture)(-1),
+        };
+        if ((int)architecture < 0)
+        {
+            return false;
+        }
+
+        int sections = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan((int)signature + 6));
+        int optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan((int)signature + 20));
+        ushort characteristics = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan((int)signature + 22));
+        long optionalOffset = signature + 24;
+        long table = optionalOffset + optionalSize;
+        if (sections is < 1 or > 96
+            || optionalSize is < 64 or > 4096
+            || table + (sections * 40L) > data.Length
+            || (characteristics & (ushort)Characteristics.ExecutableImage) == 0)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<byte> optional = data.AsSpan((int)optionalOffset, optionalSize);
+        ushort optionalMagic = BinaryPrimitives.ReadUInt16LittleEndian(optional);
+        bool expectedPe32Plus = machine is Machine.Amd64 or Machine.Arm64;
+        if ((expectedPe32Plus && optionalMagic != 0x20B)
+            || (!expectedPe32Plus && optionalMagic != 0x10B)
+            || (optionalMagic == 0x10B && optionalSize < 96)
+            || (optionalMagic == 0x20B && optionalSize < 112))
+        {
+            return false;
+        }
+
+        uint sectionAlignment = BinaryPrimitives.ReadUInt32LittleEndian(optional[32..]);
+        uint fileAlignment = BinaryPrimitives.ReadUInt32LittleEndian(optional[36..]);
+        uint sizeOfImage = BinaryPrimitives.ReadUInt32LittleEndian(optional[56..]);
+        uint sizeOfHeaders = BinaryPrimitives.ReadUInt32LittleEndian(optional[60..]);
+        long relativeTableEnd = table + (sections * 40L) - imageOffset;
+        if (sectionAlignment == 0
+            || fileAlignment == 0
+            || sizeOfImage < sizeOfHeaders
+            || sizeOfImage % sectionAlignment != 0
+            || sizeOfHeaders < relativeTableEnd
+            || sizeOfHeaders > available)
+        {
+            return false;
+        }
+
+        long rawEnd = sizeOfHeaders;
+        bool hasRawSection = false;
+        for (int section = 0; section < sections; section++)
+        {
+            int entry = (int)table + (section * 40);
+            uint virtualSize = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 8));
+            uint virtualAddress = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 12));
+            uint rawSize = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 16));
+            uint rawOffset = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(entry + 20));
+            long virtualEnd = virtualAddress + (long)Math.Max(virtualSize, rawSize);
+            long sectionRawEnd = rawOffset + (long)rawSize;
+            if (virtualAddress >= sizeOfImage
+                || virtualEnd > sizeOfImage
+                || (rawSize > 0 && (rawOffset < sizeOfHeaders || sectionRawEnd > available)))
+            {
+                return false;
+            }
+
+            hasRawSection |= rawSize > 0;
+            rawEnd = Math.Max(rawEnd, sectionRawEnd);
+        }
+
+        if (!hasRawSection)
+        {
+            return false;
+        }
+
+        imageSize = rawEnd;
+        return true;
+    }
+
+    private static LzmaStream CreateLzma1(Stream input, int maximumDictionaryBytes)
     {
         byte[] properties = new byte[5];
         input.ReadExactly(properties);
+        int property = properties[0];
+        int lc = property % 9;
+        int remainder = property / 9;
+        int lp = remainder % 5;
+        int pb = remainder / 5;
+        uint dictionarySize = BinaryPrimitives.ReadUInt32LittleEndian(properties.AsSpan(1));
+        if (property >= 9 * 5 * 5 || lc + lp > 4 || pb > 4)
+        {
+            throw new InvalidDataException("The Inno Setup LZMA1 properties are invalid.");
+        }
+
+        ValidateLzmaDictionary(dictionarySize, maximumDictionaryBytes);
         return new LzmaStream(properties, input);
     }
 
-    private static LzmaStream CreateLzma2(Stream input)
+    private static LzmaStream CreateLzma2(Stream input, int maximumDictionaryBytes)
     {
         int property = input.ReadByte();
         if (property is < 0 or > 40)
@@ -686,10 +802,27 @@ internal static partial class InnoFormatReader
             throw new InvalidDataException("The Inno Setup LZMA2 property is invalid.");
         }
 
+        uint dictionarySize = property == 40
+            ? uint.MaxValue
+            : (uint)((2 | (property & 1)) << ((property / 2) + 11));
+        ValidateLzmaDictionary(dictionarySize, maximumDictionaryBytes);
         return new LzmaStream([(byte)property], input, -1, -1, null!, true);
     }
 
-    private static byte[] ReadToLimit(Stream input, int maximum, string name)
+    private static void ValidateLzmaDictionary(uint dictionarySize, int maximumDictionaryBytes)
+    {
+        if (dictionarySize == 0 || dictionarySize > maximumDictionaryBytes)
+        {
+            throw new InvalidDataException(
+                $"The Inno Setup LZMA dictionary size {dictionarySize} exceeds the configured limit.");
+        }
+    }
+
+    private static byte[] ReadToLimit(
+        Stream input,
+        int maximum,
+        string name,
+        Action<int>? reportBytesRead = null)
     {
         using var output = new MemoryStream(Math.Min(maximum, 64 * 1024));
         byte[] buffer = new byte[81920];
@@ -698,16 +831,19 @@ internal static partial class InnoFormatReader
             int allowed = Math.Min(buffer.Length, maximum + 1 - (int)output.Length);
             if (allowed <= 0)
             {
+                reportBytesRead?.Invoke((int)output.Length);
                 throw new InvalidDataException($"The expanded {name} exceeds the configured limit.");
             }
 
             int read = input.Read(buffer, 0, allowed);
             if (read == 0)
             {
+                reportBytesRead?.Invoke((int)output.Length);
                 return output.ToArray();
             }
 
             output.Write(buffer, 0, read);
+            reportBytesRead?.Invoke((int)output.Length);
         }
     }
 
@@ -723,7 +859,7 @@ internal static partial class InnoFormatReader
         return true;
     }
 
-    internal static uint Crc32(ReadOnlySpan<byte> data)
+    private static uint Crc32(ReadOnlySpan<byte> data)
     {
         uint crc = uint.MaxValue;
         foreach (byte value in data)
@@ -743,6 +879,94 @@ internal static partial class InnoFormatReader
 
     [GeneratedRegex(@"\((\d+)\.(\d+)\.(\d+)(?:\.(\d+))?")]
     private static partial Regex SetupVersionRegex();
+}
+
+internal sealed class PayloadInspectionBudget
+{
+    public PayloadInspectionBudget(int maximumBytes)
+    {
+        Remaining = maximumBytes;
+    }
+
+    public int Remaining { get; private set; }
+
+    public void Consume(int bytes)
+    {
+        if (bytes < 0 || bytes > Remaining)
+        {
+            throw new InvalidOperationException("The Inno Setup payload inspection budget was exceeded.");
+        }
+
+        Remaining -= bytes;
+    }
+}
+
+internal sealed class PayloadInputStream : Stream
+{
+    private readonly byte[] _data;
+    private readonly int _end;
+    private int _position;
+
+    public PayloadInputStream(byte[] data, int offset, int length)
+    {
+        _data = data;
+        _position = offset;
+        _end = offset + length;
+    }
+
+    public int BytesRead { get; private set; }
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => _end - (_position - BytesRead);
+
+    public override long Position
+    {
+        get => BytesRead;
+        set => throw new NotSupportedException();
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+        => Read(buffer.AsSpan(offset, count));
+
+    public override int Read(Span<byte> buffer)
+    {
+        int count = Math.Min(buffer.Length, _end - _position);
+        if (count <= 0)
+        {
+            return 0;
+        }
+
+        _data.AsSpan(_position, count).CopyTo(buffer);
+        _position += count;
+        BytesRead += count;
+        return count;
+    }
+
+    public override int ReadByte()
+    {
+        if (_position >= _end)
+        {
+            return -1;
+        }
+
+        BytesRead++;
+        return _data[_position++];
+    }
+
+    public override void Flush()
+    {
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
 
 internal sealed class InnoBinaryReader
@@ -811,6 +1035,18 @@ internal sealed class InnoBinaryReader
     }
 
     public void SkipString(bool ansi = false) => _ = ReadString(ansi);
+
+    public void SkipLengthPrefixedBytes(int maximumBytes, string fieldName)
+    {
+        uint length = ReadUInt32();
+        if (length > maximumBytes)
+        {
+            throw new InvalidDataException(
+                $"The Inno Setup {fieldName} length {length} exceeds the configured limit.");
+        }
+
+        Skip((int)length);
+    }
 
     public void Skip(int count)
     {

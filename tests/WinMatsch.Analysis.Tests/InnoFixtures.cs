@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.IO.Compression;
 using System.Reflection.PortableExecutable;
 using System.Text;
 using SharpCompress.Compressors.LZMA;
@@ -28,6 +29,12 @@ internal static class InnoFixtures
 
         public string DefaultDirName { get; set; } = @"{autopf}\Contoso Commander";
 
+        public string UninstallDisplayName { get; set; } = "Contoso Commander 2.5";
+
+        public string CreateUninstallRegKey { get; set; } = "yes";
+
+        public string Uninstallable { get; set; } = "yes";
+
         public string ArchitecturesAllowed { get; set; } = "x64compatible";
 
         public string ArchitecturesInstallIn64BitMode { get; set; } = "x64compatible";
@@ -44,6 +51,12 @@ internal static class InnoFixtures
 
         public List<Machine> PayloadMachines { get; set; } = [];
 
+        public byte[] AdditionalPayloadBytes { get; set; } = [];
+
+        public byte HeaderCompression { get; set; }
+
+        public byte[] CompiledCode { get; set; } = [];
+
         public bool CorruptLoaderChecksum { get; set; }
 
         public bool CorruptHeaderChecksum { get; set; }
@@ -54,6 +67,8 @@ internal static class InnoFixtures
 
         public bool CompressHeader { get; set; }
 
+        public uint? LzmaDictionarySizeOverride { get; set; }
+
         public bool WriteLegacyLoaderPointer { get; set; } = true;
     }
 
@@ -61,19 +76,18 @@ internal static class InnoFixtures
     {
         options ??= new Options();
         byte[] mainHeader = BuildMainHeader(options);
-        byte[] packedHeader = options.CompressHeader ? CompressLzma(mainHeader) : mainHeader;
+        byte[] packedHeader = options.CompressHeader
+            ? CompressLzma(mainHeader, options.LzmaDictionarySizeOverride)
+            : mainHeader;
         byte[] framed = FrameChunks(packedHeader);
         byte[] blockHeader = new byte[9];
-        BinaryPrimitives.WriteUInt32LittleEndian(
-            blockHeader,
-            InnoFormatReader.Crc32(blockHeader.AsSpan(4, 5)));
         BinaryPrimitives.WriteUInt32LittleEndian(
             blockHeader.AsSpan(4),
             options.StoredHeaderSizeOverride ?? (uint)framed.Length);
         blockHeader[8] = options.CompressHeader ? (byte)1 : (byte)0;
         BinaryPrimitives.WriteUInt32LittleEndian(
             blockHeader,
-            InnoFormatReader.Crc32(blockHeader.AsSpan(4, 5)));
+            FixtureCrc32(blockHeader.AsSpan(4, 5)));
         if (options.CorruptHeaderChecksum)
         {
             blockHeader[0] ^= 0x5A;
@@ -97,6 +111,7 @@ internal static class InnoFixtures
             payload.AddRange(new byte[17]);
         }
 
+        payload.AddRange(options.AdditionalPayloadBytes);
         byte[] installer = [.. stub, .. table, .. setupHeader, .. payload];
         if (options.WriteLegacyLoaderPointer)
         {
@@ -106,6 +121,38 @@ internal static class InnoFixtures
         }
 
         return installer;
+    }
+
+    public static byte[] BuildMarkerPayload(int invalidMarkers, byte[] finalPayload)
+    {
+        List<byte> result = [];
+        for (int i = 0; i < invalidMarkers; i++)
+        {
+            result.AddRange("zlb\x1a"u8.ToArray());
+            result.AddRange([0xFF, 0xFF, 0xFF, (byte)i]);
+        }
+
+        result.AddRange("zlb\x1a"u8.ToArray());
+        using var compressed = new MemoryStream();
+        using (var zlib = new ZLibStream(compressed, CompressionLevel.SmallestSize, leaveOpen: true))
+        {
+            zlib.Write(finalPayload);
+        }
+
+        result.AddRange(compressed.ToArray());
+        return [.. result];
+    }
+
+    public static byte[] BuildPseudoPe(Machine machine)
+    {
+        byte[] image = new byte[128];
+        image[0] = (byte)'M';
+        image[1] = (byte)'Z';
+        BinaryPrimitives.WriteInt32LittleEndian(image.AsSpan(0x3C), 64);
+        "PE\0\0"u8.CopyTo(image.AsSpan(64));
+        BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(68), (ushort)machine);
+        BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(70), 0); // No sections: not a valid image.
+        return image;
     }
 
     private static byte[] BuildMainHeader(Options options)
@@ -133,7 +180,7 @@ internal static class InnoFixtures
         AddString("Contoso Commander");
         AddString("setup");
         AddString("{app}");
-        AddString("Contoso Commander Uninstall");
+        AddString(options.UninstallDisplayName);
         AddString("{app}\\unins000.exe");
         AddString("ContosoMutex");
         AddString("");
@@ -143,8 +190,8 @@ internal static class InnoFixtures
         AddString("");
         AddString("");
         AddString("");
-        AddString("yes");
-        AddString("yes");
+        AddString(options.CreateUninstallRegKey);
+        AddString(options.Uninstallable);
         AddString("*.exe");
         AddString("SetupMutex");
         if (options.Version >= new Version(5, 6, 1))
@@ -162,7 +209,7 @@ internal static class InnoFixtures
         AddString("", forceAnsi: true);
         AddString("", forceAnsi: true);
         AddString("", forceAnsi: true);
-        AddString(""); // CompiledCode
+        AddBlob(options.CompiledCode);
 
         if (!options.Unicode)
         {
@@ -199,7 +246,7 @@ internal static class InnoFixtures
 
         bytes.Add(0); // ShowLanguageDialog
         bytes.Add(0); // LanguageDetectionMethod
-        bytes.Add(0); // Stored compression
+        bytes.Add(options.HeaderCompression);
         if (options.Version < new Version(6, 3, 0))
         {
             bytes.Add(options.OldArchitecturesAllowed);
@@ -208,7 +255,7 @@ internal static class InnoFixtures
 
         bytes.AddRange(new byte[2]);
         bytes.AddRange(new byte[8]);
-        bytes.AddRange(new byte[InnoFormatReader.GetSetupFlagByteCount(options.Version, options.Unicode)]);
+        bytes.AddRange(new byte[FixtureSetupFlagByteCount(options.Version)]);
 
         foreach (Language language in options.Languages)
         {
@@ -248,6 +295,12 @@ internal static class InnoFixtures
             bytes.AddRange(encoded);
         }
 
+        void AddBlob(byte[] value)
+        {
+            AddUInt32((uint)value.Length);
+            bytes.AddRange(value);
+        }
+
         void AddUInt32(uint value)
         {
             byte[] encoded = new byte[4];
@@ -264,7 +317,7 @@ internal static class InnoFixtures
         BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(12), 1);
         BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(32), (uint)headerOffset);
         BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(36), (uint)dataOffset);
-        BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(40), InnoFormatReader.Crc32(table.AsSpan(0, 40)));
+        BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(40), FixtureCrc32(table.AsSpan(0, 40)));
         if (corrupt)
         {
             table[40] ^= 0x80;
@@ -280,7 +333,7 @@ internal static class InnoFixtures
         {
             int length = Math.Min(4096, data.Length - offset);
             byte[] crc = new byte[4];
-            BinaryPrimitives.WriteUInt32LittleEndian(crc, InnoFormatReader.Crc32(data.AsSpan(offset, length)));
+            BinaryPrimitives.WriteUInt32LittleEndian(crc, FixtureCrc32(data.AsSpan(offset, length)));
             framed.AddRange(crc);
             framed.AddRange(data.AsSpan(offset, length).ToArray());
         }
@@ -288,7 +341,7 @@ internal static class InnoFixtures
         return [.. framed];
     }
 
-    private static byte[] CompressLzma(byte[] data)
+    private static byte[] CompressLzma(byte[] data, uint? dictionarySizeOverride)
     {
         using var output = new MemoryStream();
         byte[] properties;
@@ -298,7 +351,36 @@ internal static class InnoFixtures
             lzma.Write(data);
         }
 
+        if (dictionarySizeOverride is { } dictionarySize)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(properties.AsSpan(1), dictionarySize);
+        }
+
         return [.. properties, .. output.ToArray()];
+    }
+
+    private static int FixtureSetupFlagByteCount(Version version)
+        => version switch
+        {
+            { Major: 5, Minor: 6, Build: 0 } => 6,
+            { Major: 6, Minor: 4, Build: 0, Revision: 1 } => 6,
+            _ => throw new NotSupportedException($"No independent fixture layout is defined for setup data {version}."),
+        };
+
+    private static uint FixtureCrc32(ReadOnlySpan<byte> data)
+    {
+        uint crc = uint.MaxValue;
+        foreach (byte value in data)
+        {
+            crc ^= value;
+            for (int bit = 0; bit < 8; bit++)
+            {
+                uint lowBitMask = unchecked((uint)-(int)(crc & 1));
+                crc = (crc >> 1) ^ (0xEDB88320u & lowBitMask);
+            }
+        }
+
+        return ~crc;
     }
 
 }

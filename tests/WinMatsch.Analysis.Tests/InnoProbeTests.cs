@@ -152,6 +152,47 @@ public class InnoProbeTests
     }
 
     [Fact]
+    public void Lzma_dictionary_is_bounded_before_decoder_construction()
+    {
+        byte[] installer = InnoFixtures.BuildInstaller(
+            new InnoFixtures.Options
+            {
+                CompressHeader = true,
+                LzmaDictionarySizeOverride = 512 * 1024 * 1024,
+            });
+        var probe = new InnoProbe(new InnoProbeOptions { MaximumLzmaDictionaryBytes = 8 * 1024 * 1024 });
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Probe(installer, probe));
+
+        Assert.Contains("dictionary size", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Binary_compiled_code_is_skipped_without_text_decoding()
+    {
+        var options = new InnoFixtures.Options
+        {
+            CompiledCode = [0x00, 0xD8, 0xFF, 0x00, 0x81],
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal("Contoso Commander", metadata.AppName);
+    }
+
+    [Fact]
+    public void Compiled_code_skip_is_bounded()
+    {
+        byte[] installer = InnoFixtures.BuildInstaller(
+            new InnoFixtures.Options { CompiledCode = new byte[1024] });
+        var probe = new InnoProbe(new InnoProbeOptions { MaximumCompiledCodeBytes = 128 });
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Probe(installer, probe));
+
+        Assert.Contains("compiled code", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Current_resource_style_loader_table_is_found_without_legacy_pointer()
     {
         var options = new InnoFixtures.Options { WriteLegacyLoaderPointer = false };
@@ -178,6 +219,193 @@ public class InnoProbeTests
     }
 
     [Fact]
+    public void Payload_marker_attempts_are_capped_even_when_markers_are_invalid()
+    {
+        byte[] markerPayload = InnoFixtures.BuildMarkerPayload(4, PeFixtures.BuildExe(Machine.Amd64));
+        byte[] installer = InnoFixtures.BuildInstaller(
+            new InnoFixtures.Options
+            {
+                ArchitecturesAllowed = "x86compatible",
+                ArchitecturesInstallIn64BitMode = "",
+                HeaderCompression = 1,
+                AdditionalPayloadBytes = markerPayload,
+            });
+
+        InnoSetupMetadata limited = Assert.IsType<InnoSetupMetadata>(
+            Inspect(installer, new InnoProbe(new InnoProbeOptions { MaximumPayloadMarkerAttempts = 2 })));
+        InnoSetupMetadata complete = Assert.IsType<InnoSetupMetadata>(Inspect(installer));
+
+        Assert.Empty(limited.EmbeddedPayloadArchitectures);
+        Assert.Equal(Architecture.X86, limited.EffectiveArchitecture);
+        Assert.Equal([Architecture.X64], complete.EmbeddedPayloadArchitectures);
+        Assert.Equal(Architecture.X64, complete.EffectiveArchitecture);
+    }
+
+    [Fact]
+    public void Aggregate_payload_scan_budget_caps_decompression_work()
+    {
+        byte[] markerPayload = InnoFixtures.BuildMarkerPayload(0, PeFixtures.BuildExe(Machine.Amd64));
+        byte[] installer = InnoFixtures.BuildInstaller(
+            new InnoFixtures.Options
+            {
+                ArchitecturesAllowed = "x86compatible",
+                ArchitecturesInstallIn64BitMode = "",
+                HeaderCompression = 1,
+                AdditionalPayloadBytes = markerPayload,
+            });
+        var probe = new InnoProbe(
+            new InnoProbeOptions { MaximumAggregatePayloadBytes = markerPayload.Length + 128 });
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(installer, probe));
+
+        Assert.Empty(metadata.EmbeddedPayloadArchitectures);
+        Assert.Equal(Architecture.X86, metadata.EffectiveArchitecture);
+    }
+
+    [Fact]
+    public void Pseudo_pe_is_not_accepted_as_payload_evidence()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "",
+            AdditionalPayloadBytes = InnoFixtures.BuildPseudoPe(Machine.Amd64),
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Empty(metadata.EmbeddedPayloadArchitectures);
+        Assert.Equal(Architecture.X86, metadata.EffectiveArchitecture);
+    }
+
+    [Fact]
+    public void Mixed_helper_and_application_pes_do_not_override_x86compatible()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "",
+            PayloadMachines = [Machine.I386, Machine.Amd64],
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal([Architecture.X86, Architecture.X64], metadata.EmbeddedPayloadArchitectures);
+        Assert.Equal(Architecture.X86, metadata.EffectiveArchitecture);
+    }
+
+    [Fact]
+    public void Helper_payload_does_not_override_non_x86compatible_header()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x64compatible",
+            ArchitecturesInstallIn64BitMode = "x64compatible",
+            PayloadMachines = [Machine.I386],
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal([Architecture.X86], metadata.EmbeddedPayloadArchitectures);
+        Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
+    }
+
+    [Fact]
+    public void Uninstall_display_name_has_precedence_for_arp()
+    {
+        var options = new InnoFixtures.Options { UninstallDisplayName = "Commander ARP Name" };
+
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Equal("Commander ARP Name", Assert.Single(installer.AppsAndFeaturesEntries!).DisplayName);
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void Disabled_uninstall_registration_suppresses_arp_and_product_code(
+        bool createRegistryKey,
+        bool uninstallable)
+    {
+        var options = new InnoFixtures.Options
+        {
+            CreateUninstallRegKey = createRegistryKey ? "yes" : "no",
+            Uninstallable = uninstallable ? "yes" : "no",
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options)));
+        Installer installer = Assert.Single(analysis.Installers);
+
+        Assert.False(metadata.CreatesUninstallRegistryKey);
+        Assert.Equal(options.CreateUninstallRegKey, metadata.CreateUninstallRegKey);
+        Assert.Equal(options.Uninstallable, metadata.Uninstallable);
+        Assert.Null(metadata.ProductCode);
+        Assert.Null(installer.ProductCode);
+        Assert.Null(installer.AppsAndFeaturesEntries);
+        Assert.Equal(options.AppVerName, analysis.ProductName);
+    }
+
+    [Fact]
+    public void Machine_x86_autopf_resolves_to_32_bit_program_files()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "",
+        };
+
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Equal(@"%ProgramFiles(x86)%\Contoso Commander", installer.InstallationMetadata!.DefaultInstallLocation);
+    }
+
+    [Fact]
+    public void User_autopf_resolves_to_local_programs()
+    {
+        var options = new InnoFixtures.Options
+        {
+            PrivilegesRequired = InnoPrivilegeLevel.Lowest,
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "",
+        };
+
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Equal(@"%LOCALAPPDATA%\Programs\Contoso Commander", installer.InstallationMetadata!.DefaultInstallLocation);
+    }
+
+    [Fact]
+    public void Pf_resolves_only_with_conclusive_machine_64_bit_mode()
+    {
+        var options = new InnoFixtures.Options { DefaultDirName = @"{pf}\Contoso Commander" };
+
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Equal(@"%ProgramFiles%\Contoso Commander", installer.InstallationMetadata!.DefaultInstallLocation);
+    }
+
+    [Fact]
+    public void Autopf_is_omitted_when_scope_or_install_mode_is_uncertain()
+    {
+        var options = new InnoFixtures.Options
+        {
+            PrivilegesRequired = InnoPrivilegeLevel.None,
+            ArchitecturesAllowed = "x86compatible or x64compatible",
+            ArchitecturesInstallIn64BitMode = "x64compatible",
+        };
+
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Null(installer.InstallationMetadata);
+    }
+
+    [Fact]
     public void Unsafe_arp_values_are_not_emitted()
     {
         var options = new InnoFixtures.Options
@@ -192,7 +420,7 @@ public class InnoProbeTests
             Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
 
         AppsAndFeaturesEntry arp = Assert.Single(installer.AppsAndFeaturesEntries!);
-        Assert.Equal("Contoso Commander", arp.DisplayName);
+        Assert.Equal("Contoso Commander 2.5", arp.DisplayName);
         Assert.Null(arp.DisplayVersion);
         Assert.Null(arp.Publisher);
         Assert.Null(arp.ProductCode);
@@ -268,10 +496,10 @@ public class InnoProbeTests
         return (probe ?? new InnoProbe()).Probe(peFile, stream);
     }
 
-    private static InnoSetupMetadata? Inspect(byte[] installer)
+    private static InnoSetupMetadata? Inspect(byte[] installer, InnoProbe? probe = null)
     {
         using var stream = new MemoryStream(installer);
         using var peFile = new PeFile(stream);
-        return new InnoProbe().Inspect(peFile, stream);
+        return (probe ?? new InnoProbe()).Inspect(peFile, stream);
     }
 }

@@ -36,6 +36,14 @@ public sealed class InnoSetupMetadata
 
     public string? DefaultDirName { get; init; }
 
+    public string? UninstallDisplayName { get; init; }
+
+    public string? CreateUninstallRegKey { get; init; }
+
+    public string? Uninstallable { get; init; }
+
+    public bool? CreatesUninstallRegistryKey { get; init; }
+
     public string? ArchitecturesAllowed { get; init; }
 
     public string? ArchitecturesInstallIn64BitMode { get; init; }

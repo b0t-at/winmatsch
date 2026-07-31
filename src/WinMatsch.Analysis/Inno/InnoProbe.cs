@@ -31,10 +31,15 @@ public sealed class InnoProbe : IExeFormatProbe
         }
 
         VersionInfo version = peFile.VersionInfo;
-        string? displayName = SafeArpValue(metadata.AppVerName) ?? SafeArpValue(metadata.AppName);
+        bool canClaimArp = metadata.CreatesUninstallRegistryKey != false;
+        string? displayName = canClaimArp
+            ? SafeArpValue(metadata.UninstallDisplayName)
+                ?? SafeArpValue(metadata.AppVerName)
+                ?? SafeArpValue(metadata.AppName)
+            : SafeArpValue(metadata.AppVerName) ?? SafeArpValue(metadata.AppName);
         string? displayVersion = SafeArpValue(metadata.AppVersion);
         string? publisher = SafeArpValue(metadata.Publisher);
-        string? productCode = SafeArpValue(metadata.ProductCode);
+        string? productCode = canClaimArp ? SafeArpValue(metadata.ProductCode) : null;
         var installer = new Installer
         {
             Architecture = metadata.EffectiveArchitecture,
@@ -45,13 +50,14 @@ public sealed class InnoProbe : IExeFormatProbe
             InstallerLocale = metadata.Languages.Count == 1 ? metadata.Languages[0].Locale : null,
         };
 
-        string? installLocation = NormalizeInstallLocation(metadata.DefaultDirName);
+        string? installLocation = NormalizeInstallLocation(metadata);
         if (installLocation is not null)
         {
             installer.InstallationMetadata = new InstallationMetadata { DefaultInstallLocation = installLocation };
         }
 
-        if (displayName is not null || displayVersion is not null || publisher is not null || productCode is not null)
+        if (canClaimArp
+            && (displayName is not null || displayVersion is not null || publisher is not null || productCode is not null))
         {
             installer.AppsAndFeaturesEntries =
             [
@@ -113,6 +119,9 @@ public sealed class InnoProbe : IExeFormatProbe
             _ => peFile.RequestedElevation,
         };
 
+        bool? createsUninstallRegistryKey = GetCreatesUninstallRegistryKey(
+            header.CreateUninstallRegKey,
+            header.Uninstallable);
         string? appId = SafeArpValue(header.AppId);
         return new InnoSetupMetadata
         {
@@ -121,10 +130,14 @@ public sealed class InnoProbe : IExeFormatProbe
             AppName = header.AppName,
             AppVerName = header.AppVerName,
             AppId = appId,
-            ProductCode = appId is null ? null : appId + "_is1",
+            ProductCode = appId is null || createsUninstallRegistryKey == false ? null : appId + "_is1",
             AppVersion = header.AppVersion,
             Publisher = header.Publisher,
             DefaultDirName = header.DefaultDirName,
+            UninstallDisplayName = header.UninstallDisplayName,
+            CreateUninstallRegKey = header.CreateUninstallRegKey,
+            Uninstallable = header.Uninstallable,
+            CreatesUninstallRegistryKey = createsUninstallRegistryKey,
             ArchitecturesAllowed = header.ArchitecturesAllowed,
             ArchitecturesInstallIn64BitMode = header.ArchitecturesInstallIn64BitMode,
             PrivilegesRequired = header.Privileges,
@@ -143,20 +156,24 @@ public sealed class InnoProbe : IExeFormatProbe
         IReadOnlyList<(Architecture Architecture, long Size)> payloads,
         Architecture stubArchitecture)
     {
-        if (payloads.Count > 0)
+        (Architecture? headerArchitecture, bool headerConclusive) = GetHeaderArchitecture(header, stubArchitecture);
+        Architecture[] payloadArchitectures = payloads
+            .Select(payload => payload.Architecture)
+            .Distinct()
+            .ToArray();
+        if (IsX86CompatibleOnly(header.ArchitecturesAllowed)
+            && payloadArchitectures.Length == 1)
         {
-            long largestSize = payloads.Max(payload => payload.Size);
-            Architecture[] largest = payloads
-                .Where(payload => payload.Size == largestSize)
-                .Select(payload => payload.Architecture)
-                .Distinct()
-                .ToArray();
-            if (largest.Length == 1)
-            {
-                return (largest[0], true);
-            }
+            return (payloadArchitectures[0], true);
         }
 
+        return (headerArchitecture, headerConclusive);
+    }
+
+    private static (Architecture? Architecture, bool Conclusive) GetHeaderArchitecture(
+        InnoParsedHeader header,
+        Architecture stubArchitecture)
+    {
         string allowed = header.ArchitecturesAllowed ?? "";
         string mode64 = header.ArchitecturesInstallIn64BitMode ?? "";
         bool arm64 = HasPositiveToken(allowed, "arm64") || HasPositiveToken(mode64, "arm64");
@@ -179,6 +196,15 @@ public sealed class InnoProbe : IExeFormatProbe
         return (null, false);
     }
 
+    private static bool IsX86CompatibleOnly(string? expression)
+    {
+        string value = expression ?? "";
+        return HasPositiveToken(value, "x86compatible")
+            && !HasPositiveToken(value, "x64compatible")
+            && !HasPositiveToken(value, "x64os")
+            && !HasPositiveToken(value, "arm64");
+    }
+
     private static bool HasPositiveToken(string expression, string token)
     {
         int index = expression.IndexOf(token, StringComparison.OrdinalIgnoreCase);
@@ -191,22 +217,103 @@ public sealed class InnoProbe : IExeFormatProbe
         return !before.EndsWith("not", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string? NormalizeInstallLocation(string? value)
+    private static string? NormalizeInstallLocation(InnoSetupMetadata metadata)
     {
-        string? safe = SafeMetadataValue(value);
+        string? safe = SafeMetadataValue(metadata.DefaultDirName);
         if (safe is null)
         {
             return null;
         }
 
-        return safe
-            .Replace("{autopf}", "%ProgramFiles%", StringComparison.OrdinalIgnoreCase)
-            .Replace("{pf64}", "%ProgramFiles%", StringComparison.OrdinalIgnoreCase)
-            .Replace("{pf32}", "%ProgramFiles(x86)%", StringComparison.OrdinalIgnoreCase)
-            .Replace("{pf}", "%ProgramFiles%", StringComparison.OrdinalIgnoreCase)
-            .Replace("{localappdata}", "%LOCALAPPDATA%", StringComparison.OrdinalIgnoreCase)
-            .Replace("{userappdata}", "%APPDATA%", StringComparison.OrdinalIgnoreCase);
+        string? resolved;
+        if (StartsWithConstant(safe, "{autopf}", out string autoSuffix)
+            || StartsWithConstant(safe, "{pf}", out autoSuffix))
+        {
+            resolved = metadata.Scope switch
+            {
+                Scope.User => "%LOCALAPPDATA%\\Programs" + autoSuffix,
+                Scope.Machine when Get64BitInstallMode(metadata) == true => "%ProgramFiles%" + autoSuffix,
+                Scope.Machine when Get64BitInstallMode(metadata) == false => "%ProgramFiles(x86)%" + autoSuffix,
+                _ => null,
+            };
+        }
+        else if (StartsWithConstant(safe, "{pf64}", out string pf64Suffix))
+        {
+            resolved = metadata.Scope == Scope.Machine && Get64BitInstallMode(metadata) == true
+                ? "%ProgramFiles%" + pf64Suffix
+                : null;
+        }
+        else if (StartsWithConstant(safe, "{pf32}", out string pf32Suffix))
+        {
+            resolved = metadata.Scope == Scope.Machine ? "%ProgramFiles(x86)%" + pf32Suffix : null;
+        }
+        else if (StartsWithConstant(safe, "{localappdata}", out string localSuffix))
+        {
+            resolved = metadata.Scope == Scope.User ? "%LOCALAPPDATA%" + localSuffix : null;
+        }
+        else if (StartsWithConstant(safe, "{userappdata}", out string roamingSuffix))
+        {
+            resolved = metadata.Scope == Scope.User ? "%APPDATA%" + roamingSuffix : null;
+        }
+        else
+        {
+            resolved = safe.Contains('{', StringComparison.Ordinal) ? null : safe;
+        }
+
+        return resolved is not null && !resolved.Contains('{', StringComparison.Ordinal) ? resolved : null;
     }
+
+    private static bool? Get64BitInstallMode(InnoSetupMetadata metadata)
+    {
+        string expression = metadata.ArchitecturesInstallIn64BitMode ?? "";
+        if (string.IsNullOrWhiteSpace(expression))
+        {
+            return false;
+        }
+
+        return metadata.EffectiveArchitecture switch
+        {
+            Architecture.X64 when HasPositiveToken(expression, "x64compatible")
+                || HasPositiveToken(expression, "x64os") => true,
+            Architecture.Arm64 when HasPositiveToken(expression, "arm64") => true,
+            Architecture.X86 when !HasPositiveToken(expression, "x64compatible")
+                && !HasPositiveToken(expression, "x64os")
+                && !HasPositiveToken(expression, "arm64") => false,
+            _ => null,
+        };
+    }
+
+    private static bool StartsWithConstant(string value, string constant, out string suffix)
+    {
+        if (value.StartsWith(constant, StringComparison.OrdinalIgnoreCase))
+        {
+            suffix = value[constant.Length..];
+            return true;
+        }
+
+        suffix = "";
+        return false;
+    }
+
+    private static bool? GetCreatesUninstallRegistryKey(string? createKey, string? uninstallable)
+    {
+        bool? create = ParseConstantBoolean(createKey);
+        bool? canUninstall = ParseConstantBoolean(uninstallable);
+        if (create == false || canUninstall == false)
+        {
+            return false;
+        }
+
+        return create == true && canUninstall == true ? true : null;
+    }
+
+    private static bool? ParseConstantBoolean(string? value)
+        => value?.Trim().ToLowerInvariant() switch
+        {
+            "yes" or "true" or "1" => true,
+            "no" or "false" or "0" => false,
+            _ => null,
+        };
 
     private static string? SafeArpValue(string? value)
     {
