@@ -15,12 +15,28 @@ public sealed class RepositoryCoordinatesTests
     }
 
     [Fact]
-    public void Parse_rejects_empty_value()
-        => Assert.Throws<ArgumentException>(() => RepositoryCoordinates.Parse(""));
+    public void Constructor_rejects_invalid_parts_with_argument_exceptions()
+    {
+        Assert.Throws<ArgumentException>(() => new RepositoryCoordinates("", "name"));
+        Assert.Throws<ArgumentException>(() => new RepositoryCoordinates("owner", " "));
+        Assert.Throws<ArgumentException>(() => new RepositoryCoordinates("ow/ner", "name"));
+    }
 
     [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
     [InlineData("winget-pkgs")]
     [InlineData("microsoft/winget-pkgs/extra")]
-    public void Parse_rejects_invalid_shapes(string value)
-        => Assert.Throws<FormatException>(() => RepositoryCoordinates.Parse(value));
+    [InlineData("/winget-pkgs")]
+    [InlineData("microsoft/")]
+    [InlineData("/")]
+    [InlineData(" /name")]
+    [InlineData("owner/ ")]
+    public void Parse_rejects_every_invalid_syntax_with_format_exception(string? value)
+    {
+        var exception = Assert.Throws<FormatException>(() => RepositoryCoordinates.Parse(value));
+
+        Assert.Contains("owner/name", exception.Message, StringComparison.Ordinal);
+    }
 }

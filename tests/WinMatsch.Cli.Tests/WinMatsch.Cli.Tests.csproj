@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\WinMatsch.Cli\WinMatsch.Cli.csproj" />
+    <ProjectReference Include="..\WinMatsch.Testing\WinMatsch.Testing.csproj" />
   </ItemGroup>
 
 </Project>

@@ -20,16 +20,36 @@ public sealed record RepositoryCoordinates
 
     public string Name { get; }
 
-    public static RepositoryCoordinates Parse(string value)
+    /// <summary>
+    /// Parses user-supplied <c>owner/name</c> input. Every invalid syntax — null, empty,
+    /// whitespace, a missing or extra separator, or an empty owner or name part — throws
+    /// <see cref="FormatException"/>, so configuration binding maps it to a configuration
+    /// error instead of leaking an argument exception.
+    /// </summary>
+    public static RepositoryCoordinates Parse(string? value)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(value);
-        string[] parts = value.Split('/');
-        if (parts.Length != 2)
+        if (string.IsNullOrWhiteSpace(value))
         {
             throw new FormatException("A repository must use the 'owner/name' format.");
         }
 
-        return new RepositoryCoordinates(parts[0], parts[1]);
+        string[] parts = value.Split('/');
+        if (parts.Length != 2)
+        {
+            throw new FormatException(
+                $"'{value}' is not a valid repository. Use the 'owner/name' format.");
+        }
+
+        try
+        {
+            return new RepositoryCoordinates(parts[0], parts[1]);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new FormatException(
+                $"'{value}' is not a valid repository. Use the 'owner/name' format.",
+                exception);
+        }
     }
 
     public override string ToString() => $"{Owner}/{Name}";

@@ -7,9 +7,9 @@ namespace WinMatsch.Testing.Fixtures;
 public static class FixtureCatalog
 {
     private const string DescriptorSuffix = ".descriptor.json";
-    private static readonly Lazy<List<RegressionFixture>> AllFixtures = new(LoadAll);
+    private static readonly Lazy<List<RegressionFixture>> _allFixtures = new(LoadAll);
 
-    public static IReadOnlyList<RegressionFixture> All => AllFixtures.Value;
+    public static IReadOnlyList<RegressionFixture> All => _allFixtures.Value;
 
     public static RegressionFixture Get(string id)
     {
