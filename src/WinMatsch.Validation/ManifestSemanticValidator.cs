@@ -1,7 +1,9 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
+using WinMatsch.Downloads;
 
 namespace WinMatsch.Validation;
 
@@ -400,7 +402,7 @@ internal static class ManifestSemanticValidator
             if (!entriesByFile.TryGetValue(artifact.Download.FilePath, out HashSet<string>? entries))
             {
                 entries = ReadArchiveEntries(
-                    artifact.Download.FilePath,
+                    artifact.Download,
                     installerIndex,
                     findings);
                 if (entries is null)
@@ -432,14 +434,34 @@ internal static class ManifestSemanticValidator
     }
 
     private static HashSet<string>? ReadArchiveEntries(
-        string filePath,
+        DownloadResult download,
         int installerIndex,
         List<ValidationFinding> findings)
     {
         try
         {
-            ValidateZipDirectory(filePath);
-            using ZipArchive archive = ZipFile.OpenRead(filePath);
+            using FileStream stream = File.Open(
+                download.FilePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read);
+            if (stream.Length != download.SizeInBytes)
+            {
+                throw new InvalidDataException(
+                    $"Downloaded archive size changed from {download.SizeInBytes} to {stream.Length} bytes.");
+            }
+
+            string actualHash = Convert.ToHexString(SHA256.HashData(stream));
+            if (!string.Equals(actualHash, download.Sha256.Value, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Downloaded archive SHA-256 changed from '{download.Sha256}' to '{actualHash}'.");
+            }
+
+            stream.Position = 0;
+            ValidateZipDirectory(stream);
+            stream.Position = 0;
+            using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
             if (archive.Entries.Count > MaxArchiveEntries)
             {
                 throw new InvalidDataException(
@@ -505,34 +527,29 @@ internal static class ManifestSemanticValidator
         }
         catch (InvalidDataException exception)
         {
-            findings.Add(ArchiveError(exception.Message, installerIndex, filePath));
+            findings.Add(ArchiveError(exception.Message, installerIndex, download.FilePath));
         }
         catch (IOException exception)
         {
-            findings.Add(ArchiveError(exception.Message, installerIndex, filePath));
+            findings.Add(ArchiveError(exception.Message, installerIndex, download.FilePath));
         }
         catch (UnauthorizedAccessException exception)
         {
-            findings.Add(ArchiveError(exception.Message, installerIndex, filePath));
+            findings.Add(ArchiveError(exception.Message, installerIndex, download.FilePath));
         }
         catch (OverflowException exception)
         {
             findings.Add(ArchiveError(
                 $"Archive declares an overflowing expanded size: {exception.Message}",
                 installerIndex,
-                filePath));
+                download.FilePath));
         }
 
         return null;
     }
 
-    private static void ValidateZipDirectory(string filePath)
+    private static void ValidateZipDirectory(FileStream stream)
     {
-        using FileStream stream = File.Open(
-            filePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read);
         const int minimumRecordLength = 22;
         const int maximumCommentLength = ushort.MaxValue;
         int tailLength = checked((int)Math.Min(

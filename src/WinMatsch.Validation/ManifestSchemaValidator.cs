@@ -391,7 +391,8 @@ public static partial class ManifestSchemaValidator
         if (tag == "tag:yaml.org,2002:float"
             && value is not null
             && !IsNonFiniteYamlNumber(value)
-            && TryGetYamlFloatJson(value, out string? number))
+            && (TryGetYamlFloatJson(value, out string? number)
+                || TryGetExplicitIntegerFormFloatJson(value, out number)))
         {
             writer.WriteRawValue(number);
             return;
@@ -520,6 +521,19 @@ public static partial class ManifestSchemaValidator
         return true;
     }
 
+    private static bool TryGetExplicitIntegerFormFloatJson(
+        string value,
+        out string jsonNumber)
+    {
+        if (YamlDecimalIntegerPattern().IsMatch(value))
+        {
+            return TryGetYamlIntegerJson(value, out jsonNumber);
+        }
+
+        jsonNumber = string.Empty;
+        return false;
+    }
+
     private static bool IsNonFiniteYamlNumber(string value)
         => value.Equals(".inf", StringComparison.OrdinalIgnoreCase)
             || value.Equals("+.inf", StringComparison.OrdinalIgnoreCase)
@@ -535,6 +549,11 @@ public static partial class ManifestSchemaValidator
         @"^[+-]?(?:0[xX][0-9a-fA-F](?:_?[0-9a-fA-F])*|0[oO][0-7](?:_?[0-7])*|0[bB][01](?:_?[01])*|[0-9](?:_?[0-9])*)$",
         RegexOptions.CultureInvariant)]
     private static partial Regex YamlIntegerPattern();
+
+    [GeneratedRegex(
+        @"^[+-]?[0-9](?:_?[0-9])*$",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex YamlDecimalIntegerPattern();
 
     private static void ValidatePropertyCasing(
         YamlNode node,

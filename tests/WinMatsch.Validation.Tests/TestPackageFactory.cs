@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
 
@@ -128,6 +129,32 @@ internal static class TestPackageFactory
             IsFromCache = source.IsFromCache,
             MayBeStored = source.MayBeStored,
         };
+
+    public static DownloadResult CopyDownloadForFile(
+        DownloadResult source,
+        string filePath,
+        Sha256Hash? hashOverride = null)
+    {
+        using FileStream stream = File.OpenRead(filePath);
+        var hash = new Sha256Hash(Convert.ToHexString(SHA256.HashData(stream)));
+        return new DownloadResult
+        {
+            FilePath = filePath,
+            FileName = Path.GetFileName(filePath),
+            Sha256 = hashOverride ?? hash,
+            SizeInBytes = stream.Length,
+            LastModified = source.LastModified,
+            ETag = source.ETag,
+            ResponseDate = source.ResponseDate,
+            FreshUntil = source.FreshUntil,
+            RetrievedAt = source.RetrievedAt,
+            InitialUrl = source.InitialUrl,
+            FinalUrl = source.FinalUrl,
+            ContentType = source.ContentType,
+            IsFromCache = source.IsFromCache,
+            MayBeStored = source.MayBeStored,
+        };
+    }
 }
 
 internal sealed class FakePreflightNetwork : IPreflightNetwork

@@ -434,9 +434,9 @@ public sealed class PreflightGateTests
             ];
             PreflightRequest valid = TestPackageFactory.CreateRequest(manifests);
             InstallerArtifact artifact = Assert.Single(valid.InstallerArtifacts);
-            DownloadResult download = TestPackageFactory.CopyDownload(
+            DownloadResult download = TestPackageFactory.CopyDownloadForFile(
                 artifact.Download,
-                filePath: archivePath);
+                archivePath);
             PreflightRequest request = Copy(
                 valid,
                 artifacts: [artifact with { Download = download }]);
@@ -445,6 +445,60 @@ public sealed class PreflightGateTests
                 .ValidateAsync(request);
 
             Assert.Contains(report.Findings, static finding => finding.Code == "VLD3011");
+        }
+        finally
+        {
+            File.Delete(archivePath);
+        }
+    }
+
+    [Fact]
+    public async Task Nested_membership_is_bound_to_the_recorded_artifact_identity()
+    {
+        string archivePath = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-validation-{Guid.NewGuid():N}.zip");
+        try
+        {
+            using (ZipArchive archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+            {
+                _ = archive.CreateEntry("bin/tool.exe");
+            }
+
+            PackageManifests manifests = TestPackageFactory.CreateManifests();
+            manifests.Installer.InstallerType = InstallerType.Zip;
+            Installer installer = Assert.Single(manifests.Installer.Installers!);
+            installer.NestedInstallerType = InstallerType.Portable;
+            installer.NestedInstallerFiles =
+            [
+                new NestedInstallerFile
+                {
+                    RelativeFilePath = "bin/tool.exe",
+                    PortableCommandAlias = "tool",
+                },
+            ];
+            PreflightRequest valid = TestPackageFactory.CreateRequest(manifests);
+            InstallerArtifact artifact = Assert.Single(valid.InstallerArtifacts);
+            PreflightRequest request = Copy(
+                valid,
+                artifacts:
+                [
+                    artifact with
+                    {
+                        Download = TestPackageFactory.CopyDownloadForFile(
+                            artifact.Download,
+                            archivePath,
+                            hashOverride: artifact.Download.Sha256),
+                    },
+                ]);
+
+            ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+                .ValidateAsync(request);
+
+            Assert.Contains(
+                report.Findings,
+                static finding => finding.Code == "VLD3012"
+                    && finding.Message.Contains("SHA-256 changed", StringComparison.Ordinal));
         }
         finally
         {
@@ -476,11 +530,21 @@ public sealed class PreflightGateTests
                     PortableCommandAlias = "tool",
                 },
             ];
+            var archiveHash = TestPackageFactory.CopyDownloadForFile(
+                TestPackageFactory.CreateDownload(
+                    TestPackageFactory.InstallerUrl,
+                    new Sha256Hash(TestPackageFactory.Hash)),
+                archivePath).Sha256;
+            foreach (Installer installer in manifests.Installer.Installers!)
+            {
+                installer.InstallerSha256 = archiveHash;
+            }
+
             manifests.Installer.Installers!.Add(new Installer
             {
                 Architecture = Architecture.Arm64,
                 InstallerUrl = TestPackageFactory.InstallerUrl,
-                InstallerSha256 = new Sha256Hash(TestPackageFactory.Hash),
+                InstallerSha256 = archiveHash,
             });
             PreflightRequest valid = TestPackageFactory.CreateRequest(manifests);
             InstallerArtifact artifact = Assert.Single(valid.InstallerArtifacts);
@@ -490,9 +554,9 @@ public sealed class PreflightGateTests
                 [
                     artifact with
                     {
-                        Download = TestPackageFactory.CopyDownload(
+                        Download = TestPackageFactory.CopyDownloadForFile(
                             artifact.Download,
-                            filePath: archivePath),
+                            archivePath),
                     },
                 ]);
 
@@ -544,9 +608,9 @@ public sealed class PreflightGateTests
                 [
                     artifact with
                     {
-                        Download = TestPackageFactory.CopyDownload(
+                        Download = TestPackageFactory.CopyDownloadForFile(
                             artifact.Download,
-                            filePath: archivePath),
+                            archivePath),
                     },
                 ]);
 
@@ -598,9 +662,9 @@ public sealed class PreflightGateTests
                 [
                     artifact with
                     {
-                        Download = TestPackageFactory.CopyDownload(
+                        Download = TestPackageFactory.CopyDownloadForFile(
                             artifact.Download,
-                            filePath: archivePath),
+                            archivePath),
                     },
                 ]);
 
@@ -652,9 +716,9 @@ public sealed class PreflightGateTests
                 [
                     artifact with
                     {
-                        Download = TestPackageFactory.CopyDownload(
+                        Download = TestPackageFactory.CopyDownloadForFile(
                             artifact.Download,
-                            filePath: archivePath),
+                            archivePath),
                     },
                 ]);
 

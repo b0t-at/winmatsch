@@ -219,4 +219,26 @@ public sealed class ManifestSchemaValidatorTests
         Assert.Equal("VLD1001", finding.Code);
         Assert.Contains("incompatible with node type", finding.Message, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("!!float 1")]
+    [InlineData("!!float \"1\"")]
+    public void Explicit_integer_form_floats_remain_json_numbers(string scalar)
+    {
+        string yaml = $"""
+            PackageIdentifier: Example.App
+            PackageVersion: {scalar}
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.12.0
+
+            """;
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Version);
+
+        Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD1001");
+        Assert.Contains(report.Findings, static finding => finding.Code == "VLD1003");
+    }
 }
