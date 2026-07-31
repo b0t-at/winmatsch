@@ -1,0 +1,297 @@
+[
+  {
+    "id": "super-productivity-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/johannesjo/super-productivity/releases/tags/v18.2.8",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v18.2.8",
+      "assets": [
+        {
+          "name": "Super-Productivity-Setup-x64.exe",
+          "browser_download_url": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-x64.exe"
+        },
+        {
+          "name": "Super-Productivity-Setup.exe",
+          "browser_download_url": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup.exe"
+        },
+        {
+          "name": "Super-Productivity-Setup-arm64.exe",
+          "browser_download_url": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-arm64.exe"
+        }
+      ]
+    }
+  },
+  {
+    "id": "notesnook-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/streetwriters/notesnook/releases/tags/v3.2.4",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v3.2.4",
+      "assets": [
+        {
+          "name": "notesnook_win_x64.exe",
+          "browser_download_url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64.exe"
+        },
+        {
+          "name": "notesnook_win_x64_portable.exe",
+          "browser_download_url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64_portable.exe"
+        },
+        {
+          "name": "notesnook_win_arm64.exe",
+          "browser_download_url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64.exe"
+        },
+        {
+          "name": "notesnook_win_arm64_portable.exe",
+          "browser_download_url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64_portable.exe"
+        }
+      ]
+    }
+  },
+  {
+    "id": "uhk-agent-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/UltimateHackingKeyboard/agent/releases/tags/v5.0.0",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v5.0.0",
+      "assets": [
+        {
+          "name": "UHK.Agent-5.0.0-win-ia32.exe",
+          "browser_download_url": "https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win-ia32.exe"
+        },
+        {
+          "name": "UHK.Agent-5.0.0-win.exe",
+          "browser_download_url": "https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win.exe"
+        },
+        {
+          "name": "UHK.Agent-5.0.0-win-x64.exe",
+          "browser_download_url": "https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win-x64.exe"
+        }
+      ]
+    }
+  },
+  {
+    "id": "electron-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/electron/electron/releases/tags/v35.2.0",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v35.2.0",
+      "assets": [
+        {
+          "name": "electron-v35.2.0-win32-ia32.zip",
+          "browser_download_url": "https://github.com/electron/electron/releases/download/v35.2.0/electron-v35.2.0-win32-ia32.zip"
+        },
+        {
+          "name": "electron-v35.2.0-win32-x64.zip",
+          "browser_download_url": "https://github.com/electron/electron/releases/download/v35.2.0/electron-v35.2.0-win32-x64.zip"
+        },
+        {
+          "name": "electron-v35.2.0-win32-arm64.zip",
+          "browser_download_url": "https://github.com/electron/electron/releases/download/v35.2.0/electron-v35.2.0-win32-arm64.zip"
+        }
+      ]
+    }
+  },
+  {
+    "id": "pandoc-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/jgm/pandoc/releases/tags/3.6.2",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "3.6.2",
+      "assets": [
+        {
+          "name": "pandoc-3.6.2-windows-x86_64.msi",
+          "browser_download_url": "https://github.com/jgm/pandoc/releases/download/3.6.2/pandoc-3.6.2-windows-x86_64.msi"
+        }
+      ]
+    }
+  },
+  {
+    "id": "surrealdb-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/surrealdb/surrealdb/releases/tags/v2.3.0",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v2.3.0",
+      "assets": [
+        {
+          "name": "surreal-v2.3.0.windows-amd64.exe",
+          "browser_download_url": "https://github.com/surrealdb/surrealdb/releases/download/v2.3.0/surreal-v2.3.0.windows-amd64.exe"
+        }
+      ]
+    }
+  },
+  {
+    "id": "keeper-commander-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/Keeper-Security/Commander/releases/tags/v17.1.3",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v17.1.3",
+      "assets": [
+        {
+          "name": "keeper-commander-windows-v17.1.3.exe",
+          "browser_download_url": "https://github.com/Keeper-Security/Commander/releases/download/v17.1.3/keeper-commander-windows-v17.1.3.exe"
+        }
+      ]
+    }
+  },
+  {
+    "id": "buf-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/bufbuild/buf/releases/tags/v1.64.0",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v1.64.0",
+      "assets": [
+        {
+          "name": "buf-Windows-x86_64.zip",
+          "browser_download_url": "https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-x86_64.zip"
+        },
+        {
+          "name": "buf-Windows-arm64.zip",
+          "browser_download_url": "https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-arm64.zip"
+        }
+      ]
+    }
+  },
+  {
+    "id": "clouddrive2-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/cloud-fs/cloud-fs.github.io/releases/tags/v0.9.8",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v0.9.8",
+      "assets": [
+        {
+          "name": "CloudDrive2Setup-X64-0.9.8.exe",
+          "browser_download_url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-X64-0.9.8.exe"
+        },
+        {
+          "name": "CloudDrive2Setup-Arm64-0.9.8.exe",
+          "browser_download_url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-Arm64-0.9.8.exe"
+        }
+      ]
+    }
+  },
+  {
+    "id": "sonarr-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/Sonarr/Sonarr/releases/tags/v4.0.15.2941",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v4.0.15.2941",
+      "assets": [
+        {
+          "name": "Sonarr.main.4.0.15.2941.win-x86-installer.exe",
+          "browser_download_url": "https://github.com/Sonarr/Sonarr/releases/download/v4.0.15.2941/Sonarr.main.4.0.15.2941.win-x86-installer.exe"
+        },
+        {
+          "name": "Sonarr.main.4.0.15.2941.win-x64-installer.exe",
+          "browser_download_url": "https://github.com/Sonarr/Sonarr/releases/download/v4.0.15.2941/Sonarr.main.4.0.15.2941.win-x64-installer.exe"
+        }
+      ]
+    }
+  },
+  {
+    "id": "mise-release",
+    "method": "GET",
+    "uri": "https://api.github.com/repos/jdx/mise/releases/tags/v2025.12.2",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "tag_name": "v2025.12.2",
+      "assets": [
+        {
+          "name": "mise-v2025.12.2-windows-x64.zip",
+          "browser_download_url": "https://github.com/jdx/mise/releases/download/v2025.12.2/mise-v2025.12.2-windows-x64.zip"
+        },
+        {
+          "name": "mise-v2025.12.2-windows-arm64.zip",
+          "browser_download_url": "https://github.com/jdx/mise/releases/download/v2025.12.2/mise-v2025.12.2-windows-arm64.zip"
+        }
+      ]
+    }
+  },
+  {
+    "id": "curl-win32",
+    "method": "HEAD",
+    "uri": "https://curl.se/windows/dl-8.12.1_4/curl-8.12.1_4-win32-mingw.zip",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/zip"
+    }
+  },
+  {
+    "id": "curl-win64",
+    "method": "HEAD",
+    "uri": "https://curl.se/windows/dl-8.12.1_4/curl-8.12.1_4-win64-mingw.zip",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/zip"
+    }
+  },
+  {
+    "id": "curl-win64a",
+    "method": "HEAD",
+    "uri": "https://curl.se/windows/dl-8.12.1_4/curl-8.12.1_4-win64a-mingw.zip",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/zip"
+    }
+  },
+  {
+    "id": "exiftool-x86",
+    "method": "HEAD",
+    "uri": "https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_32.exe",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/octet-stream"
+    }
+  },
+  {
+    "id": "exiftool-x64",
+    "method": "HEAD",
+    "uri": "https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_64.exe",
+    "statusCode": 200,
+    "responseHeaders": {
+      "Content-Type": "application/octet-stream"
+    }
+  }
+]

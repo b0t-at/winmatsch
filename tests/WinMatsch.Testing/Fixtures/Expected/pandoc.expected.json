@@ -1,0 +1,21 @@
+{
+  "packageIdentifier": "JohnMacFarlane.Pandoc",
+  "packageVersion": "3.6.2",
+  "installerType": "wix",
+  "installers": [
+    {
+      "architecture": "x64",
+      "installerUrl": "https://github.com/jgm/pandoc/releases/download/3.6.2/pandoc-3.6.2-windows-x86_64.msi",
+      "installerSha256": "E9A8036CC298AE3D92105D5909C805A0A069CC988E7938703C4041B3E24A13AA",
+      "scope": "user",
+      "customSwitch": "ALLUSERS=1"
+    },
+    {
+      "architecture": "x64",
+      "installerUrl": "https://github.com/jgm/pandoc/releases/download/3.6.2/pandoc-3.6.2-windows-x86_64.msi",
+      "installerSha256": "E9A8036CC298AE3D92105D5909C805A0A069CC988E7938703C4041B3E24A13AA",
+      "scope": "machine",
+      "customSwitch": "ALLUSERS=2"
+    }
+  ]
+}

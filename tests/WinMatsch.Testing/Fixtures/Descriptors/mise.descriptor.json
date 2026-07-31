@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "mise",
+  "package": {
+    "identifier": "jdx.mise",
+    "version": "2025.12.2"
+  },
+  "regression": {
+    "summary": "Release-note list markers must be sanitized before emitting a YAML block scalar.",
+    "ruleIds": ["META-4", "PIPE-1"],
+    "expectedBehavior": "Replace leading hyphen list markers with bullet characters while preserving the release-note text."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 322416,
+    "outcome": "merged",
+    "headCommit": "66119735cfd2386afc27a76aa88a6b6ab56c4c0e",
+    "mergeCommit": "1d7de913a338550b16f253dad7d6bb9f72e2512c",
+    "observedAt": "2025-12-30T22:11:27Z",
+    "manifestPath": "manifests/j/jdx/mise/2025.12.2/jdx.mise.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/66119735cfd2386afc27a76aa88a6b6ab56c4c0e/manifests/j/jdx/mise/2025.12.2/jdx.mise.installer.yaml",
+    "manifestSha256": "02B84C31A1D843DF59DA34E42719D2A08A869742840344EBB40FAEAA43BC3A09"
+  },
+  "assets": [
+    {
+      "fileName": "mise-v2025.12.2-windows-x64.zip",
+      "url": "https://github.com/jdx/mise/releases/download/v2025.12.2/mise-v2025.12.2-windows-x64.zip",
+      "sha256": "281929A9910ACD3B1229E03BBD8F29FA399CE05750701947227636811FA05AA0",
+      "expectedArchitecture": "x64",
+      "expectedInstallerType": "zip"
+    },
+    {
+      "fileName": "mise-v2025.12.2-windows-arm64.zip",
+      "url": "https://github.com/jdx/mise/releases/download/v2025.12.2/mise-v2025.12.2-windows-arm64.zip",
+      "sha256": "BDDE94A05B2D014A89E509142552510CE8105494F38D6F1B45172507435F1EC7",
+      "expectedArchitecture": "arm64",
+      "expectedInstallerType": "zip"
+    }
+  ],
+  "expectedSnapshot": "Fixtures/Expected/mise.expected.json"
+}

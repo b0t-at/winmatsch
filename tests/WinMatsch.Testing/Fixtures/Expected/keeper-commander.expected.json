@@ -1,0 +1,12 @@
+{
+  "packageIdentifier": "KeeperSecurity.Commander",
+  "packageVersion": "17.1.3",
+  "installerType": "inno",
+  "installers": [
+    {
+      "architecture": "x64",
+      "installerUrl": "https://github.com/Keeper-Security/Commander/releases/download/v17.1.3/keeper-commander-windows-v17.1.3.exe",
+      "installerSha256": "3943F3DEC6EC94B88CD2BBED392E64CB1B82C9E9CB32446DD356DD75FFA899A3"
+    }
+  ]
+}

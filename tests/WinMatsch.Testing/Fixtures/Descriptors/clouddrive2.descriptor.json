@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "clouddrive2",
+  "package": {
+    "identifier": "Waytech.CloudDrive2",
+    "version": "0.9.8"
+  },
+  "regression": {
+    "summary": "A static ARP DisplayVersion overlaps every package version and must not be emitted.",
+    "ruleIds": ["ARP-2"],
+    "expectedBehavior": "Preserve the ARP product code but omit DisplayVersion 1.0."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 287069,
+    "outcome": "closed-unmerged-with-observed-regression",
+    "headCommit": "45cf87119118a53be961052f0fd3cc114a2e4295",
+    "mergeCommit": "70d268245c8c42515ee0f65864055b1d90f74467",
+    "observedAt": "2025-09-09T12:29:04Z",
+    "manifestPath": "manifests/w/Waytech/CloudDrive2/0.9.8/Waytech.CloudDrive2.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/45cf87119118a53be961052f0fd3cc114a2e4295/manifests/w/Waytech/CloudDrive2/0.9.8/Waytech.CloudDrive2.installer.yaml",
+    "manifestSha256": "F967823B8EC3F8493DC7DDD74E47D773406E9DF0A0D4834E57A27F126ABC6433"
+  },
+  "assets": [
+    {
+      "fileName": "CloudDrive2Setup-X64-0.9.8.exe",
+      "url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-X64-0.9.8.exe",
+      "sha256": "762C0CDE3C285C8317503452A2EC1FDCA9276056DD1443412C8418DC217F0D6B",
+      "expectedArchitecture": "x64",
+      "expectedInstallerType": "inno"
+    },
+    {
+      "fileName": "CloudDrive2Setup-Arm64-0.9.8.exe",
+      "url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-Arm64-0.9.8.exe",
+      "sha256": "4C5E6803A5615D023F084CD4B95D445DD9B335EAF2CAC2315459B08C9E44FEC4",
+      "expectedArchitecture": "arm64",
+      "expectedInstallerType": "inno"
+    }
+  ],
+  "expectedSnapshot": "Fixtures/Expected/clouddrive2.expected.json"
+}

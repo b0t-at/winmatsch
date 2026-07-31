@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "super-productivity",
+  "package": {
+    "identifier": "JohannesMillan.superProductivity",
+    "version": "18.2.8"
+  },
+  "regression": {
+    "summary": "Tokenless and explicitly tagged Electron/NSIS assets must not collapse to duplicate x64 entries.",
+    "ruleIds": ["ARCH-1", "ARCH-2", "DUP-1"],
+    "expectedBehavior": "Map -x64 to x64, -arm64 to arm64, and the tokenless setup asset to x86."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 363945,
+    "outcome": "merged",
+    "headCommit": "6f277684639d8ffc0b1ae71ae6ae7f50cf8906be",
+    "mergeCommit": "839d8a584ffc3df800ff4bc98fe09af7a60652d1",
+    "observedAt": "2026-04-24T10:54:36Z",
+    "manifestPath": "manifests/j/JohannesMillan/superProductivity/18.2.8/JohannesMillan.superProductivity.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/6f277684639d8ffc0b1ae71ae6ae7f50cf8906be/manifests/j/JohannesMillan/superProductivity/18.2.8/JohannesMillan.superProductivity.installer.yaml",
+    "manifestSha256": "7F546883337D9D2AEBC987C4D244F13DB13BAD972B82A17F3CF9C8671DCAA46B"
+  },
+  "assets": [
+    {
+      "fileName": "Super-Productivity-Setup-x64.exe",
+      "url": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-x64.exe",
+      "sha256": "CE8E856D5A83F9092DEDA2C30D0B9F001C5EA5EBDC1AE917DF66CA66B86C7554",
+      "expectedArchitecture": "x64",
+      "expectedInstallerType": "nullsoft"
+    },
+    {
+      "fileName": "Super-Productivity-Setup.exe",
+      "url": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup.exe",
+      "sha256": "98F2FD1E455E03B0F5F3F09A389A53A5828D246F1B43651F10C0960FCD3DB2BC",
+      "expectedArchitecture": "x86",
+      "expectedInstallerType": "nullsoft"
+    },
+    {
+      "fileName": "Super-Productivity-Setup-arm64.exe",
+      "url": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-arm64.exe",
+      "sha256": "FF37E36FC0E3BB557FF24DB3A7E697C8C49B54887D52B8081FEDEB1EAA5EFD6F",
+      "expectedArchitecture": "arm64",
+      "expectedInstallerType": "nullsoft"
+    }
+  ],
+  "expectedSnapshot": "Fixtures/Expected/super-productivity.expected.json"
+}

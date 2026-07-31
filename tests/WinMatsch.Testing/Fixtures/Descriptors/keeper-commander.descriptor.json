@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "keeper-commander",
+  "package": {
+    "identifier": "KeeperSecurity.Commander",
+    "version": "17.1.3"
+  },
+  "regression": {
+    "summary": "Inno's x86compatible header is not sufficient to classify a 64-bit-only installer as x86.",
+    "ruleIds": ["ARCH-4"],
+    "expectedBehavior": "Retain the learned x64 architecture for the Keeper Commander installer."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 271802,
+    "outcome": "merged",
+    "headCommit": "2462b8005ee1d91e28439b9c32bd4126d0f23cde",
+    "mergeCommit": "a63e2c749d9bc3b5c34324f658b12d9928f3d799",
+    "observedAt": "2025-07-11T11:52:59Z",
+    "manifestPath": "manifests/k/KeeperSecurity/Commander/17.1.3/KeeperSecurity.Commander.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/2462b8005ee1d91e28439b9c32bd4126d0f23cde/manifests/k/KeeperSecurity/Commander/17.1.3/KeeperSecurity.Commander.installer.yaml",
+    "manifestSha256": "2DE27B28167CFE11288D8FC840A12FCB84A80BDA9FFC82CB08A22E2A635502ED"
+  },
+  "assets": [
+    {
+      "fileName": "keeper-commander-windows-v17.1.3.exe",
+      "url": "https://github.com/Keeper-Security/Commander/releases/download/v17.1.3/keeper-commander-windows-v17.1.3.exe",
+      "sha256": "3943F3DEC6EC94B88CD2BBED392E64CB1B82C9E9CB32446DD356DD75FFA899A3",
+      "expectedArchitecture": "x64",
+      "expectedInstallerType": "inno"
+    }
+  ],
+  "expectedSnapshot": "Fixtures/Expected/keeper-commander.expected.json"
+}

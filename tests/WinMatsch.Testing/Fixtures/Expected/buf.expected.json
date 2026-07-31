@@ -1,0 +1,23 @@
+{
+  "packageIdentifier": "bufbuild.buf",
+  "packageVersion": "1.64.0",
+  "installerType": "zip",
+  "nestedInstallerType": "portable",
+  "nestedInstallerFiles": [
+    "buf/bin/buf.exe",
+    "buf/bin/protoc-gen-buf-breaking.exe",
+    "buf/bin/protoc-gen-buf-lint.exe"
+  ],
+  "installers": [
+    {
+      "architecture": "x64",
+      "installerUrl": "https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-x86_64.zip",
+      "installerSha256": "097B0BA51F424FC6811EA30BA3A0A70A75C457126CA09FA45CC5DA4CFEFCB26E"
+    },
+    {
+      "architecture": "arm64",
+      "installerUrl": "https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-arm64.zip",
+      "installerSha256": "DA90612C292920CFD1625588A319FBFACDDCFC5E40BB78FC49B147D19000CED7"
+    }
+  ]
+}

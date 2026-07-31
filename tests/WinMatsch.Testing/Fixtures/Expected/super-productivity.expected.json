@@ -1,0 +1,22 @@
+{
+  "packageIdentifier": "JohannesMillan.superProductivity",
+  "packageVersion": "18.2.8",
+  "installerType": "nullsoft",
+  "installers": [
+    {
+      "architecture": "x64",
+      "installerUrl": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-x64.exe",
+      "installerSha256": "CE8E856D5A83F9092DEDA2C30D0B9F001C5EA5EBDC1AE917DF66CA66B86C7554"
+    },
+    {
+      "architecture": "x86",
+      "installerUrl": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup.exe",
+      "installerSha256": "98F2FD1E455E03B0F5F3F09A389A53A5828D246F1B43651F10C0960FCD3DB2BC"
+    },
+    {
+      "architecture": "arm64",
+      "installerUrl": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-arm64.exe",
+      "installerSha256": "FF37E36FC0E3BB557FF24DB3A7E697C8C49B54887D52B8081FEDEB1EAA5EFD6F"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "sonarr",
+  "package": {
+    "identifier": "TeamSonarr.Sonarr",
+    "version": "4.0.15.2941"
+  },
+  "regression": {
+    "summary": "A static major-only ARP DisplayVersion overlaps successive package versions and must be omitted.",
+    "ruleIds": ["ARP-2"],
+    "expectedBehavior": "Preserve the ARP product code but omit DisplayVersion 4."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 267360,
+    "outcome": "closed-unmerged-with-observed-regression",
+    "headCommit": "b6e118341a2fd7f0d06c3e14ecf5b617b5097b41",
+    "mergeCommit": "f7da27726768866de78234200f0ba017107f8d63",
+    "observedAt": "2025-06-29T09:12:27Z",
+    "manifestPath": "manifests/t/TeamSonarr/Sonarr/4.0.15.2941/TeamSonarr.Sonarr.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/b6e118341a2fd7f0d06c3e14ecf5b617b5097b41/manifests/t/TeamSonarr/Sonarr/4.0.15.2941/TeamSonarr.Sonarr.installer.yaml",
+    "manifestSha256": "BEA7AEDC29EE28ED48062AAA81CE3976702D29E172882F55072AE2C064B516A7"
+  },
+  "assets": [
+    {
+      "fileName": "Sonarr.main.4.0.15.2941.win-x86-installer.exe",
+      "url": "https://github.com/Sonarr/Sonarr/releases/download/v4.0.15.2941/Sonarr.main.4.0.15.2941.win-x86-installer.exe",
+      "sha256": "BEB740135FD52FDD99167239987161E5D7DB6A87FD9D1AA81C2BA435542B2FFD",
+      "expectedArchitecture": "x86",
+      "expectedInstallerType": "inno"
+    },
+    {
+      "fileName": "Sonarr.main.4.0.15.2941.win-x64-installer.exe",
+      "url": "https://github.com/Sonarr/Sonarr/releases/download/v4.0.15.2941/Sonarr.main.4.0.15.2941.win-x64-installer.exe",
+      "sha256": "74F6D99775683C8F7E85C42A97000490413CDDA8F7A1D3AA53C8E4AE5C5F30FF",
+      "expectedArchitecture": "x64",
+      "expectedInstallerType": "inno"
+    }
+  ],
+  "expectedSnapshot": "Fixtures/Expected/sonarr.expected.json"
+}

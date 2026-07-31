@@ -1,0 +1,30 @@
+{
+  "packageIdentifier": "Streetwriters.Notesnook",
+  "packageVersion": "3.2.4",
+  "installers": [
+    {
+      "architecture": "x64",
+      "installerType": "nullsoft",
+      "installerUrl": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64.exe",
+      "installerSha256": "C12A1F9A11D912636528918DC900BAA0213A942C4621031BE9CF1C04A447D5EE"
+    },
+    {
+      "architecture": "x64",
+      "installerType": "portable",
+      "installerUrl": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64_portable.exe",
+      "installerSha256": "0BBE8D413AEB04D8C7257CB83FA4BE63DE64BAE5702242B621F959A79D676D60"
+    },
+    {
+      "architecture": "arm64",
+      "installerType": "nullsoft",
+      "installerUrl": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64.exe",
+      "installerSha256": "05F5D7DDA56507DB2D2F95660EBC57B092D24F4A41D9504777DA2B24A9A93659"
+    },
+    {
+      "architecture": "arm64",
+      "installerType": "portable",
+      "installerUrl": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64_portable.exe",
+      "installerSha256": "AC8713CA2FAC92E262497DDD31D5A3FB92CA8202742C6B497C1C6CA44AC6107E"
+    }
+  ]
+}

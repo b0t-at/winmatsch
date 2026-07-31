@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "exiftool",
+  "package": {
+    "identifier": "OliverBetz.ExifTool",
+    "version": "12.87"
+  },
+  "regression": {
+    "summary": "Architecture-specific assets are each expanded into user and machine scope entries without URL swapping.",
+    "ruleIds": ["MAP-1", "SCOPE-1", "ARP-1"],
+    "expectedBehavior": "Create four entries: x86/x64 crossed with user/machine, retaining matching ARP metadata."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 157949,
+    "outcome": "merged",
+    "headCommit": "ae8412626246d8d20997afe8cff2dfd72537de08",
+    "mergeCommit": "ef6af2f96e3113a62d898faee25c157b7b94136f",
+    "observedAt": "2024-06-17T17:15:55Z",
+    "manifestPath": "manifests/o/OliverBetz/ExifTool/12.87/OliverBetz.ExifTool.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/ae8412626246d8d20997afe8cff2dfd72537de08/manifests/o/OliverBetz/ExifTool/12.87/OliverBetz.ExifTool.installer.yaml",
+    "manifestSha256": "09465EA058B57456F6E9274C9DC32D0024234C68D1EE25BBFF4E7C89E4681778"
+  },
+  "assets": [
+    {
+      "fileName": "ExifTool_install_12.87_32.exe",
+      "url": "https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_32.exe",
+      "sha256": "E1059C78D961A46960E6B2161AE661AE7553626D8FE48B0675157333DA515E97",
+      "expectedArchitecture": "x86",
+      "expectedInstallerType": "inno"
+    },
+    {
+      "fileName": "ExifTool_install_12.87_64.exe",
+      "url": "https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_64.exe",
+      "sha256": "E56B953D9A70EB3439A4DE01401489B7AB757CD8081A41128531C1A59AF15D7B",
+      "expectedArchitecture": "x64",
+      "expectedInstallerType": "inno"
+    }
+  ],
+  "expectedSnapshot": "Fixtures/Expected/exiftool.expected.json"
+}

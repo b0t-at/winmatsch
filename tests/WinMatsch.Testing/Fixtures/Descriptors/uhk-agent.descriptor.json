@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "uhk-agent",
+  "package": {
+    "identifier": "UltimateGadgetLaboratories.UHKAgent",
+    "version": "5.0.0"
+  },
+  "regression": {
+    "summary": "A universal Electron/NSIS asset is redundant when explicit ia32 and x64 assets exist.",
+    "ruleIds": ["ARCH-2", "ARCH-5", "DUP-2"],
+    "expectedBehavior": "Keep the ia32 and x64 installers and omit the tokenless universal installer."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 199079,
+    "outcome": "merged-with-observed-regression",
+    "headCommit": "5e175f011b08c6f8c5da6431fe06addf92c82b92",
+    "mergeCommit": "bed62a0d693373a4d6906a4c59f53e0cb2765300",
+    "observedAt": "2024-12-16T18:07:03Z",
+    "manifestPath": "manifests/u/UltimateGadgetLaboratories/UHKAgent/5.0.0/UltimateGadgetLaboratories.UHKAgent.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/5e175f011b08c6f8c5da6431fe06addf92c82b92/manifests/u/UltimateGadgetLaboratories/UHKAgent/5.0.0/UltimateGadgetLaboratories.UHKAgent.installer.yaml",
+    "manifestSha256": "48A44CF214616D5E420A0D53A119BC5773BA8E4939654B0CC4F1497DD3D5D08D"
+  },
+  "assets": [
+    {
+      "fileName": "UHK.Agent-5.0.0-win-ia32.exe",
+      "url": "https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win-ia32.exe",
+      "sha256": "7806A4245846F69F9E11432DD7173237529F0FE49639D181E82E2CE4D95604E1",
+      "expectedArchitecture": "x86",
+      "expectedInstallerType": "nullsoft"
+    },
+    {
+      "fileName": "UHK.Agent-5.0.0-win.exe",
+      "url": "https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win.exe",
+      "sha256": "63053D44E0BC750C325D7F7727C52D3E2AA8AB4F38C1F58F827473C37E0AFC4A",
+      "expectedArchitecture": "neutral",
+      "expectedInstallerType": "nullsoft",
+      "includeInExpectedManifest": false
+    },
+    {
+      "fileName": "UHK.Agent-5.0.0-win-x64.exe",
+      "url": "https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win-x64.exe",
+      "sha256": "52446DAC2CAED17A6A499584F9842B277F2B24A8E1DFAB2817C0043B4BFD00E4",
+      "expectedArchitecture": "x64",
+      "expectedInstallerType": "nullsoft"
+    }
+  ],
+  "expectedSnapshot": "Fixtures/Expected/uhk-agent.expected.json"
+}
