@@ -552,7 +552,7 @@ internal static partial class InnoFormatReader
             values.Add("arm64");
         }
 
-        return values.Count == 0 ? null : string.Join(' ', values);
+        return values.Count == 0 ? null : string.Join(" or ", values);
     }
 
     public static IReadOnlyList<(Architecture Architecture, long Size)> InspectPayloads(

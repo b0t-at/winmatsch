@@ -29,6 +29,12 @@ public sealed class InnoProbeOptions
 
     public int MaximumPayloadCandidates { get; init; } = 64;
 
+    public int MaximumArchitectureExpressionCharacters { get; init; } = 4096;
+
+    public int MaximumArchitectureExpressionTokens { get; init; } = 256;
+
+    public int MaximumArchitectureExpressionNesting { get; init; } = 32;
+
     internal void Validate()
     {
         if (MaximumLoaderScanBytes <= 0
@@ -43,7 +49,10 @@ public sealed class InnoProbeOptions
             || MaximumExpandedPayloadBytes <= 0
             || MaximumAggregatePayloadBytes <= 0
             || MaximumPayloadMarkerAttempts <= 0
-            || MaximumPayloadCandidates <= 0)
+            || MaximumPayloadCandidates <= 0
+            || MaximumArchitectureExpressionCharacters <= 0
+            || MaximumArchitectureExpressionTokens <= 0
+            || MaximumArchitectureExpressionNesting <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(InnoProbeOptions), "All Inno Setup parser limits must be positive.");
         }

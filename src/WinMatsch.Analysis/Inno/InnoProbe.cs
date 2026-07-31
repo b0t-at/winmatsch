@@ -39,7 +39,7 @@ public sealed class InnoProbe : IExeFormatProbe
             : SafeArpValue(metadata.AppVerName) ?? SafeArpValue(metadata.AppName);
         string? displayVersion = SafeArpValue(metadata.AppVersion);
         string? publisher = SafeArpValue(metadata.Publisher);
-        string? productCode = canClaimArp ? SafeArpValue(metadata.ProductCode) : null;
+        string? productCode = canClaimArp ? metadata.ProductCode : null;
         var installer = new Installer
         {
             Architecture = metadata.EffectiveArchitecture,
@@ -104,7 +104,11 @@ public sealed class InnoProbe : IExeFormatProbe
             .Distinct()
             .ToList();
 
-        (Architecture? architecture, bool conclusive) = GetArchitecture(header, payloads, peFile.Architecture);
+        (Architecture? architecture, bool conclusive) = GetArchitecture(
+            header,
+            payloads,
+            peFile.Architecture,
+            _options);
         bool overrideAllowed = header.PrivilegesMayBeOverridden;
         Scope? scope = overrideAllowed ? null : header.Privileges switch
         {
@@ -122,7 +126,7 @@ public sealed class InnoProbe : IExeFormatProbe
         bool? createsUninstallRegistryKey = GetCreatesUninstallRegistryKey(
             header.CreateUninstallRegKey,
             header.Uninstallable);
-        string? appId = SafeArpValue(header.AppId);
+        string? appId = SafeAppId(header.AppId);
         return new InnoSetupMetadata
         {
             SetupDataVersion = header.Version,
@@ -154,14 +158,16 @@ public sealed class InnoProbe : IExeFormatProbe
     private static (Architecture? Architecture, bool Conclusive) GetArchitecture(
         InnoParsedHeader header,
         IReadOnlyList<(Architecture Architecture, long Size)> payloads,
-        Architecture stubArchitecture)
+        Architecture stubArchitecture,
+        InnoProbeOptions options)
     {
-        (Architecture? headerArchitecture, bool headerConclusive) = GetHeaderArchitecture(header, stubArchitecture);
+        (Architecture? headerArchitecture, bool headerConclusive) =
+            GetHeaderArchitecture(header, stubArchitecture, options);
         Architecture[] payloadArchitectures = payloads
             .Select(payload => payload.Architecture)
             .Distinct()
             .ToArray();
-        if (IsX86CompatibleOnly(header.ArchitecturesAllowed)
+        if (IsX86CompatibleOnly(header.ArchitecturesAllowed, options)
             && payloadArchitectures.Length == 1)
         {
             return (payloadArchitectures[0], true);
@@ -172,23 +178,32 @@ public sealed class InnoProbe : IExeFormatProbe
 
     private static (Architecture? Architecture, bool Conclusive) GetHeaderArchitecture(
         InnoParsedHeader header,
-        Architecture stubArchitecture)
+        Architecture stubArchitecture,
+        InnoProbeOptions options)
     {
-        string allowed = header.ArchitecturesAllowed ?? "";
-        string mode64 = header.ArchitecturesInstallIn64BitMode ?? "";
-        bool arm64 = HasPositiveToken(allowed, "arm64") || HasPositiveToken(mode64, "arm64");
-        bool x64 = HasPositiveToken(allowed, "x64compatible")
-            || HasPositiveToken(allowed, "x64os")
-            || HasPositiveToken(mode64, "x64compatible")
-            || HasPositiveToken(mode64, "x64os");
-        bool x86 = HasPositiveToken(allowed, "x86compatible") || HasPositiveToken(allowed, "x86os");
-        int targetCount = (arm64 ? 1 : 0) + (x64 ? 1 : 0) + (x86 ? 1 : 0);
-        if (targetCount == 1)
+        if (!InnoArchitectureExpression.TryEvaluate(header.ArchitecturesAllowed, options, out int allowedTargets)
+            || !InnoArchitectureExpression.TryEvaluate(
+                header.ArchitecturesInstallIn64BitMode,
+                options,
+                out int mode64Targets))
         {
-            return (arm64 ? Architecture.Arm64 : x64 ? Architecture.X64 : Architecture.X86, true);
+            return stubArchitecture == Architecture.X86 ? (null, false) : (stubArchitecture, false);
         }
 
-        if (targetCount == 0 && stubArchitecture != Architecture.X86)
+        int targets = allowedTargets | mode64Targets;
+        if (targets is InnoArchitectureExpression.X86
+            or InnoArchitectureExpression.X64
+            or InnoArchitectureExpression.Arm64)
+        {
+            return (targets switch
+            {
+                InnoArchitectureExpression.X86 => Architecture.X86,
+                InnoArchitectureExpression.X64 => Architecture.X64,
+                _ => Architecture.Arm64,
+            }, true);
+        }
+
+        if (targets == 0 && stubArchitecture != Architecture.X86)
         {
             return (stubArchitecture, false);
         }
@@ -196,28 +211,11 @@ public sealed class InnoProbe : IExeFormatProbe
         return (null, false);
     }
 
-    private static bool IsX86CompatibleOnly(string? expression)
-    {
-        string value = expression ?? "";
-        return HasPositiveToken(value, "x86compatible")
-            && !HasPositiveToken(value, "x64compatible")
-            && !HasPositiveToken(value, "x64os")
-            && !HasPositiveToken(value, "arm64");
-    }
+    private static bool IsX86CompatibleOnly(string? expression, InnoProbeOptions options)
+        => InnoArchitectureExpression.TryEvaluate(expression, options, out int targets)
+            && targets == InnoArchitectureExpression.X86;
 
-    private static bool HasPositiveToken(string expression, string token)
-    {
-        int index = expression.IndexOf(token, StringComparison.OrdinalIgnoreCase);
-        if (index < 0)
-        {
-            return false;
-        }
-
-        string before = expression[..index].TrimEnd();
-        return !before.EndsWith("not", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? NormalizeInstallLocation(InnoSetupMetadata metadata)
+    private string? NormalizeInstallLocation(InnoSetupMetadata metadata)
     {
         string? safe = SafeMetadataValue(metadata.DefaultDirName);
         if (safe is null)
@@ -232,14 +230,14 @@ public sealed class InnoProbe : IExeFormatProbe
             resolved = metadata.Scope switch
             {
                 Scope.User => "%LOCALAPPDATA%\\Programs" + autoSuffix,
-                Scope.Machine when Get64BitInstallMode(metadata) == true => "%ProgramFiles%" + autoSuffix,
-                Scope.Machine when Get64BitInstallMode(metadata) == false => "%ProgramFiles(x86)%" + autoSuffix,
+                Scope.Machine when Get64BitInstallMode(metadata, _options) == true => "%ProgramFiles%" + autoSuffix,
+                Scope.Machine when Get64BitInstallMode(metadata, _options) == false => "%ProgramFiles(x86)%" + autoSuffix,
                 _ => null,
             };
         }
         else if (StartsWithConstant(safe, "{pf64}", out string pf64Suffix))
         {
-            resolved = metadata.Scope == Scope.Machine && Get64BitInstallMode(metadata) == true
+            resolved = metadata.Scope == Scope.Machine && Get64BitInstallMode(metadata, _options) == true
                 ? "%ProgramFiles%" + pf64Suffix
                 : null;
         }
@@ -263,7 +261,7 @@ public sealed class InnoProbe : IExeFormatProbe
         return resolved is not null && !resolved.Contains('{', StringComparison.Ordinal) ? resolved : null;
     }
 
-    private static bool? Get64BitInstallMode(InnoSetupMetadata metadata)
+    private static bool? Get64BitInstallMode(InnoSetupMetadata metadata, InnoProbeOptions options)
     {
         string expression = metadata.ArchitecturesInstallIn64BitMode ?? "";
         if (string.IsNullOrWhiteSpace(expression))
@@ -271,14 +269,16 @@ public sealed class InnoProbe : IExeFormatProbe
             return false;
         }
 
+        if (!InnoArchitectureExpression.TryEvaluate(expression, options, out int targets))
+        {
+            return null;
+        }
+
         return metadata.EffectiveArchitecture switch
         {
-            Architecture.X64 when HasPositiveToken(expression, "x64compatible")
-                || HasPositiveToken(expression, "x64os") => true,
-            Architecture.Arm64 when HasPositiveToken(expression, "arm64") => true,
-            Architecture.X86 when !HasPositiveToken(expression, "x64compatible")
-                && !HasPositiveToken(expression, "x64os")
-                && !HasPositiveToken(expression, "arm64") => false,
+            Architecture.X64 => (targets & InnoArchitectureExpression.X64) != 0,
+            Architecture.Arm64 => (targets & InnoArchitectureExpression.Arm64) != 0,
+            Architecture.X86 => false,
             _ => null,
         };
     }
@@ -320,15 +320,24 @@ public sealed class InnoProbe : IExeFormatProbe
         string? safe = SafeMetadataValue(value);
         if (safe is null
             || safe.Contains('$', StringComparison.Ordinal)
-            || safe.Contains("{code:", StringComparison.OrdinalIgnoreCase)
-            || safe.Contains("{param:", StringComparison.OrdinalIgnoreCase)
-            || safe.Contains("{reg:", StringComparison.OrdinalIgnoreCase)
-            || safe.Contains("{ini:", StringComparison.OrdinalIgnoreCase))
+            || safe.Contains('{', StringComparison.Ordinal)
+            || safe.Contains('}', StringComparison.Ordinal))
         {
             return null;
         }
 
         return safe.StartsWith("ms-resource:", StringComparison.OrdinalIgnoreCase) ? null : safe;
+    }
+
+    private static string? SafeAppId(string? value)
+    {
+        string? safe = SafeMetadataValue(value);
+        if (safe is null)
+        {
+            return null;
+        }
+
+        return Guid.TryParseExact(safe, "B", out _) ? safe : SafeArpValue(safe);
     }
 
     private static string? SafeMetadataValue(string? value)

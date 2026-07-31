@@ -20,9 +20,12 @@ public class InnoProbeTests
     [Fact]
     public void Current_header_extracts_metadata_architecture_scope_and_arp()
     {
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller()));
         InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller()));
         Installer installer = Assert.Single(analysis.Installers);
 
+        Assert.Equal("{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}", metadata.AppId);
+        Assert.Equal("{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1", metadata.ProductCode);
         Assert.Equal(DetectedInstallerFormat.InnoSetup, analysis.Format);
         Assert.Equal(InstallerType.Inno, installer.InstallerType);
         Assert.Equal(Architecture.X64, installer.Architecture);
@@ -79,6 +82,7 @@ public class InnoProbeTests
     [InlineData("x86compatible", Architecture.X86)]
     [InlineData("x64compatible", Architecture.X64)]
     [InlineData("arm64", Architecture.Arm64)]
+    [InlineData("(x64compatible and (not arm64))", Architecture.X64)]
     public void Current_architecture_expressions_map_when_unambiguous(string expression, Architecture expected)
     {
         var options = new InnoFixtures.Options
@@ -93,19 +97,53 @@ public class InnoProbeTests
         Assert.True(metadata.ArchitectureIsConclusive);
     }
 
-    [Fact]
-    public void Mixed_architecture_expression_is_left_uncertain_without_payload_evidence()
+    [Theory]
+    [InlineData("x64compatible or not x64compatible")]
+    [InlineData("not x64compatible")]
+    [InlineData("(x86compatible or arm64)")]
+    [InlineData("x64compatible and (")]
+    [InlineData("x64compatible or")]
+    [InlineData("x64compatible-suffix")]
+    public void Non_single_or_malformed_architecture_expression_is_inconclusive(string expression)
     {
         var options = new InnoFixtures.Options
         {
-            ArchitecturesAllowed = "x86compatible or x64compatible",
-            ArchitecturesInstallIn64BitMode = "x64compatible",
+            ArchitecturesAllowed = expression,
+            ArchitecturesInstallIn64BitMode = "",
         };
 
         InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
 
         Assert.Null(metadata.EffectiveArchitecture);
         Assert.False(metadata.ArchitectureIsConclusive);
+    }
+
+    [Fact]
+    public void Architecture_expression_limits_fail_conservatively()
+    {
+        (string Expression, InnoProbeOptions ProbeOptions)[] cases =
+        [
+            ("x64compatible", new InnoProbeOptions { MaximumArchitectureExpressionCharacters = 8 }),
+            (
+                "x64compatible or x86compatible",
+                new InnoProbeOptions { MaximumArchitectureExpressionTokens = 2 }),
+            ("((x64compatible))", new InnoProbeOptions { MaximumArchitectureExpressionNesting = 1 }),
+        ];
+
+        foreach ((string expression, InnoProbeOptions probeOptions) in cases)
+        {
+            var fixtureOptions = new InnoFixtures.Options
+            {
+                ArchitecturesAllowed = expression,
+                ArchitecturesInstallIn64BitMode = "",
+            };
+
+            InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(
+                Inspect(InnoFixtures.BuildInstaller(fixtureOptions), new InnoProbe(probeOptions)));
+
+            Assert.Null(metadata.EffectiveArchitecture);
+            Assert.False(metadata.ArchitectureIsConclusive);
+        }
     }
 
     [Fact]
@@ -424,6 +462,49 @@ public class InnoProbeTests
         Assert.Null(arp.DisplayVersion);
         Assert.Null(arp.Publisher);
         Assert.Null(arp.ProductCode);
+    }
+
+    [Theory]
+    [InlineData("{cm:Version}")]
+    [InlineData("{username}")]
+    [InlineData("{code:GetVersion}")]
+    [InlineData("{param:Version|0}")]
+    [InlineData("{reg:HKCU\\Software\\Contoso,Version|0}")]
+    [InlineData("{ini:{app}\\settings.ini,Version,Current|0}")]
+    [InlineData("release-{sysuserinfoname}")]
+    public void Unresolved_runtime_constants_are_rejected_from_arp_values(string value)
+    {
+        var options = new InnoFixtures.Options { AppVersion = value };
+
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Null(Assert.Single(installer.AppsAndFeaturesEntries!).DisplayVersion);
+    }
+
+    [Fact]
+    public void Runtime_constants_do_not_leak_and_static_name_fallback_remains_safe()
+    {
+        var options = new InnoFixtures.Options
+        {
+            UninstallDisplayName = "{cm:DisplayName}",
+            AppVerName = "{username}",
+            AppName = "Static Commander",
+            AppVersion = "{code:GetVersion}",
+            Publisher = "Vendor {param:Publisher}",
+            AppId = "{reg:HKCU\\Software\\Contoso,AppId}",
+        };
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options)));
+        Installer installer = Assert.Single(analysis.Installers);
+        AppsAndFeaturesEntry arp = Assert.Single(installer.AppsAndFeaturesEntries!);
+
+        Assert.Equal("Static Commander", arp.DisplayName);
+        Assert.Equal("Static Commander", analysis.ProductName);
+        Assert.Null(arp.DisplayVersion);
+        Assert.Null(arp.Publisher);
+        Assert.Null(arp.ProductCode);
+        Assert.Null(installer.ProductCode);
     }
 
     [Fact]
