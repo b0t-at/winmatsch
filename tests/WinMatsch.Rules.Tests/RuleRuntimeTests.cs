@@ -343,6 +343,32 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Renamed_installer_url_does_not_hide_another_reverted_field()
+    {
+        static PackageManifests Create(string url, string productCode)
+        {
+            Installer installer = TestManifests.CreateInstaller(url: url);
+            installer.ProductCode = productCode;
+            return TestManifests.Create(installer);
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("https://example.test/old-app.exe", "A"),
+            Previous = Create("https://example.test/old-app.exe", "B"),
+            Manifests = Create("https://example.test/renamed-app.exe", "A"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal)
+                && review.HumanValue == "B"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
     public void Versioned_url_pattern_reversion_requires_review()
     {
         static PackageManifests Create(string url)

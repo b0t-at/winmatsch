@@ -18,8 +18,8 @@ internal static class HumanCorrectionDetector
         }
 
         IReadOnlyList<RawManifestChange> humanChanges = botSnapshot.Diff(humanSnapshot);
-        Dictionary<SemanticChangeKey, RawManifestChange> generatedChanges = botSnapshot
-            .Diff(generatedSnapshot)
+        IReadOnlyList<RawManifestChange> generatedChangeList = botSnapshot.Diff(generatedSnapshot);
+        Dictionary<SemanticChangeKey, RawManifestChange> generatedChanges = generatedChangeList
             .ToDictionary(
                 static change => new SemanticChangeKey(change.DocumentKey, change.SemanticPath),
                 static change => change);
@@ -41,6 +41,13 @@ internal static class HumanCorrectionDetector
             bool generatedEffectiveResolved = generatedSnapshot.TryGetEffectiveInstallerValue(
                 humanChange.SemanticPath,
                 out string? effectiveValue);
+            if (!generatedEffectiveResolved)
+            {
+                generatedEffectiveResolved = generatedSnapshot.TryGetEffectiveInstallerValueFromPairing(
+                    humanChange.SemanticPath,
+                    generatedChangeList,
+                    out effectiveValue);
+            }
             bool effectiveInstallerPath = ManifestSnapshot.IsEffectiveInstallerPath(humanChange.SemanticPath);
             bool generatedValueKnown = generatedEffectiveResolved
                 || generatedChange is not null

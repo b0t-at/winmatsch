@@ -692,6 +692,70 @@ internal sealed class ManifestSnapshot
         return false;
     }
 
+    internal bool TryGetEffectiveInstallerValueFromPairing(
+        string semanticPath,
+        IReadOnlyList<RawManifestChange> pairingChanges,
+        out string? value)
+    {
+        const string prefix = "Installers{installer:";
+        if (!semanticPath.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            value = null;
+            return false;
+        }
+
+        int close = semanticPath.IndexOf('}', prefix.Length);
+        if (close < 0
+            || close + 2 > semanticPath.Length)
+        {
+            value = null;
+            return false;
+        }
+
+        string installerSemanticPrefix = semanticPath[..(close + 1)];
+        RawManifestChange? pairing = pairingChanges.FirstOrDefault(
+            change => change.DocumentKey == "installer"
+                && change.SemanticPath.StartsWith(
+                    $"{installerSemanticPrefix}.",
+                    StringComparison.Ordinal));
+        if (pairing is null
+            || !TryGetInstallerIndex(pairing.FieldPath, out int installerIndex))
+        {
+            value = null;
+            return false;
+        }
+
+        string fieldPath = semanticPath[(close + 2)..];
+        YamlMappingNode root = GetRoot("installer");
+        if (GetMappingValue(root, "Installers") is not YamlSequenceNode installers
+            || installerIndex < 0
+            || installerIndex >= installers.Children.Count
+            || installers.Children[installerIndex] is not YamlMappingNode installer)
+        {
+            value = null;
+            return false;
+        }
+
+        if (TryResolveSemanticPath(installer, fieldPath, out value))
+        {
+            return true;
+        }
+
+        return TryResolveSemanticPath(root, fieldPath, out value);
+    }
+
+    private static bool TryGetInstallerIndex(string fieldPath, out int index)
+    {
+        const string prefix = "Installers[";
+        index = -1;
+        int close = fieldPath.IndexOf(']', prefix.Length);
+        return fieldPath.StartsWith(prefix, StringComparison.Ordinal)
+            && close > prefix.Length
+            && int.TryParse(
+                fieldPath.AsSpan(prefix.Length, close - prefix.Length),
+                out index);
+    }
+
     private bool TryGetUniformInstallerValue(string semanticPath, out string? value)
     {
         int separator = semanticPath.IndexOfAny(['.', '{']);
