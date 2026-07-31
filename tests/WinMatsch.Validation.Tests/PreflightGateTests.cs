@@ -507,6 +507,64 @@ public sealed class PreflightGateTests
     }
 
     [Fact]
+    public async Task Lowercase_recorded_hash_matches_the_same_archive_identity()
+    {
+        string archivePath = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-validation-{Guid.NewGuid():N}.zip");
+        try
+        {
+            using (ZipArchive archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+            {
+                _ = archive.CreateEntry("bin/tool.exe");
+            }
+
+            DownloadResult actual = TestPackageFactory.CopyDownloadForFile(
+                TestPackageFactory.CreateDownload(
+                    TestPackageFactory.InstallerUrl,
+                    new Sha256Hash(TestPackageFactory.Hash)),
+                archivePath);
+            var lowercaseHash = new Sha256Hash(actual.Sha256.Value.ToLowerInvariant());
+            PackageManifests manifests = TestPackageFactory.CreateManifests();
+            manifests.Installer.InstallerType = InstallerType.Zip;
+            Installer installer = Assert.Single(manifests.Installer.Installers!);
+            installer.InstallerSha256 = lowercaseHash;
+            installer.NestedInstallerType = InstallerType.Portable;
+            installer.NestedInstallerFiles =
+            [
+                new NestedInstallerFile
+                {
+                    RelativeFilePath = "bin/tool.exe",
+                    PortableCommandAlias = "tool",
+                },
+            ];
+            PreflightRequest valid = TestPackageFactory.CreateRequest(manifests);
+            InstallerArtifact artifact = Assert.Single(valid.InstallerArtifacts);
+            PreflightRequest request = Copy(
+                valid,
+                artifacts:
+                [
+                    artifact with
+                    {
+                        Download = TestPackageFactory.CopyDownloadForFile(
+                            artifact.Download,
+                            archivePath,
+                            hashOverride: lowercaseHash),
+                    },
+                ]);
+
+            ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+                .ValidateAsync(request);
+
+            Assert.True(report.IsValid, report.ToText());
+        }
+        finally
+        {
+            File.Delete(archivePath);
+        }
+    }
+
+    [Fact]
     public async Task Root_nested_metadata_can_be_shared_by_alternative_architectures()
     {
         string archivePath = Path.Combine(

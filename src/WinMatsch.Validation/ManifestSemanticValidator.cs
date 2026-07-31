@@ -451,8 +451,8 @@ internal static class ManifestSemanticValidator
                     $"Downloaded archive size changed from {download.SizeInBytes} to {stream.Length} bytes.");
             }
 
-            string actualHash = Convert.ToHexString(SHA256.HashData(stream));
-            if (!string.Equals(actualHash, download.Sha256.Value, StringComparison.Ordinal))
+            Sha256Hash actualHash = Sha256Hash.FromHashBytes(SHA256.HashData(stream));
+            if (actualHash != download.Sha256)
             {
                 throw new InvalidDataException(
                     $"Downloaded archive SHA-256 changed from '{download.Sha256}' to '{actualHash}'.");
