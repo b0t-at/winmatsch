@@ -24,14 +24,12 @@ internal static class ManifestPackageParser
 
         foreach (ManifestDocument document in documents.OrderBy(static item => item.RepositoryPath, StringComparer.Ordinal))
         {
-            ManifestHeader header;
-            try
+            ValidationReport headerReport = ManifestSchemaValidator.ReadHeader(
+                document,
+                out ManifestHeader? header);
+            findings.AddRange(headerReport.Findings);
+            if (header is null)
             {
-                header = ManifestYamlReader.ReadHeader(document.Content);
-            }
-            catch (YamlException exception)
-            {
-                findings.Add(Error("VLD1001", $"Invalid YAML: {exception.Message}", document.RepositoryPath));
                 continue;
             }
 

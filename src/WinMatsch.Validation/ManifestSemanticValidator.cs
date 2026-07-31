@@ -334,10 +334,32 @@ internal static class ManifestSemanticValidator
             return false;
         }
 
-        return !path.Split(['/', '\\']).Any(static segment => segment is "" or "." or "..");
+        return !path.Split(['/', '\\']).Any(static segment =>
+            segment is "" or "." or ".." || !IsSafeWindowsPathSegment(segment));
     }
 
     private static string NormalizeArchivePath(string path) => path.Replace('\\', '/');
+
+    private static bool IsSafeWindowsPathSegment(string segment)
+    {
+        if (segment[^1] is '.' or ' '
+            || segment.Any(static character =>
+                char.IsControl(character)
+                || character is '<' or '>' or '"' or ':' or '|' or '?' or '*'))
+        {
+            return false;
+        }
+
+        string deviceName = segment.Split('.')[0];
+        return !deviceName.Equals("CON", StringComparison.OrdinalIgnoreCase)
+            && !deviceName.Equals("PRN", StringComparison.OrdinalIgnoreCase)
+            && !deviceName.Equals("AUX", StringComparison.OrdinalIgnoreCase)
+            && !deviceName.Equals("NUL", StringComparison.OrdinalIgnoreCase)
+            && !(deviceName.Length == 4
+                && (deviceName.StartsWith("COM", StringComparison.OrdinalIgnoreCase)
+                    || deviceName.StartsWith("LPT", StringComparison.OrdinalIgnoreCase))
+                && deviceName[3] is >= '1' and <= '9');
+    }
 
     private static bool IsSafeAlias(string alias)
         => !string.IsNullOrWhiteSpace(alias)
@@ -424,6 +446,8 @@ internal static class ManifestSemanticValidator
             }
 
             long expandedBytes = 0;
+            var entries = new HashSet<string>(StringComparer.Ordinal);
+            var windowsPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (ZipArchiveEntry entry in archive.Entries)
             {
                 if (entry.FullName.Length > MaxArchivePathLength)
@@ -445,14 +469,35 @@ internal static class ManifestSemanticValidator
                     throw new InvalidDataException(
                         $"Archive expands beyond the {MaxExpandedArchiveBytes}-byte validation limit.");
                 }
+
+                if (entry.Name.Length == 0)
+                {
+                    continue;
+                }
+
+                string normalizedPath = NormalizeArchivePath(entry.FullName);
+                if (!IsSafeRelativeArchivePath(normalizedPath))
+                {
+                    throw new InvalidDataException(
+                        $"Archive entry '{entry.FullName}' is not a safe Windows-relative path.");
+                }
+
+                if (!entries.Add(normalizedPath))
+                {
+                    throw new InvalidDataException(
+                        $"Archive contains duplicate canonical path '{normalizedPath}'.");
+                }
+
+                if (windowsPaths.TryGetValue(normalizedPath, out string? existingPath))
+                {
+                    throw new InvalidDataException(
+                        $"Archive paths '{existingPath}' and '{normalizedPath}' collide on Windows.");
+                }
+
+                windowsPaths.Add(normalizedPath, normalizedPath);
             }
 
-            return
-            [
-                .. archive.Entries
-                    .Where(static entry => entry.Name.Length > 0)
-                    .Select(static entry => entry.FullName.Replace('\\', '/')),
-            ];
+            return entries;
         }
         catch (InvalidDataException exception)
         {

@@ -148,4 +148,31 @@ public sealed class ManifestSchemaValidatorTests
         Assert.False(report.IsValid);
         Assert.Contains(report.Findings, static finding => finding.Code == "VLD1001");
     }
+
+    [Theory]
+    [InlineData("0b10")]
+    [InlineData("999999999999999999999999999999999999999999999999")]
+    [InlineData("1e9999")]
+    [InlineData(".inf")]
+    [InlineData(".nan")]
+    public void Numeric_yaml_scalars_never_downgrade_to_schema_strings(string scalar)
+    {
+        string yaml = $"""
+            PackageIdentifier: Example.App
+            PackageVersion: {scalar}
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.12.0
+
+            """;
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Version);
+
+        Assert.False(report.IsValid);
+        Assert.Contains(
+            report.Findings,
+            static finding => finding.Code is "VLD1001" or "VLD1003");
+    }
 }

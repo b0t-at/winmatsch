@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Json.Schema;
 using WinMatsch.Core;
 using YamlDotNet.Core;
@@ -11,7 +12,7 @@ using YamlDotNet.RepresentationModel;
 namespace WinMatsch.Validation;
 
 /// <summary>Validates manifest YAML against the four bundled WinGet 1.12 Draft 7 schemas.</summary>
-public static class ManifestSchemaValidator
+public static partial class ManifestSchemaValidator
 {
     public const string SchemaVersion = "1.12.0";
 
@@ -21,6 +22,51 @@ public static class ManifestSchemaValidator
     private const int MaxYamlNodes = 100_000;
 
     private static readonly Dictionary<ManifestType, SchemaEntry> _schemas = LoadSchemas();
+
+    internal static ValidationReport ReadHeader(
+        ManifestDocument document,
+        out ManifestHeader? header)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        header = null;
+        JsonDocument instance;
+        try
+        {
+            (instance, _) = ConvertYamlToJson(document.Content);
+        }
+        catch (YamlException exception)
+        {
+            return YamlFailure($"Invalid YAML: {exception.Message}", document.RepositoryPath);
+        }
+        catch (JsonException exception)
+        {
+            return YamlFailure(
+                $"Invalid YAML scalar value: {exception.Message}",
+                document.RepositoryPath);
+        }
+        catch (InvalidDataException exception)
+        {
+            return YamlFailure(exception.Message, document.RepositoryPath);
+        }
+        catch (ArgumentException exception)
+        {
+            return YamlFailure($"Invalid YAML: {exception.Message}", document.RepositoryPath);
+        }
+
+        using (instance)
+        {
+            JsonElement root = instance.RootElement;
+            header = new ManifestHeader
+            {
+                PackageIdentifier = GetString(root, "PackageIdentifier"),
+                PackageVersion = GetString(root, "PackageVersion"),
+                ManifestType = GetString(root, "ManifestType"),
+                ManifestVersion = GetString(root, "ManifestVersion"),
+            };
+        }
+
+        return new ValidationReport();
+    }
 
     public static ValidationReport Validate(ManifestDocument document, ManifestType manifestType)
     {
@@ -45,31 +91,21 @@ public static class ManifestSchemaValidator
         }
         catch (YamlException exception)
         {
-            return new ValidationReport(
-            [
-                Error("VLD1001", $"Invalid YAML: {exception.Message}", document.RepositoryPath),
-            ]);
+            return YamlFailure($"Invalid YAML: {exception.Message}", document.RepositoryPath);
         }
         catch (JsonException exception)
         {
-            return new ValidationReport(
-            [
-                Error("VLD1001", $"Invalid YAML scalar value: {exception.Message}", document.RepositoryPath),
-            ]);
+            return YamlFailure(
+                $"Invalid YAML scalar value: {exception.Message}",
+                document.RepositoryPath);
         }
         catch (InvalidDataException exception)
         {
-            return new ValidationReport(
-            [
-                Error("VLD1001", exception.Message, document.RepositoryPath),
-            ]);
+            return YamlFailure(exception.Message, document.RepositoryPath);
         }
         catch (ArgumentException exception)
         {
-            return new ValidationReport(
-            [
-                Error("VLD1001", $"Invalid YAML: {exception.Message}", document.RepositoryPath),
-            ]);
+            return YamlFailure($"Invalid YAML: {exception.Message}", document.RepositoryPath);
         }
 
         using (instance)
@@ -274,13 +310,18 @@ public static class ManifestSchemaValidator
         {
             writer.WriteBooleanValue(boolean);
         }
-        else if (TryParseYamlInteger(value, out long integer))
+        else if (TryGetYamlIntegerJson(value, out string? integer))
         {
-            writer.WriteNumberValue(integer);
+            writer.WriteRawValue(integer);
         }
-        else if (TryParseYamlFloat(value, out decimal number))
+        else if (IsNonFiniteYamlNumber(value))
         {
-            writer.WriteNumberValue(number);
+            throw new InvalidDataException(
+                $"YAML numeric scalar '{value}' cannot be represented as a JSON number.");
+        }
+        else if (TryGetYamlFloatJson(value, out string? number))
+        {
+            writer.WriteRawValue(number);
         }
         else
         {
@@ -293,50 +334,65 @@ public static class ManifestSchemaValidator
         string tag,
         string? value)
     {
-        switch (tag)
+        if (tag == "tag:yaml.org,2002:str")
         {
-            case "tag:yaml.org,2002:str":
-                writer.WriteStringValue(value);
-                return;
-            case "tag:yaml.org,2002:null" when value is null
+            writer.WriteStringValue(value);
+            return;
+        }
+
+        if (tag == "tag:yaml.org,2002:null"
+            && (value is null
                 || value.Length == 0
                 || value.Equals("null", StringComparison.OrdinalIgnoreCase)
-                || value.Equals("~", StringComparison.Ordinal):
-                writer.WriteNullValue();
-                return;
-            case "tag:yaml.org,2002:bool" when bool.TryParse(value, out bool boolean):
-                writer.WriteBooleanValue(boolean);
-                return;
-            case "tag:yaml.org,2002:int" when value is not null
-                && TryParseYamlInteger(value, out long integer):
-                writer.WriteNumberValue(integer);
-                return;
-            case "tag:yaml.org,2002:float" when value is not null
-                && TryParseYamlFloat(value, out decimal number):
-                writer.WriteNumberValue(number);
-                return;
-            default:
-                throw new InvalidDataException(
-                    $"YAML scalar tag '{tag}' is unsupported or has an invalid value.");
+                || value.Equals("~", StringComparison.Ordinal)))
+        {
+            writer.WriteNullValue();
+            return;
         }
+
+        if (tag == "tag:yaml.org,2002:bool"
+            && bool.TryParse(value, out bool boolean))
+        {
+            writer.WriteBooleanValue(boolean);
+            return;
+        }
+
+        if (tag == "tag:yaml.org,2002:int"
+            && value is not null
+            && TryGetYamlIntegerJson(value, out string? integer))
+        {
+            writer.WriteRawValue(integer);
+            return;
+        }
+
+        if (tag == "tag:yaml.org,2002:float"
+            && value is not null
+            && !IsNonFiniteYamlNumber(value)
+            && TryGetYamlFloatJson(value, out string? number))
+        {
+            writer.WriteRawValue(number);
+            return;
+        }
+
+        throw new InvalidDataException(
+            $"YAML scalar tag '{tag}' is unsupported or has an invalid value.");
     }
 
-    private static bool TryParseYamlInteger(string value, out long integer)
+    private static bool TryGetYamlIntegerJson(string value, out string jsonNumber)
     {
-        string normalized = value.Replace("_", string.Empty, StringComparison.Ordinal);
         int sign = 1;
         int prefixIndex = 0;
-        if (normalized.StartsWith('+'))
+        if (value.StartsWith('+'))
         {
             prefixIndex = 1;
         }
-        else if (normalized.StartsWith('-'))
+        else if (value.StartsWith('-'))
         {
             sign = -1;
             prefixIndex = 1;
         }
 
-        ReadOnlySpan<char> unsigned = normalized.AsSpan(prefixIndex);
+        ReadOnlySpan<char> unsigned = value.AsSpan(prefixIndex);
         int radix;
         if (unsigned.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
         {
@@ -348,24 +404,30 @@ public static class ManifestSchemaValidator
             radix = 8;
             unsigned = unsigned[2..];
         }
+        else if (unsigned.StartsWith("0b", StringComparison.OrdinalIgnoreCase))
+        {
+            radix = 2;
+            unsigned = unsigned[2..];
+        }
         else
         {
-            return long.TryParse(
-                normalized,
-                NumberStyles.AllowLeadingSign,
-                CultureInfo.InvariantCulture,
-                out integer);
+            radix = 10;
         }
 
-        if (unsigned.IsEmpty)
+        if (unsigned.IsEmpty || !HasValidDigitSeparators(unsigned))
         {
-            integer = default;
+            jsonNumber = string.Empty;
             return false;
         }
 
         BigInteger parsed = BigInteger.Zero;
         foreach (char character in unsigned)
         {
+            if (character == '_')
+            {
+                continue;
+            }
+
             int digit = character switch
             {
                 >= '0' and <= '9' => character - '0',
@@ -375,7 +437,7 @@ public static class ManifestSchemaValidator
             };
             if (digit < 0 || digit >= radix)
             {
-                integer = default;
+                jsonNumber = string.Empty;
                 return false;
             }
 
@@ -383,35 +445,74 @@ public static class ManifestSchemaValidator
         }
 
         parsed *= sign;
-        if (parsed < long.MinValue || parsed > long.MaxValue)
-        {
-            integer = default;
-            return false;
-        }
-
-        integer = (long)parsed;
+        jsonNumber = parsed.ToString(CultureInfo.InvariantCulture);
         return true;
     }
 
-    private static bool TryParseYamlFloat(string value, out decimal number)
+    private static bool HasValidDigitSeparators(ReadOnlySpan<char> value)
     {
-        string normalized = value.Replace("_", string.Empty, StringComparison.Ordinal);
-        if (normalized.IndexOfAny(['.', 'e', 'E']) < 0
-            || normalized.Equals(".inf", StringComparison.OrdinalIgnoreCase)
-            || normalized.Equals("+.inf", StringComparison.OrdinalIgnoreCase)
-            || normalized.Equals("-.inf", StringComparison.OrdinalIgnoreCase)
-            || normalized.Equals(".nan", StringComparison.OrdinalIgnoreCase))
+        if (value[0] == '_' || value[^1] == '_')
         {
-            number = default;
             return false;
         }
 
-        return decimal.TryParse(
-            normalized,
-            NumberStyles.Float,
-            CultureInfo.InvariantCulture,
-            out number);
+        for (int index = 1; index < value.Length; index++)
+        {
+            if (value[index] == '_' && value[index - 1] == '_')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
+
+    private static bool TryGetYamlFloatJson(string value, out string jsonNumber)
+    {
+        if (value.IndexOfAny(['.', 'e', 'E']) < 0 || !YamlFloatPattern().IsMatch(value))
+        {
+            jsonNumber = string.Empty;
+            return false;
+        }
+
+        string normalized = value.Replace("_", string.Empty, StringComparison.Ordinal);
+        if (normalized.StartsWith('+'))
+        {
+            normalized = normalized[1..];
+        }
+
+        int exponentIndex = normalized.IndexOfAny(['e', 'E']);
+        int mantissaEnd = exponentIndex < 0 ? normalized.Length : exponentIndex;
+        if (normalized[0] == '.')
+        {
+            normalized = $"0{normalized}";
+            mantissaEnd++;
+        }
+        else if (normalized.StartsWith("-.", StringComparison.Ordinal))
+        {
+            normalized = $"-0{normalized[1..]}";
+            mantissaEnd++;
+        }
+
+        if (normalized[mantissaEnd - 1] == '.')
+        {
+            normalized = normalized.Insert(mantissaEnd, "0");
+        }
+
+        jsonNumber = normalized;
+        return true;
+    }
+
+    private static bool IsNonFiniteYamlNumber(string value)
+        => value.Equals(".inf", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("+.inf", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("-.inf", StringComparison.OrdinalIgnoreCase)
+            || value.Equals(".nan", StringComparison.OrdinalIgnoreCase);
+
+    [GeneratedRegex(
+        @"^[+-]?(?:(?:[0-9](?:_?[0-9])*)(?:\.(?:[0-9](?:_?[0-9])*)?)?|\.(?:[0-9](?:_?[0-9])*))(?:[eE][+-]?[0-9](?:_?[0-9])*)?$",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex YamlFloatPattern();
 
     private static void ValidatePropertyCasing(
         YamlNode node,
@@ -490,6 +591,15 @@ public static class ManifestSchemaValidator
 
     private static ValidationFinding Error(string code, string message, string path)
         => new(code, ValidationSeverity.Error, message, path);
+
+    private static ValidationReport YamlFailure(string message, string path)
+        => new([Error("VLD1001", message, path)]);
+
+    private static string? GetString(JsonElement root, string propertyName)
+        => root.TryGetProperty(propertyName, out JsonElement property)
+            && property.ValueKind == JsonValueKind.String
+                ? property.GetString()
+                : null;
 
     private sealed record SchemaEntry(
         JsonSchema Schema,

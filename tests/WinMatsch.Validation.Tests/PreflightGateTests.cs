@@ -65,6 +65,23 @@ public sealed class PreflightGateTests
     }
 
     [Fact]
+    public async Task Actual_preflight_header_path_returns_a_diagnostic_for_non_mapping_yaml()
+    {
+        PreflightRequest valid = TestPackageFactory.CreateRequest();
+        ManifestDocument first = valid.Documents[0];
+        ManifestDocument[] documents =
+        [
+            first with { Content = "- not\n- a\n- manifest\n" },
+            .. valid.Documents.Skip(1),
+        ];
+
+        ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+            .ValidateAsync(Copy(valid, documents: documents));
+
+        Assert.Contains(report.Findings, static finding => finding.Code == "VLD1001");
+    }
+
+    [Fact]
     public async Task Complete_package_set_and_cross_file_identity_are_required()
     {
         PreflightRequest valid = TestPackageFactory.CreateRequest();
@@ -540,6 +557,60 @@ public sealed class PreflightGateTests
                 report.Findings,
                 static finding => finding.Code == "VLD3012"
                     && finding.Message.Contains("10001 entries", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.Delete(archivePath);
+        }
+    }
+
+    [Fact]
+    public async Task Windows_equivalent_archive_paths_are_rejected_as_ambiguous()
+    {
+        string archivePath = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-validation-{Guid.NewGuid():N}.zip");
+        try
+        {
+            using (ZipArchive archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+            {
+                _ = archive.CreateEntry("bin/tool.exe");
+                _ = archive.CreateEntry("BIN\\tool.exe");
+            }
+
+            PackageManifests manifests = TestPackageFactory.CreateManifests();
+            manifests.Installer.InstallerType = InstallerType.Zip;
+            Installer installer = Assert.Single(manifests.Installer.Installers!);
+            installer.NestedInstallerType = InstallerType.Portable;
+            installer.NestedInstallerFiles =
+            [
+                new NestedInstallerFile
+                {
+                    RelativeFilePath = "bin/tool.exe",
+                    PortableCommandAlias = "tool",
+                },
+            ];
+            PreflightRequest valid = TestPackageFactory.CreateRequest(manifests);
+            InstallerArtifact artifact = Assert.Single(valid.InstallerArtifacts);
+            PreflightRequest request = Copy(
+                valid,
+                artifacts:
+                [
+                    artifact with
+                    {
+                        Download = TestPackageFactory.CopyDownload(
+                            artifact.Download,
+                            filePath: archivePath),
+                    },
+                ]);
+
+            ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+                .ValidateAsync(request);
+
+            Assert.Contains(
+                report.Findings,
+                static finding => finding.Code == "VLD3012"
+                    && finding.Message.Contains("collide on Windows", StringComparison.Ordinal));
         }
         finally
         {
