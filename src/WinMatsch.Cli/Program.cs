@@ -1,3 +1,4 @@
+using WinMatsch.Cli.Commands.Diagnostics;
 using WinMatsch.Cli.Hosting;
 
 namespace WinMatsch.Cli;
@@ -10,5 +11,6 @@ namespace WinMatsch.Cli;
 /// </summary>
 public static class Program
 {
-    public static Task<int> Main(string[] args) => CliHost.CreateDefault().RunAsync(args);
+    public static Task<int> Main(string[] args) =>
+        CliHost.CreateDefault([new DiagnosticsCommandModule()]).RunAsync(args);
 }

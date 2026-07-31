@@ -1,3 +1,4 @@
+using WinMatsch.Core;
 using WinMatsch.Testing.Infrastructure;
 using Xunit;
 
@@ -32,6 +33,50 @@ public sealed class RealProcessTests
         Assert.Contains("--nonsense", result.StandardError, StringComparison.Ordinal);
         Assert.DoesNotContain("   at ", result.StandardError, StringComparison.Ordinal);
         Assert.DoesNotContain("Exception", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Help_exposes_read_only_diagnostic_commands()
+    {
+        ProcessResult result = await RunCliAsync("--help");
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("analyze", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("validate", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("show", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("list-versions", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Local_offline_validate_runs_through_real_process_without_stack_trace()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "winmatsch-cli-process-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            WriteManifestSet(directory);
+
+            ProcessResult result = await RunCliAsync(
+                "validate",
+                directory,
+                "--offline",
+                "--interaction",
+                "never",
+                "--format",
+                "json");
+
+            Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+            Assert.Contains("\"networkMode\":\"offline\"", result.StandardOutput, StringComparison.Ordinal);
+            Assert.Contains("\"code\":\"VLD6001\"", result.StandardOutput, StringComparison.Ordinal);
+            Assert.DoesNotContain("   at ", result.StandardError, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private static async Task<ProcessResult> RunCliAsync(params string[] args)
@@ -72,5 +117,53 @@ public sealed class RealProcessTests
         }
 
         return "dotnet";
+    }
+
+    private static void WriteManifestSet(string directory)
+    {
+        var identifier = new PackageIdentifier("Example.App");
+        var version = new PackageVersion("1.0.0");
+        var locale = new LanguageTag("en-US");
+        var manifests = new PackageManifests
+        {
+            Version = new VersionManifest
+            {
+                PackageIdentifier = identifier,
+                PackageVersion = version,
+                DefaultLocale = locale,
+            },
+            Installer = new InstallerManifest
+            {
+                PackageIdentifier = identifier,
+                PackageVersion = version,
+                InstallerType = InstallerType.Exe,
+                Installers =
+                [
+                    new Installer
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerUrl = "https://example.test/setup.exe",
+                        InstallerSha256 = new Sha256Hash(
+                            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                    },
+                ],
+            },
+            DefaultLocale = new DefaultLocaleManifest
+            {
+                PackageIdentifier = identifier,
+                PackageVersion = version,
+                PackageLocale = locale,
+                Publisher = "Example",
+                PackageName = "Example App",
+                License = "MIT",
+                ShortDescription = "Example",
+            },
+            Locales = [],
+        };
+
+        foreach ((string name, string content) in PackageManifestIO.SerializeFiles(manifests))
+        {
+            File.WriteAllText(Path.Combine(directory, name), content);
+        }
     }
 }
