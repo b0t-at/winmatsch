@@ -544,8 +544,7 @@ internal sealed class ManifestSnapshot
         const string prefix = "Installers{installer:";
         if (!semanticPath.StartsWith(prefix, StringComparison.Ordinal))
         {
-            value = null;
-            return false;
+            return TryGetUniformInstallerValue(semanticPath, out value);
         }
 
         int close = semanticPath.IndexOf('}', prefix.Length);
@@ -587,6 +586,57 @@ internal sealed class ManifestSnapshot
 
         value = null;
         return false;
+    }
+
+    private bool TryGetUniformInstallerValue(string semanticPath, out string? value)
+    {
+        int separator = semanticPath.IndexOfAny(['.', '{']);
+        string rootField = separator < 0 ? semanticPath : semanticPath[..separator];
+        if (!InstallerFieldAccessors.All.Any(
+                accessor => string.Equals(accessor.Name, rootField, StringComparison.Ordinal)))
+        {
+            value = null;
+            return false;
+        }
+
+        YamlMappingNode root = GetRoot("installer");
+        if (TryResolveSemanticPath(root, semanticPath, out value))
+        {
+            return true;
+        }
+
+        if (GetMappingValue(root, "Installers") is not YamlSequenceNode installers
+            || installers.Children.Count == 0)
+        {
+            value = null;
+            return false;
+        }
+
+        string? commonValue = null;
+        bool first = true;
+        foreach (YamlNode node in installers.Children)
+        {
+            if (node is not YamlMappingNode installer
+                || !TryResolveSemanticPath(installer, semanticPath, out string? installerValue))
+            {
+                value = null;
+                return false;
+            }
+
+            if (first)
+            {
+                commonValue = installerValue;
+                first = false;
+            }
+            else if (!string.Equals(commonValue, installerValue, StringComparison.Ordinal))
+            {
+                value = null;
+                return false;
+            }
+        }
+
+        value = commonValue;
+        return true;
     }
 
     private static bool TryResolveSemanticPath(YamlNode start, string path, out string? value)

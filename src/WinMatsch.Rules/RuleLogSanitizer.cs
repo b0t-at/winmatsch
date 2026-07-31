@@ -50,9 +50,7 @@ internal static class RuleLogSanitizer
         int position = 0;
         while (position < value.Length)
         {
-            int http = value.IndexOf("http://", position, StringComparison.OrdinalIgnoreCase);
-            int https = value.IndexOf("https://", position, StringComparison.OrdinalIgnoreCase);
-            int start = http < 0 ? https : https < 0 ? http : Math.Min(http, https);
+            int start = FindNextUriStart(value, position);
             if (start < 0)
             {
                 result.Append(value, position, value.Length - position);
@@ -82,6 +80,31 @@ internal static class RuleLogSanitizer
         string sanitized = result.ToString();
         return ContainsBoundedCredential(sanitized) ? "[REDACTED]" : sanitized;
     }
+
+    private static int FindNextUriStart(string value, int position)
+    {
+        int separator = value.IndexOf("://", position, StringComparison.Ordinal);
+        while (separator >= 0)
+        {
+            int start = separator;
+            while (start > position && IsSchemeCharacter(value[start - 1]))
+            {
+                start--;
+            }
+
+            if (start < separator && char.IsAsciiLetter(value[start]))
+            {
+                return start;
+            }
+
+            separator = value.IndexOf("://", separator + 3, StringComparison.Ordinal);
+        }
+
+        return -1;
+    }
+
+    private static bool IsSchemeCharacter(char value)
+        => char.IsAsciiLetterOrDigit(value) || value is '+' or '-' or '.';
 
     private static bool TryDecodeSensitiveText(string value, out string decoded)
     {
@@ -124,9 +147,7 @@ internal static class RuleLogSanitizer
 
     private static bool TrySanitizeUri(string value, out string? sanitized)
     {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
-            || !(uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-                || uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri))
         {
             sanitized = "[REDACTED]";
             return true;

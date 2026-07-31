@@ -394,6 +394,37 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Root_correction_reversion_is_detected_after_generated_pushdown()
+    {
+        static PackageManifests Create(string? rootProductCode, string? installerProductCode)
+        {
+            Installer first = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+            first.ProductCode = installerProductCode;
+            Installer second = TestManifests.CreateInstaller(url: "https://example.test/b.exe");
+            second.ProductCode = installerProductCode;
+            PackageManifests manifests = TestManifests.Create(first, second);
+            manifests.Installer.ProductCode = rootProductCode;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create("A", installerProductCode: null),
+            Previous = Create("B", installerProductCode: null),
+            Manifests = Create(rootProductCode: null, "A"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath == "ProductCode"
+                && review.BotValue == "A"
+                && review.HumanValue == "B"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
     public void Hoisted_generated_value_cannot_hide_a_reverted_installer_correction()
     {
         static Installer Installer(string url, string productCode)
@@ -802,6 +833,16 @@ public class RuleRuntimeTests
 
         Assert.DoesNotContain("super-secret", sanitized, StringComparison.Ordinal);
         Assert.DoesNotContain("?sig=", sanitized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Non_http_uri_userinfo_and_query_are_sanitized()
+    {
+        const string value = "Downloaded from ftp://user:password@example.test/app.exe?token=secret";
+
+        string sanitized = RuleLogSanitizer.SanitizeMessage(value);
+
+        Assert.Equal("Downloaded from [REDACTED]", sanitized);
     }
 
     [Fact]
