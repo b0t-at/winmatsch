@@ -9,6 +9,8 @@ namespace WinMatsch.Rules;
 internal sealed class ManifestSnapshot
 {
     private const int InstallerMatchThreshold = 150;
+    private const int MaximumLcsCells = 1_000_000;
+    private const int MaximumInstallerMatchComparisons = 1_000_000;
     private static readonly object _installerSerializationLock = new();
     private static readonly Sha256Hash _missingHashPlaceholder = new(new string('0', Sha256Hash.Length));
     private readonly IReadOnlyDictionary<string, DocumentSnapshot> _documents;
@@ -45,26 +47,7 @@ internal sealed class ManifestSnapshot
 
     public static PackageManifests Clone(PackageManifests manifests)
     {
-        ArgumentNullException.ThrowIfNull(manifests);
-        string installerYaml = SerializeInstaller(manifests.Installer, out int[] missingHashIndices);
-        var clone = new PackageManifests
-        {
-            Installer = ManifestYamlReader.ReadInstaller(installerYaml),
-            DefaultLocale = ManifestYamlReader.ReadDefaultLocale(ManifestYamlWriter.Serialize(manifests.DefaultLocale)),
-            Locales =
-            [
-                .. manifests.Locales.Select(
-                    static locale => ManifestYamlReader.ReadLocale(ManifestYamlWriter.Serialize(locale))),
-            ],
-            Version = ManifestYamlReader.ReadVersion(ManifestYamlWriter.Serialize(manifests.Version)),
-        };
-
-        foreach (int index in missingHashIndices)
-        {
-            clone.Installer.Installers![index].InstallerSha256 = null;
-        }
-
-        return clone;
+        return ManifestClone.Clone(manifests);
     }
 
     public static bool TryCapture(PackageManifests manifests, out ManifestSnapshot snapshot)
@@ -76,8 +59,16 @@ internal sealed class ManifestSnapshot
         }
         catch (InvalidOperationException)
         {
-            snapshot = null!;
-            return false;
+            try
+            {
+                snapshot = Capture(ManifestClone.CreateSerializable(manifests));
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                snapshot = null!;
+                return false;
+            }
         }
     }
 
@@ -338,37 +329,137 @@ internal sealed class ManifestSnapshot
         YamlSequenceNode before,
         YamlSequenceNode after)
     {
-        var candidates = new List<InstallerMatchCandidate>();
-        for (int beforeIndex = 0; beforeIndex < before.Children.Count; beforeIndex++)
+        InstallerMatchValues[] beforeValues = [.. before.Children.Select(GetInstallerMatchValues)];
+        InstallerMatchValues[] afterValues = [.. after.Children.Select(GetInstallerMatchValues)];
+        var matchedBefore = new HashSet<int>();
+        var matchedAfter = new HashSet<int>();
+        var pairs = new List<SequencePair>();
+
+        MatchInstallersByKey(
+            beforeValues,
+            afterValues,
+            static value => value.PrimaryIdentity,
+            matchedBefore,
+            matchedAfter,
+            pairs);
+        MatchInstallersByKey(
+            beforeValues,
+            afterValues,
+            static value => value.UrlPattern,
+            matchedBefore,
+            matchedAfter,
+            pairs);
+
+        int remainingBefore = beforeValues.Length - matchedBefore.Count;
+        int remainingAfter = afterValues.Length - matchedAfter.Count;
+        if ((long)remainingBefore * remainingAfter <= MaximumInstallerMatchComparisons)
         {
-            InstallerMatchValues beforeValues = GetInstallerMatchValues(before.Children[beforeIndex]);
-            for (int afterIndex = 0; afterIndex < after.Children.Count; afterIndex++)
+            for (int beforeIndex = 0; beforeIndex < beforeValues.Length; beforeIndex++)
             {
-                InstallerMatchValues afterValues = GetInstallerMatchValues(after.Children[afterIndex]);
-                int score = InstallerMatchScore(beforeValues, afterValues);
-                if (score >= InstallerMatchThreshold)
+                if (matchedBefore.Contains(beforeIndex))
                 {
-                    candidates.Add(new(beforeIndex, afterIndex, score, Math.Abs(beforeIndex - afterIndex)));
+                    continue;
+                }
+
+                int bestAfterIndex = -1;
+                int bestScore = InstallerMatchThreshold - 1;
+                int bestDistance = int.MaxValue;
+                for (int afterIndex = 0; afterIndex < afterValues.Length; afterIndex++)
+                {
+                    if (matchedAfter.Contains(afterIndex))
+                    {
+                        continue;
+                    }
+
+                    int score = InstallerMatchScore(beforeValues[beforeIndex], afterValues[afterIndex]);
+                    int distance = Math.Abs(beforeIndex - afterIndex);
+                    if (score > bestScore || score == bestScore && distance < bestDistance)
+                    {
+                        bestAfterIndex = afterIndex;
+                        bestScore = score;
+                        bestDistance = distance;
+                    }
+                }
+
+                if (bestAfterIndex >= 0)
+                {
+                    matchedBefore.Add(beforeIndex);
+                    matchedAfter.Add(bestAfterIndex);
+                    pairs.Add(new(beforeIndex, bestAfterIndex));
+                }
+            }
+        }
+        else
+        {
+            int count = Math.Min(beforeValues.Length, afterValues.Length);
+            for (int index = 0; index < count; index++)
+            {
+                if (!matchedBefore.Contains(index)
+                    && !matchedAfter.Contains(index)
+                    && InstallerMatchScore(beforeValues[index], afterValues[index]) >= InstallerMatchThreshold)
+                {
+                    matchedBefore.Add(index);
+                    matchedAfter.Add(index);
+                    pairs.Add(new(index, index));
                 }
             }
         }
 
-        var matchedBefore = new HashSet<int>();
-        var matchedAfter = new HashSet<int>();
-        var pairs = new List<SequencePair>();
-        foreach (InstallerMatchCandidate candidate in candidates
-                     .OrderByDescending(static candidate => candidate.Score)
-                     .ThenBy(static candidate => candidate.Distance)
-                     .ThenBy(static candidate => candidate.BeforeIndex)
-                     .ThenBy(static candidate => candidate.AfterIndex))
+        return pairs;
+    }
+
+    private static void MatchInstallersByKey(
+        InstallerMatchValues[] before,
+        InstallerMatchValues[] after,
+        Func<InstallerMatchValues, string?> keySelector,
+        HashSet<int> matchedBefore,
+        HashSet<int> matchedAfter,
+        ICollection<SequencePair> pairs)
+    {
+        var afterByKey = new Dictionary<string, Queue<int>>(StringComparer.OrdinalIgnoreCase);
+        for (int index = 0; index < after.Length; index++)
         {
-            if (matchedBefore.Add(candidate.BeforeIndex) && matchedAfter.Add(candidate.AfterIndex))
+            if (matchedAfter.Contains(index) || string.IsNullOrEmpty(keySelector(after[index])))
             {
-                pairs.Add(new(candidate.BeforeIndex, candidate.AfterIndex));
+                continue;
             }
+
+            string key = keySelector(after[index])!;
+            if (!afterByKey.TryGetValue(key, out Queue<int>? indices))
+            {
+                indices = new();
+                afterByKey.Add(key, indices);
+            }
+
+            indices.Enqueue(index);
         }
 
-        return pairs;
+        for (int index = 0; index < before.Length; index++)
+        {
+            if (matchedBefore.Contains(index) || string.IsNullOrEmpty(keySelector(before[index])))
+            {
+                continue;
+            }
+
+            string key = keySelector(before[index])!;
+            if (!afterByKey.TryGetValue(key, out Queue<int>? indices))
+            {
+                continue;
+            }
+
+            while (indices.Count > 0 && matchedAfter.Contains(indices.Peek()))
+            {
+                indices.Dequeue();
+            }
+
+            if (indices.Count > 0)
+            {
+                int afterIndex = indices.Dequeue();
+                matchedBefore.Add(index);
+                matchedAfter.Add(afterIndex);
+                pairs.Add(new(index, afterIndex));
+            }
+        }
     }
 
     private static int InstallerMatchScore(
@@ -526,8 +617,21 @@ internal sealed class ManifestSnapshot
     {
         string[] beforeValues = [.. before.Children.Select(CanonicalNode)];
         string[] afterValues = [.. after.Children.Select(CanonicalNode)];
-        int[,] lengths = BuildLcsLengths(beforeValues, afterValues);
-        List<SequencePair> anchors = GetLcsPairs(beforeValues, afterValues, lengths);
+        if (beforeValues.AsSpan().SequenceEqual(afterValues))
+        {
+            return;
+        }
+
+        List<SequencePair> anchors;
+        if ((long)beforeValues.Length * afterValues.Length <= MaximumLcsCells)
+        {
+            int[,] lengths = BuildLcsLengths(beforeValues, afterValues);
+            anchors = GetLcsPairs(beforeValues, afterValues, lengths);
+        }
+        else
+        {
+            anchors = GetLinearSubsequencePairs(beforeValues, afterValues);
+        }
 
         int beforeStart = 0;
         int afterStart = 0;
@@ -662,6 +766,45 @@ internal sealed class ManifestSnapshot
             else
             {
                 j++;
+            }
+        }
+
+        return pairs;
+    }
+
+    private static List<SequencePair> GetLinearSubsequencePairs(string[] before, string[] after)
+    {
+        var afterIndices = new Dictionary<string, Queue<int>>(StringComparer.Ordinal);
+        for (int index = 0; index < after.Length; index++)
+        {
+            if (!afterIndices.TryGetValue(after[index], out Queue<int>? indices))
+            {
+                indices = new();
+                afterIndices.Add(after[index], indices);
+            }
+
+            indices.Enqueue(index);
+        }
+
+        var pairs = new List<SequencePair>();
+        int lastAfterIndex = -1;
+        for (int beforeIndex = 0; beforeIndex < before.Length; beforeIndex++)
+        {
+            if (!afterIndices.TryGetValue(before[beforeIndex], out Queue<int>? indices))
+            {
+                continue;
+            }
+
+            while (indices.Count > 0 && indices.Peek() <= lastAfterIndex)
+            {
+                indices.Dequeue();
+            }
+
+            if (indices.Count > 0)
+            {
+                int afterIndex = indices.Dequeue();
+                pairs.Add(new(beforeIndex, afterIndex));
+                lastAfterIndex = afterIndex;
             }
         }
 
@@ -819,12 +962,6 @@ internal sealed class ManifestSnapshot
     private sealed record DocumentSnapshot(string ManifestPath, YamlNode Root);
 
     private sealed record SequencePair(int BeforeIndex, int AfterIndex);
-
-    private sealed record InstallerMatchCandidate(
-        int BeforeIndex,
-        int AfterIndex,
-        int Score,
-        int Distance);
 
     private sealed record InstallerMatchValues(
         string PrimaryIdentity,

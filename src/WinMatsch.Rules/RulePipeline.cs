@@ -193,7 +193,11 @@ public sealed class RulePipeline
             return;
         }
 
-        ManifestSnapshot before = ManifestSnapshot.Capture(context.Manifests);
+        if (!ManifestSnapshot.TryCapture(context.Manifests, out ManifestSnapshot before))
+        {
+            throw new InvalidOperationException(
+                $"Rule '{rule.Id}' cannot run in log-only mode because the manifest cannot be snapshotted.");
+        }
         var simulation = new ManifestContext
         {
             Manifests = ManifestSnapshot.Clone(context.Manifests),
@@ -206,7 +210,11 @@ public sealed class RulePipeline
         };
 
         rule.Apply(simulation);
-        ManifestSnapshot after = ManifestSnapshot.Capture(simulation.Manifests);
+        if (!ManifestSnapshot.TryCapture(simulation.Manifests, out ManifestSnapshot after))
+        {
+            throw new InvalidOperationException(
+                $"Rule '{rule.Id}' log-only result cannot be snapshotted.");
+        }
         context.ImportFindings(simulation.Findings);
         context.ImportTrace(simulation.Trace);
         RecordChanges(rule, context, before.Diff(after), resolution, simulation);

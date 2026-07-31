@@ -394,6 +394,27 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Large_sequence_diff_uses_bounded_memory_and_reports_the_single_removal()
+    {
+        List<string> before = [.. Enumerable.Range(0, 2048).Select(static index => $"Command{index}")];
+        List<string> after = [.. before];
+        after.RemoveAt(1024);
+        Installer installer = TestManifests.CreateInstaller();
+        installer.Commands = before;
+        ManifestContext context = TestManifests.CreateContext(TestManifests.Create(installer));
+
+        RulePipeline.Create(
+            [new ReplaceCommandsRule(after)],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        RuleChange change = Assert.Single(context.Changes);
+        Assert.Equal("Installers[0].Commands[1024]", change.FieldPath);
+        Assert.Equal("Command1024", change.Before);
+        Assert.Null(change.After);
+    }
+
+    [Fact]
     public void Validation_rules_still_process_incomplete_manifests()
     {
         Installer first = TestManifests.CreateInstaller();
@@ -453,6 +474,33 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Log_only_runs_when_unrelated_required_manifest_fields_are_missing()
+    {
+        Installer installer = TestManifests.CreateInstaller();
+        installer.ProductCode = "ab12cd34-ef56-7890-abcd-ef1234567890";
+        PackageManifests manifests = TestManifests.Create(installer);
+        manifests.Version.DefaultLocale = null;
+        ManifestContext context = TestManifests.CreateContext(manifests);
+        var configuration = new RuleRuntimeConfiguration(
+            commandOverrides: new Dictionary<string, RuleMode>
+            {
+                [RuleIds.NormalizeProductCodes] = RuleMode.LogOnly,
+            });
+
+        RulePipeline.Create(
+            [new NormalizeProductCodesRule()],
+            configuration,
+            OverridePackSet.Empty).Run(context);
+
+        Assert.Null(manifests.Version.DefaultLocale);
+        Assert.Equal("ab12cd34-ef56-7890-abcd-ef1234567890", installer.ProductCode);
+        RuleChange change = Assert.Single(
+            context.Changes,
+            item => item.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal));
+        Assert.Equal("{AB12CD34-EF56-7890-ABCD-EF1234567890}", change.After);
+    }
+
+    [Fact]
     public void Catalogue_ids_keep_the_exact_policy_names()
     {
         Assert.Equal("ARCH-1", RuleCatalogueIds.Arch1);
@@ -463,6 +511,8 @@ public class RuleRuntimeTests
 
     [Theory]
     [InlineData("Authorization: Bearer abcdefghijklmnopqrstuvwxyz")]
+    [InlineData("Authorization: Bearer abc.def~ghi+jkl/mno")]
+    [InlineData("Authorization: Basic dXNlcjpwYXNzKysv")]
     [InlineData("Cookie: session=top-secret")]
     [InlineData("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwxyz")]
     public void Common_authorization_material_is_redacted(string message)
@@ -515,6 +565,19 @@ public class RuleRuntimeTests
     [InlineData("session=top-secret")]
     public void Syntactically_bounded_credential_markers_are_redacted(string message)
     {
+        ManifestContext context = TestManifests.CreateContext(
+            TestManifests.Create(TestManifests.CreateInstaller()),
+            explain: true);
+
+        new DirectLoggingRule(message).Apply(context);
+
+        Assert.Equal("[REDACTED]", Assert.Single(context.Trace).Message);
+    }
+
+    [Fact]
+    public void Credential_assignments_in_url_paths_are_redacted()
+    {
+        const string message = "https://example.test/download/token=super-secret/app.exe";
         ManifestContext context = TestManifests.CreateContext(
             TestManifests.Create(TestManifests.CreateInstaller()),
             explain: true);

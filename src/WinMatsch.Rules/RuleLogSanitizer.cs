@@ -41,7 +41,8 @@ internal static class RuleLogSanitizer
                 Query = string.Empty,
                 Fragment = string.Empty,
             };
-            return safe.Uri.AbsoluteUri;
+            string sanitizedUri = safe.Uri.AbsoluteUri;
+            return ContainsBoundedCredential(sanitizedUri) ? "[REDACTED]" : sanitizedUri;
         }
 
         return ContainsBoundedCredential(value) ? "[REDACTED]" : value;
@@ -175,7 +176,7 @@ internal static class RuleLogSanitizer
                 }
 
                 ReadOnlySpan<char> token = value.AsSpan(tokenStart, tokenEnd - tokenStart);
-                if (token.Length >= 12 && IsBase64UrlToken(token))
+                if (token.Length >= 12 && IsAuthorizationToken(token))
                 {
                     return true;
                 }
@@ -207,11 +208,27 @@ internal static class RuleLogSanitizer
     private static bool IsBase64UrlCharacter(char value)
         => char.IsAsciiLetterOrDigit(value) || value is '-' or '_' or '=';
 
+    private static bool IsAuthorizationTokenCharacter(char value)
+        => IsBase64UrlCharacter(value) || value is '.' or '~' or '+' or '/';
+
     private static bool IsBase64UrlToken(ReadOnlySpan<char> value)
     {
         foreach (char character in value)
         {
             if (!IsBase64UrlCharacter(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsAuthorizationToken(ReadOnlySpan<char> value)
+    {
+        foreach (char character in value)
+        {
+            if (!IsAuthorizationTokenCharacter(character))
             {
                 return false;
             }
