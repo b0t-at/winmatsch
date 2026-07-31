@@ -175,4 +175,48 @@ public sealed class ManifestSchemaValidatorTests
             report.Findings,
             static finding => finding.Code is "VLD1001" or "VLD1003");
     }
+
+    [Fact]
+    public void Huge_numeric_scalars_are_bounded_before_big_integer_conversion()
+    {
+        string scalar = new('9', 10_000);
+        string yaml = $"""
+            PackageIdentifier: Example.App
+            PackageVersion: {scalar}
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.12.0
+
+            """;
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Version);
+
+        ValidationFinding finding = Assert.Single(report.Findings);
+        Assert.Equal("VLD1001", finding.Code);
+        Assert.Contains("cannot exceed 256 characters", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Container_tags_must_match_the_yaml_node_type()
+    {
+        const string yaml = """
+            !!seq {
+              PackageIdentifier: Example.App,
+              PackageVersion: 1.0.0,
+              DefaultLocale: en-US,
+              ManifestType: version,
+              ManifestVersion: 1.12.0
+            }
+            """;
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Version);
+
+        ValidationFinding finding = Assert.Single(report.Findings);
+        Assert.Equal("VLD1001", finding.Code);
+        Assert.Contains("incompatible with node type", finding.Message, StringComparison.Ordinal);
+    }
 }

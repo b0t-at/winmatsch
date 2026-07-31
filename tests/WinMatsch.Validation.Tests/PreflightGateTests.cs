@@ -619,6 +619,88 @@ public sealed class PreflightGateTests
     }
 
     [Fact]
+    public async Task Traversal_directory_entries_are_rejected_before_membership_checks()
+    {
+        string archivePath = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-validation-{Guid.NewGuid():N}.zip");
+        try
+        {
+            using (ZipArchive archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+            {
+                _ = archive.CreateEntry("../");
+                _ = archive.CreateEntry("bin/tool.exe");
+            }
+
+            PackageManifests manifests = TestPackageFactory.CreateManifests();
+            manifests.Installer.InstallerType = InstallerType.Zip;
+            Installer installer = Assert.Single(manifests.Installer.Installers!);
+            installer.NestedInstallerType = InstallerType.Portable;
+            installer.NestedInstallerFiles =
+            [
+                new NestedInstallerFile
+                {
+                    RelativeFilePath = "bin/tool.exe",
+                    PortableCommandAlias = "tool",
+                },
+            ];
+            PreflightRequest valid = TestPackageFactory.CreateRequest(manifests);
+            InstallerArtifact artifact = Assert.Single(valid.InstallerArtifacts);
+            PreflightRequest request = Copy(
+                valid,
+                artifacts:
+                [
+                    artifact with
+                    {
+                        Download = TestPackageFactory.CopyDownload(
+                            artifact.Download,
+                            filePath: archivePath),
+                    },
+                ]);
+
+            ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+                .ValidateAsync(request);
+
+            Assert.Contains(
+                report.Findings,
+                static finding => finding.Code == "VLD3012"
+                    && finding.Message.Contains(
+                        "not a safe Windows-relative path",
+                        StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.Delete(archivePath);
+        }
+    }
+
+    [Theory]
+    [InlineData("CON")]
+    [InlineData(".")]
+    [InlineData("tool*")]
+    [InlineData("bad\u0001alias")]
+    public async Task Portable_aliases_must_be_safe_windows_command_names(string alias)
+    {
+        PackageManifests manifests = TestPackageFactory.CreateManifests();
+        manifests.Installer.InstallerType = InstallerType.Zip;
+        Installer installer = Assert.Single(manifests.Installer.Installers!);
+        installer.NestedInstallerType = InstallerType.Portable;
+        installer.NestedInstallerFiles =
+        [
+            new NestedInstallerFile
+            {
+                RelativeFilePath = "bin/tool.exe",
+                PortableCommandAlias = alias,
+            },
+        ];
+
+        ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+            .ValidateAsync(TestPackageFactory.CreateRequest(manifests));
+
+        Assert.Contains(report.Findings, static finding => finding.Code == "VLD3009");
+    }
+
+    [Fact]
     public async Task Changed_redirect_target_blocks_boundary_even_when_revalidation_reports_unchanged()
     {
         var network = new FakePreflightNetwork

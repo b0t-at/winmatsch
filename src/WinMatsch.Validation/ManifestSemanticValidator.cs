@@ -365,7 +365,8 @@ internal static class ManifestSemanticValidator
         => !string.IsNullOrWhiteSpace(alias)
             && !alias.Any(static value =>
                 char.IsWhiteSpace(value)
-                || value is '/' or '\\' or ':');
+                || value is '/' or '\\')
+            && IsSafeWindowsPathSegment(alias);
 
     private static void ValidateNestedArchiveContents(
         InstallerManifest manifest,
@@ -470,16 +471,27 @@ internal static class ManifestSemanticValidator
                         $"Archive expands beyond the {MaxExpandedArchiveBytes}-byte validation limit.");
                 }
 
-                if (entry.Name.Length == 0)
-                {
-                    continue;
-                }
-
                 string normalizedPath = NormalizeArchivePath(entry.FullName);
-                if (!IsSafeRelativeArchivePath(normalizedPath))
+                bool isDirectory = normalizedPath.EndsWith('/');
+                string pathForValidation = isDirectory
+                    ? normalizedPath.TrimEnd('/')
+                    : normalizedPath;
+                if (!IsSafeRelativeArchivePath(pathForValidation))
                 {
                     throw new InvalidDataException(
                         $"Archive entry '{entry.FullName}' is not a safe Windows-relative path.");
+                }
+
+                if (windowsPaths.TryGetValue(pathForValidation, out string? existingPath))
+                {
+                    throw new InvalidDataException(
+                        $"Archive paths '{existingPath}' and '{normalizedPath}' collide on Windows.");
+                }
+
+                windowsPaths.Add(pathForValidation, normalizedPath);
+                if (isDirectory)
+                {
+                    continue;
                 }
 
                 if (!entries.Add(normalizedPath))
@@ -487,14 +499,6 @@ internal static class ManifestSemanticValidator
                     throw new InvalidDataException(
                         $"Archive contains duplicate canonical path '{normalizedPath}'.");
                 }
-
-                if (windowsPaths.TryGetValue(normalizedPath, out string? existingPath))
-                {
-                    throw new InvalidDataException(
-                        $"Archive paths '{existingPath}' and '{normalizedPath}' collide on Windows.");
-                }
-
-                windowsPaths.Add(normalizedPath, normalizedPath);
             }
 
             return entries;

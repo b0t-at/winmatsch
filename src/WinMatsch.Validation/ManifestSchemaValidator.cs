@@ -20,6 +20,7 @@ public static partial class ManifestSchemaValidator
     private const int MaxManifestBytes = 16 * 1024 * 1024;
     private const int MaxYamlDepth = 64;
     private const int MaxYamlNodes = 100_000;
+    private const int MaxNumericScalarCharacters = 256;
 
     private static readonly Dictionary<ManifestType, SchemaEntry> _schemas = LoadSchemas();
 
@@ -237,6 +238,8 @@ public static partial class ManifestSchemaValidator
                 "YAML anchors and aliases are not permitted in manifests.");
         }
 
+        ValidateContainerTag(node);
+
         if (depth > MaxYamlDepth)
         {
             throw new InvalidDataException(
@@ -281,6 +284,26 @@ public static partial class ManifestSchemaValidator
                 break;
             default:
                 throw new InvalidDataException($"Unsupported YAML node type '{node.NodeType}'.");
+        }
+    }
+
+    private static void ValidateContainerTag(YamlNode node)
+    {
+        if (node.Tag.IsEmpty || node.Tag.IsNonSpecific || node is YamlScalarNode)
+        {
+            return;
+        }
+
+        bool valid = node switch
+        {
+            YamlMappingNode => node.Tag == "tag:yaml.org,2002:map",
+            YamlSequenceNode => node.Tag == "tag:yaml.org,2002:seq",
+            _ => false,
+        };
+        if (!valid)
+        {
+            throw new InvalidDataException(
+                $"YAML tag '{node.Tag}' is incompatible with node type '{node.NodeType}'.");
         }
     }
 
@@ -380,6 +403,18 @@ public static partial class ManifestSchemaValidator
 
     private static bool TryGetYamlIntegerJson(string value, out string jsonNumber)
     {
+        if (!YamlIntegerPattern().IsMatch(value))
+        {
+            jsonNumber = string.Empty;
+            return false;
+        }
+
+        if (value.Length > MaxNumericScalarCharacters)
+        {
+            throw new InvalidDataException(
+                $"YAML numeric scalars cannot exceed {MaxNumericScalarCharacters} characters.");
+        }
+
         int sign = 1;
         int prefixIndex = 0;
         if (value.StartsWith('+'))
@@ -414,12 +449,6 @@ public static partial class ManifestSchemaValidator
             radix = 10;
         }
 
-        if (unsigned.IsEmpty || !HasValidDigitSeparators(unsigned))
-        {
-            jsonNumber = string.Empty;
-            return false;
-        }
-
         BigInteger parsed = BigInteger.Zero;
         foreach (char character in unsigned)
         {
@@ -449,30 +478,18 @@ public static partial class ManifestSchemaValidator
         return true;
     }
 
-    private static bool HasValidDigitSeparators(ReadOnlySpan<char> value)
-    {
-        if (value[0] == '_' || value[^1] == '_')
-        {
-            return false;
-        }
-
-        for (int index = 1; index < value.Length; index++)
-        {
-            if (value[index] == '_' && value[index - 1] == '_')
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     private static bool TryGetYamlFloatJson(string value, out string jsonNumber)
     {
         if (value.IndexOfAny(['.', 'e', 'E']) < 0 || !YamlFloatPattern().IsMatch(value))
         {
             jsonNumber = string.Empty;
             return false;
+        }
+
+        if (value.Length > MaxNumericScalarCharacters)
+        {
+            throw new InvalidDataException(
+                $"YAML numeric scalars cannot exceed {MaxNumericScalarCharacters} characters.");
         }
 
         string normalized = value.Replace("_", string.Empty, StringComparison.Ordinal);
@@ -513,6 +530,11 @@ public static partial class ManifestSchemaValidator
         @"^[+-]?(?:(?:[0-9](?:_?[0-9])*)(?:\.(?:[0-9](?:_?[0-9])*)?)?|\.(?:[0-9](?:_?[0-9])*))(?:[eE][+-]?[0-9](?:_?[0-9])*)?$",
         RegexOptions.CultureInvariant)]
     private static partial Regex YamlFloatPattern();
+
+    [GeneratedRegex(
+        @"^[+-]?(?:0[xX][0-9a-fA-F](?:_?[0-9a-fA-F])*|0[oO][0-7](?:_?[0-7])*|0[bB][01](?:_?[01])*|[0-9](?:_?[0-9])*)$",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex YamlIntegerPattern();
 
     private static void ValidatePropertyCasing(
         YamlNode node,
