@@ -773,26 +773,14 @@ internal sealed class ManifestSnapshot
 
         YamlSequenceNode? humanInstallers =
             GetMappingValue(humanRoot, "Installers") as YamlSequenceNode;
-        var usedHumanInstallers = new HashSet<int>();
-        var humanIndexByGenerated = new int?[generatedInstallers.Children.Count];
-        if (humanInstallers is not null)
-        {
-            for (int generatedIndex = 0; generatedIndex < generatedInstallers.Children.Count; generatedIndex++)
-            {
-                if (generatedInstallers.Children[generatedIndex] is YamlMappingNode generatedInstaller
-                    && MatchInstallerExcludingField(
-                        humanInstallers,
-                        humanRoot,
-                        generatedInstaller,
-                        generatedRoot,
-                        rootSemanticPath,
-                        usedHumanInstallers) is int humanIndex)
-                {
-                    usedHumanInstallers.Add(humanIndex);
-                    humanIndexByGenerated[generatedIndex] = humanIndex;
-                }
-            }
-        }
+        int?[] humanIndexByGenerated = humanInstallers is null
+            ? new int?[generatedInstallers.Children.Count]
+            : MatchInstallersExcludingField(
+                humanInstallers,
+                humanRoot,
+                generatedInstallers,
+                generatedRoot,
+                rootSemanticPath);
 
         for (int generatedIndex = 0; generatedIndex < generatedInstallers.Children.Count; generatedIndex++)
         {
@@ -838,47 +826,65 @@ internal sealed class ManifestSnapshot
         return false;
     }
 
-    private static int? MatchInstallerExcludingField(
+    private static int?[] MatchInstallersExcludingField(
         YamlSequenceNode candidates,
         YamlMappingNode candidateRoot,
-        YamlMappingNode target,
+        YamlSequenceNode targets,
         YamlMappingNode targetRoot,
-        string excludedField,
-        HashSet<int> usedCandidates)
+        string excludedField)
     {
-        int bestIndex = -1;
-        int bestScore = int.MinValue;
-        for (int index = 0; index < candidates.Children.Count; index++)
+        var scoredPairs = new List<InstallerPairCandidate>();
+        for (int targetIndex = 0; targetIndex < targets.Children.Count; targetIndex++)
         {
-            if (candidates.Children[index] is not YamlMappingNode candidate)
+            if (targets.Children[targetIndex] is not YamlMappingNode target
+                || ScalarValue(GetMappingValue(target, "InstallerUrl")) is not { } targetUrl)
             {
                 continue;
             }
 
-            if (usedCandidates.Contains(index)
-                || !EqualScalar(candidate, target, "InstallerUrl"))
+            for (int candidateIndex = 0; candidateIndex < candidates.Children.Count; candidateIndex++)
             {
-                continue;
-            }
+                if (candidates.Children[candidateIndex] is not YamlMappingNode candidate
+                    || ScalarValue(GetMappingValue(candidate, "InstallerUrl")) is not { } candidateUrl
+                    || !string.Equals(
+                        NormalizeInstallerUrl(candidateUrl),
+                        NormalizeInstallerUrl(targetUrl),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
-            int score = 0;
-            score += 10_000;
-            score += EqualScalar(candidate, target, "InstallerSha256") ? 5_000 : 0;
-            score += EqualScalar(candidate, target, "Architecture") ? 2_000 : 0;
-            score += InstallerSwitchesScore(candidate, target, excludedField);
-            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "InstallerType", excludedField) ? 500 : 0;
-            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "Scope", excludedField) ? 400 : 0;
-            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "InstallerLocale", excludedField) ? 300 : 0;
-            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "NestedInstallerType", excludedField) ? 200 : 0;
-            score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "ProductCode", excludedField) ? 100 : 0;
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestIndex = index;
+                int score = 10_000;
+                score += EqualScalar(candidate, target, "InstallerSha256") ? 5_000 : 0;
+                score += EqualScalar(candidate, target, "Architecture") ? 2_000 : 0;
+                score += InstallerSwitchesScore(candidate, target, excludedField);
+                score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "InstallerType", excludedField) ? 500 : 0;
+                score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "Scope", excludedField) ? 400 : 0;
+                score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "InstallerLocale", excludedField) ? 300 : 0;
+                score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "NestedInstallerType", excludedField) ? 200 : 0;
+                score += EqualEffectiveScalar(candidate, candidateRoot, target, targetRoot, "ProductCode", excludedField) ? 100 : 0;
+                scoredPairs.Add(new(candidateIndex, targetIndex, score));
             }
         }
 
-        return bestIndex < 0 ? null : bestIndex;
+        var usedCandidates = new HashSet<int>();
+        var usedTargets = new HashSet<int>();
+        var result = new int?[targets.Children.Count];
+        foreach (InstallerPairCandidate pair in scoredPairs
+                     .OrderByDescending(static pair => pair.Score)
+                     .ThenBy(static pair => pair.TargetIndex)
+                     .ThenBy(static pair => pair.CandidateIndex))
+        {
+            if (!usedCandidates.Contains(pair.CandidateIndex)
+                && !usedTargets.Contains(pair.TargetIndex))
+            {
+                usedCandidates.Add(pair.CandidateIndex);
+                usedTargets.Add(pair.TargetIndex);
+                result[pair.TargetIndex] = pair.CandidateIndex;
+            }
+        }
+
+        return result;
     }
 
     private static bool EqualScalar(
@@ -1937,6 +1943,11 @@ internal sealed class ManifestSnapshot
         string? NestedInstallerType,
         string? Architecture,
         string? ProductCode);
+
+    private sealed record InstallerPairCandidate(
+        int CandidateIndex,
+        int TargetIndex,
+        int Score);
 
     private sealed record FlattenedValue(string FieldPath, string SemanticPath, string? Value);
 }
