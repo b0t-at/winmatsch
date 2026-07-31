@@ -771,6 +771,7 @@ internal sealed class ManifestSnapshot
             return false;
         }
 
+        var usedHumanInstallers = new HashSet<int>();
         for (int generatedIndex = 0; generatedIndex < generatedInstallers.Children.Count; generatedIndex++)
         {
             if (generatedInstallers.Children[generatedIndex] is not YamlMappingNode generatedInstaller)
@@ -797,9 +798,11 @@ internal sealed class ManifestSnapshot
                     humanRoot,
                     generatedInstaller,
                     generatedRoot,
-                    rootSemanticPath) is int humanIndex
+                    rootSemanticPath,
+                    usedHumanInstallers) is int humanIndex
                 && humanInstallers.Children[humanIndex] is YamlMappingNode humanInstaller)
             {
+                usedHumanInstallers.Add(humanIndex);
                 humanValue = TryResolveSemanticPath(
                     humanInstaller,
                     rootSemanticPath,
@@ -826,7 +829,8 @@ internal sealed class ManifestSnapshot
         YamlMappingNode candidateRoot,
         YamlMappingNode target,
         YamlMappingNode targetRoot,
-        string excludedField)
+        string excludedField,
+        HashSet<int> usedCandidates)
     {
         int bestIndex = -1;
         int bestScore = int.MinValue;
@@ -837,8 +841,14 @@ internal sealed class ManifestSnapshot
                 continue;
             }
 
+            if (usedCandidates.Contains(index)
+                || !EqualScalar(candidate, target, "InstallerUrl"))
+            {
+                continue;
+            }
+
             int score = 0;
-            score += EqualScalar(candidate, target, "InstallerUrl") ? 10_000 : 0;
+            score += 10_000;
             score += EqualScalar(candidate, target, "InstallerSha256") ? 5_000 : 0;
             score += EqualScalar(candidate, target, "Architecture") ? 2_000 : 0;
             score += InstallerSwitchesScore(candidate, target, excludedField);

@@ -658,6 +658,48 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void New_installer_cannot_reuse_an_unrelated_human_installer_pair()
+    {
+        static PackageManifests Create(
+            string rootProductCode,
+            params (string Url, string? Override)[] installers)
+        {
+            PackageManifests manifests = TestManifests.Create(
+                [
+                    .. installers.Select(item =>
+                    {
+                        Installer installer = TestManifests.CreateInstaller(url: item.Url);
+                        installer.ProductCode = item.Override;
+                        return installer;
+                    }),
+                ]);
+            manifests.Installer.ProductCode = rootProductCode;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(
+                "A",
+                ("https://example.test/existing.exe", null)),
+            Previous = Create(
+                "B",
+                ("https://example.test/existing.exe", "A")),
+            Manifests = Create(
+                "B",
+                ("https://example.test/existing.exe", "A"),
+                ("https://example.test/new.exe", "A")),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath == "ProductCode"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
     public void Nested_switch_correction_is_excluded_from_installer_pairing()
     {
         static PackageManifests Create(string rootSilent, string? userSilent, string? machineSilent)
