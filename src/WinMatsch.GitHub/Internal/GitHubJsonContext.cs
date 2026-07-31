@@ -1,0 +1,41 @@
+using System.Text.Json.Serialization;
+
+namespace WinMatsch.GitHub.Internal;
+
+[JsonSourceGenerationOptions(
+    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+[JsonSerializable(typeof(RestUserDto))]
+[JsonSerializable(typeof(RestRepositoryDto))]
+[JsonSerializable(typeof(RestContentDto))]
+[JsonSerializable(typeof(RestTreeDto))]
+[JsonSerializable(typeof(List<RestReleaseDto>))]
+[JsonSerializable(typeof(List<RestBranchDto>))]
+[JsonSerializable(typeof(RestReferenceDto))]
+[JsonSerializable(typeof(CreateReferenceDto))]
+[JsonSerializable(typeof(RestCompareDto))]
+[JsonSerializable(typeof(CreateForkDto))]
+[JsonSerializable(typeof(MergeUpstreamDto))]
+[JsonSerializable(typeof(RestMergeUpstreamResultDto))]
+[JsonSerializable(typeof(List<RestPullRequestDto>))]
+[JsonSerializable(typeof(RestPullRequestDto))]
+[JsonSerializable(typeof(CreatePullRequestDto))]
+[JsonSerializable(typeof(UpdatePullRequestDto))]
+[JsonSerializable(typeof(CreateCommentDto))]
+[JsonSerializable(typeof(RestCommentDto))]
+[JsonSerializable(typeof(RestErrorDto))]
+[JsonSerializable(typeof(RestGitCommitDto))]
+[JsonSerializable(typeof(CreateBlobDto))]
+[JsonSerializable(typeof(CreatedBlobDto))]
+[JsonSerializable(typeof(CreateTreeDto))]
+[JsonSerializable(typeof(CreatedTreeDto))]
+[JsonSerializable(typeof(CreateGitCommitDto))]
+[JsonSerializable(typeof(CreatedGitCommitDto))]
+[JsonSerializable(typeof(UpdateReferenceDto))]
+[JsonSerializable(typeof(GraphQlViewerRequestDto))]
+[JsonSerializable(typeof(GraphQlViewerResponseDto))]
+[JsonSerializable(typeof(GraphQlRepositoryRequestDto))]
+[JsonSerializable(typeof(GraphQlRepositoryResponseDto))]
+[JsonSerializable(typeof(GraphQlCommitRequestDto))]
+[JsonSerializable(typeof(GraphQlCommitResponseDto))]
+internal sealed partial class GitHubJsonContext : JsonSerializerContext;
