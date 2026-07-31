@@ -344,8 +344,7 @@ internal static class RuleLogSanitizer
 
                 int tokenEnd = tokenStart;
                 while (tokenEnd < value.Length
-                    && !char.IsWhiteSpace(value[tokenEnd])
-                    && !IsUriTerminator(value[tokenEnd]))
+                    && IsAuthorizationTokenCharacter(value[tokenEnd]))
                 {
                     tokenEnd++;
                 }
