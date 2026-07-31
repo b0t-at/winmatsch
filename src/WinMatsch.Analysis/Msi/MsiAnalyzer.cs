@@ -148,6 +148,7 @@ public sealed class MsiAnalyzer : IInstallerAnalyzer
     private static byte[] ReadStreamBytes(RootStorage root, EntryInfo entry)
     {
         using CfbStream stream = root.OpenStream(entry.Name);
+        AnalysisLimits.ValidateAllocation(entry.Length, $"MSI stream '{entry.Name}'", AnalysisLimits.MaxMsiStreamBytes);
         byte[] bytes = new byte[entry.Length];
         stream.ReadExactly(bytes);
         return bytes;

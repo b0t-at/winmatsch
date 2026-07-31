@@ -27,7 +27,9 @@ public sealed class MsixBundleAnalyzer : IInstallerAnalyzer
     public InstallerAnalysis Analyze(Stream stream, string fileName)
     {
         ArgumentNullException.ThrowIfNull(stream);
+        using IDisposable scope = AnalysisLimits.EnterArchive($"'{fileName}'");
         using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+        AnalysisLimits.ValidateArchive(archive, $"'{fileName}'");
 
         ZipArchiveEntry manifestEntry = archive.GetEntry(BundleManifestEntryName)
             ?? throw new InvalidDataException(

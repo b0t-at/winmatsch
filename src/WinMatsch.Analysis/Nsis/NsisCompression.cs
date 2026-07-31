@@ -109,7 +109,9 @@ internal static class NsisCompression
         => data.Length >= 2 && data[0] == Bzip2BlockMagic && data[1] < 14;
 
     private static InvalidDataException UnsupportedBzip2()
-        => new("The NSIS installer uses NSIS-modified bzip2 compression, which is not supported.");
+        => new(
+            "The NSIS installer uses NSIS-modified bzip2 compression, which this analyzer cannot decode safely. "
+            + "Manual analysis is required; do not infer the installer type or architecture from the x86 stub.");
 
     private static byte[] ReadStored(Stream stream, long offset, int headerSize, long available)
     {
@@ -140,7 +142,8 @@ internal static class NsisCompression
             if (first[0] == 1)
             {
                 throw new InvalidDataException(
-                    "The NSIS installer uses LZMA with the BCJ x86 filter, which is not supported.");
+                    "The NSIS installer uses LZMA with the BCJ x86 filter, which this analyzer cannot decode safely. "
+                    + "Manual analysis is required; do not infer the installer type or architecture from the x86 stub.");
             }
 
             data.ReadExactly(first); // Filter flag 0: the props byte follows.

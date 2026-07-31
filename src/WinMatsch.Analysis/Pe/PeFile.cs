@@ -138,7 +138,10 @@ public sealed class PeFile : IDisposable
         uint dataRva = BinaryPrimitives.ReadUInt32LittleEndian(resources[dataEntryOffset..]);
         uint dataSize = BinaryPrimitives.ReadUInt32LittleEndian(resources[(dataEntryOffset + 4)..]);
         long dataOffset = dataRva - (long)(uint)directory.RelativeVirtualAddress;
-        if (dataSize == 0 || dataOffset < 0 || dataOffset + dataSize > resources.Length)
+        if (dataSize == 0
+            || dataSize > AnalysisLimits.MaxResourceBytes
+            || dataOffset < 0
+            || dataOffset + dataSize > resources.Length)
         {
             return null;
         }

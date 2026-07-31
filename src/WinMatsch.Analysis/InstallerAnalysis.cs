@@ -45,4 +45,7 @@ public sealed class InstallerAnalysis
 
     /// <summary>What was found inside the archive; only set by archive analyzers.</summary>
     public ZipContents? Zip { get; init; }
+
+    /// <summary>Non-fatal findings that should be shown before generating a manifest.</summary>
+    public IReadOnlyList<AnalysisDiagnostic> Diagnostics { get; init; } = [];
 }

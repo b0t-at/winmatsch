@@ -74,6 +74,9 @@ internal static class NsisFixtures
 
         public bool SetRegView64 { get; set; }
 
+        /// <summary>Payload names embedded in the string table, as electron-builder emits.</summary>
+        public List<string> PayloadNames { get; set; } = [];
+
         /// <summary>Overrides the first header's length_of_header for corruption tests.</summary>
         public int? DeclaredHeaderSizeOverride { get; set; }
 
@@ -111,6 +114,10 @@ internal static class NsisFixtures
 
         int installDirectoryPtr = options.InstallDirectory is null ? 0 : strings.Add(options.InstallDirectory);
         int langNamePtr = strings.Add([Token.Lit(options.LangName)]);
+        foreach (string payloadName in options.PayloadNames)
+        {
+            strings.Add([Token.Lit(payloadName)]);
+        }
 
         // Entries: some noise, the registry writes, optionally SetRegView 64
         // (EW_SETFLAG on exec flag 12, alter_reg_view, with the value string "256").

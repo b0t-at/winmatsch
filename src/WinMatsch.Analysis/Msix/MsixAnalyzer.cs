@@ -30,7 +30,9 @@ public sealed class MsixAnalyzer : IInstallerAnalyzer
     public InstallerAnalysis Analyze(Stream stream, string fileName)
     {
         ArgumentNullException.ThrowIfNull(stream);
+        using IDisposable scope = AnalysisLimits.EnterArchive($"'{fileName}'");
         using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+        AnalysisLimits.ValidateArchive(archive, $"'{fileName}'");
 
         ZipArchiveEntry manifestEntry = archive.GetEntry(ManifestEntryName)
             ?? throw new InvalidDataException($"'{fileName}' is not an MSIX/AppX package: it has no {ManifestEntryName} entry.");

@@ -19,10 +19,6 @@ internal sealed class NsisFirstHeader
     private const uint Signature = 0xDEADBEEF;
     private const int ScanStep = 512;
 
-    // An installer header beyond this size is treated as corrupt rather than allocated: real
-    // headers are a few KiB to a few MiB (strings + instructions), never anywhere near 256 MiB.
-    private const int MaxHeaderSize = 256 * 1024 * 1024;
-
     private static ReadOnlySpan<byte> Magic => "NullsoftInst"u8;
 
     private NsisFirstHeader(uint flags, int headerSize, uint followingDataSize, long dataOffset)
@@ -77,7 +73,7 @@ internal sealed class NsisFirstHeader
             uint flags = BinaryPrimitives.ReadUInt32LittleEndian(record);
             int headerSize = BinaryPrimitives.ReadInt32LittleEndian(record[20..]);
             uint followingDataSize = BinaryPrimitives.ReadUInt32LittleEndian(record[24..]);
-            if (headerSize is <= 0 or > MaxHeaderSize)
+            if (headerSize is <= 0 or > AnalysisLimits.MaxNsisHeaderBytes)
             {
                 throw new InvalidDataException(
                     $"The NSIS first header declares an implausible installer header size of {headerSize} bytes.");
@@ -115,6 +111,11 @@ internal sealed class NsisFirstHeader
 
         int sectionCount = BinaryPrimitives.ReadUInt16LittleEndian(coffHeader[6..]);
         int optionalHeaderSize = BinaryPrimitives.ReadUInt16LittleEndian(coffHeader[20..]);
+        if (sectionCount is <= 0 or > AnalysisLimits.MaxPeSections)
+        {
+            return 0;
+        }
+
         byte[] table = new byte[sectionCount * 40];
         if (!TryReadAt(stream, peHeaderOffset + 24 + (uint)optionalHeaderSize, table))
         {

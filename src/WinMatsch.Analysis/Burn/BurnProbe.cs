@@ -51,28 +51,51 @@ public sealed class BurnProbe : IExeFormatProbe
 
         BurnManifest manifest = BurnManifest.Parse(manifestBytes);
         VersionInfo version = peFile.VersionInfo;
+        Architecture architecture = DetermineArchitecture(peFile.Architecture, manifest, out AnalysisDiagnostic? architectureDiagnostic);
 
         var installer = new Installer
         {
-            Architecture = manifest.ChainTargetsArm64 ? Architecture.Arm64 : peFile.Architecture,
+            Architecture = architecture,
             InstallerType = InstallerType.Burn,
             ElevationRequirement = peFile.RequestedElevation,
             ProductCode = manifest.RegistrationId,
         };
 
+        List<AppsAndFeaturesEntry> arpEntries = [];
         if (manifest.RegistersArpEntry)
         {
-            installer.AppsAndFeaturesEntries =
-            [
-                new AppsAndFeaturesEntry
-                {
-                    DisplayName = manifest.DisplayName,
-                    Publisher = manifest.Publisher,
-                    DisplayVersion = manifest.DisplayVersion ?? manifest.RegistrationVersion,
-                    ProductCode = manifest.RegistrationId,
-                    UpgradeCode = manifest.UpgradeCode,
-                },
-            ];
+            arpEntries.Add(new AppsAndFeaturesEntry
+            {
+                DisplayName = manifest.DisplayName,
+                Publisher = manifest.Publisher,
+                DisplayVersion = manifest.DisplayVersion ?? manifest.RegistrationVersion,
+                ProductCode = manifest.RegistrationId,
+                UpgradeCode = manifest.UpgradeCode,
+            });
+        }
+
+        foreach (BurnMsiPackage package in manifest.MsiPackages)
+        {
+            if (!package.RegistersArpEntry
+                || string.IsNullOrWhiteSpace(package.ProductCode)
+                || arpEntries.Any(entry => string.Equals(entry.ProductCode, package.ProductCode, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            arpEntries.Add(new AppsAndFeaturesEntry
+            {
+                DisplayName = package.DisplayName,
+                DisplayVersion = package.Version,
+                ProductCode = package.ProductCode,
+                UpgradeCode = package.UpgradeCode,
+                InstallerType = InstallerType.Msi,
+            });
+        }
+
+        if (arpEntries.Count > 0)
+        {
+            installer.AppsAndFeaturesEntries = arpEntries;
         }
 
         return new InstallerAnalysis
@@ -83,7 +106,46 @@ public sealed class BurnProbe : IExeFormatProbe
             Publisher = manifest.Publisher ?? version.CompanyName,
             ProductVersion = manifest.DisplayVersion ?? manifest.RegistrationVersion ?? version.ProductVersion,
             Copyright = version.LegalCopyright,
+            Diagnostics = architectureDiagnostic is null ? [] : [architectureDiagnostic],
         };
+    }
+
+    private static Architecture DetermineArchitecture(
+        Architecture stubArchitecture,
+        BurnManifest manifest,
+        out AnalysisDiagnostic? diagnostic)
+    {
+        Architecture[] targets = [.. manifest.ChainTargetArchitectures.Distinct()];
+        if (targets.Length == 1
+            && !manifest.HasAmbiguousArchitectureCondition
+            && stubArchitecture == Architecture.X86)
+        {
+            diagnostic = null;
+            return targets[0];
+        }
+
+        if (targets.Length > 1)
+        {
+            diagnostic = new AnalysisDiagnostic(
+                "BURN001",
+                $"The Burn chain contains architecture-specific MSI packages for {string.Join(", ", targets)}. "
+                    + $"The outer {stubArchitecture} stub architecture was retained; verify whether separate manifest entries are needed.",
+                RequiresManualAnalysis: true);
+            return stubArchitecture;
+        }
+
+        if (manifest.HasAmbiguousArchitectureCondition)
+        {
+            diagnostic = new AnalysisDiagnostic(
+                "BURN002",
+                "The Burn chain contains a negated or ambiguous architecture condition. "
+                    + $"The outer {stubArchitecture} stub architecture was retained; verify the payload architecture manually.",
+                RequiresManualAnalysis: true);
+            return stubArchitecture;
+        }
+
+        diagnostic = null;
+        return stubArchitecture;
     }
 
     /// <summary>
@@ -112,6 +174,11 @@ public sealed class BurnProbe : IExeFormatProbe
 
         int sectionCount = BinaryPrimitives.ReadUInt16LittleEndian(coffHeader[6..]);
         int optionalHeaderSize = BinaryPrimitives.ReadUInt16LittleEndian(coffHeader[20..]);
+        if (sectionCount is <= 0 or > AnalysisLimits.MaxPeSections)
+        {
+            return null;
+        }
+
         byte[] table = new byte[sectionCount * SectionHeaderSize];
         if (!TryReadAt(stream, peHeaderOffset + 24 + (uint)optionalHeaderSize, table))
         {
@@ -134,6 +201,7 @@ public sealed class BurnProbe : IExeFormatProbe
                 return null;
             }
 
+            AnalysisLimits.ValidateAllocation(available, "The .wixburn PE section", AnalysisLimits.MaxEntryBytes);
             byte[] section = new byte[available];
             return TryReadAt(stream, rawPointer, section) ? section : null;
         }
@@ -151,6 +219,7 @@ public sealed class BurnProbe : IExeFormatProbe
             throw new InvalidDataException("The Burn UX container extends past the end of the file or is empty.");
         }
 
+        AnalysisLimits.ValidateAllocation(size, "The Burn UX container", AnalysisLimits.MaxEntryBytes);
         byte[] container = new byte[size];
         stream.Position = header.StubSize;
         stream.ReadExactly(container);

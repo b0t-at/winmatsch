@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using WinMatsch.Analysis.Pe;
 using WinMatsch.Core;
 
@@ -54,6 +55,12 @@ public sealed class NsisProbe : IExeFormatProbe
 
         string? installDirectory = strings.Read(header.InstallDirectoryPtr);
         (Dictionary<string, string> arpValues, bool regView64) = ScanEntries(header, strings);
+        Architecture architecture = GetArchitecture(
+            peFile,
+            installDirectory,
+            regView64,
+            DetectPayloadArchitectures(header),
+            out AnalysisDiagnostic? architectureDiagnostic);
 
         string? displayName = arpValues.GetValueOrDefault("DisplayName");
         string? displayVersion = arpValues.GetValueOrDefault("DisplayVersion");
@@ -62,7 +69,7 @@ public sealed class NsisProbe : IExeFormatProbe
 
         var installer = new Installer
         {
-            Architecture = GetArchitecture(peFile, installDirectory, regView64),
+            Architecture = architecture,
             InstallerType = InstallerType.Nullsoft,
             Scope = GetScope(installDirectory),
             ElevationRequirement = peFile.RequestedElevation,
@@ -92,6 +99,7 @@ public sealed class NsisProbe : IExeFormatProbe
             Publisher = publisher ?? version.CompanyName,
             ProductVersion = displayVersion ?? version.ProductVersion,
             Copyright = version.LegalCopyright,
+            Diagnostics = architectureDiagnostic is null ? [] : [architectureDiagnostic],
         };
     }
 
@@ -159,13 +167,103 @@ public sealed class NsisProbe : IExeFormatProbe
     /// install directory targets a 64-bit folder or the script switches to the 64-bit
     /// registry view.
     /// </summary>
-    private static Architecture GetArchitecture(PeFile peFile, string? installDirectory, bool regView64)
+    private static Architecture GetArchitecture(
+        PeFile peFile,
+        string? installDirectory,
+        bool regView64,
+        List<Architecture> payloadArchitectures,
+        out AnalysisDiagnostic? diagnostic)
     {
-        bool x64 = regView64
+        Architecture scriptArchitecture = regView64
             || (installDirectory is not null
                 && (installDirectory.Contains("$PROGRAMFILES64", StringComparison.OrdinalIgnoreCase)
-                    || installDirectory.Contains("$COMMONFILES64", StringComparison.OrdinalIgnoreCase)));
-        return x64 && peFile.Architecture == Architecture.X86 ? Architecture.X64 : peFile.Architecture;
+                    || installDirectory.Contains("$COMMONFILES64", StringComparison.OrdinalIgnoreCase)))
+            ? Architecture.X64
+            : peFile.Architecture;
+
+        if (payloadArchitectures.Count == 0)
+        {
+            diagnostic = null;
+            return scriptArchitecture;
+        }
+
+        if (payloadArchitectures.Count > 1)
+        {
+            diagnostic = new AnalysisDiagnostic(
+                "NSIS001",
+                $"The NSIS string table references payloads for {string.Join(", ", payloadArchitectures)}. "
+                    + $"This appears to be a universal installer; architecture requires manual analysis.",
+                RequiresManualAnalysis: true);
+            return scriptArchitecture;
+        }
+
+        Architecture payloadArchitecture = payloadArchitectures[0];
+        diagnostic = payloadArchitecture != scriptArchitecture && scriptArchitecture != Architecture.X86
+            ? new AnalysisDiagnostic(
+                "NSIS002",
+                $"The NSIS script implies {scriptArchitecture}, but its Electron-style payload name implies "
+                    + $"{payloadArchitecture}. The payload architecture was selected; verify the package manually.",
+                RequiresManualAnalysis: true)
+            : null;
+        return payloadArchitecture;
+    }
+
+    /// <summary>
+    /// electron-builder stores payload names such as app-64.7z, app-32.7z and app-arm64.7z
+    /// in the NSIS string table. Those names describe the installed binaries, unlike the
+    /// always-x86 NSIS stub.
+    /// </summary>
+    private static List<Architecture> DetectPayloadArchitectures(NsisHeader header)
+    {
+        ReadOnlySpan<byte> bytes = header.Strings;
+        List<Architecture> architectures = [];
+        AddIfPresent(
+            architectures,
+            Architecture.Arm64,
+            bytes,
+            "app-arm64.7z",
+            "app-aarch64.7z",
+            "win-arm64",
+            "win-aarch64");
+        AddIfPresent(
+            architectures,
+            Architecture.X64,
+            bytes,
+            "app-64.7z",
+            "app-x64.7z",
+            "app-amd64.7z",
+            "win-x64",
+            "win-amd64");
+        AddIfPresent(
+            architectures,
+            Architecture.X86,
+            bytes,
+            "app-32.7z",
+            "app-ia32.7z",
+            "app-x86.7z",
+            "win-ia32",
+            "win-x86");
+        return architectures;
+    }
+
+    private static void AddIfPresent(
+        List<Architecture> architectures,
+        Architecture architecture,
+        ReadOnlySpan<byte> searchable,
+        params string[] conventions)
+    {
+        foreach (string convention in conventions)
+        {
+            string upper = convention.ToUpperInvariant();
+            if (searchable.IndexOf(Encoding.ASCII.GetBytes(convention)) >= 0
+                || searchable.IndexOf(Encoding.ASCII.GetBytes(upper)) >= 0
+                || searchable.IndexOf(Encoding.Unicode.GetBytes(convention)) >= 0
+                || searchable.IndexOf(Encoding.Unicode.GetBytes(upper)) >= 0)
+            {
+                architectures.Add(architecture);
+                return;
+            }
+        }
     }
 
     /// <summary>

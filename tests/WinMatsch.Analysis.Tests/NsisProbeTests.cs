@@ -153,6 +153,44 @@ public class NsisProbeTests
         Assert.Equal(Architecture.X64, Assert.Single(analysis.Installers).Architecture);
     }
 
+    [Theory]
+    [InlineData("app-64.7z", Architecture.X64)]
+    [InlineData("app-x64.7z", Architecture.X64)]
+    [InlineData("app-arm64.7z", Architecture.Arm64)]
+    [InlineData("app-32.7z", Architecture.X86)]
+    [InlineData("app-ia32.7z", Architecture.X86)]
+    public void Electron_payload_name_drives_architecture(string payloadName, Architecture expected)
+    {
+        var options = new NsisFixtures.Options
+        {
+            InstallDirectory = [NsisFixtures.Token.ShellProgramFiles(x64: false)],
+            PayloadNames = [payloadName],
+        };
+
+        InstallerAnalysis? analysis = Probe(NsisFixtures.BuildInstaller(options));
+
+        Assert.NotNull(analysis);
+        Assert.Equal(expected, Assert.Single(analysis.Installers).Architecture);
+    }
+
+    [Fact]
+    public void Universal_electron_payloads_request_manual_analysis_without_claiming_neutral()
+    {
+        var options = new NsisFixtures.Options
+        {
+            InstallDirectory = [NsisFixtures.Token.ShellProgramFiles(x64: false)],
+            PayloadNames = ["app-32.7z", "app-64.7z"],
+        };
+
+        InstallerAnalysis? analysis = Probe(NsisFixtures.BuildInstaller(options));
+
+        Assert.NotNull(analysis);
+        Assert.Equal(Architecture.X86, Assert.Single(analysis.Installers).Architecture);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("NSIS001", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+    }
+
     [Fact]
     public void Lang_code_references_resolve_through_the_first_langtable()
     {
@@ -305,6 +343,7 @@ public class NsisProbeTests
         var exception = Assert.Throws<InvalidDataException>(() => Probe(installer));
 
         Assert.Contains("bzip2", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Manual analysis is required", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -316,6 +355,7 @@ public class NsisProbeTests
         var exception = Assert.Throws<InvalidDataException>(() => Probe(installer));
 
         Assert.Contains("BCJ", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Manual analysis is required", exception.Message, StringComparison.Ordinal);
     }
 
     [Theory]

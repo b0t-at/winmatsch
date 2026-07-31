@@ -1,5 +1,6 @@
 using System.Xml;
 using System.Xml.Linq;
+using WinMatsch.Core;
 
 namespace WinMatsch.Analysis.Burn;
 
@@ -39,12 +40,14 @@ internal sealed class BurnManifest
     /// <summary>The Id of the first RelatedBundle with Action="Upgrade" — the upgrade code.</summary>
     public string? UpgradeCode { get; private init; }
 
-    /// <summary>
-    /// Whether any chain package's InstallCondition targets ARM64: it mentions
-    /// <c>NativeMachine</c> together with the IMAGE_FILE_MACHINE_ARM64 value 0xAA64 (or an
-    /// "arm64" token). Such a bundle installs ARM64 payloads even though its stub is x86.
-    /// </summary>
-    public bool ChainTargetsArm64 { get; private init; }
+    /// <summary>MSI packages in the chain, including ARP visibility and architecture evidence.</summary>
+    public IReadOnlyList<BurnMsiPackage> MsiPackages { get; private init; } = [];
+
+    /// <summary>Architecture targets inferred from every package type in the chain.</summary>
+    public IReadOnlyList<Architecture> ChainTargetArchitectures { get; private init; } = [];
+
+    /// <summary>Whether an architecture-bearing condition was negated or otherwise ambiguous.</summary>
+    public bool HasAmbiguousArchitectureCondition { get; private init; }
 
     /// <summary>Parses the manifest XML.</summary>
     /// <exception cref="InvalidDataException">The bytes are not a well-formed Burn manifest.</exception>
@@ -73,7 +76,9 @@ internal sealed class BurnManifest
         XElement? arp = registration is null ? null : FirstByLocalName(registration.Elements(), "Arp");
         XElement? upgradeRelation = root.Descendants().FirstOrDefault(element
             => element.Name.LocalName == "RelatedBundle"
-                && string.Equals(element.Attribute("Action")?.Value, "Upgrade", StringComparison.OrdinalIgnoreCase));
+                && IsUpgradeRelation(element));
+        List<BurnMsiPackage> msiPackages = ParseMsiPackages(root);
+        (List<Architecture> chainTargets, bool ambiguousArchitecture) = ParseChainArchitectures(root);
 
         return new BurnManifest
         {
@@ -85,16 +90,136 @@ internal sealed class BurnManifest
             DisplayVersion = arp?.Attribute("DisplayVersion")?.Value,
             Publisher = arp?.Attribute("Publisher")?.Value,
             UpgradeCode = upgradeRelation?.Attribute("Id")?.Value,
-            ChainTargetsArm64 = root.Descendants().Any(element
-                => element.Attribute("InstallCondition")?.Value is { } condition && ConditionTargetsArm64(condition)),
+            MsiPackages = msiPackages,
+            ChainTargetArchitectures = chainTargets,
+            HasAmbiguousArchitectureCondition = ambiguousArchitecture,
         };
     }
 
     private static XElement? FirstByLocalName(IEnumerable<XElement> elements, string localName)
         => elements.FirstOrDefault(element => element.Name.LocalName == localName);
 
-    private static bool ConditionTargetsArm64(string condition)
-        => condition.Contains("NativeMachine", StringComparison.OrdinalIgnoreCase)
-            && (condition.Contains("0xAA64", StringComparison.OrdinalIgnoreCase)
-                || condition.Contains("arm64", StringComparison.OrdinalIgnoreCase));
+    private static bool IsUpgradeRelation(XElement element)
+        => IsValue(element, "Action", "Upgrade")
+            || IsValue(element, "RelationType", "Upgrade")
+            || IsValue(element, "Type", "Upgrade");
+
+    private static List<BurnMsiPackage> ParseMsiPackages(XElement root)
+    {
+        List<BurnMsiPackage> packages = [];
+        foreach (XElement package in root.Descendants().Where(static element => element.Name.LocalName == "MsiPackage"))
+        {
+            bool arpSystemComponent = package.Descendants().Any(element
+                => element.Name.LocalName == "MsiProperty"
+                    && (IsValue(element, "Id", "ARPSYSTEMCOMPONENT")
+                        || IsValue(element, "Name", "ARPSYSTEMCOMPONENT"))
+                    && IsTruthy(element.Attribute("Value")?.Value));
+            bool visible = IsTruthy(package.Attribute("Visible")?.Value) && !arpSystemComponent;
+            string? condition = package.Attribute("InstallCondition")?.Value;
+            ArchitectureEvidence evidence = ParseTargetArchitecture(condition);
+            Architecture? architecture = evidence.Architecture;
+            if (architecture is null && IsTruthy(package.Attribute("Win64")?.Value))
+            {
+                architecture = Architecture.X64;
+            }
+
+            packages.Add(new BurnMsiPackage(
+                package.Attribute("Id")?.Value,
+                package.Attribute("ProductCode")?.Value,
+                package.Attribute("UpgradeCode")?.Value,
+                package.Attribute("DisplayName")?.Value,
+                package.Attribute("Version")?.Value,
+                visible,
+                architecture,
+                condition));
+        }
+
+        return packages;
+    }
+
+    private static (List<Architecture> Architectures, bool Ambiguous) ParseChainArchitectures(XElement root)
+    {
+        List<Architecture> architectures = [];
+        bool ambiguous = false;
+        foreach (XElement package in root.Descendants().Where(static element
+            => element.Name.LocalName.EndsWith("Package", StringComparison.Ordinal)))
+        {
+            ArchitectureEvidence evidence = ParseTargetArchitecture(package.Attribute("InstallCondition")?.Value);
+            if (evidence.Architecture is { } architecture && !architectures.Contains(architecture))
+            {
+                architectures.Add(architecture);
+            }
+
+            ambiguous |= evidence.Ambiguous;
+            if (evidence.Architecture is null
+                && IsTruthy(package.Attribute("Win64")?.Value)
+                && !architectures.Contains(Architecture.X64))
+            {
+                architectures.Add(Architecture.X64);
+            }
+        }
+
+        return (architectures, ambiguous);
+    }
+
+    private static ArchitectureEvidence ParseTargetArchitecture(string? condition)
+    {
+        if (string.IsNullOrWhiteSpace(condition))
+        {
+            return default;
+        }
+
+        bool arm64 = condition.Contains("arm64", StringComparison.OrdinalIgnoreCase)
+            || condition.Contains("0xAA64", StringComparison.OrdinalIgnoreCase)
+            || condition.Contains("43620", StringComparison.Ordinal);
+        bool x64 = condition.Contains("amd64", StringComparison.OrdinalIgnoreCase)
+            || condition.Contains("x64", StringComparison.OrdinalIgnoreCase)
+            || condition.Contains("0x8664", StringComparison.OrdinalIgnoreCase)
+            || condition.Contains("34404", StringComparison.Ordinal);
+        string compact = condition.Replace(" ", string.Empty, StringComparison.Ordinal);
+        bool negatedNativeMachine = compact.Contains("NOTNativeMachine", StringComparison.OrdinalIgnoreCase)
+            || compact.Contains("NOT(NativeMachine", StringComparison.OrdinalIgnoreCase)
+            || compact.Contains("<>", StringComparison.Ordinal)
+            || compact.Contains("!=", StringComparison.Ordinal);
+        if ((arm64 || x64) && negatedNativeMachine)
+        {
+            return new ArchitectureEvidence(null, Ambiguous: true);
+        }
+
+        if (arm64)
+        {
+            return new ArchitectureEvidence(Architecture.Arm64, Ambiguous: false);
+        }
+
+        if (x64
+            || (condition.Contains("VersionNT64", StringComparison.OrdinalIgnoreCase)
+                && !condition.Contains("NOT VersionNT64", StringComparison.OrdinalIgnoreCase)))
+        {
+            return new ArchitectureEvidence(Architecture.X64, Ambiguous: false);
+        }
+
+        return default;
+    }
+
+    private static bool IsValue(XElement element, string attributeName, string expected)
+        => string.Equals(element.Attribute(attributeName)?.Value, expected, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTruthy(string? value)
+        => value is not null
+            && (value.Equals("yes", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("1", StringComparison.Ordinal));
+
+    private readonly record struct ArchitectureEvidence(Architecture? Architecture, bool Ambiguous);
 }
+
+/// <summary>Install-relevant metadata for one MSI package in a Burn chain.</summary>
+internal sealed record BurnMsiPackage(
+    string? Id,
+    string? ProductCode,
+    string? UpgradeCode,
+    string? DisplayName,
+    string? Version,
+    bool RegistersArpEntry,
+    Architecture? TargetArchitecture,
+    string? InstallCondition);
