@@ -7,6 +7,11 @@
   <ItemGroup>
     <ProjectReference Include="..\WinMatsch.Analysis\WinMatsch.Analysis.csproj" />
     <ProjectReference Include="..\WinMatsch.Core\WinMatsch.Core.csproj" />
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Overrides\BuiltIn\*.yaml" />
   </ItemGroup>
 
   <ItemGroup>

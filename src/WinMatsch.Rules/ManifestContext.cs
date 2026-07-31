@@ -11,12 +11,22 @@ public sealed class ManifestContext
 {
     private readonly List<RuleFinding> _findings = [];
     private readonly List<RuleTraceEntry> _trace = [];
+    private readonly List<RuleChange> _changes = [];
+    private readonly List<RuleExecution> _executions = [];
+    private readonly List<HumanCorrectionReview> _humanCorrectionReviews = [];
+    private readonly Dictionary<string, RuleChangeEvidence> _changeEvidence = new(StringComparer.Ordinal);
 
     /// <summary>The manifests being produced. Normalization and quirk rules mutate these in place.</summary>
     public required PackageManifests Manifests { get; init; }
 
     /// <summary>The previous version's manifests when this run updates an existing package; null for new packages.</summary>
     public PackageManifests? Previous { get; init; }
+
+    /// <summary>
+    /// The exact manifest set originally proposed by automation for the version represented by
+    /// <see cref="Previous"/>. Supplying both enables three-way human-correction detection.
+    /// </summary>
+    public PackageManifests? OriginalBotSubmission { get; init; }
 
     /// <summary>Analysis evidence per installer URL; empty when installers were not downloaded.</summary>
     public IReadOnlyList<InstallerEvidence> Evidence { get; init; } = [];
@@ -28,6 +38,18 @@ public sealed class ManifestContext
 
     /// <summary>The explain log; only populated when <see cref="RuleOptions.Explain"/> is set.</summary>
     public IReadOnlyList<RuleTraceEntry> Trace => _trace;
+
+    /// <summary>Applied changes and log-only proposals, in deterministic execution order.</summary>
+    public IReadOnlyList<RuleChange> Changes => _changes;
+
+    /// <summary>The effective mode selected for every rule in pipeline order.</summary>
+    public IReadOnlyList<RuleExecution> Executions => _executions;
+
+    /// <summary>Known human corrections that generated output would revert.</summary>
+    public IReadOnlyList<HumanCorrectionReview> HumanCorrectionReviews => _humanCorrectionReviews;
+
+    /// <summary>True when a known human correction would be reverted and review is required.</summary>
+    public bool RequiresReview => _humanCorrectionReviews.Count != 0;
 
     /// <summary>Adds a finding with the rule's default severity and mirrors it into the explain trace.</summary>
     public void AddFinding(IRule rule, string message, string? path = null)
@@ -41,8 +63,10 @@ public sealed class ManifestContext
     {
         ArgumentNullException.ThrowIfNull(rule);
         ArgumentNullException.ThrowIfNull(message);
-        _findings.Add(new RuleFinding(rule.Id, severity, message, path));
-        AddTrace(rule, path is null ? message : $"{path}: {message}");
+        string safeMessage = RuleLogSanitizer.SanitizeMessage(message);
+        string? safePath = path is null ? null : RuleLogSanitizer.SanitizeMessage(path);
+        _findings.Add(new RuleFinding(rule.Id, severity, safeMessage, safePath));
+        AddTrace(rule, safePath is null ? safeMessage : $"{safePath}: {safeMessage}");
     }
 
     /// <summary>Records what a rule changed or found; no-op unless <see cref="RuleOptions.Explain"/> is set.</summary>
@@ -52,8 +76,26 @@ public sealed class ManifestContext
         ArgumentNullException.ThrowIfNull(message);
         if (Options.Explain)
         {
-            _trace.Add(new RuleTraceEntry(rule.Id, message));
+            _trace.Add(new RuleTraceEntry(rule.Id, RuleLogSanitizer.SanitizeMessage(message)));
         }
+    }
+
+    /// <summary>
+    /// Attaches source evidence to a manifest field that a rule changed. Paths use the same
+    /// canonical form as <see cref="RuleChange.FieldPath"/>.
+    /// </summary>
+    public void AddChangeEvidence(
+        IRule rule,
+        string manifestPath,
+        string fieldPath,
+        string source,
+        RuleChangeConfidence confidence)
+    {
+        ArgumentNullException.ThrowIfNull(rule);
+        ArgumentException.ThrowIfNullOrWhiteSpace(manifestPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fieldPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+        _changeEvidence[EvidenceKey(rule.Id, manifestPath, fieldPath)] = new(source, confidence);
     }
 
     /// <summary>Finds the evidence for an installer URL (case-insensitive), or null when there is none.</summary>
@@ -74,4 +116,29 @@ public sealed class ManifestContext
 
         return null;
     }
+
+    internal RuleChangeEvidence? FindChangeEvidence(string ruleId, string manifestPath, string fieldPath)
+        => _changeEvidence.GetValueOrDefault(EvidenceKey(ruleId, manifestPath, fieldPath));
+
+    internal void AddChange(RuleChange change) => _changes.Add(change);
+
+    internal void AddExecution(RuleExecution execution) => _executions.Add(execution);
+
+    internal void AddHumanCorrectionReview(HumanCorrectionReview review) => _humanCorrectionReviews.Add(review);
+
+    internal void ImportFindings(IEnumerable<RuleFinding> findings) => _findings.AddRange(findings);
+
+    internal void ImportTrace(IEnumerable<RuleTraceEntry> trace)
+    {
+        if (Options.Explain)
+        {
+            _trace.AddRange(trace);
+        }
+    }
+
+    internal static string GetInstallerManifestPath(PackageManifests manifests)
+        => ManifestSnapshot.GetInstallerPath(manifests);
+
+    private static string EvidenceKey(string ruleId, string manifestPath, string fieldPath)
+        => $"{ruleId}\u001f{manifestPath}\u001f{fieldPath}";
 }
