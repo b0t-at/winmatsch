@@ -9,7 +9,6 @@ namespace WinMatsch.Rules;
 internal sealed class ManifestSnapshot
 {
     private const int InstallerMatchThreshold = 150;
-    private const int MaximumLcsCells = 1_000_000;
     private const int MaximumInstallerMatchComparisons = 1_000_000;
     private readonly IReadOnlyDictionary<string, DocumentSnapshot> _documents;
 
@@ -274,24 +273,182 @@ internal sealed class ManifestSnapshot
     {
         ArgumentNullException.ThrowIfNull(after);
         var changes = new List<RawManifestChange>();
-        var documentKeys = new SortedSet<string>(_documents.Keys, StringComparer.Ordinal);
-        documentKeys.UnionWith(after._documents.Keys);
-
-        foreach (string documentKey in documentKeys)
+        foreach (DocumentPair pair in MatchDocuments(after))
         {
-            _documents.TryGetValue(documentKey, out DocumentSnapshot? beforeDocument);
-            after._documents.TryGetValue(documentKey, out DocumentSnapshot? afterDocument);
             DiffNode(
-                documentKey,
-                afterDocument?.ManifestPath ?? beforeDocument!.ManifestPath,
+                pair.SemanticKey,
+                pair.After?.ManifestPath ?? pair.Before!.ManifestPath,
                 fieldPath: string.Empty,
                 semanticPath: string.Empty,
-                beforeDocument?.Root,
-                afterDocument?.Root,
+                pair.Before?.Root,
+                pair.After?.Root,
                 changes);
         }
 
         return changes;
+    }
+
+    private List<DocumentPair> MatchDocuments(ManifestSnapshot after)
+    {
+        var pairs = new List<DocumentPair>();
+        var matchedBefore = new HashSet<string>(StringComparer.Ordinal);
+        var matchedAfter = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (string key in _documents.Keys.Where(static key => !key.StartsWith("locale:", StringComparison.Ordinal)))
+        {
+            _documents.TryGetValue(key, out DocumentSnapshot? beforeDocument);
+            after._documents.TryGetValue(key, out DocumentSnapshot? afterDocument);
+            pairs.Add(new(key, beforeDocument, afterDocument));
+            matchedBefore.Add(key);
+            if (afterDocument is not null)
+            {
+                matchedAfter.Add(key);
+            }
+        }
+
+        foreach (string key in after._documents.Keys.Where(
+                     static key => !key.StartsWith("locale:", StringComparison.Ordinal)
+                         && key is not "version" and not "installer" and not "defaultLocale"))
+        {
+            if (!matchedAfter.Contains(key))
+            {
+                pairs.Add(new(key, null, after._documents[key]));
+                matchedAfter.Add(key);
+            }
+        }
+
+        string[] localeBases = _documents.Keys
+            .Concat(after._documents.Keys)
+            .Where(static key => key.StartsWith("locale:", StringComparison.Ordinal))
+            .Select(LocaleBaseKey)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        foreach (string localeBase in localeBases)
+        {
+            string[] beforeKeys = _documents.Keys
+                .Where(key => string.Equals(LocaleBaseKey(key), localeBase, StringComparison.OrdinalIgnoreCase))
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            string[] afterKeys = after._documents.Keys
+                .Where(key => string.Equals(LocaleBaseKey(key), localeBase, StringComparison.OrdinalIgnoreCase))
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+
+            var candidates = new List<DocumentMatchCandidate>();
+            for (int beforeIndex = 0; beforeIndex < beforeKeys.Length; beforeIndex++)
+            {
+                for (int afterIndex = 0; afterIndex < afterKeys.Length; afterIndex++)
+                {
+                    candidates.Add(new(
+                        beforeIndex,
+                        afterIndex,
+                        DocumentSimilarity(
+                            _documents[beforeKeys[beforeIndex]].Root,
+                            after._documents[afterKeys[afterIndex]].Root)));
+                }
+            }
+
+            var usedBefore = new HashSet<int>();
+            var usedAfter = new HashSet<int>();
+            foreach (DocumentMatchCandidate candidate in candidates
+                         .OrderByDescending(static candidate => candidate.Score)
+                         .ThenBy(static candidate => candidate.BeforeIndex)
+                         .ThenBy(static candidate => candidate.AfterIndex))
+            {
+                if (!usedBefore.Contains(candidate.BeforeIndex)
+                    && !usedAfter.Contains(candidate.AfterIndex))
+                {
+                    usedBefore.Add(candidate.BeforeIndex);
+                    usedAfter.Add(candidate.AfterIndex);
+                    string beforeKey = beforeKeys[candidate.BeforeIndex];
+                    string afterKey = afterKeys[candidate.AfterIndex];
+                    pairs.Add(new(beforeKey, _documents[beforeKey], after._documents[afterKey]));
+                }
+            }
+
+            for (int i = 0; i < beforeKeys.Length; i++)
+            {
+                if (!usedBefore.Contains(i))
+                {
+                    pairs.Add(new(beforeKeys[i], _documents[beforeKeys[i]], null));
+                }
+            }
+
+            for (int i = 0; i < afterKeys.Length; i++)
+            {
+                if (!usedAfter.Contains(i))
+                {
+                    string semanticKey = $"{localeBase}#added:{Hash(CanonicalNode(after._documents[afterKeys[i]].Root))}";
+                    pairs.Add(new(semanticKey, null, after._documents[afterKeys[i]]));
+                }
+            }
+        }
+
+        return pairs;
+    }
+
+    private static string LocaleBaseKey(string key)
+    {
+        int occurrence = key.LastIndexOf('#');
+        return occurrence < 0 ? key : key[..occurrence];
+    }
+
+    private static int DocumentSimilarity(YamlNode before, YamlNode after)
+    {
+        if (string.Equals(CanonicalNode(before), CanonicalNode(after), StringComparison.Ordinal))
+        {
+            return int.MaxValue;
+        }
+
+        Dictionary<string, string?> beforeValues = FlattenForSimilarity(before);
+        Dictionary<string, string?> afterValues = FlattenForSimilarity(after);
+        int score = 0;
+        foreach ((string path, string? value) in beforeValues)
+        {
+            if (afterValues.TryGetValue(path, out string? afterValue)
+                && string.Equals(value, afterValue, StringComparison.Ordinal))
+            {
+                score++;
+            }
+        }
+
+        return score;
+    }
+
+    private static Dictionary<string, string?> FlattenForSimilarity(YamlNode root)
+    {
+        var values = new Dictionary<string, string?>(StringComparer.Ordinal);
+        FlattenForSimilarity(root, string.Empty, values);
+        return values;
+    }
+
+    private static void FlattenForSimilarity(
+        YamlNode node,
+        string path,
+        IDictionary<string, string?> values)
+    {
+        if (node is YamlMappingNode mapping)
+        {
+            foreach ((string key, YamlNode child) in ToMapping(mapping))
+            {
+                FlattenForSimilarity(child, AppendProperty(path, key), values);
+            }
+
+            return;
+        }
+
+        if (node is YamlSequenceNode sequence)
+        {
+            for (int i = 0; i < sequence.Children.Count; i++)
+            {
+                FlattenForSimilarity(sequence.Children[i], $"{path}[{i}]", values);
+            }
+
+            return;
+        }
+
+        values[path] = ScalarValue(node);
     }
 
     public static string GetInstallerPath(PackageManifests manifests)
@@ -1025,80 +1182,44 @@ internal sealed class ManifestSnapshot
         string[] afterValues = [.. after.Children.Select(CanonicalNode)];
         int[] beforeOccurrences = GetOccurrenceOrdinals(beforeValues);
         int[] afterOccurrences = GetOccurrenceOrdinals(afterValues);
-        if (beforeValues.AsSpan().SequenceEqual(afterValues))
+        var afterIndices = new Dictionary<string, Queue<int>>(StringComparer.Ordinal);
+        for (int index = 0; index < after.Children.Count; index++)
         {
-            return;
-        }
-
-        List<SequencePair> anchors;
-        if ((long)beforeValues.Length * afterValues.Length <= MaximumLcsCells)
-        {
-            int[,] lengths = BuildLcsLengths(beforeValues, afterValues);
-            anchors = GetLcsPairs(beforeValues, afterValues, lengths);
-        }
-        else
-        {
-            anchors = GetLinearSubsequencePairs(beforeValues, afterValues);
-        }
-
-        int beforeStart = 0;
-        int afterStart = 0;
-        foreach (SequencePair anchor in anchors.Append(new(before.Children.Count, after.Children.Count)))
-        {
-            DiffUnmatchedSequenceRange(
-                documentKey,
-                manifestPath,
-                fieldPath,
-                semanticPath,
-                before,
-                after,
-                beforeStart,
-                anchor.BeforeIndex,
-                afterStart,
-                anchor.AfterIndex,
-                beforeOccurrences,
-                afterOccurrences,
-                changes);
-
-            if (anchor.BeforeIndex < before.Children.Count)
+            if (!afterIndices.TryGetValue(afterValues[index], out Queue<int>? indices))
             {
-                string identity = beforeValues[anchor.BeforeIndex];
-                DiffNode(
-                    documentKey,
-                    manifestPath,
-                    $"{fieldPath}[{anchor.AfterIndex}]",
-                    $"{semanticPath}{{item:{Hash(identity)}#{beforeOccurrences[anchor.BeforeIndex]}}}",
-                    before.Children[anchor.BeforeIndex],
-                    after.Children[anchor.AfterIndex],
-                    changes);
+                indices = new();
+                afterIndices.Add(afterValues[index], indices);
             }
 
-            beforeStart = anchor.BeforeIndex + 1;
-            afterStart = anchor.AfterIndex + 1;
+            indices.Enqueue(index);
         }
-    }
 
-    private static void DiffUnmatchedSequenceRange(
-        string documentKey,
-        string manifestPath,
-        string fieldPath,
-        string semanticPath,
-        YamlSequenceNode before,
-        YamlSequenceNode after,
-        int beforeStart,
-        int beforeEnd,
-        int afterStart,
-        int afterEnd,
-        int[] beforeOccurrences,
-        int[] afterOccurrences,
-        ICollection<RawManifestChange> changes)
-    {
-        int paired = Math.Min(beforeEnd - beforeStart, afterEnd - afterStart);
-        for (int offset = 0; offset < paired; offset++)
+        var matchedBefore = new HashSet<int>();
+        var matchedAfter = new HashSet<int>();
+        for (int beforeIndex = 0; beforeIndex < beforeValues.Length; beforeIndex++)
         {
-            int beforeIndex = beforeStart + offset;
-            int afterIndex = afterStart + offset;
-            string identity = CanonicalNode(before.Children[beforeIndex]);
+            if (!afterIndices.TryGetValue(beforeValues[beforeIndex], out Queue<int>? indices)
+                || indices.Count == 0)
+            {
+                continue;
+            }
+
+            matchedBefore.Add(beforeIndex);
+            matchedAfter.Add(indices.Dequeue());
+        }
+
+        int[] unmatchedBefore = Enumerable.Range(0, before.Children.Count)
+            .Where(index => !matchedBefore.Contains(index))
+            .ToArray();
+        int[] unmatchedAfter = Enumerable.Range(0, after.Children.Count)
+            .Where(index => !matchedAfter.Contains(index))
+            .ToArray();
+        int paired = Math.Min(unmatchedBefore.Length, unmatchedAfter.Length);
+        for (int i = 0; i < paired; i++)
+        {
+            int beforeIndex = unmatchedBefore[i];
+            int afterIndex = unmatchedAfter[i];
+            string identity = beforeValues[beforeIndex];
             DiffNode(
                 documentKey,
                 manifestPath,
@@ -1109,9 +1230,10 @@ internal sealed class ManifestSnapshot
                 changes);
         }
 
-        for (int beforeIndex = beforeStart + paired; beforeIndex < beforeEnd; beforeIndex++)
+        for (int i = paired; i < unmatchedBefore.Length; i++)
         {
-            string identity = CanonicalNode(before.Children[beforeIndex]);
+            int beforeIndex = unmatchedBefore[i];
+            string identity = beforeValues[beforeIndex];
             FlattenAddedOrRemoved(
                 documentKey,
                 manifestPath,
@@ -1123,9 +1245,10 @@ internal sealed class ManifestSnapshot
                 changes);
         }
 
-        for (int afterIndex = afterStart + paired; afterIndex < afterEnd; afterIndex++)
+        for (int i = paired; i < unmatchedAfter.Length; i++)
         {
-            string identity = CanonicalNode(after.Children[afterIndex]);
+            int afterIndex = unmatchedAfter[i];
+            string identity = afterValues[afterIndex];
             FlattenAddedOrRemoved(
                 documentKey,
                 manifestPath,
@@ -1136,90 +1259,6 @@ internal sealed class ManifestSnapshot
                 adding: true,
                 changes);
         }
-    }
-
-    private static int[,] BuildLcsLengths(string[] before, string[] after)
-    {
-        var lengths = new int[before.Length + 1, after.Length + 1];
-        for (int i = before.Length - 1; i >= 0; i--)
-        {
-            for (int j = after.Length - 1; j >= 0; j--)
-            {
-                lengths[i, j] = string.Equals(before[i], after[j], StringComparison.Ordinal)
-                    ? lengths[i + 1, j + 1] + 1
-                    : Math.Max(lengths[i + 1, j], lengths[i, j + 1]);
-            }
-        }
-
-        return lengths;
-    }
-
-    private static List<SequencePair> GetLcsPairs(
-        string[] before,
-        string[] after,
-        int[,] lengths)
-    {
-        var pairs = new List<SequencePair>();
-        int i = 0;
-        int j = 0;
-        while (i < before.Length && j < after.Length)
-        {
-            if (string.Equals(before[i], after[j], StringComparison.Ordinal))
-            {
-                pairs.Add(new(i, j));
-                i++;
-                j++;
-            }
-            else if (lengths[i + 1, j] >= lengths[i, j + 1])
-            {
-                i++;
-            }
-            else
-            {
-                j++;
-            }
-        }
-
-        return pairs;
-    }
-
-    private static List<SequencePair> GetLinearSubsequencePairs(string[] before, string[] after)
-    {
-        var afterIndices = new Dictionary<string, Queue<int>>(StringComparer.Ordinal);
-        for (int index = 0; index < after.Length; index++)
-        {
-            if (!afterIndices.TryGetValue(after[index], out Queue<int>? indices))
-            {
-                indices = new();
-                afterIndices.Add(after[index], indices);
-            }
-
-            indices.Enqueue(index);
-        }
-
-        var pairs = new List<SequencePair>();
-        int lastAfterIndex = -1;
-        for (int beforeIndex = 0; beforeIndex < before.Length; beforeIndex++)
-        {
-            if (!afterIndices.TryGetValue(before[beforeIndex], out Queue<int>? indices))
-            {
-                continue;
-            }
-
-            while (indices.Count > 0 && indices.Peek() <= lastAfterIndex)
-            {
-                indices.Dequeue();
-            }
-
-            if (indices.Count > 0)
-            {
-                int afterIndex = indices.Dequeue();
-                pairs.Add(new(beforeIndex, afterIndex));
-                lastAfterIndex = afterIndex;
-            }
-        }
-
-        return pairs;
     }
 
     private static int[] GetOccurrenceOrdinals(string[] values)
@@ -1358,6 +1397,16 @@ internal sealed class ManifestSnapshot
         };
 
     private sealed record DocumentSnapshot(string ManifestPath, YamlNode Root);
+
+    private sealed record DocumentPair(
+        string SemanticKey,
+        DocumentSnapshot? Before,
+        DocumentSnapshot? After);
+
+    private sealed record DocumentMatchCandidate(
+        int BeforeIndex,
+        int AfterIndex,
+        int Score);
 
     private sealed record SequencePair(int BeforeIndex, int AfterIndex);
 

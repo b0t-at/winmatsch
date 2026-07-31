@@ -906,6 +906,62 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Duplicate_locale_reordering_does_not_hide_a_reverted_correction()
+    {
+        static LocaleManifest Locale(string description) => new()
+        {
+            PackageIdentifier = new PackageIdentifier("Test.App"),
+            PackageVersion = new PackageVersion(TestManifests.DefaultVersion),
+            PackageLocale = new LanguageTag("fr-FR"),
+            Publisher = TestManifests.DefaultPublisher,
+            PackageName = TestManifests.DefaultPackageName,
+            License = "MIT",
+            ShortDescription = description,
+        };
+
+        PackageManifests originalBot = TestManifests.Create(TestManifests.CreateInstaller());
+        originalBot.Locales = [Locale("A"), Locale("B")];
+        PackageManifests merged = TestManifests.Create(TestManifests.CreateInstaller());
+        merged.Locales = [Locale("B"), Locale("A-corrected")];
+        PackageManifests generated = TestManifests.Create(TestManifests.CreateInstaller());
+        generated.Locales = [Locale("B"), Locale("A")];
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            review => review.FieldPath == "ShortDescription"
+                && review.HumanValue == "A-corrected"
+                && review.GeneratedValue == "A");
+    }
+
+    [Fact]
+    public void Sequence_reordering_does_not_create_duplicate_semantic_change_keys()
+    {
+        Installer originalInstaller = TestManifests.CreateInstaller();
+        originalInstaller.Commands = ["A", "B"];
+        Installer generatedInstaller = TestManifests.CreateInstaller();
+        generatedInstaller.Commands = ["B", "A"];
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = TestManifests.Create(originalInstaller),
+            Previous = TestManifests.Create(TestManifests.CreateInstaller()),
+            Manifests = TestManifests.Create(generatedInstaller),
+        };
+        context.Previous.Installer.Installers![0].Commands = ["A", "B"];
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
     public void Disabled_rule_ids_only_reports_unconditional_command_disables()
     {
         var configuration = new RuleRuntimeConfiguration(
