@@ -423,7 +423,9 @@ public sealed partial class PayloadDependencyAnalyzer
     private static string NormalizeAndValidatePath(string entryName)
     {
         string normalized = entryName.Replace('\\', '/');
-        if (normalized.StartsWith('/') || Path.IsPathFullyQualified(normalized))
+        if (normalized.StartsWith('/')
+            || IsWindowsDriveRooted(normalized)
+            || Path.IsPathFullyQualified(normalized))
         {
             throw new InvalidDataException($"Archive entry '{entryName}' uses an absolute path.");
         }
@@ -435,6 +437,12 @@ public sealed partial class PayloadDependencyAnalyzer
 
         return normalized;
     }
+
+    private static bool IsWindowsDriveRooted(string path)
+        => path.Length >= 3
+            && char.IsAsciiLetter(path[0])
+            && path[1] == ':'
+            && path[2] == '/';
 
     private static string GetDirectory(string path)
     {

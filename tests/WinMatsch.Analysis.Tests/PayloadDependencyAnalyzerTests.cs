@@ -10,6 +10,36 @@ public class PayloadDependencyAnalyzerTests
 {
     private readonly PayloadDependencyAnalyzer _analyzer = new();
 
+    [Fact]
+    public void Analysis_and_signal_collections_are_defensively_copied_and_read_only()
+    {
+        string[] sourceSignals = ["vcruntime140.dll"];
+        var evidence = new DependencyEvidence
+        {
+            PayloadPath = "app.exe",
+            Kind = DependencyEvidenceKind.VisualCppRuntime,
+            Status = DependencyEvidenceStatus.Detected,
+            Signals = sourceSignals,
+        };
+        DependencyEvidence[] sourceEvidence = [evidence];
+        var analysis = new PayloadDependencyAnalysis(sourceEvidence);
+
+        sourceSignals[0] = "changed.dll";
+        sourceEvidence[0] = new DependencyEvidence
+        {
+            PayloadPath = "other.exe",
+            Kind = DependencyEvidenceKind.DotNetRuntime,
+            Status = DependencyEvidenceStatus.Absent,
+        };
+
+        Assert.Equal("vcruntime140.dll", Assert.Single(evidence.Signals));
+        Assert.Same(evidence, Assert.Single(analysis.Evidence));
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<string>)evidence.Signals).Add("another.dll"));
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<DependencyEvidence>)analysis.Evidence).Clear());
+    }
+
     [Theory]
     [InlineData(Machine.I386, Architecture.X86)]
     [InlineData(Machine.Amd64, Architecture.X64)]
@@ -210,6 +240,68 @@ public class PayloadDependencyAnalyzerTests
         Assert.Contains("per-payload analysis limit", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Archive_entry_count_is_bounded_including_irrelevant_entries()
+    {
+        var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
+        {
+            MaximumArchiveEntries = 1,
+        });
+        using MemoryStream archive = DependencyFixtures.BuildZip(
+            ("one.txt", [1]),
+            ("two.txt", [2]));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => analyzer.Analyze(archive, "many.zip"));
+
+        Assert.Contains("2 entries", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Total_relevant_payload_bytes_are_bounded()
+    {
+        var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
+        {
+            MaximumPayloadBytes = 4,
+            MaximumTotalPayloadBytes = 5,
+        });
+        using MemoryStream archive = DependencyFixtures.BuildZip(
+            ("one.exe", [1, 2, 3]),
+            ("two.dll", [4, 5, 6]));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => analyzer.Analyze(archive, "large.zip"));
+
+        Assert.Contains("total analysis limit", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("../app.exe")]
+    [InlineData("/root/app.exe")]
+    [InlineData(@"C:\payload\app.exe")]
+    [InlineData("C:/payload/app.exe")]
+    public void Parent_and_absolute_archive_paths_are_rejected(string path)
+    {
+        using MemoryStream archive = DependencyFixtures.BuildZip((path, [1]));
+
+        Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(archive, "hostile.zip"));
+    }
+
+    [Fact]
+    public void Zero_and_negative_options_are_rejected()
+    {
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumArchiveEntries = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumArchiveEntries = -1 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumPayloadBytes = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumPayloadBytes = -1 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalPayloadBytes = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalPayloadBytes = -1 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumImportDescriptors = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumImportDescriptors = -1 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumImportNameBytes = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumImportNameBytes = -1 });
+    }
+
     private static DependencyEvidence Find(
         PayloadDependencyAnalysis analysis,
         string payloadPath,
@@ -217,4 +309,7 @@ public class PayloadDependencyAnalyzerTests
         => Assert.Single(
             analysis.Evidence,
             evidence => evidence.PayloadPath == payloadPath && evidence.Kind == kind);
+
+    private static void AssertInvalid(PayloadDependencyAnalyzerOptions options)
+        => Assert.Throws<ArgumentOutOfRangeException>(() => new PayloadDependencyAnalyzer(options));
 }

@@ -26,7 +26,7 @@ public enum DependencyEvidenceStatus
 /// </summary>
 public sealed class DependencyEvidence
 {
-    private IReadOnlyList<string> _signals = [];
+    private IReadOnlyList<string> _signals = Array.AsReadOnly(Array.Empty<string>());
 
     /// <summary>
     /// Installer file name or normalized archive-relative payload path that produced the evidence.
@@ -52,7 +52,7 @@ public sealed class DependencyEvidence
         init
         {
             ArgumentNullException.ThrowIfNull(value);
-            _signals = value;
+            _signals = Array.AsReadOnly(value.ToArray());
         }
     }
 }
@@ -65,7 +65,7 @@ public sealed class PayloadDependencyAnalysis
     public PayloadDependencyAnalysis(IReadOnlyList<DependencyEvidence> evidence)
     {
         ArgumentNullException.ThrowIfNull(evidence);
-        _evidence = evidence;
+        _evidence = Array.AsReadOnly(evidence.ToArray());
     }
 
     public IReadOnlyList<DependencyEvidence> Evidence => _evidence;
