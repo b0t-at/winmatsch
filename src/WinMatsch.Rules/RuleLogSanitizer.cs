@@ -363,7 +363,8 @@ internal static class RuleLogSanitizer
                      [' ', '\t', '\r', '\n', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\''],
                      StringSplitOptions.RemoveEmptyEntries))
         {
-            string[] segments = candidate.Split('.');
+            string trimmed = candidate.TrimEnd('.', ':', '!', '?');
+            string[] segments = trimmed.Split('.');
             if (segments.Length == 3
                 && segments.All(static segment => segment.Length >= 6 && segment.All(IsBase64UrlCharacter)))
             {

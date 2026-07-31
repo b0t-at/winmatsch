@@ -38,13 +38,16 @@ internal static class HumanCorrectionDetector
                 out string? effectiveHumanValue)
                 ? effectiveHumanValue
                 : humanChange.After;
-            string? generatedValue = generatedSnapshot.TryGetEffectiveInstallerValue(
+            bool generatedEffectiveResolved = generatedSnapshot.TryGetEffectiveInstallerValue(
                 humanChange.SemanticPath,
-                out string? effectiveValue)
+                out string? effectiveValue);
+            bool effectiveInstallerPath = ManifestSnapshot.IsEffectiveInstallerPath(humanChange.SemanticPath);
+            bool generatedValueKnown = generatedEffectiveResolved
+                || generatedChange is not null
+                || !effectiveInstallerPath;
+            string? generatedValue = generatedEffectiveResolved
                 ? effectiveValue
-                : generatedChange is null
-                    ? botValue
-                    : generatedChange.After;
+                : generatedChange is null ? botValue : generatedChange.After;
             bool generatedRestoresBot = generatedSnapshot.TryFindEffectiveInstallerValue(
                 humanChange.SemanticPath,
                 botValue,
@@ -52,7 +55,7 @@ internal static class HumanCorrectionDetector
 
             if (!string.Equals(botValue, humanValue, StringComparison.Ordinal)
                 && (generatedRestoresBot
-                    || ManifestSnapshot.SemanticValueEquals(
+                    || generatedValueKnown && ManifestSnapshot.SemanticValueEquals(
                         humanChange.FieldPath,
                         botValue,
                         generatedValue)))

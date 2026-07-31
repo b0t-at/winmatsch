@@ -539,6 +539,19 @@ internal sealed class ManifestSnapshot
                 StringComparison.OrdinalIgnoreCase);
     }
 
+    internal static bool IsEffectiveInstallerPath(string semanticPath)
+    {
+        if (semanticPath.StartsWith("Installers{installer:", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        int separator = semanticPath.IndexOfAny(['.', '{']);
+        string rootField = separator < 0 ? semanticPath : semanticPath[..separator];
+        return InstallerFieldAccessors.All.Any(
+            accessor => string.Equals(accessor.Name, rootField, StringComparison.Ordinal));
+    }
+
     internal bool TryGetEffectiveInstallerValue(string semanticPath, out string? value)
     {
         const string prefix = "Installers{installer:";
@@ -600,6 +613,12 @@ internal sealed class ManifestSnapshot
                 && SemanticValueEquals(semanticPath, expected, value))
             {
                 matched = value;
+                return true;
+            }
+
+            if (expected is null)
+            {
+                matched = null;
                 return true;
             }
 
@@ -670,13 +689,13 @@ internal sealed class ManifestSnapshot
         bool first = true;
         foreach (YamlNode node in installers.Children)
         {
-            if (node is not YamlMappingNode installer
-                || !TryResolveSemanticPath(installer, semanticPath, out string? installerValue))
+            if (node is not YamlMappingNode installer)
             {
                 value = null;
                 return false;
             }
 
+            _ = TryResolveSemanticPath(installer, semanticPath, out string? installerValue);
             if (first)
             {
                 commonValue = installerValue;
@@ -1090,7 +1109,7 @@ internal sealed class ManifestSnapshot
         HashSet<int> matchedAfter,
         ICollection<SequencePair> pairs)
     {
-        var afterByKey = new Dictionary<string, Queue<int>>(StringComparer.OrdinalIgnoreCase);
+        var afterByKey = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
         for (int index = 0; index < after.Length; index++)
         {
             if (matchedAfter.Contains(index) || string.IsNullOrEmpty(keySelector(after[index])))
@@ -1099,13 +1118,13 @@ internal sealed class ManifestSnapshot
             }
 
             string key = keySelector(after[index])!;
-            if (!afterByKey.TryGetValue(key, out Queue<int>? indices))
+            if (!afterByKey.TryGetValue(key, out List<int>? indices))
             {
-                indices = new();
+                indices = [];
                 afterByKey.Add(key, indices);
             }
 
-            indices.Enqueue(index);
+            indices.Add(index);
         }
 
         for (int index = 0; index < before.Length; index++)
@@ -1116,19 +1135,36 @@ internal sealed class ManifestSnapshot
             }
 
             string key = keySelector(before[index])!;
-            if (!afterByKey.TryGetValue(key, out Queue<int>? indices))
+            if (!afterByKey.TryGetValue(key, out List<int>? indices))
             {
                 continue;
             }
 
-            while (indices.Count > 0 && matchedAfter.Contains(indices.Peek()))
+            int bestListIndex = -1;
+            int bestScore = int.MinValue;
+            int bestDistance = int.MaxValue;
+            for (int listIndex = 0; listIndex < indices.Count; listIndex++)
             {
-                indices.Dequeue();
+                int afterIndex = indices[listIndex];
+                if (matchedAfter.Contains(afterIndex))
+                {
+                    continue;
+                }
+
+                int score = InstallerMatchScore(before[index], after[afterIndex]);
+                int distance = Math.Abs(index - afterIndex);
+                if (score > bestScore || score == bestScore && distance < bestDistance)
+                {
+                    bestListIndex = listIndex;
+                    bestScore = score;
+                    bestDistance = distance;
+                }
             }
 
-            if (indices.Count > 0)
+            if (bestListIndex >= 0)
             {
-                int afterIndex = indices.Dequeue();
+                int afterIndex = indices[bestListIndex];
+                indices.RemoveAt(bestListIndex);
                 matchedBefore.Add(index);
                 matchedAfter.Add(afterIndex);
                 pairs.Add(new(index, afterIndex));

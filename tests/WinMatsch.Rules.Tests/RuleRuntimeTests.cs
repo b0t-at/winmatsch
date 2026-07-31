@@ -492,6 +492,32 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Missing_bot_value_with_mixed_generated_values_does_not_trigger_review()
+    {
+        static PackageManifests Create(string? rootProductCode, string? first, string? second)
+        {
+            Installer firstInstaller = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+            firstInstaller.ProductCode = first;
+            Installer secondInstaller = TestManifests.CreateInstaller(url: "https://example.test/b.exe");
+            secondInstaller.ProductCode = second;
+            PackageManifests manifests = TestManifests.Create(firstInstaller, secondInstaller);
+            manifests.Installer.ProductCode = rootProductCode;
+            return manifests;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(rootProductCode: null, first: null, second: null),
+            Previous = Create("B", first: null, second: null),
+            Manifests = Create(rootProductCode: null, "C", "D"),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
     public void Hoisted_generated_value_cannot_hide_a_reverted_installer_correction()
     {
         static Installer Installer(string url, string productCode)
@@ -922,6 +948,43 @@ public class RuleRuntimeTests
 
         Assert.DoesNotContain("do-not-log", sanitized, StringComparison.Ordinal);
         Assert.DoesNotContain("sig=", sanitized, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Same_url_multi_arch_installers_match_by_architecture_after_reorder()
+    {
+        static PackageManifests Create(bool reversed)
+        {
+            Installer x86 = TestManifests.CreateInstaller(
+                Architecture.X86,
+                url: "https://example.test/universal.zip");
+            Installer x64 = TestManifests.CreateInstaller(
+                Architecture.X64,
+                url: "https://example.test/universal.zip");
+            return reversed ? TestManifests.Create(x64, x86) : TestManifests.Create(x86, x64);
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(reversed: false),
+            Previous = Create(reversed: true),
+            Manifests = Create(reversed: false),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
+    public void Sentence_punctuation_does_not_bypass_jwt_redaction()
+    {
+        const string message =
+            "Token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwxyz.";
+
+        string sanitized = RuleLogSanitizer.SanitizeMessage(message);
+
+        Assert.Equal("[REDACTED]", sanitized);
     }
 
     [Fact]
