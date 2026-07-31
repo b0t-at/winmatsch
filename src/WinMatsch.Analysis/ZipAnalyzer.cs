@@ -279,7 +279,9 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
                         && pair.First.UpgradeCode == pair.Second.UpgradeCode
                         && pair.First.InstallerType == pair.Second.InstallerType));
 
-    private static bool DependenciesEqual(Dependencies? left, Dependencies? right)
+    private static bool DependenciesEqual(
+        WinMatsch.Core.Dependencies? left,
+        WinMatsch.Core.Dependencies? right)
         => ReferenceEquals(left, right)
             || (left is not null
                 && right is not null
