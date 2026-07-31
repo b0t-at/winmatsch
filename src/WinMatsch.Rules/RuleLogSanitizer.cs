@@ -111,6 +111,14 @@ internal static class RuleLogSanitizer
         ReadOnlySpan<string> assignmentNames =
         [
             "token",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "api_token",
+            "accessToken",
+            "refreshToken",
+            "idToken",
+            "apiToken",
             "password",
             "passwd",
             "secret",
@@ -139,6 +147,11 @@ internal static class RuleLogSanitizer
                 if (boundedBefore && boundedAfter)
                 {
                     int next = end;
+                    if (next < value.Length && value[next] is '\'' or '"')
+                    {
+                        next++;
+                    }
+
                     while (next < value.Length && char.IsWhiteSpace(value[next]))
                     {
                         next++;

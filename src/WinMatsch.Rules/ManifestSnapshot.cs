@@ -11,8 +11,6 @@ internal sealed class ManifestSnapshot
     private const int InstallerMatchThreshold = 150;
     private const int MaximumLcsCells = 1_000_000;
     private const int MaximumInstallerMatchComparisons = 1_000_000;
-    private static readonly object _installerSerializationLock = new();
-    private static readonly Sha256Hash _missingHashPlaceholder = new(new string('0', Sha256Hash.Length));
     private readonly IReadOnlyDictionary<string, DocumentSnapshot> _documents;
 
     private ManifestSnapshot(IReadOnlyDictionary<string, DocumentSnapshot> documents)
@@ -40,7 +38,7 @@ internal sealed class ManifestSnapshot
             documents,
             "installer",
             GetInstallerPath(identitySource),
-            SerializeInstaller(serializableManifests.Installer, out _));
+            ManifestYamlWriter.Serialize(serializableManifests.Installer));
         Add(
             documents,
             "defaultLocale",
@@ -331,42 +329,6 @@ internal sealed class ManifestSnapshot
         using var reader = new StringReader(yaml);
         stream.Load(reader);
         documents.Add(documentKey, new(manifestPath, stream.Documents[0].RootNode));
-    }
-
-    private static string SerializeInstaller(InstallerManifest manifest, out int[] missingHashIndices)
-    {
-        List<Installer>? installers = manifest.Installers;
-        if (installers is null)
-        {
-            missingHashIndices = [];
-            return ManifestYamlWriter.Serialize(manifest);
-        }
-
-        lock (_installerSerializationLock)
-        {
-            var missing = new List<int>();
-            for (int i = 0; i < installers.Count; i++)
-            {
-                if (installers[i].InstallerSha256 is null)
-                {
-                    installers[i].InstallerSha256 = _missingHashPlaceholder;
-                    missing.Add(i);
-                }
-            }
-
-            try
-            {
-                missingHashIndices = [.. missing];
-                return ManifestYamlWriter.Serialize(manifest);
-            }
-            finally
-            {
-                foreach (int index in missing)
-                {
-                    installers[index].InstallerSha256 = null;
-                }
-            }
-        }
     }
 
     private static void DiffNode(

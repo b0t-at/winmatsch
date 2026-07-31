@@ -627,6 +627,9 @@ public class RuleRuntimeTests
     [InlineData("--password hunter2")]
     [InlineData("/password:hunter2")]
     [InlineData("session=top-secret")]
+    [InlineData("access_token=oauth-secret")]
+    [InlineData("refreshToken: oauth-secret")]
+    [InlineData("{\"access_token\":\"oauth-secret\"}")]
     public void Syntactically_bounded_credential_markers_are_redacted(string message)
     {
         ManifestContext context = TestManifests.CreateContext(
@@ -660,6 +663,25 @@ public class RuleRuntimeTests
 
         Assert.DoesNotContain("super-secret", sanitized, StringComparison.Ordinal);
         Assert.DoesNotContain("?sig=", sanitized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Missing_hash_changes_are_audited_from_null_not_a_serialization_placeholder()
+    {
+        Installer installer = TestManifests.CreateInstaller();
+        installer.InstallerSha256 = null;
+        ManifestContext context = TestManifests.CreateContext(TestManifests.Create(installer));
+
+        RulePipeline.Create(
+            [new SetHashRule()],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        RuleChange change = Assert.Single(
+            context.Changes,
+            item => item.FieldPath.EndsWith(".InstallerSha256", StringComparison.Ordinal));
+        Assert.Null(change.Before);
+        Assert.Equal(new string('A', Sha256Hash.Length), change.After);
     }
 
     private sealed class ReplaceUrlRule : IRule
@@ -723,6 +745,23 @@ public class RuleRuntimeTests
         public void Apply(ManifestContext context)
         {
             context.Manifests.Installer.Installers![0].Commands = [.. commands];
+        }
+    }
+
+    private sealed class SetHashRule : IRule
+    {
+        public string Id => "WM9994";
+
+        public RuleCategory Category => RuleCategory.Normalization;
+
+        public RuleSeverity Severity => RuleSeverity.Info;
+
+        public string Description => "Test exact missing hash logging.";
+
+        public void Apply(ManifestContext context)
+        {
+            context.Manifests.Installer.Installers![0].InstallerSha256 =
+                new Sha256Hash(new string('A', Sha256Hash.Length));
         }
     }
 }
