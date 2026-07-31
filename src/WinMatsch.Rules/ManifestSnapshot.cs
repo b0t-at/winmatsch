@@ -776,9 +776,18 @@ internal sealed class ManifestSnapshot
             }
 
             ReadOnlySpan<char> digits = path.AsSpan(start, i - start);
-            bool architectureToken = start > 0
-                && char.ToLowerInvariant(path[start - 1]) == 'x'
-                && (digits.SequenceEqual("64") || digits.SequenceEqual("86"));
+            ReadOnlySpan<char> prefix = GetAsciiLetterPrefix(path, start);
+            bool architectureToken = digits.SequenceEqual("64")
+                    && (prefix.EndsWith("x", StringComparison.OrdinalIgnoreCase)
+                        || prefix.EndsWith("win", StringComparison.OrdinalIgnoreCase)
+                        || prefix.EndsWith("arm", StringComparison.OrdinalIgnoreCase)
+                        || prefix.EndsWith("amd", StringComparison.OrdinalIgnoreCase))
+                || digits.SequenceEqual("86")
+                    && prefix.EndsWith("x", StringComparison.OrdinalIgnoreCase)
+                || digits.SequenceEqual("32")
+                    && prefix.EndsWith("win", StringComparison.OrdinalIgnoreCase)
+                || digits.SequenceEqual("386")
+                    && prefix.EndsWith("i", StringComparison.OrdinalIgnoreCase);
             if (architectureToken)
             {
                 normalized.Append(digits);
@@ -805,6 +814,17 @@ internal sealed class ManifestSnapshot
         }
 
         return normalized.ToString();
+    }
+
+    private static ReadOnlySpan<char> GetAsciiLetterPrefix(string value, int end)
+    {
+        int start = end;
+        while (start > 0 && char.IsAsciiLetter(value[start - 1]))
+        {
+            start--;
+        }
+
+        return value.AsSpan(start, end - start);
     }
 
     private static int[] GetInstallerOccurrenceOrdinals(

@@ -630,6 +630,10 @@ public class RuleRuntimeTests
     [InlineData("access_token=oauth-secret")]
     [InlineData("refreshToken: oauth-secret")]
     [InlineData("{\"access_token\":\"oauth-secret\"}")]
+    [InlineData("oauth_token=oauth-secret")]
+    [InlineData("{\"client_secret\":\"oauth-secret\"}")]
+    [InlineData("--access-token oauth-secret")]
+    [InlineData("--oauth-token oauth-secret")]
     public void Syntactically_bounded_credential_markers_are_redacted(string message)
     {
         ManifestContext context = TestManifests.CreateContext(
@@ -682,6 +686,35 @@ public class RuleRuntimeTests
             item => item.FieldPath.EndsWith(".InstallerSha256", StringComparison.Ordinal));
         Assert.Null(change.Before);
         Assert.Equal(new string('A', Sha256Hash.Length), change.After);
+    }
+
+    [Fact]
+    public void Numeric_architecture_urls_remain_distinct_when_installers_reorder()
+    {
+        static PackageManifests Create(bool reversed)
+        {
+            Installer win32 = TestManifests.CreateInstaller(
+                Architecture.X86,
+                url: "https://example.test/app-win32-1.0.exe");
+            Installer win64 = TestManifests.CreateInstaller(
+                Architecture.X64,
+                url: "https://example.test/app-win64-1.0.exe");
+            return reversed
+                ? TestManifests.Create(win64, win32)
+                : TestManifests.Create(win32, win64);
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = Create(reversed: false),
+            Previous = Create(reversed: true),
+            Manifests = Create(reversed: false),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+        Assert.Empty(context.HumanCorrectionReviews);
     }
 
     private sealed class ReplaceUrlRule : IRule
