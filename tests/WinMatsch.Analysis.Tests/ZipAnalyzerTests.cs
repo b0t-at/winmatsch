@@ -30,10 +30,12 @@ public class ZipAnalyzerTests
         Assert.Equal(DetectedInstallerFormat.Zip, analysis.Format);
         Installer installer = Assert.Single(analysis.Installers);
         Assert.Equal(InstallerType.Zip, installer.InstallerType);
-        Assert.Equal(InstallerType.Msi, installer.NestedInstallerType);
+        Assert.Equal(InstallerType.Wix, installer.NestedInstallerType);
         NestedInstallerFile nested = Assert.Single(installer.NestedInstallerFiles!);
         Assert.Equal("installers/app.msi", nested.RelativeFilePath);
         Assert.Equal(Architecture.X64, installer.Architecture); // From the nested MSI's Template.
+        Assert.Equal(Scope.User, installer.Scope);
+        Assert.Null(installer.ProductCode);
         Assert.Equal("Contoso Editor", analysis.ProductName);
         Assert.Equal("Contoso Ltd", analysis.Publisher);
         Assert.Equal("2.4.1", analysis.ProductVersion);
@@ -44,9 +46,9 @@ public class ZipAnalyzerTests
     [Theory]
     [InlineData("app.msixbundle", InstallerType.Msix)]
     [InlineData("app.MSIX", InstallerType.Msix)]
-    [InlineData("app.appx", InstallerType.Appx)]
-    [InlineData("app.appxbundle", InstallerType.Appx)]
-    public void Nested_installer_type_is_mapped_from_the_extension(string entryName, InstallerType expected)
+    [InlineData("app.appx", InstallerType.Msix)]
+    [InlineData("app.appxbundle", InstallerType.Msix)]
+    public void Nested_installer_type_is_preserved_from_inner_analysis(string entryName, InstallerType expected)
     {
         byte[] payload = Path.GetExtension(entryName).Contains("bundle", StringComparison.OrdinalIgnoreCase)
             ? MsixFixtures.BuildBundle("""
@@ -61,6 +63,49 @@ public class ZipAnalyzerTests
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
 
         Assert.Equal(expected, Assert.Single(analysis.Installers).NestedInstallerType);
+    }
+
+    [Fact]
+    public void Nested_msi_preserves_product_scope_locale_and_arp_metadata()
+    {
+        const string productCode = "{5A2FEA1B-0F30-4F86-9F92-01A45C5A1E30}";
+        byte[] msi = MsiFixtures.BuildMsi(
+            [
+                ("ProductCode", productCode),
+                ("ProductName", "Contoso Editor"),
+                ("ProductVersion", "2.4.1"),
+                ("Manufacturer", "Contoso Ltd"),
+                ("ProductLanguage", "1033"),
+                ("ALLUSERS", "1"),
+            ],
+            creatingApplication: "Plain MSI Builder");
+        using MemoryStream zip = BuildZip(("installers/app.msi", msi));
+
+        Installer installer = Assert.Single(_analyzer.Analyze(zip, "app.zip").Installers);
+
+        Assert.Equal(InstallerType.Msi, installer.NestedInstallerType);
+        Assert.Equal(productCode, installer.ProductCode);
+        Assert.Equal(Scope.Machine, installer.Scope);
+        Assert.Equal(new LanguageTag("en-US"), installer.InstallerLocale);
+        Assert.Equal(productCode, Assert.Single(installer.AppsAndFeaturesEntries!).ProductCode);
+    }
+
+    [Fact]
+    public void Nested_nsis_preserves_type_scope_locale_elevation_and_arp_metadata()
+    {
+        byte[] nsis = NsisFixtures.BuildInstaller(new NsisFixtures.Options
+        {
+            ManifestXml = PeFixtures.ManifestXml("requireAdministrator"),
+        });
+        using MemoryStream zip = BuildZip(("installers/setup.exe", nsis));
+
+        Installer installer = Assert.Single(_analyzer.Analyze(zip, "app.zip").Installers);
+
+        Assert.Equal(InstallerType.Nullsoft, installer.NestedInstallerType);
+        Assert.Equal(Scope.Machine, installer.Scope);
+        Assert.Equal(new LanguageTag("en-US"), installer.InstallerLocale);
+        Assert.Equal(ElevationRequirement.ElevationRequired, installer.ElevationRequirement);
+        Assert.Equal(NsisFixtures.DefaultDisplayName, Assert.Single(installer.AppsAndFeaturesEntries!).DisplayName);
     }
 
     [Fact]
@@ -178,7 +223,7 @@ public class ZipAnalyzerTests
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
 
         Installer installer = Assert.Single(analysis.Installers);
-        Assert.Equal(InstallerType.Msi, installer.NestedInstallerType);
+        Assert.Equal(InstallerType.Wix, installer.NestedInstallerType);
         Assert.Equal("payload/app.msi", Assert.Single(installer.NestedInstallerFiles!).RelativeFilePath);
     }
 

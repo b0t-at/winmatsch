@@ -144,7 +144,7 @@ public class BurnProbeTests
 
     [Theory]
     [InlineData("NativeMachine = 0xAA64", Architecture.Arm64)]
-    [InlineData("NOT VersionNT64 OR NativeMachine = arm64", Architecture.Arm64)]
+    [InlineData("(NativeMachine = arm64)", Architecture.Arm64)]
     [InlineData("VersionNT64", Architecture.X64)]
     [InlineData("NativeMachine = 0x8664", Architecture.X64)]
     public void Chain_install_conditions_override_the_x86_stub_machine(string condition, Architecture expected)
@@ -226,6 +226,10 @@ public class BurnProbeTests
     [Theory]
     [InlineData("NativeMachine &lt;&gt; 0xAA64")]
     [InlineData("NOT (NativeMachine = arm64)")]
+    [InlineData("NOT VersionNT64")]
+    [InlineData("VersionNT64 OR NativeMachine = arm64")]
+    [InlineData("VersionNT64 AND WixBundleInstalled")]
+    [InlineData("NativeMachine = 0xAA64 OR WixBundleAction = 2")]
     public void Negated_architecture_condition_does_not_promote_the_stub(string condition)
     {
         string manifest = BurnFixtures.ManifestXml(msiPackageXml:

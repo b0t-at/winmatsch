@@ -358,6 +358,18 @@ public class NsisProbeTests
         Assert.Contains("Manual analysis is required", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Oversized_lzma_dictionary_is_rejected_before_decoder_allocation()
+    {
+        byte[] installer = NsisFixtures.BuildInstaller(
+            new NsisFixtures.Options { Compressor = NsisCompressor.OversizedLzmaDictionary });
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Probe(installer));
+
+        Assert.Contains("dictionary", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(AnalysisLimits.MaxNsisHeaderBytes.ToString(), exception.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(NsisCompressor.NoDataAtAll)]
     [InlineData(NsisCompressor.CorruptDeflateNonSolid)]

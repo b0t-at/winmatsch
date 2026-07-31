@@ -19,6 +19,7 @@ public enum NsisCompressor
     LzmaBcjSolid,
     CorruptDeflateNonSolid,
     CorruptLzmaSolid,
+    OversizedLzmaDictionary,
     NoDataAtAll,
 }
 
@@ -209,6 +210,7 @@ internal static class NsisFixtures
             NsisCompressor.LzmaBcjSolid => [0x01, .. Lzma(header)],
             NsisCompressor.CorruptDeflateNonSolid => CompressedBlock([0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89]),
             NsisCompressor.CorruptLzmaSolid => [0x5D, 0x00, 0x00, 0x80, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            NsisCompressor.OversizedLzmaDictionary => [0x5D, 0x00, 0x00, 0x00, 0x40, 0x00],
             NsisCompressor.NoDataAtAll => [],
             _ => throw new ArgumentOutOfRangeException(nameof(compressor)),
         };

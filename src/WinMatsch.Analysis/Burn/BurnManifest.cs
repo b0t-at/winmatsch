@@ -169,36 +169,72 @@ internal sealed class BurnManifest
             return default;
         }
 
-        bool arm64 = condition.Contains("arm64", StringComparison.OrdinalIgnoreCase)
-            || condition.Contains("0xAA64", StringComparison.OrdinalIgnoreCase)
-            || condition.Contains("43620", StringComparison.Ordinal);
-        bool x64 = condition.Contains("amd64", StringComparison.OrdinalIgnoreCase)
-            || condition.Contains("x64", StringComparison.OrdinalIgnoreCase)
-            || condition.Contains("0x8664", StringComparison.OrdinalIgnoreCase)
-            || condition.Contains("34404", StringComparison.Ordinal);
-        string compact = condition.Replace(" ", string.Empty, StringComparison.Ordinal);
-        bool negatedNativeMachine = compact.Contains("NOTNativeMachine", StringComparison.OrdinalIgnoreCase)
-            || compact.Contains("NOT(NativeMachine", StringComparison.OrdinalIgnoreCase)
-            || compact.Contains("<>", StringComparison.Ordinal)
-            || compact.Contains("!=", StringComparison.Ordinal);
-        if ((arm64 || x64) && negatedNativeMachine)
-        {
-            return new ArchitectureEvidence(null, Ambiguous: true);
-        }
-
-        if (arm64)
-        {
-            return new ArchitectureEvidence(Architecture.Arm64, Ambiguous: false);
-        }
-
-        if (x64
-            || (condition.Contains("VersionNT64", StringComparison.OrdinalIgnoreCase)
-                && !condition.Contains("NOT VersionNT64", StringComparison.OrdinalIgnoreCase)))
+        string predicate = StripOuterParentheses(condition.Trim());
+        if (string.Equals(predicate, "VersionNT64", StringComparison.OrdinalIgnoreCase))
         {
             return new ArchitectureEvidence(Architecture.X64, Ambiguous: false);
         }
 
-        return default;
+        int equals = predicate.IndexOf('=');
+        if (equals > 0
+            && equals == predicate.LastIndexOf('=')
+            && string.Equals(predicate[..equals].Trim(), "NativeMachine", StringComparison.OrdinalIgnoreCase))
+        {
+            string target = predicate[(equals + 1)..].Trim();
+            if (target.Equals("arm64", StringComparison.OrdinalIgnoreCase)
+                || target.Equals("0xAA64", StringComparison.OrdinalIgnoreCase)
+                || target.Equals("43620", StringComparison.Ordinal))
+            {
+                return new ArchitectureEvidence(Architecture.Arm64, Ambiguous: false);
+            }
+
+            if (target.Equals("amd64", StringComparison.OrdinalIgnoreCase)
+                || target.Equals("x64", StringComparison.OrdinalIgnoreCase)
+                || target.Equals("0x8664", StringComparison.OrdinalIgnoreCase)
+                || target.Equals("34404", StringComparison.Ordinal))
+            {
+                return new ArchitectureEvidence(Architecture.X64, Ambiguous: false);
+            }
+        }
+
+        bool mentionsArchitecture = condition.Contains("VersionNT64", StringComparison.OrdinalIgnoreCase)
+            || condition.Contains("NativeMachine", StringComparison.OrdinalIgnoreCase);
+        return new ArchitectureEvidence(null, Ambiguous: mentionsArchitecture);
+    }
+
+    private static string StripOuterParentheses(string value)
+    {
+        while (value.Length >= 2 && value[0] == '(' && value[^1] == ')' && OuterParenthesesEncloseAll(value))
+        {
+            value = value[1..^1].Trim();
+        }
+
+        return value;
+    }
+
+    private static bool OuterParenthesesEncloseAll(string value)
+    {
+        int depth = 0;
+        for (int i = 0; i < value.Length; i++)
+        {
+            depth += value[i] switch
+            {
+                '(' => 1,
+                ')' => -1,
+                _ => 0,
+            };
+            if (depth == 0 && i != value.Length - 1)
+            {
+                return false;
+            }
+
+            if (depth < 0)
+            {
+                return false;
+            }
+        }
+
+        return depth == 0;
     }
 
     private static bool IsValue(XElement element, string attributeName, string expected)

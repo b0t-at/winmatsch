@@ -59,6 +59,12 @@ public static class FileAnalyzer
             }
         }
 
+        if (namedAnalyzer is null)
+        {
+            throw new NotSupportedException(
+                $"No installer analyzer is registered for the file extension '{Path.GetExtension(fileName)}' (file '{fileName}'). Supported: .msi, .msix, .appx, .msixbundle, .appxbundle, .zip, .exe.");
+        }
+
         InstallerContentKind content = InstallerContentDetector.Detect(stream, fileName);
         IInstallerAnalyzer? contentAnalyzer = content switch
         {
@@ -72,12 +78,6 @@ public static class FileAnalyzer
 
         if (contentAnalyzer is null)
         {
-            if (namedAnalyzer is null)
-            {
-                throw new NotSupportedException(
-                    $"No installer analyzer is registered for the file extension '{Path.GetExtension(fileName)}' (file '{fileName}'). Supported: .msi, .msix, .appx, .msixbundle, .appxbundle, .zip, .exe.");
-            }
-
             throw new InvalidDataException(
                 $"'{fileName}' does not contain recognized installer magic for its extension. Manual analysis is required.");
         }

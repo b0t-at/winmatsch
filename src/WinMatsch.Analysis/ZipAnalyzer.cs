@@ -131,13 +131,13 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         List<ResolvedCandidate> resolved = [];
         foreach (Installer innerInstaller in inner.Installers)
         {
-            InstallerType nestedType = inner.Format == DetectedInstallerFormat.PortableExe
-                ? InstallerType.Portable
-                : candidate.DeclaredType;
+            InstallerType nestedType = innerInstaller.NestedInstallerType
+                ?? innerInstaller.InstallerType
+                ?? candidate.DeclaredType;
             resolved.Add(new ResolvedCandidate(
                 candidate.Path,
                 nestedType,
-                innerInstaller.Architecture,
+                innerInstaller,
                 inner.ProductName,
                 inner.Publisher,
                 inner.ProductVersion,
@@ -153,40 +153,41 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         IReadOnlyList<string> candidatePaths)
     {
         List<Installer> installers = [];
-        foreach (IGrouping<(InstallerType NestedType, Architecture? Architecture), ResolvedCandidate> group in resolved.GroupBy(
+        foreach (IGrouping<(InstallerType NestedType, Architecture? Architecture), ResolvedCandidate> architectureGroup in resolved.GroupBy(
             static candidate => (candidate.NestedType, candidate.Architecture)))
         {
-            string[] paths = [.. group.Select(static candidate => candidate.Path).Distinct(StringComparer.OrdinalIgnoreCase)];
-            bool aliasesRequired = group.Key.NestedType == InstallerType.Portable && paths.Length > 1;
-            List<NestedInstallerFile> nestedFiles = [];
-            var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string path in paths)
+            foreach (List<ResolvedCandidate> group in PartitionCompatible(architectureGroup))
             {
-                string? alias = aliasesRequired ? Path.GetFileNameWithoutExtension(path) : null;
-                if (alias is not null)
+                string[] paths = [.. group.Select(static candidate => candidate.Path).Distinct(StringComparer.OrdinalIgnoreCase)];
+                bool aliasesRequired = architectureGroup.Key.NestedType == InstallerType.Portable && paths.Length > 1;
+                List<NestedInstallerFile> nestedFiles = [];
+                var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string path in paths)
                 {
-                    ValidatePortableAlias(alias, path);
-                    if (!aliases.Add(alias))
+                    string? alias = aliasesRequired ? Path.GetFileNameWithoutExtension(path) : null;
+                    if (alias is not null)
                     {
-                        throw new InvalidDataException(
-                            $"Portable archive paths produce duplicate command alias '{alias}'. Manual alias selection is required.");
+                        ValidatePortableAlias(alias, path);
+                        if (!aliases.Add(alias))
+                        {
+                            throw new InvalidDataException(
+                                $"Portable archive paths produce duplicate command alias '{alias}'. Manual alias selection is required.");
+                        }
                     }
+
+                    nestedFiles.Add(new NestedInstallerFile
+                    {
+                        RelativeFilePath = path,
+                        PortableCommandAlias = alias,
+                    });
                 }
 
-                nestedFiles.Add(new NestedInstallerFile
-                {
-                    RelativeFilePath = path,
-                    PortableCommandAlias = alias,
-                });
+                Installer installer = group[0].Installer;
+                installer.InstallerType = InstallerType.Zip;
+                installer.NestedInstallerType = architectureGroup.Key.NestedType;
+                installer.NestedInstallerFiles = nestedFiles;
+                installers.Add(installer);
             }
-
-            installers.Add(new Installer
-            {
-                Architecture = group.Key.Architecture,
-                InstallerType = InstallerType.Zip,
-                NestedInstallerType = group.Key.NestedType,
-                NestedInstallerFiles = nestedFiles,
-            });
         }
 
         List<AnalysisDiagnostic> diagnostics =
@@ -197,7 +198,8 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         {
             diagnostics.Add(new AnalysisDiagnostic(
                 "ZIP002",
-                "The archive contains payloads for multiple architectures; one ZIP installer entry was produced per architecture."));
+                "The archive contains payloads for multiple architectures or incompatible installer metadata; "
+                    + "separate ZIP installer entries were produced."));
         }
 
         return new InstallerAnalysis
@@ -218,6 +220,88 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         string[] present = [.. values.OfType<string>().Where(static value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal)];
         return present.Length == 1 ? present[0] : null;
     }
+
+    private static List<List<ResolvedCandidate>> PartitionCompatible(
+        IEnumerable<ResolvedCandidate> candidates)
+    {
+        List<List<ResolvedCandidate>> groups = [];
+        foreach (ResolvedCandidate candidate in candidates)
+        {
+            List<ResolvedCandidate>? compatible = groups.FirstOrDefault(
+                group => HaveCompatibleMetadata(group[0].Installer, candidate.Installer));
+            if (compatible is null)
+            {
+                groups.Add([candidate]);
+            }
+            else
+            {
+                compatible.Add(candidate);
+            }
+        }
+
+        return groups;
+    }
+
+    private static bool HaveCompatibleMetadata(Installer left, Installer right)
+        => left.ProductCode == right.ProductCode
+            && Equals(left.Scope, right.Scope)
+            && Equals(left.InstallerLocale, right.InstallerLocale)
+            && Equals(left.ElevationRequirement, right.ElevationRequirement)
+            && SwitchesEqual(left.InstallerSwitches, right.InstallerSwitches)
+            && ArpEntriesEqual(left.AppsAndFeaturesEntries, right.AppsAndFeaturesEntries)
+            && DependenciesEqual(left.Dependencies, right.Dependencies);
+
+    private static bool SwitchesEqual(InstallerSwitches? left, InstallerSwitches? right)
+        => ReferenceEquals(left, right)
+            || (left is not null
+                && right is not null
+                && left.Silent == right.Silent
+                && left.SilentWithProgress == right.SilentWithProgress
+                && left.Interactive == right.Interactive
+                && left.InstallLocation == right.InstallLocation
+                && left.Log == right.Log
+                && left.Upgrade == right.Upgrade
+                && left.Custom == right.Custom
+                && left.Repair == right.Repair);
+
+    private static bool ArpEntriesEqual(
+        List<AppsAndFeaturesEntry>? left,
+        List<AppsAndFeaturesEntry>? right)
+        => ReferenceEquals(left, right)
+            || (left is not null
+                && right is not null
+                && left.Count == right.Count
+                && left.Zip(right).All(static pair
+                    => pair.First.DisplayName == pair.Second.DisplayName
+                        && pair.First.Publisher == pair.Second.Publisher
+                        && pair.First.DisplayVersion == pair.Second.DisplayVersion
+                        && pair.First.ProductCode == pair.Second.ProductCode
+                        && pair.First.UpgradeCode == pair.Second.UpgradeCode
+                        && pair.First.InstallerType == pair.Second.InstallerType));
+
+    private static bool DependenciesEqual(Dependencies? left, Dependencies? right)
+        => ReferenceEquals(left, right)
+            || (left is not null
+                && right is not null
+                && SequenceEqual(left.WindowsFeatures, right.WindowsFeatures)
+                && SequenceEqual(left.WindowsLibraries, right.WindowsLibraries)
+                && SequenceEqual(left.ExternalDependencies, right.ExternalDependencies)
+                && PackageDependenciesEqual(left.PackageDependencies, right.PackageDependencies));
+
+    private static bool PackageDependenciesEqual(
+        List<PackageDependency>? left,
+        List<PackageDependency>? right)
+        => ReferenceEquals(left, right)
+            || (left is not null
+                && right is not null
+                && left.Count == right.Count
+                && left.Zip(right).All(static pair
+                    => Equals(pair.First.PackageIdentifier, pair.Second.PackageIdentifier)
+                        && Equals(pair.First.MinimumVersion, pair.Second.MinimumVersion)));
+
+    private static bool SequenceEqual<T>(List<T>? left, List<T>? right)
+        => ReferenceEquals(left, right)
+            || (left is not null && right is not null && left.SequenceEqual(right));
 
     private static bool HasExpectedMagic(ZipArchiveEntry entry, InstallerType type)
     {
@@ -335,10 +419,13 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
     private sealed record ResolvedCandidate(
         string Path,
         InstallerType NestedType,
-        Architecture? Architecture,
+        Installer Installer,
         string? ProductName,
         string? Publisher,
         string? ProductVersion,
         string? Copyright,
-        IReadOnlyList<AnalysisDiagnostic> Diagnostics);
+        IReadOnlyList<AnalysisDiagnostic> Diagnostics)
+    {
+        public Architecture? Architecture => Installer.Architecture;
+    }
 }

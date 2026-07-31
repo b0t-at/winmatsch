@@ -114,6 +114,17 @@ public class FileAnalyzerTests
     }
 
     [Fact]
+    public void Unknown_extension_with_supported_content_still_throws_not_supported()
+    {
+        using MemoryStream stream = PeFixtures.BuildExeStream();
+
+        NotSupportedException exception = Assert.Throws<NotSupportedException>(
+            () => FileAnalyzer.Analyze(stream, "renamed.bin"));
+
+        Assert.Contains(".bin", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Non_seekable_stream_is_rejected()
     {
         using var stream = new NonSeekableStream();

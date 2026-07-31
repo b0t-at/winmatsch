@@ -152,6 +152,15 @@ internal static class NsisCompression
         byte[] properties = new byte[5];
         properties[0] = first[0];
         data.ReadExactly(properties.AsSpan(1));
+        uint dictionarySize = BinaryPrimitives.ReadUInt32LittleEndian(properties.AsSpan(1));
+        if (dictionarySize == 0 || dictionarySize > AnalysisLimits.MaxNsisHeaderBytes)
+        {
+            data.Dispose();
+            throw new InvalidDataException(
+                $"The NSIS LZMA dictionary declares {dictionarySize} bytes; "
+                + $"the analysis limit is {AnalysisLimits.MaxNsisHeaderBytes} bytes.");
+        }
+
         return new LzmaStream(properties, data);
     }
 

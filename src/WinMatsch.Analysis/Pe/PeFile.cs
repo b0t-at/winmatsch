@@ -96,18 +96,20 @@ public sealed class PeFile : IDisposable
         }
 
         DirectoryEntry directory = peHeader.ResourceTableDirectory;
-        if (directory.RelativeVirtualAddress == 0 || directory.Size <= 0)
+        if (directory.RelativeVirtualAddress == 0
+            || directory.Size <= 0
+            || directory.Size > AnalysisLimits.MaxResourceBytes)
         {
             return null;
         }
 
         PEMemoryBlock block = _reader.GetSectionData(directory.RelativeVirtualAddress);
-        if (block.Length == 0)
+        if (block.Length < directory.Size)
         {
             return null;
         }
 
-        ReadOnlySpan<byte> resources = block.GetContent().AsSpan();
+        ReadOnlySpan<byte> resources = block.GetContent(0, directory.Size).AsSpan();
 
         (int Offset, bool IsSubdirectory)? typeEntry = FindIdEntry(resources, 0, resourceTypeId);
         if (typeEntry is not { IsSubdirectory: true })
