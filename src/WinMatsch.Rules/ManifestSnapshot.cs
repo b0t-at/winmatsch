@@ -89,213 +89,213 @@ internal sealed class ManifestSnapshot
     }
 
     private void RemoveMissingRequiredValues(PackageManifests original)
+    {
+        YamlMappingNode version = GetRoot("version");
+        RemoveWhenMissing(version, "PackageIdentifier", original.Version.PackageIdentifier);
+        RemoveWhenMissing(version, "PackageVersion", original.Version.PackageVersion);
+        RemoveWhenMissing(version, "DefaultLocale", original.Version.DefaultLocale);
+        RemoveWhenMissing(version, "ManifestVersion", original.Version.ManifestVersion);
+
+        YamlMappingNode installerManifest = GetRoot("installer");
+        RemoveWhenMissing(installerManifest, "PackageIdentifier", original.Installer.PackageIdentifier);
+        RemoveWhenMissing(installerManifest, "PackageVersion", original.Installer.PackageVersion);
+        RemoveWhenMissing(installerManifest, "ManifestVersion", original.Installer.ManifestVersion);
+        RemoveMissingInstallerFields(installerManifest, original.Installer);
+        if (original.Installer.Installers is not { Count: > 0 } originalInstallers)
         {
-            YamlMappingNode version = GetRoot("version");
-            RemoveWhenMissing(version, "PackageIdentifier", original.Version.PackageIdentifier);
-            RemoveWhenMissing(version, "PackageVersion", original.Version.PackageVersion);
-            RemoveWhenMissing(version, "DefaultLocale", original.Version.DefaultLocale);
-            RemoveWhenMissing(version, "ManifestVersion", original.Version.ManifestVersion);
-
-            YamlMappingNode installerManifest = GetRoot("installer");
-            RemoveWhenMissing(installerManifest, "PackageIdentifier", original.Installer.PackageIdentifier);
-            RemoveWhenMissing(installerManifest, "PackageVersion", original.Installer.PackageVersion);
-            RemoveWhenMissing(installerManifest, "ManifestVersion", original.Installer.ManifestVersion);
-            RemoveMissingInstallerFields(installerManifest, original.Installer);
-            if (original.Installer.Installers is not { Count: > 0 } originalInstallers)
+            RemoveMappingKey(installerManifest, "Installers");
+        }
+        else if (GetMappingValue(installerManifest, "Installers") is YamlSequenceNode installerSequence)
+        {
+            for (int i = 0; i < originalInstallers.Count; i++)
             {
-                RemoveMappingKey(installerManifest, "Installers");
-            }
-            else if (GetMappingValue(installerManifest, "Installers") is YamlSequenceNode installerSequence)
-            {
-                for (int i = 0; i < originalInstallers.Count; i++)
+                if (installerSequence.Children[i] is not YamlMappingNode installer)
                 {
-                    if (installerSequence.Children[i] is not YamlMappingNode installer)
-                    {
-                        continue;
-                    }
-
-                    Installer originalInstaller = originalInstallers[i];
-                    RemoveWhenMissing(installer, "Architecture", originalInstaller.Architecture);
-                    RemoveWhenMissing(installer, "InstallerUrl", originalInstaller.InstallerUrl);
-                    RemoveWhenMissing(installer, "InstallerSha256", originalInstaller.InstallerSha256);
-                    RemoveMissingInstallerFields(installer, originalInstaller);
+                    continue;
                 }
-            }
 
-            RemoveMissingLocaleValues(GetRoot("defaultLocale"), original.DefaultLocale);
-            string[] localeDocumentKeys = GetLocaleDocumentKeys(original.Locales);
-            for (int i = 0; i < original.Locales.Count; i++)
-            {
-                LocaleManifest locale = original.Locales[i];
-                RemoveMissingLocaleValues(GetRoot(localeDocumentKeys[i]), locale);
+                Installer originalInstaller = originalInstallers[i];
+                RemoveWhenMissing(installer, "Architecture", originalInstaller.Architecture);
+                RemoveWhenMissing(installer, "InstallerUrl", originalInstaller.InstallerUrl);
+                RemoveWhenMissing(installer, "InstallerSha256", originalInstaller.InstallerSha256);
+                RemoveMissingInstallerFields(installer, originalInstaller);
             }
         }
 
-        private YamlMappingNode GetRoot(string documentKey)
-            => (YamlMappingNode)_documents[documentKey].Root;
-
-        private static void RemoveMissingLocaleValues(YamlMappingNode mapping, LocaleManifest original)
+        RemoveMissingLocaleValues(GetRoot("defaultLocale"), original.DefaultLocale);
+        string[] localeDocumentKeys = GetLocaleDocumentKeys(original.Locales);
+        for (int i = 0; i < original.Locales.Count; i++)
         {
-            RemoveWhenMissing(mapping, "PackageIdentifier", original.PackageIdentifier);
-            RemoveWhenMissing(mapping, "PackageVersion", original.PackageVersion);
-            RemoveWhenMissing(mapping, "PackageLocale", original.PackageLocale);
-            RemoveWhenMissing(mapping, "ManifestVersion", original.ManifestVersion);
-            if (original is DefaultLocaleManifest defaultLocale)
-            {
-                RemoveWhenMissing(mapping, "Publisher", defaultLocale.Publisher);
-                RemoveWhenMissing(mapping, "PackageName", defaultLocale.PackageName);
-                RemoveWhenMissing(mapping, "License", defaultLocale.License);
-                RemoveWhenMissing(mapping, "ShortDescription", defaultLocale.ShortDescription);
-            }
+            LocaleManifest locale = original.Locales[i];
+            RemoveMissingLocaleValues(GetRoot(localeDocumentKeys[i]), locale);
+        }
+    }
 
-            if (original.Icons is { } icons
-                && GetMappingValue(mapping, "Icons") is YamlSequenceNode iconSequence)
+    private YamlMappingNode GetRoot(string documentKey)
+        => (YamlMappingNode)_documents[documentKey].Root;
+
+    private static void RemoveMissingLocaleValues(YamlMappingNode mapping, LocaleManifest original)
+    {
+        RemoveWhenMissing(mapping, "PackageIdentifier", original.PackageIdentifier);
+        RemoveWhenMissing(mapping, "PackageVersion", original.PackageVersion);
+        RemoveWhenMissing(mapping, "PackageLocale", original.PackageLocale);
+        RemoveWhenMissing(mapping, "ManifestVersion", original.ManifestVersion);
+        if (original is DefaultLocaleManifest defaultLocale)
+        {
+            RemoveWhenMissing(mapping, "Publisher", defaultLocale.Publisher);
+            RemoveWhenMissing(mapping, "PackageName", defaultLocale.PackageName);
+            RemoveWhenMissing(mapping, "License", defaultLocale.License);
+            RemoveWhenMissing(mapping, "ShortDescription", defaultLocale.ShortDescription);
+        }
+
+        if (original.Icons is { } icons
+            && GetMappingValue(mapping, "Icons") is YamlSequenceNode iconSequence)
+        {
+            for (int i = 0; i < icons.Count; i++)
             {
-                for (int i = 0; i < icons.Count; i++)
+                if (iconSequence.Children[i] is YamlMappingNode icon)
                 {
-                    if (iconSequence.Children[i] is YamlMappingNode icon)
-                    {
-                        RemoveWhenMissing(icon, "IconUrl", icons[i].IconUrl);
-                        RemoveWhenMissing(icon, "IconFileType", icons[i].IconFileType);
-                    }
+                    RemoveWhenMissing(icon, "IconUrl", icons[i].IconUrl);
+                    RemoveWhenMissing(icon, "IconFileType", icons[i].IconFileType);
                 }
             }
         }
+    }
 
-        private static void RemoveMissingInstallerFields(YamlMappingNode mapping, InstallerFieldsBase original)
+    private static void RemoveMissingInstallerFields(YamlMappingNode mapping, InstallerFieldsBase original)
+    {
+        RestoreInvalidMarkets(mapping, original.Markets);
+        RemoveMissingSequenceMappingValues(
+            mapping,
+            "ExpectedReturnCodes",
+            original.ExpectedReturnCodes,
+            static (item, value) =>
+            {
+                RemoveWhenMissing(item, "InstallerReturnCode", value.InstallerReturnCode);
+                RemoveWhenMissing(item, "ReturnResponse", value.ReturnResponse);
+            });
+        RemoveMissingSequenceMappingValues(
+            mapping,
+            "NestedInstallerFiles",
+            original.NestedInstallerFiles,
+            static (item, value) => RemoveWhenMissing(item, "RelativeFilePath", value.RelativeFilePath));
+
+        if (original.Dependencies?.PackageDependencies is { } dependencies
+            && GetMappingValue(mapping, "Dependencies") is YamlMappingNode dependencyMapping)
         {
-            RestoreInvalidMarkets(mapping, original.Markets);
             RemoveMissingSequenceMappingValues(
-                mapping,
-                "ExpectedReturnCodes",
-                original.ExpectedReturnCodes,
-                static (item, value) =>
-                {
-                    RemoveWhenMissing(item, "InstallerReturnCode", value.InstallerReturnCode);
-                    RemoveWhenMissing(item, "ReturnResponse", value.ReturnResponse);
-                });
+                dependencyMapping,
+                "PackageDependencies",
+                dependencies,
+                static (item, value) => RemoveWhenMissing(item, "PackageIdentifier", value.PackageIdentifier));
+        }
+
+        if (original.InstallationMetadata?.Files is { } files
+            && GetMappingValue(mapping, "InstallationMetadata") is YamlMappingNode metadataMapping)
+        {
             RemoveMissingSequenceMappingValues(
-                mapping,
-                "NestedInstallerFiles",
-                original.NestedInstallerFiles,
+                metadataMapping,
+                "Files",
+                files,
                 static (item, value) => RemoveWhenMissing(item, "RelativeFilePath", value.RelativeFilePath));
-
-            if (original.Dependencies?.PackageDependencies is { } dependencies
-                && GetMappingValue(mapping, "Dependencies") is YamlMappingNode dependencyMapping)
-            {
-                RemoveMissingSequenceMappingValues(
-                    dependencyMapping,
-                    "PackageDependencies",
-                    dependencies,
-                    static (item, value) => RemoveWhenMissing(item, "PackageIdentifier", value.PackageIdentifier));
-            }
-
-            if (original.InstallationMetadata?.Files is { } files
-                && GetMappingValue(mapping, "InstallationMetadata") is YamlMappingNode metadataMapping)
-            {
-                RemoveMissingSequenceMappingValues(
-                    metadataMapping,
-                    "Files",
-                    files,
-                    static (item, value) => RemoveWhenMissing(item, "RelativeFilePath", value.RelativeFilePath));
-            }
-
-            if (original.Authentication is { } authentication
-                && GetMappingValue(mapping, "Authentication") is YamlMappingNode authenticationMapping)
-            {
-                RemoveWhenMissing(
-                    authenticationMapping,
-                    "AuthenticationType",
-                    authentication.AuthenticationType);
-            }
         }
 
-        private static void RestoreInvalidMarkets(YamlMappingNode mapping, Markets? original)
+        if (original.Authentication is { } authentication
+            && GetMappingValue(mapping, "Authentication") is YamlMappingNode authenticationMapping)
         {
-            if (original is null
-                || GetMappingValue(mapping, "Markets") is not YamlMappingNode markets)
-            {
-                return;
-            }
-
-            if (original.AllowedMarkets is null)
-            {
-                RemoveMappingKey(markets, "AllowedMarkets");
-            }
-
-            if (original.ExcludedMarkets is null)
-            {
-                RemoveMappingKey(markets, "ExcludedMarkets");
-            }
-            else if (GetMappingValue(markets, "ExcludedMarkets") is null)
-            {
-                markets.Add(
-                    "ExcludedMarkets",
-                    new YamlSequenceNode(
-                        original.ExcludedMarkets.Select(static value => new YamlScalarNode(value))));
-            }
+            RemoveWhenMissing(
+                authenticationMapping,
+                "AuthenticationType",
+                authentication.AuthenticationType);
         }
+    }
 
-        private static void RemoveMissingSequenceMappingValues<T>(
-            YamlMappingNode parent,
-            string key,
-            IReadOnlyList<T>? originals,
-            Action<YamlMappingNode, T> removeMissing)
+    private static void RestoreInvalidMarkets(YamlMappingNode mapping, Markets? original)
+    {
+        if (original is null
+            || GetMappingValue(mapping, "Markets") is not YamlMappingNode markets)
         {
-            if (originals is null || GetMappingValue(parent, key) is not YamlSequenceNode sequence)
-            {
-                return;
-            }
-
-            for (int i = 0; i < originals.Count; i++)
-            {
-                if (sequence.Children[i] is YamlMappingNode mapping)
-                {
-                    removeMissing(mapping, originals[i]);
-                }
-            }
+            return;
         }
 
-        private static void RemoveWhenMissing<T>(YamlMappingNode mapping, string key, T? value)
+        if (original.AllowedMarkets is null)
         {
-            if (value is null)
-            {
-                RemoveMappingKey(mapping, key);
-            }
+            RemoveMappingKey(markets, "AllowedMarkets");
         }
 
-        private static YamlNode? GetMappingValue(YamlMappingNode mapping, string key)
+        if (original.ExcludedMarkets is null)
         {
-            foreach ((YamlNode keyNode, YamlNode valueNode) in mapping.Children)
-            {
-                if (keyNode is YamlScalarNode { Value: { } value }
-                    && string.Equals(value, key, StringComparison.Ordinal))
-                {
-                    return valueNode;
-                }
-            }
-
-            return null;
+            RemoveMappingKey(markets, "ExcludedMarkets");
         }
-
-        private static void RemoveMappingKey(YamlMappingNode mapping, string key)
+        else if (GetMappingValue(markets, "ExcludedMarkets") is null)
         {
-            YamlNode? matchedKey = null;
-            foreach (YamlNode keyNode in mapping.Children.Keys)
-            {
-                if (keyNode is YamlScalarNode { Value: { } value }
-                    && string.Equals(value, key, StringComparison.Ordinal))
-                {
-                    matchedKey = keyNode;
-                    break;
-                }
-            }
+            markets.Add(
+                "ExcludedMarkets",
+                new YamlSequenceNode(
+                    original.ExcludedMarkets.Select(static value => new YamlScalarNode(value))));
+        }
+    }
 
-            if (matchedKey is not null)
+    private static void RemoveMissingSequenceMappingValues<T>(
+        YamlMappingNode parent,
+        string key,
+        IReadOnlyList<T>? originals,
+        Action<YamlMappingNode, T> removeMissing)
+    {
+        if (originals is null || GetMappingValue(parent, key) is not YamlSequenceNode sequence)
+        {
+            return;
+        }
+
+        for (int i = 0; i < originals.Count; i++)
+        {
+            if (sequence.Children[i] is YamlMappingNode mapping)
             {
-                mapping.Children.Remove(matchedKey);
+                removeMissing(mapping, originals[i]);
             }
         }
+    }
+
+    private static void RemoveWhenMissing<T>(YamlMappingNode mapping, string key, T? value)
+    {
+        if (value is null)
+        {
+            RemoveMappingKey(mapping, key);
+        }
+    }
+
+    private static YamlNode? GetMappingValue(YamlMappingNode mapping, string key)
+    {
+        foreach ((YamlNode keyNode, YamlNode valueNode) in mapping.Children)
+        {
+            if (keyNode is YamlScalarNode { Value: { } value }
+                && string.Equals(value, key, StringComparison.Ordinal))
+            {
+                return valueNode;
+            }
+        }
+
+        return null;
+    }
+
+    private static void RemoveMappingKey(YamlMappingNode mapping, string key)
+    {
+        YamlNode? matchedKey = null;
+        foreach (YamlNode keyNode in mapping.Children.Keys)
+        {
+            if (keyNode is YamlScalarNode { Value: { } value }
+                && string.Equals(value, key, StringComparison.Ordinal))
+            {
+                matchedKey = keyNode;
+                break;
+            }
+        }
+
+        if (matchedKey is not null)
+        {
+            mapping.Children.Remove(matchedKey);
+        }
+    }
 
     public IReadOnlyList<RawManifestChange> Diff(ManifestSnapshot after)
     {
