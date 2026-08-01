@@ -160,9 +160,24 @@ internal static class PeImportReader
                             sizeOfHeaders,
                             sections,
                             stream.Length,
-                            out _,
+                            out long metadataOffset,
                             out long metadataAvailable)
-                        || metadataSize > metadataAvailable)
+                        || metadataSize > metadataAvailable
+                        || metadataSize < 16)
+                    {
+                        return new PeImportInspection(architecture, [], false, false);
+                    }
+
+                    Span<byte> metadataPrefix = stackalloc byte[16];
+                    if (!TryReadAt(stream, metadataOffset, metadataPrefix))
+                    {
+                        return new PeImportInspection(architecture, [], false, false);
+                    }
+
+                    uint versionLength = BinaryPrimitives.ReadUInt32LittleEndian(metadataPrefix[12..]);
+                    if (BinaryPrimitives.ReadUInt32LittleEndian(metadataPrefix) != 0x424A5342
+                        || versionLength == 0
+                        || versionLength > metadataSize - 16)
                     {
                         return new PeImportInspection(architecture, [], false, false);
                     }
@@ -181,7 +196,7 @@ internal static class PeImportReader
             if (directoryCount <= 1
                 || !TryReadDirectory(optional, dataDirectoryOffset, 1, out uint importRva, out uint importSize))
             {
-                return new PeImportInspection(architecture, [], isManaged, false);
+                return new PeImportInspection(architecture, [], isManaged, directoryCount <= 1);
             }
 
             if (importRva == 0 && importSize == 0)

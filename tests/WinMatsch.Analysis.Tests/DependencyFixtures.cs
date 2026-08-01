@@ -41,6 +41,29 @@ internal static class DependencyFixtures
 
     public static Stream AsNonSeekable(MemoryStream stream) => new NonSeekableReadStream(stream);
 
+    public static byte[] AddCentralDirectoryDigitalSignature(
+        byte[] archive,
+        ReadOnlySpan<byte> signatureData)
+    {
+        ArgumentNullException.ThrowIfNull(archive);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(signatureData.Length, ushort.MaxValue);
+        int eocdOffset = archive.Length - 22;
+        byte[] record = new byte[6 + signatureData.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(record, 0x05054B50);
+        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(4), checked((ushort)signatureData.Length));
+        signatureData.CopyTo(record.AsSpan(6));
+        byte[] result = new byte[archive.Length + record.Length];
+        archive.AsSpan(0, eocdOffset).CopyTo(result);
+        record.CopyTo(result, eocdOffset);
+        archive.AsSpan(eocdOffset).CopyTo(result.AsSpan(eocdOffset + record.Length));
+        int newEocdOffset = eocdOffset + record.Length;
+        uint oldDirectorySize = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(newEocdOffset + 12));
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            result.AsSpan(newEocdOffset + 12),
+            checked(oldDirectorySize + (uint)record.Length));
+        return result;
+    }
+
     public static MemoryStream BuildCompressedZeroZip(string path, long uncompressedLength)
     {
         var stream = new MemoryStream();

@@ -199,6 +199,48 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Forged_clr_header_without_metadata_signature_cannot_create_neutral_evidence()
+    {
+        byte[] pe = DependencyFixtures.BuildPe(Machine.I386);
+        int peOffset = BinaryPrimitives.ReadInt32LittleEndian(pe.AsSpan(0x3C));
+        int optionalOffset = peOffset + 24;
+        int optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(pe.AsSpan(peOffset + 20));
+        int sectionOffset = optionalOffset + optionalSize;
+        uint sectionRva = BinaryPrimitives.ReadUInt32LittleEndian(pe.AsSpan(sectionOffset + 12));
+        int sectionRawOffset = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(pe.AsSpan(sectionOffset + 20)));
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 208), sectionRva);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 212), 72);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset), 72);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 8), sectionRva + 72);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 12), 16);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 16), 1);
+        using MemoryStream archive = DependencyFixtures.BuildZip(("forged.exe", pe));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "forged.zip");
+
+        Assert.All(analysis.Evidence, evidence =>
+        {
+            Assert.Equal(Architecture.X86, evidence.Architecture);
+            Assert.Equal(DependencyEvidenceStatus.Ambiguous, evidence.Status);
+        });
+    }
+
+    [Fact]
+    public void Valid_pe_with_no_data_directories_reports_absent_controls()
+    {
+        byte[] pe = DependencyFixtures.BuildPe(Machine.Amd64);
+        int peOffset = BinaryPrimitives.ReadInt32LittleEndian(pe.AsSpan(0x3C));
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(peOffset + 24 + 108), 0);
+        using MemoryStream archive = DependencyFixtures.BuildZip(("minimal.exe", pe));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "minimal.zip");
+
+        Assert.All(
+            analysis.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Absent, evidence.Status));
+    }
+
+    [Fact]
     public void Truncated_clr_header_cannot_create_false_neutral_evidence()
     {
         byte[] pe = DependencyFixtures.BuildPe(Machine.I386);
@@ -447,6 +489,23 @@ public class PayloadDependencyAnalyzerTests
             () => _analyzer.Analyze(archive, "underreported.zip"));
 
         Assert.Contains("declared and actual", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bounded_central_directory_digital_signature_is_accepted()
+    {
+        using MemoryStream valid = DependencyFixtures.BuildZip(
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64, "VCRUNTIME140.dll")));
+        byte[] archiveBytes = DependencyFixtures.AddCentralDirectoryDigitalSignature(
+            valid.ToArray(),
+            "signed"u8);
+        using var archive = new MemoryStream(archiveBytes);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "signed.zip");
+
+        Assert.Equal(
+            DependencyEvidenceStatus.Detected,
+            Find(analysis, "app.exe", DependencyEvidenceKind.VisualCppRuntime).Status);
     }
 
     [Fact]

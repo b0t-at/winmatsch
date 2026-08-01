@@ -212,6 +212,43 @@ internal static class ZipArchiveBounds
             position += recordSize;
         }
 
+        Span<byte> optionalRecordHeader = stackalloc byte[8];
+        while (position < directoryEnd)
+        {
+            if (directoryEnd - position < 4)
+            {
+                throw Corrupt(description);
+            }
+
+            stream.Position = (long)position;
+            stream.ReadExactly(optionalRecordHeader[..4]);
+            uint signature = BinaryPrimitives.ReadUInt32LittleEndian(optionalRecordHeader);
+            ulong recordSize;
+            if (signature == 0x05054B50)
+            {
+                stream.ReadExactly(optionalRecordHeader.Slice(4, 2));
+                recordSize = 6UL + BinaryPrimitives.ReadUInt16LittleEndian(optionalRecordHeader[4..]);
+            }
+            else if (signature == 0x08064B50)
+            {
+                stream.ReadExactly(optionalRecordHeader[4..]);
+                recordSize = 8UL + BinaryPrimitives.ReadUInt32LittleEndian(optionalRecordHeader[4..]);
+            }
+            else
+            {
+                throw Corrupt(description);
+            }
+
+            if (recordSize > directoryEnd - position
+                || position - directoryOffset + recordSize > (ulong)maximumBytes)
+            {
+                throw new InvalidDataException(
+                    $"{description} has an optional ZIP central-directory record outside the configured bounds.");
+            }
+
+            position += recordSize;
+        }
+
         ulong actualSize = position - directoryOffset;
         if (position != directoryEnd || actualSize != declaredSize)
         {
