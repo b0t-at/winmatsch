@@ -19,6 +19,8 @@ internal static class InnoFixtures
 
         public string AppName { get; set; } = "Contoso Commander";
 
+        public byte[]? AppNameBytesOverride { get; set; }
+
         public string AppVerName { get; set; } = "Contoso Commander 2.5";
 
         public string AppId { get; set; } = "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}";
@@ -48,6 +50,8 @@ internal static class InnoFixtures
         public byte PrivilegeOverrides { get; set; }
 
         public List<Language> Languages { get; set; } = [new("english", 1033)];
+
+        public int? AnsiEncodingCodePageOverride { get; set; }
 
         public List<Machine> PayloadMachines { get; set; } = [];
 
@@ -167,12 +171,13 @@ internal static class InnoFixtures
         Encoding encoding = options.Unicode
             ? Encoding.Unicode
             : Encoding.GetEncoding(
-                checked((int)(options.Languages.FirstOrDefault()?.CodePage ?? 1252)),
-                EncoderFallback.ExceptionFallback,
+                options.AnsiEncodingCodePageOverride
+                    ?? checked((int)(options.Languages.FirstOrDefault()?.CodePage ?? 1252)),
+                EncoderFallback.ReplacementFallback,
                 DecoderFallback.ExceptionFallback);
         List<byte> bytes = [];
 
-        AddString(options.AppName);
+        AddString(options.AppName, rawBytes: options.AppNameBytesOverride);
         AddString(options.AppVerName);
         AddString(options.AppId);
         AddString("© Contoso");
@@ -294,9 +299,9 @@ internal static class InnoFixtures
 
         return [.. bytes];
 
-        void AddString(string value, bool forceAnsi = false)
+        void AddString(string value, bool forceAnsi = false, byte[]? rawBytes = null)
         {
-            byte[] encoded = (forceAnsi ? Encoding.GetEncoding(1252) : encoding).GetBytes(value);
+            byte[] encoded = rawBytes ?? (forceAnsi ? Encoding.GetEncoding(1252) : encoding).GetBytes(value);
             AddUInt32((uint)encoded.Length);
             bytes.AddRange(encoded);
         }
@@ -373,7 +378,7 @@ internal static class InnoFixtures
         => version switch
         {
             { Major: 5, Minor: 6, Build: 0 } => 6,
-            { Major: 6, Minor: 4, Build: 0, Revision: 1 } => 6,
+            { Major: 6, Minor: >= 4 } => 6,
             _ => throw new NotSupportedException($"No independent fixture layout is defined for setup data {version}."),
         };
 

@@ -19,6 +19,11 @@ public enum DependencyEvidenceStatus
     Inferred,
     Ambiguous,
     Absent,
+    /// <summary>
+    /// The evidence source was not inspected completely because a configured resource budget,
+    /// stream capability, or supported-format boundary was reached.
+    /// </summary>
+    Unavailable,
 }
 
 /// <summary>
@@ -61,12 +66,22 @@ public sealed class DependencyEvidence
 public sealed class PayloadDependencyAnalysis
 {
     private readonly IReadOnlyList<DependencyEvidence> _evidence;
+    private readonly IReadOnlyList<AnalysisDiagnostic> _diagnostics;
 
-    public PayloadDependencyAnalysis(IReadOnlyList<DependencyEvidence> evidence)
+    public PayloadDependencyAnalysis(
+        IReadOnlyList<DependencyEvidence> evidence,
+        IReadOnlyList<AnalysisDiagnostic>? diagnostics = null)
     {
         ArgumentNullException.ThrowIfNull(evidence);
         _evidence = Array.AsReadOnly(evidence.ToArray());
+        _diagnostics = Array.AsReadOnly((diagnostics ?? []).ToArray());
     }
 
     public IReadOnlyList<DependencyEvidence> Evidence => _evidence;
+
+    /// <summary>Non-fatal reasons why dependency evidence is incomplete or needs review.</summary>
+    public IReadOnlyList<AnalysisDiagnostic> Diagnostics => _diagnostics;
+
+    /// <summary>Whether every relevant payload was inspected within the configured bounds.</summary>
+    public bool IsComplete => !_evidence.Any(static item => item.Status == DependencyEvidenceStatus.Unavailable);
 }

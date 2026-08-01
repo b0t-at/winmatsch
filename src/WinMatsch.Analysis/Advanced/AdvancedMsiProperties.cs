@@ -68,8 +68,12 @@ internal static class AdvancedMsiProperties
 
     private static byte[] Read(RootStorage root, EntryInfo entry)
     {
+        AnalysisLimits.ValidateAllocation(
+            entry.Length,
+            $"Advanced Installer MSI stream '{entry.Name}'",
+            AnalysisLimits.MaxMsiStreamBytes);
         using CfbStream stream = root.OpenStream(entry.Name);
-        byte[] data = new byte[entry.Length];
+        byte[] data = new byte[checked((int)entry.Length)];
         stream.ReadExactly(data);
         return data;
     }

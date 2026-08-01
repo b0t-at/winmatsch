@@ -60,35 +60,6 @@ internal static class PeOverlay
         return overlayStart >= stream.Length ? 0 : overlayStart;
     }
 
-    /// <summary>
-    /// Scans a bounded window of the stream for a payload signature.
-    /// </summary>
-    /// <param name="stream">Seekable stream over the executable.</param>
-    /// <param name="searchStart">Absolute offset where the scan begins.</param>
-    /// <param name="signature">Signature bytes to locate.</param>
-    /// <param name="maxScanBytes">Maximum number of bytes to inspect.</param>
-    /// <returns>The absolute offset of the signature, or <c>-1</c> when absent.</returns>
-    public static long FindSignature(Stream stream, long searchStart, ReadOnlySpan<byte> signature, int maxScanBytes)
-    {
-        ArgumentNullException.ThrowIfNull(stream);
-
-        long available = stream.Length - searchStart;
-        if (available < signature.Length)
-        {
-            return -1;
-        }
-
-        int windowLength = (int)Math.Min(available, maxScanBytes);
-        byte[] window = new byte[windowLength];
-        if (!TryReadAt(stream, searchStart, window))
-        {
-            return -1;
-        }
-
-        int index = window.AsSpan().IndexOf(signature);
-        return index < 0 ? -1 : searchStart + index;
-    }
-
     private static bool TryReadAt(Stream stream, long offset, Span<byte> buffer)
     {
         if (offset < 0 || offset + buffer.Length > stream.Length)

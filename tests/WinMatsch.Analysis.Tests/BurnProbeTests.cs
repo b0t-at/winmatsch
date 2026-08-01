@@ -223,6 +223,21 @@ public class BurnProbeTests
         Assert.Equal(Architecture.Arm64, Assert.Single(analysis.Installers).Architecture);
     }
 
+    [Fact]
+    public void Arm64_only_chain_does_not_silently_inherit_an_x64_stub()
+    {
+        string manifest = BurnFixtures.ManifestXml(msiPackageXml:
+            """<ExePackage Id="Payload" InstallCondition="NativeMachine = 0xAA64" />""");
+
+        InstallerAnalysis? analysis = Probe(BurnFixtures.BuildBundle(manifest, machine: Machine.Amd64));
+
+        Assert.NotNull(analysis);
+        Assert.Null(Assert.Single(analysis.Installers).Architecture);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("BURN003", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+    }
+
     [Theory]
     [InlineData("NativeMachine &lt;&gt; 0xAA64")]
     [InlineData("NOT (NativeMachine = arm64)")]

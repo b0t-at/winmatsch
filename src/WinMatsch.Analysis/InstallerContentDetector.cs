@@ -79,10 +79,6 @@ internal static class InstallerContentDetector
 
             return hasPackageManifest ? InstallerContentKind.Msix : InstallerContentKind.Zip;
         }
-        catch (InvalidDataException)
-        {
-            throw;
-        }
         catch (Exception exception) when (exception is IOException or NotSupportedException)
         {
             throw new InvalidDataException($"'{fileName}' starts with ZIP magic but is not a readable archive.", exception);

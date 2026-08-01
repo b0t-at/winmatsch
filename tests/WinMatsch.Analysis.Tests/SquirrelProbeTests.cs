@@ -148,16 +148,37 @@ public class SquirrelProbeTests
     }
 
     [Theory]
-    [InlineData(Machine.I386, Architecture.X86)]
-    [InlineData(Machine.Amd64, Architecture.X64)]
-    [InlineData(Machine.Arm64, Architecture.Arm64)]
-    public void Stub_machine_decides_architecture(Machine machine, Architecture expected)
+    [InlineData(Machine.I386)]
+    [InlineData(Machine.Amd64)]
+    [InlineData(Machine.Arm64)]
+    public void Stub_machine_alone_does_not_decide_payload_architecture(Machine machine)
     {
         byte[] setup = SquirrelFixtures.BuildClassicSetup(
             SquirrelFixtures.BuildNupkg(SquirrelFixtures.NuspecXml()),
             machine: machine);
 
-        Assert.Equal(expected, Assert.Single(Probe(setup)!.Installers).Architecture);
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(setup));
+        Assert.Null(Assert.Single(analysis.Installers).Architecture);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("SQUIRREL001", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+    }
+
+    [Theory]
+    [InlineData(Machine.I386, Architecture.X86)]
+    [InlineData(Machine.Amd64, Architecture.X64)]
+    [InlineData(Machine.Arm64, Architecture.Arm64)]
+    public void Nupkg_payload_pe_decides_architecture(Machine machine, Architecture expected)
+    {
+        byte[] nupkg = SquirrelFixtures.BuildNupkg(
+            SquirrelFixtures.NuspecXml(),
+            extraEntries: [("lib/net45/app.exe", DependencyFixtures.BuildPe(machine))]);
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(
+            Probe(SquirrelFixtures.BuildClassicSetup(nupkg)));
+
+        Assert.Equal(expected, Assert.Single(analysis.Installers).Architecture);
+        Assert.Empty(analysis.Diagnostics);
     }
 
     [Fact]
@@ -183,7 +204,9 @@ public class SquirrelProbeTests
         Installer installer = Assert.Single(analysis.Installers);
         Assert.Null(installer.ProductCode);
         Assert.Null(installer.AppsAndFeaturesEntries);
+        Assert.Null(installer.Architecture);
         Assert.Equal("Contoso Chat", analysis.ProductName);
+        Assert.Equal("SQUIRREL001", Assert.Single(analysis.Diagnostics).Code);
     }
 
     [Fact]

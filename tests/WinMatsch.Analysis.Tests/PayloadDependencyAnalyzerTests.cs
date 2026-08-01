@@ -38,6 +38,7 @@ public class PayloadDependencyAnalyzerTests
             () => ((IList<string>)evidence.Signals).Add("another.dll"));
         Assert.Throws<NotSupportedException>(
             () => ((IList<DependencyEvidence>)analysis.Evidence).Clear());
+        Assert.True(analysis.IsComplete);
     }
 
     [Theory]
@@ -226,7 +227,7 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
-    public void Oversized_relevant_payload_is_rejected_by_the_configured_bound()
+    public void Oversized_relevant_payload_returns_unavailable_evidence_without_aborting()
     {
         var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
         {
@@ -234,10 +235,50 @@ public class PayloadDependencyAnalyzerTests
         });
         using MemoryStream archive = DependencyFixtures.BuildZip(("app.exe", [1, 2, 3, 4]));
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(
-            () => analyzer.Analyze(archive, "large.zip"));
+        PayloadDependencyAnalysis analysis = analyzer.Analyze(archive, "large.zip");
 
-        Assert.Contains("per-payload analysis limit", exception.Message, StringComparison.Ordinal);
+        Assert.False(analysis.IsComplete);
+        Assert.All(analysis.Evidence, evidence =>
+        {
+            Assert.Equal("app.exe", evidence.PayloadPath);
+            Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status);
+            Assert.Contains("analysis-unavailable:payload-byte-budget", evidence.Signals);
+        });
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
+    }
+
+    [Fact]
+    public void Seventy_megabyte_compressed_entry_does_not_abort_archive_analysis()
+    {
+        using MemoryStream archive = DependencyFixtures.BuildCompressedZeroZip(
+            "electron/app.exe",
+            70L * 1024 * 1024);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "electron.zip");
+
+        Assert.False(analysis.IsComplete);
+        Assert.All(
+            analysis.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
+    }
+
+    [Fact]
+    public void Inflated_declared_length_does_not_consume_the_actual_byte_budget()
+    {
+        byte[] pe = DependencyFixtures.BuildPe(Machine.Amd64, "VCRUNTIME140.dll");
+        using var archive = new MemoryStream(SquirrelFixtures.BuildStoredZip(
+            [("app.exe", pe)],
+            declaredSizeOverrideForLastEntry: 200L * 1024 * 1024));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "declared-size.zip");
+
+        DependencyEvidence evidence = Find(
+            analysis,
+            "app.exe",
+            DependencyEvidenceKind.VisualCppRuntime);
+        Assert.Equal(DependencyEvidenceStatus.Detected, evidence.Status);
+        Assert.True(analysis.IsComplete);
     }
 
     [Fact]
@@ -258,7 +299,7 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
-    public void Total_relevant_payload_bytes_are_bounded()
+    public void Total_relevant_payload_budget_counts_actual_reads_and_degrades()
     {
         var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
         {
@@ -269,10 +310,132 @@ public class PayloadDependencyAnalyzerTests
             ("one.exe", [1, 2, 3]),
             ("two.dll", [4, 5, 6]));
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(
-            () => analyzer.Analyze(archive, "large.zip"));
+        PayloadDependencyAnalysis analysis = analyzer.Analyze(archive, "large.zip");
 
-        Assert.Contains("total analysis limit", exception.Message, StringComparison.Ordinal);
+        Assert.False(analysis.IsComplete);
+        Assert.Contains(
+            analysis.Evidence,
+            evidence => evidence.PayloadPath == "two.dll"
+                && evidence.Status == DependencyEvidenceStatus.Unavailable
+                && evidence.Signals.Contains("analysis-unavailable:aggregate-byte-budget"));
+    }
+
+    [Fact]
+    public void Archive_read_operation_budget_bounds_decompression_work()
+    {
+        var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
+        {
+            MaximumArchiveReadOperations = 1,
+        });
+        using MemoryStream archive = DependencyFixtures.BuildZip(
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64)));
+
+        PayloadDependencyAnalysis analysis = analyzer.Analyze(archive, "work.zip");
+
+        Assert.False(analysis.IsComplete);
+        Assert.Contains(
+            analysis.Evidence,
+            evidence => evidence.Status == DependencyEvidenceStatus.Unavailable
+                && evidence.Signals.Contains("analysis-unavailable:work-budget"));
+    }
+
+    [Fact]
+    public void Two_hundred_megabyte_sparse_executable_uses_targeted_pe_reads()
+    {
+        using DependencyFixtures.SparsePrefixStream stream = DependencyFixtures.BuildSparsePeStream(
+            Machine.Amd64,
+            200L * 1024 * 1024,
+            "VCRUNTIME140.dll");
+
+        PayloadDependencyAnalysis dependencies = _analyzer.Analyze(stream, "large-tool.exe");
+
+        DependencyEvidence evidence = Find(
+            dependencies,
+            "large-tool.exe",
+            DependencyEvidenceKind.VisualCppRuntime);
+        Assert.Equal(DependencyEvidenceStatus.Detected, evidence.Status);
+        Assert.Equal(Architecture.X64, evidence.Architecture);
+        Assert.True(stream.TotalBytesRead < 32L * 1024 * 1024);
+
+        stream.Position = 0;
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(stream, "large-tool.exe");
+        Assert.Equal(DetectedInstallerFormat.PortableExe, analysis.Format);
+    }
+
+    [Fact]
+    public void Wrapper_stub_without_payload_signal_is_ambiguous_not_absent()
+    {
+        byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "",
+        });
+        using var stream = new MemoryStream(installer);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "setup.exe");
+
+        Assert.All(
+            analysis.Evidence.Where(evidence => evidence.PayloadPath == "setup.exe"),
+            evidence =>
+            {
+                Assert.Equal(DependencyEvidenceStatus.Ambiguous, evidence.Status);
+                Assert.Contains(evidence.Signals, signal => signal.StartsWith("outer-stub-only:", StringComparison.Ordinal));
+            });
+    }
+
+    [Fact]
+    public void Inno_embedded_pe_supplies_inner_vc_runtime_evidence()
+    {
+        byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "",
+            AdditionalPayloadBytes = DependencyFixtures.BuildPe(Machine.Amd64, "VCRUNTIME140.dll"),
+        });
+        using var stream = new MemoryStream(installer);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "setup.exe");
+
+        DependencyEvidence evidence = Assert.Single(
+            analysis.Evidence,
+            item => item.PayloadPath.StartsWith("inno-payload/", StringComparison.Ordinal)
+                && item.Kind == DependencyEvidenceKind.VisualCppRuntime);
+        Assert.Equal(DependencyEvidenceStatus.Detected, evidence.Status);
+        Assert.Equal(Architecture.X64, evidence.Architecture);
+        Assert.Contains("vcruntime140.dll", evidence.Signals);
+    }
+
+    [Fact]
+    public void Squirrel_nupkg_pe_supplies_inner_vc_runtime_evidence()
+    {
+        byte[] nupkg = SquirrelFixtures.BuildNupkg(
+            SquirrelFixtures.NuspecXml(),
+            extraEntries:
+            [
+                ("lib/net45/app.exe", DependencyFixtures.BuildPe(Machine.Amd64, "VCRUNTIME140.dll")),
+            ]);
+        using var stream = new MemoryStream(SquirrelFixtures.BuildClassicSetup(nupkg));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "Setup.exe");
+
+        DependencyEvidence evidence = Find(
+            analysis,
+            "squirrel-nupkg/lib/net45/app.exe",
+            DependencyEvidenceKind.VisualCppRuntime);
+        Assert.Equal(DependencyEvidenceStatus.Detected, evidence.Status);
+        Assert.Equal(Architecture.X64, evidence.Architecture);
+    }
+
+    [Fact]
+    public void Cancellation_is_not_converted_to_unavailable_evidence()
+    {
+        using MemoryStream archive = DependencyFixtures.BuildZip(
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64)));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(
+            () => _analyzer.AnalyzeWithCancellation(archive, "cancelled.zip", cancellation.Token));
     }
 
     [Theory]
@@ -296,6 +459,10 @@ public class PayloadDependencyAnalyzerTests
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumPayloadBytes = -1 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalPayloadBytes = 0 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalPayloadBytes = -1 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumArchiveReadOperations = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumArchiveReadOperations = -1 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumRuntimeConfigBytes = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumRuntimeConfigBytes = -1 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumImportDescriptors = 0 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumImportDescriptors = -1 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumImportNameBytes = 0 });

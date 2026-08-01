@@ -1,6 +1,9 @@
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using WinMatsch.Analysis.Inno;
+using WinMatsch.Analysis.Pe;
+using WinMatsch.Analysis.Squirrel;
 
 namespace WinMatsch.Analysis.Dependencies;
 
@@ -23,21 +26,163 @@ public sealed partial class PayloadDependencyAnalyzer
 
     /// <summary>Analyzes a PE installer or ZIP archive while leaving the input stream open.</summary>
     public PayloadDependencyAnalysis Analyze(Stream stream, string fileName)
+        => AnalyzeCore(stream, fileName, CancellationToken.None);
+
+    /// <summary>
+    /// Analyzes a PE installer or ZIP archive while leaving the input stream open. Resource-limit
+    /// exhaustion is returned as unavailable evidence; cancellation still propagates normally.
+    /// </summary>
+    public PayloadDependencyAnalysis AnalyzeWithCancellation(
+        Stream stream,
+        string fileName,
+        CancellationToken cancellationToken)
+        => AnalyzeCore(stream, fileName, cancellationToken);
+
+    private PayloadDependencyAnalysis AnalyzeCore(
+        Stream stream,
+        string fileName,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (string.Equals(Path.GetExtension(fileName), ".zip", StringComparison.OrdinalIgnoreCase))
         {
-            return AnalyzeArchive(stream);
+            return AnalyzeArchive(stream, cancellationToken);
         }
 
-        byte[] image = ReadBounded(stream, _options.MaximumPayloadBytes, fileName);
-        PePayload payload = InspectPe(Path.GetFileName(fileName), image);
-        return new PayloadDependencyAnalysis(CreatePeEvidence(payload, runtimeConfig: null, nearbyHostFxr: null));
+        return AnalyzeExecutable(stream, fileName, cancellationToken);
     }
 
-    private PayloadDependencyAnalysis AnalyzeArchive(Stream stream)
+    private PayloadDependencyAnalysis AnalyzeExecutable(
+        Stream stream,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        string payloadPath = Path.GetFileName(fileName);
+        if (!stream.CanSeek)
+        {
+            const string signal = "analysis-unavailable:non-seekable-executable";
+            return new PayloadDependencyAnalysis(
+                CreateUnavailableEvidence(payloadPath, signal),
+                [new AnalysisDiagnostic("DEP001", $"Dependency evidence for '{payloadPath}' is unavailable because the executable stream is not seekable.")]);
+        }
+
+        PePayload payload = InspectPe(payloadPath, stream);
+        InstallerAnalysis? installerAnalysis = TryAnalyzeExecutable(stream, fileName, cancellationToken);
+        DetectedInstallerFormat? format = installerAnalysis?.Format;
+        bool payloadIsDirect = format == DetectedInstallerFormat.PortableExe;
+        string? outerSignal = payloadIsDirect
+            ? null
+            : $"outer-stub-only:{format?.ToString() ?? "unclassified"}";
+        var evidence = new List<DependencyEvidence>(CreatePeEvidence(
+            payload,
+            runtimeConfig: null,
+            nearbyHostFxr: null,
+            allowAbsent: payloadIsDirect,
+            additionalSignal: outerSignal));
+        var diagnostics = new List<AnalysisDiagnostic>(payloadIsDirect
+            ? []
+            :
+            [
+                new AnalysisDiagnostic(
+                    "DEP002",
+                    $"The outer PE of '{payloadPath}' is a wrapper stub"
+                        + (format is null ? "." : $" ({format}).")
+                        + " Missing runtime imports in that stub are ambiguous; any bounded format-specific payload evidence is reported separately."),
+            ]);
+        if (format == DetectedInstallerFormat.InnoSetup)
+        {
+            AddInnoPayloadEvidence(stream, evidence, diagnostics, cancellationToken);
+        }
+        else if (format == DetectedInstallerFormat.Squirrel)
+        {
+            AddSquirrelPayloadEvidence(stream, evidence, cancellationToken);
+            diagnostics.AddRange(installerAnalysis?.Diagnostics ?? []);
+        }
+
+        return new PayloadDependencyAnalysis(evidence, diagnostics);
+    }
+
+    private static void AddInnoPayloadEvidence(
+        Stream stream,
+        List<DependencyEvidence> evidence,
+        List<AnalysisDiagnostic> diagnostics,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        long savedPosition = stream.Position;
+        try
+        {
+            stream.Position = 0;
+            using var peFile = new PeFile(stream);
+            stream.Position = 0;
+            InnoSetupMetadata? metadata = new InnoProbe().Inspect(peFile, stream);
+            if (metadata is null)
+            {
+                return;
+            }
+
+            int index = 0;
+            foreach (InnoPayloadCandidate candidate in metadata.EmbeddedPayloads)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var payload = new PePayload(
+                    $"inno-payload/{++index}-{candidate.Architecture.ToString().ToLowerInvariant()}.exe",
+                    candidate.ImportInspection);
+                evidence.AddRange(CreatePeEvidence(
+                    payload,
+                    runtimeConfig: null,
+                    nearbyHostFxr: null,
+                    allowAbsent: true,
+                    additionalSignal: "inno:embedded-pe"));
+            }
+
+            diagnostics.AddRange(metadata.Diagnostics.Where(static diagnostic =>
+                diagnostic.Code is "INNO003" or "INNO007" or "INNO008" or "INNO009"));
+        }
+        catch (UnsupportedInnoVersionException)
+        {
+            // The outer analysis already carries the future-version diagnostic. Dependency
+            // evidence remains explicitly ambiguous through the outer-stub evidence above.
+        }
+        finally
+        {
+            stream.Position = savedPosition;
+        }
+    }
+
+    private static void AddSquirrelPayloadEvidence(
+        Stream stream,
+        List<DependencyEvidence> evidence,
+        CancellationToken cancellationToken)
+    {
+        long savedPosition = stream.Position;
+        try
+        {
+            stream.Position = 0;
+            foreach (SquirrelPayloadPe candidate in SquirrelProbe.InspectPayloadPeEvidence(stream))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var payload = new PePayload(
+                    $"squirrel-nupkg/{candidate.Path}",
+                    candidate.ImportInspection);
+                evidence.AddRange(CreatePeEvidence(
+                    payload,
+                    runtimeConfig: null,
+                    nearbyHostFxr: null,
+                    allowAbsent: true,
+                    additionalSignal: "squirrel:nupkg-pe"));
+            }
+        }
+        finally
+        {
+            stream.Position = savedPosition;
+        }
+    }
+
+    private PayloadDependencyAnalysis AnalyzeArchive(Stream stream, CancellationToken cancellationToken)
     {
         using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
         if (archive.Entries.Count > _options.MaximumArchiveEntries)
@@ -49,10 +194,15 @@ public sealed partial class PayloadDependencyAnalyzer
         var pePayloads = new List<PePayload>();
         var runtimeConfigs = new List<RuntimeConfigPayload>();
         var hostFxrPayloads = new List<PePayload>();
-        long totalBytes = 0;
+        var evidence = new List<DependencyEvidence>();
+        var diagnostics = new List<AnalysisDiagnostic>();
+        var budget = new ArchiveReadBudget(
+            _options.MaximumTotalPayloadBytes,
+            _options.MaximumArchiveReadOperations);
 
         foreach (ZipArchiveEntry entry in archive.Entries)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string path = NormalizeAndValidatePath(entry.FullName);
             if (path.EndsWith('/'))
             {
@@ -66,21 +216,26 @@ public sealed partial class PayloadDependencyAnalyzer
                 continue;
             }
 
-            if (entry.Length > _options.MaximumPayloadBytes)
-            {
-                throw new InvalidDataException(
-                    $"Archive payload '{path}' is {entry.Length} bytes, exceeding the per-payload analysis limit of {_options.MaximumPayloadBytes}.");
-            }
-
-            totalBytes = checked(totalBytes + entry.Length);
-            if (totalBytes > _options.MaximumTotalPayloadBytes)
-            {
-                throw new InvalidDataException(
-                    $"Relevant archive payloads exceed the total analysis limit of {_options.MaximumTotalPayloadBytes} bytes.");
-            }
-
             using Stream entryStream = entry.Open();
-            byte[] content = ReadBounded(entryStream, _options.MaximumPayloadBytes, path);
+            long perPayloadLimit = isRuntimeConfig
+                ? Math.Min(_options.MaximumPayloadBytes, _options.MaximumRuntimeConfigBytes)
+                : _options.MaximumPayloadBytes;
+            PayloadReadResult read = ReadPayload(
+                entryStream,
+                perPayloadLimit,
+                budget,
+                cancellationToken);
+            if (read.Content is null)
+            {
+                string signal = $"analysis-unavailable:{read.Reason}";
+                evidence.AddRange(CreateUnavailableEvidence(path, signal, isRuntimeConfig));
+                diagnostics.Add(new AnalysisDiagnostic(
+                    "DEP003",
+                    $"Dependency evidence for archive payload '{path}' is unavailable: {read.Description}."));
+                continue;
+            }
+
+            byte[] content = read.Content;
             if (isRuntimeConfig)
             {
                 runtimeConfigs.Add(new RuntimeConfigPayload(path, ParseRuntimeConfig(content)));
@@ -96,7 +251,6 @@ public sealed partial class PayloadDependencyAnalyzer
             }
         }
 
-        var evidence = new List<DependencyEvidence>();
         var matchedConfigs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (PePayload payload in pePayloads)
         {
@@ -107,7 +261,12 @@ public sealed partial class PayloadDependencyAnalyzer
             }
 
             PePayload? nearbyHostFxr = FindNearbyHostFxr(payload.Path, hostFxrPayloads);
-            evidence.AddRange(CreatePeEvidence(payload, runtimeConfig, nearbyHostFxr));
+            evidence.AddRange(CreatePeEvidence(
+                payload,
+                runtimeConfig,
+                nearbyHostFxr,
+                allowAbsent: true,
+                additionalSignal: null));
         }
 
         foreach (RuntimeConfigPayload runtimeConfig in runtimeConfigs)
@@ -118,33 +277,45 @@ public sealed partial class PayloadDependencyAnalyzer
             }
         }
 
-        return new PayloadDependencyAnalysis(evidence);
+        return new PayloadDependencyAnalysis(evidence, diagnostics);
     }
 
-    private PePayload InspectPe(string path, byte[] image)
+    private PePayload InspectPe(string path, Stream stream)
         => new(
             path,
             PeImportReader.Inspect(
-                image,
+                stream,
                 _options.MaximumImportDescriptors,
                 _options.MaximumImportNameBytes));
+
+    private PePayload InspectPe(string path, byte[] content)
+    {
+        using var stream = new MemoryStream(content, writable: false);
+        return InspectPe(path, stream);
+    }
 
     private static IReadOnlyList<DependencyEvidence> CreatePeEvidence(
         PePayload payload,
         RuntimeConfigPayload? runtimeConfig,
-        PePayload? nearbyHostFxr)
+        PePayload? nearbyHostFxr,
+        bool allowAbsent,
+        string? additionalSignal)
     {
         PeImportInspection pe = payload.Inspection;
-        string[] vcImports = pe.ImportedModules
+        List<string> vcSignals = pe.ImportedModules
             .Where(IsVisualCppRuntimeModule)
             .Select(static module => module.ToLowerInvariant())
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
-            .ToArray();
+            .ToList();
+        if (additionalSignal is not null)
+        {
+            vcSignals.Add(additionalSignal);
+        }
 
-        DependencyEvidenceStatus vcStatus = vcImports.Length > 0
+        DependencyEvidenceStatus vcStatus = vcSignals.Any(IsVisualCppRuntimeModule)
             ? DependencyEvidenceStatus.Detected
-            : pe.IsComplete
+            : pe.IsComplete && allowAbsent
                 ? DependencyEvidenceStatus.Absent
                 : DependencyEvidenceStatus.Ambiguous;
 
@@ -154,11 +325,20 @@ public sealed partial class PayloadDependencyAnalyzer
             Architecture = pe.Architecture,
             Kind = DependencyEvidenceKind.VisualCppRuntime,
             Status = vcStatus,
-            Signals = vcImports,
+            Signals = vcSignals,
         };
 
         RuntimeConfigInspection runtime = runtimeConfig?.Inspection ?? RuntimeConfigInspection.Absent;
         var runtimeSignals = new List<string>(runtime.Signals);
+        if (additionalSignal is not null)
+        {
+            runtimeSignals.Add(additionalSignal);
+        }
+        if (pe.IsManaged)
+        {
+            runtimeSignals.Add("pe:managed-image");
+        }
+
         if (IsHostFxr(payload.Path))
         {
             runtimeSignals.Add($"bundled-hostfxr:{payload.Path}");
@@ -172,7 +352,9 @@ public sealed partial class PayloadDependencyAnalyzer
             ? runtime.Status
             : nearbyHostFxr is not null || IsHostFxr(payload.Path)
                 ? DependencyEvidenceStatus.Ambiguous
-                : pe.IsComplete
+                : pe.IsManaged
+                    ? DependencyEvidenceStatus.Ambiguous
+                    : pe.IsComplete && allowAbsent
                     ? DependencyEvidenceStatus.Absent
                     : DependencyEvidenceStatus.Ambiguous;
 
@@ -193,6 +375,44 @@ public sealed partial class PayloadDependencyAnalyzer
         };
 
         return [vcEvidence, dotNetEvidence];
+    }
+
+    private static IReadOnlyList<DependencyEvidence> CreateUnavailableEvidence(
+        string path,
+        string signal,
+        bool runtimeConfigOnly = false)
+    {
+        if (runtimeConfigOnly)
+        {
+            return
+            [
+                new DependencyEvidence
+                {
+                    PayloadPath = path,
+                    Kind = DependencyEvidenceKind.DotNetRuntime,
+                    Status = DependencyEvidenceStatus.Unavailable,
+                    Signals = [signal],
+                },
+            ];
+        }
+
+        return
+        [
+            new DependencyEvidence
+            {
+                PayloadPath = path,
+                Kind = DependencyEvidenceKind.VisualCppRuntime,
+                Status = DependencyEvidenceStatus.Unavailable,
+                Signals = [signal],
+            },
+            new DependencyEvidence
+            {
+                PayloadPath = path,
+                Kind = DependencyEvidenceKind.DotNetRuntime,
+                Status = DependencyEvidenceStatus.Unavailable,
+                Signals = [signal],
+            },
+        ];
     }
 
     private static DependencyEvidence CreateUnassociatedRuntimeConfigEvidence(RuntimeConfigPayload runtimeConfig)
@@ -390,31 +610,73 @@ public sealed partial class PayloadDependencyAnalyzer
             && major >= 5;
     }
 
-    private static byte[] ReadBounded(Stream stream, long maximumBytes, string payloadPath)
+    private static PayloadReadResult ReadPayload(
+        Stream stream,
+        long maximumBytes,
+        ArchiveReadBudget budget,
+        CancellationToken cancellationToken)
     {
-        if (stream.CanSeek && stream.Length - stream.Position > maximumBytes)
+        if (budget.RemainingBytes <= 0)
         {
-            throw new InvalidDataException(
-                $"Payload '{payloadPath}' exceeds the analysis limit of {maximumBytes} bytes.");
+            return PayloadReadResult.Unavailable(
+                "aggregate-byte-budget",
+                $"the aggregate read budget of {budget.MaximumBytes} bytes was exhausted");
         }
 
-        using var buffer = new MemoryStream();
+        using var output = new MemoryStream((int)Math.Min(maximumBytes, 64 * 1024));
         byte[] chunk = new byte[81920];
         long total = 0;
-        int read;
-        while ((read = stream.Read(chunk, 0, chunk.Length)) > 0)
+        while (true)
         {
-            total += read;
-            if (total > maximumBytes)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!budget.TryConsumeOperation())
             {
-                throw new InvalidDataException(
-                    $"Payload '{payloadPath}' exceeds the analysis limit of {maximumBytes} bytes.");
+                return PayloadReadResult.Unavailable(
+                    "work-budget",
+                    $"the archive read-work budget of {budget.MaximumOperations} operations was exhausted");
             }
 
-            buffer.Write(chunk, 0, read);
-        }
+            long remainingPerPayload = maximumBytes - total;
+            long remainingAggregate = budget.RemainingBytes;
+            if (remainingPerPayload <= 0)
+            {
+                if (remainingAggregate <= 0)
+                {
+                    return PayloadReadResult.Unavailable(
+                        "aggregate-byte-budget",
+                        $"the aggregate read budget of {budget.MaximumBytes} bytes was exhausted");
+                }
 
-        return buffer.ToArray();
+                int extra = stream.ReadByte();
+                if (extra < 0)
+                {
+                    return PayloadReadResult.Success(output.ToArray());
+                }
+
+                budget.ConsumeBytes(1);
+                return PayloadReadResult.Unavailable(
+                    "payload-byte-budget",
+                    $"it expands beyond the per-payload read budget of {maximumBytes} bytes");
+            }
+
+            if (remainingAggregate <= 0)
+            {
+                return PayloadReadResult.Unavailable(
+                    "aggregate-byte-budget",
+                    $"the aggregate read budget of {budget.MaximumBytes} bytes was exhausted");
+            }
+
+            int requested = (int)Math.Min(chunk.Length, Math.Min(remainingPerPayload, remainingAggregate));
+            int read = stream.Read(chunk, 0, requested);
+            if (read == 0)
+            {
+                return PayloadReadResult.Success(output.ToArray());
+            }
+
+            budget.ConsumeBytes(read);
+            total += read;
+            output.Write(chunk, 0, read);
+        }
     }
 
     private static bool HasExtension(string path, string extension)
@@ -453,12 +715,86 @@ public sealed partial class PayloadDependencyAnalyzer
     private static string CombinePath(string directory, string fileName)
         => directory.Length == 0 ? fileName : $"{directory}/{fileName}";
 
+    private static InstallerAnalysis? TryAnalyzeExecutable(
+        Stream stream,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        long savedPosition = stream.Position;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            stream.Position = 0;
+            return new ExeAnalyzer().Analyze(stream, fileName);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException
+                or BadImageFormatException
+                or NotSupportedException
+                or IOException)
+        {
+            return null;
+        }
+        finally
+        {
+            stream.Position = savedPosition;
+        }
+    }
+
     [GeneratedRegex(@"^(?:vcruntime|msvcp|concrt)\d+(?:_\d+)?d?\.dll$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex VisualCppRuntimeModuleRegex();
 
     private sealed record PePayload(string Path, PeImportInspection Inspection);
 
     private sealed record RuntimeConfigPayload(string Path, RuntimeConfigInspection Inspection);
+
+    private sealed record PayloadReadResult(byte[]? Content, string? Reason, string? Description)
+    {
+        public static PayloadReadResult Success(byte[] content) => new(content, null, null);
+
+        public static PayloadReadResult Unavailable(string reason, string description)
+            => new(null, reason, description);
+    }
+
+    private sealed class ArchiveReadBudget
+    {
+        public ArchiveReadBudget(long maximumBytes, int maximumOperations)
+        {
+            MaximumBytes = maximumBytes;
+            MaximumOperations = maximumOperations;
+            RemainingBytes = maximumBytes;
+            RemainingOperations = maximumOperations;
+        }
+
+        public long MaximumBytes { get; }
+
+        public int MaximumOperations { get; }
+
+        public long RemainingBytes { get; private set; }
+
+        public int RemainingOperations { get; private set; }
+
+        public bool TryConsumeOperation()
+        {
+            if (RemainingOperations == 0)
+            {
+                return false;
+            }
+
+            RemainingOperations--;
+            return true;
+        }
+
+        public void ConsumeBytes(int bytes)
+        {
+            if (bytes < 0 || bytes > RemainingBytes)
+            {
+                throw new InvalidOperationException("The dependency-analysis read budget was exceeded.");
+            }
+
+            RemainingBytes -= bytes;
+        }
+    }
 
     private sealed record RuntimeConfigInspection(
         DependencyEvidenceStatus Status,

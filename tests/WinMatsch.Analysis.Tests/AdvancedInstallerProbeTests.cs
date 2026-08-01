@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using System.Reflection.PortableExecutable;
+using System.Text;
 using WinMatsch.Analysis.Advanced;
 using WinMatsch.Analysis.Burn;
 using WinMatsch.Analysis.Nsis;
@@ -178,6 +180,25 @@ public class AdvancedInstallerProbeTests
 
         InvalidDataException error = Assert.Throws<InvalidDataException>(() => Probe(setup));
         Assert.Contains("nested 7z", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Oversized_declared_msi_table_stream_is_rejected_before_allocation()
+    {
+        byte[] msi = MsiFixtures.BuildMsi(_typicalProperties);
+        string encodedName = MsiFixtures.EncodeStreamName("Property", isTable: true);
+        byte[] nameBytes = Encoding.Unicode.GetBytes(encodedName + "\0");
+        int directoryEntry = msi.AsSpan().IndexOf(nameBytes);
+        Assert.True(directoryEntry >= 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            msi.AsSpan(directoryEntry + 120),
+            (ulong)AnalysisLimits.MaxMsiStreamBytes + 1);
+        using var stream = new MemoryStream(msi);
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => AdvancedMsiProperties.IsArpSystemComponent(stream));
+
+        Assert.Contains("allocation limit", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

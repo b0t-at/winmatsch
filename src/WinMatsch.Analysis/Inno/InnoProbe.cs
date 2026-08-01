@@ -24,7 +24,40 @@ public sealed class InnoProbe : IExeFormatProbe
         ArgumentNullException.ThrowIfNull(peFile);
         ArgumentNullException.ThrowIfNull(stream);
 
-        InnoSetupMetadata? metadata = Inspect(peFile, stream);
+        InnoSetupMetadata? metadata;
+        try
+        {
+            metadata = Inspect(peFile, stream);
+        }
+        catch (UnsupportedInnoVersionException exception)
+        {
+            VersionInfo unsupportedVersion = peFile.VersionInfo;
+            return new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.InnoSetup,
+                Installers =
+                [
+                    new Installer
+                    {
+                        Architecture = peFile.Architecture == Architecture.X86 ? null : peFile.Architecture,
+                        InstallerType = InstallerType.Inno,
+                        ElevationRequirement = peFile.RequestedElevation,
+                    },
+                ],
+                ProductName = unsupportedVersion.ProductName,
+                ProductVersion = unsupportedVersion.ProductVersion,
+                Publisher = unsupportedVersion.CompanyName,
+                Copyright = unsupportedVersion.LegalCopyright,
+                Diagnostics =
+                [
+                    new AnalysisDiagnostic(
+                        "INNO010",
+                        $"{exception.Message} Header metadata was not interpreted; verify the installer manually.",
+                        RequiresManualAnalysis: true),
+                ],
+            };
+        }
+
         if (metadata is null)
         {
             return null;
@@ -48,6 +81,9 @@ public sealed class InnoProbe : IExeFormatProbe
             ElevationRequirement = metadata.ElevationRequirement,
             ProductCode = productCode,
             InstallerLocale = metadata.Languages.Count == 1 ? metadata.Languages[0].Locale : null,
+            UnsupportedOSArchitectures = metadata.UnsupportedOSArchitectures.Count == 0
+                ? null
+                : [.. metadata.UnsupportedOSArchitectures],
         };
 
         string? installLocation = NormalizeInstallLocation(metadata);
@@ -80,6 +116,7 @@ public sealed class InnoProbe : IExeFormatProbe
             ProductVersion = displayVersion ?? version.ProductVersion,
             Publisher = publisher ?? version.CompanyName,
             Copyright = version.LegalCopyright,
+            Diagnostics = metadata.Diagnostics,
         };
     }
 
@@ -96,17 +133,17 @@ public sealed class InnoProbe : IExeFormatProbe
         }
 
         InnoParsedHeader header = parsed.Value.Header;
-        IReadOnlyList<(Architecture Architecture, long Size)> payloads =
+        InnoPayloadScanResult payloadScan =
             InnoFormatReader.InspectPayloads(stream, parsed.Value.Offsets, header.Compression, _options);
-        List<Architecture> payloadArchitectures = payloads
+        List<Architecture> payloadArchitectures = payloadScan.Candidates
             .OrderByDescending(payload => payload.Size)
             .Select(payload => payload.Architecture)
             .Distinct()
             .ToList();
 
-        (Architecture? architecture, bool conclusive) = GetArchitecture(
+        ArchitectureDecision decision = GetArchitecture(
             header,
-            payloads,
+            payloadScan,
             peFile.Architecture,
             _options);
         bool overrideAllowed = header.PrivilegesMayBeOverridden;
@@ -119,9 +156,18 @@ public sealed class InnoProbe : IExeFormatProbe
         ElevationRequirement? elevation = overrideAllowed ? null : header.Privileges switch
         {
             InnoPrivilegeLevel.Admin or InnoPrivilegeLevel.PowerUser => ElevationRequirement.ElevationRequired,
-            InnoPrivilegeLevel.Lowest => ElevationRequirement.ElevationProhibited,
+            InnoPrivilegeLevel.Lowest => null,
             _ => peFile.RequestedElevation,
         };
+        List<AnalysisDiagnostic> diagnostics =
+        [
+            .. header.Diagnostics,
+            .. payloadScan.Diagnostics,
+        ];
+        if (decision.Diagnostic is not null)
+        {
+            diagnostics.Add(decision.Diagnostic);
+        }
 
         bool? createsUninstallRegistryKey = GetCreatesUninstallRegistryKey(
             header.CreateUninstallRegKey,
@@ -150,14 +196,17 @@ public sealed class InnoProbe : IExeFormatProbe
             ElevationRequirement = elevation,
             Languages = header.Languages,
             EmbeddedPayloadArchitectures = payloadArchitectures,
-            EffectiveArchitecture = architecture,
-            ArchitectureIsConclusive = conclusive,
+            EmbeddedPayloads = payloadScan.Candidates,
+            UnsupportedOSArchitectures = GetUnsupportedOSArchitectures(header, _options),
+            EffectiveArchitecture = decision.Architecture,
+            ArchitectureIsConclusive = decision.Conclusive,
+            Diagnostics = diagnostics.Distinct().ToArray(),
         };
     }
 
-    private static (Architecture? Architecture, bool Conclusive) GetArchitecture(
+    private static ArchitectureDecision GetArchitecture(
         InnoParsedHeader header,
-        IReadOnlyList<(Architecture Architecture, long Size)> payloads,
+        InnoPayloadScanResult payloadScan,
         Architecture stubArchitecture,
         InnoProbeOptions options)
     {
@@ -166,23 +215,85 @@ public sealed class InnoProbe : IExeFormatProbe
                 options,
                 out InnoArchitectureExpression.Evaluation allowed))
         {
-            return stubArchitecture == Architecture.X86 ? (null, false) : (stubArchitecture, false);
+            return new ArchitectureDecision(
+                stubArchitecture == Architecture.X86 ? null : stubArchitecture,
+                Conclusive: false,
+                new AnalysisDiagnostic(
+                    "INNO001",
+                    $"The Inno Setup ArchitecturesAllowed expression '{header.ArchitecturesAllowed}' could not be evaluated safely.",
+                    RequiresManualAnalysis: true));
         }
 
         (Architecture? headerArchitecture, bool headerConclusive) =
             GetHeaderArchitecture(allowed, stubArchitecture);
-        Architecture[] payloadArchitectures = payloads
-            .Select(payload => payload.Architecture)
-            .Distinct()
-            .ToArray();
-        if (payloadArchitectures.Length == 1
-            && TryGetArchitectureTarget(payloadArchitectures[0], out int payloadTarget)
-            && (allowed.PositiveX86CompatibleTargets & payloadTarget) != 0)
+        PayloadSelection payload = SelectPayloadArchitecture(payloadScan.Candidates);
+        bool allowedIsEmpty = string.IsNullOrWhiteSpace(header.ArchitecturesAllowed);
+        if (payload.Architecture is { } payloadArchitecture
+            && TryGetArchitectureTarget(payloadArchitecture, out int payloadTarget)
+            && (allowedIsEmpty || (allowed.PositiveX86CompatibleTargets & payloadTarget) != 0))
         {
-            return (payloadArchitectures[0], true);
+            return new ArchitectureDecision(
+                payloadArchitecture,
+                payload.Conclusive && payloadScan.IsComplete,
+                payload.Diagnostic);
         }
 
-        return (headerArchitecture, headerConclusive);
+        if (payload.Diagnostic is not null)
+        {
+            return new ArchitectureDecision(headerArchitecture, headerConclusive, payload.Diagnostic);
+        }
+
+        if (allowedIsEmpty
+            && TryGetSingle64BitModeArchitecture(
+                header.ArchitecturesInstallIn64BitMode,
+                options,
+                out Architecture modeArchitecture))
+        {
+            return new ArchitectureDecision(
+                modeArchitecture,
+                Conclusive: false,
+                new AnalysisDiagnostic(
+                    "INNO011",
+                    "ArchitecturesAllowed is empty, but ArchitecturesInstallIn64BitMode supplies a 64-bit architecture hint. Verify the inferred architecture manually.",
+                    RequiresManualAnalysis: true));
+        }
+
+        if (allowedIsEmpty && headerArchitecture is null)
+        {
+            return new ArchitectureDecision(
+                stubArchitecture == Architecture.X86 ? null : stubArchitecture,
+                Conclusive: false,
+                new AnalysisDiagnostic(
+                    "INNO001",
+                    "ArchitecturesAllowed is empty and no decisive embedded payload architecture was found.",
+                    RequiresManualAnalysis: true));
+        }
+
+        if (payload.Architecture is not null
+            && payload.Architecture != headerArchitecture)
+        {
+            return new ArchitectureDecision(
+                headerArchitecture,
+                headerConclusive,
+                new AnalysisDiagnostic(
+                    "INNO012",
+                    $"The Inno Setup header implies {headerArchitecture?.ToString() ?? "an unknown architecture"}, but embedded payload evidence favors {payload.Architecture}. The header result was retained.",
+                    RequiresManualAnalysis: true));
+        }
+
+        if (headerArchitecture is null
+            && allowed.PositiveX86CompatibleTargets != 0)
+        {
+            return new ArchitectureDecision(
+                null,
+                Conclusive: false,
+                new AnalysisDiagnostic(
+                    "INNO001",
+                    "The Inno Setup x86compatible expression describes compatible operating systems, not proof that the installed payload is x86.",
+                    RequiresManualAnalysis: true));
+        }
+
+        return new ArchitectureDecision(headerArchitecture, headerConclusive, null);
     }
 
     private static (Architecture? Architecture, bool Conclusive) GetHeaderArchitecture(
@@ -192,7 +303,10 @@ public sealed class InnoProbe : IExeFormatProbe
         int targets = allowed.Targets;
         int inferredTargets = allowed.PositiveArchitectureHints & targets;
         bool negationBroadenedTargets = (targets & ~allowed.PositiveTargetCoverage) != 0;
+        bool x86CompatibilityOnly = inferredTargets == InnoArchitectureExpression.X86
+            && allowed.PositiveX86CompatibleTargets != 0;
         if (!negationBroadenedTargets
+            && !x86CompatibilityOnly
             && inferredTargets is InnoArchitectureExpression.X86
                 or InnoArchitectureExpression.X64
                 or InnoArchitectureExpression.Arm64)
@@ -206,6 +320,108 @@ public sealed class InnoProbe : IExeFormatProbe
         }
 
         return (null, false);
+    }
+
+    private static PayloadSelection SelectPayloadArchitecture(
+        IReadOnlyList<InnoPayloadCandidate> payloads)
+    {
+        if (payloads.Count == 0)
+        {
+            return default;
+        }
+
+        PayloadWeight[] weights =
+        [
+            .. payloads
+                .GroupBy(static payload => payload.Architecture)
+                .Select(static group => new PayloadWeight(
+                    group.Key,
+                    group.Sum(static payload => payload.Size),
+                    group.Max(static payload => payload.Size)))
+                .OrderByDescending(static weight => weight.TotalSize)
+                .ThenByDescending(static weight => weight.LargestImage),
+        ];
+        if (weights.Length == 1)
+        {
+            return new PayloadSelection(weights[0].Architecture, Conclusive: true, Diagnostic: null);
+        }
+
+        PayloadWeight first = weights[0];
+        PayloadWeight second = weights[1];
+        if (first.TotalSize >= second.TotalSize * 2
+            && first.LargestImage > second.LargestImage)
+        {
+            return new PayloadSelection(
+                first.Architecture,
+                Conclusive: false,
+                new AnalysisDiagnostic(
+                    "INNO002",
+                    $"Embedded Inno Setup payloads contain mixed architectures ({string.Join(", ", weights.Select(static weight => weight.Architecture))}); {first.Architecture} has the dominant valid PE payload size and was selected provisionally.",
+                    RequiresManualAnalysis: true));
+        }
+
+        return new PayloadSelection(
+            Architecture: null,
+            Conclusive: false,
+            new AnalysisDiagnostic(
+                "INNO002",
+                $"Embedded Inno Setup payloads contain mixed architecture evidence ({string.Join(", ", weights.Select(static weight => weight.Architecture))}); no architecture was selected from payloads.",
+                RequiresManualAnalysis: true));
+    }
+
+    private static bool TryGetSingle64BitModeArchitecture(
+        string? expression,
+        InnoProbeOptions options,
+        out Architecture architecture)
+    {
+        architecture = default;
+        if (string.IsNullOrWhiteSpace(expression)
+            || !InnoArchitectureExpression.TryEvaluate(expression, options, out InnoArchitectureExpression.Evaluation mode))
+        {
+            return false;
+        }
+
+        int inferred = mode.PositiveArchitectureHints & mode.Targets;
+        if (inferred is InnoArchitectureExpression.X64 or InnoArchitectureExpression.Arm64)
+        {
+            architecture = GetArchitectureFromTarget(inferred);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static Architecture[] GetUnsupportedOSArchitectures(
+        InnoParsedHeader header,
+        InnoProbeOptions options)
+    {
+        if (header.HasUnsupportedIa64
+            || !InnoArchitectureExpression.TryEvaluate(
+                header.ArchitecturesAllowed,
+                options,
+                out InnoArchitectureExpression.Evaluation allowed)
+            || allowed.Targets == 0
+            || allowed.NegativeTargetCoverage != 0
+            || (allowed.Targets & ~allowed.PositiveTargetCoverage) != 0)
+        {
+            return [];
+        }
+
+        List<Architecture> unsupported = [Architecture.Arm];
+        if ((allowed.Targets & InnoArchitectureExpression.X86) == 0)
+        {
+            unsupported.Add(Architecture.X86);
+        }
+        if ((allowed.Targets & InnoArchitectureExpression.X64) == 0)
+        {
+            unsupported.Add(Architecture.X64);
+        }
+        if ((allowed.Targets & InnoArchitectureExpression.Arm64) == 0)
+        {
+            unsupported.Add(Architecture.Arm64);
+        }
+
+        return unsupported.Order().ToArray();
     }
 
     private static Architecture GetArchitectureFromTarget(int target)
@@ -378,4 +594,19 @@ public sealed class InnoProbe : IExeFormatProbe
 
         return value.Trim();
     }
+
+    private sealed record ArchitectureDecision(
+        Architecture? Architecture,
+        bool Conclusive,
+        AnalysisDiagnostic? Diagnostic);
+
+    private readonly record struct PayloadWeight(
+        Architecture Architecture,
+        long TotalSize,
+        long LargestImage);
+
+    private readonly record struct PayloadSelection(
+        Architecture? Architecture,
+        bool Conclusive,
+        AnalysisDiagnostic? Diagnostic);
 }

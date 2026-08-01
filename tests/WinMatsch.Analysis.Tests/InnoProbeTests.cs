@@ -71,15 +71,15 @@ public class InnoProbeTests
         Assert.Equal("Контосо", metadata.Publisher);
         Assert.Equal([1251u, 1251u], metadata.Languages.Select(language => language.CodePage));
         Assert.Equal([new LanguageTag("ru-RU"), new LanguageTag("uk-UA")], metadata.Languages.Select(language => language.Locale));
-        Assert.Equal(Architecture.X86, installer.Architecture);
+        Assert.Null(installer.Architecture);
         Assert.Equal(Scope.User, installer.Scope);
-        Assert.Equal(ElevationRequirement.ElevationProhibited, installer.ElevationRequirement);
+        Assert.Null(installer.ElevationRequirement);
         Assert.Null(installer.InstallerLocale);
         Assert.Equal(@"%LOCALAPPDATA%\Contoso", installer.InstallationMetadata!.DefaultInstallLocation);
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "INNO001");
     }
 
     [Theory]
-    [InlineData("x86compatible", Architecture.X86)]
     [InlineData("x64compatible", Architecture.X64)]
     [InlineData("arm64", Architecture.Arm64)]
     [InlineData("(x64compatible and (not arm64))", Architecture.X64)]
@@ -99,6 +99,24 @@ public class InnoProbeTests
 
         Assert.Equal(expected, metadata.EffectiveArchitecture);
         Assert.True(metadata.ArchitectureIsConclusive);
+    }
+
+    [Fact]
+    public void X86compatible_without_payload_proof_is_inconclusive()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "",
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Null(metadata.EffectiveArchitecture);
+        Assert.False(metadata.ArchitectureIsConclusive);
+        Assert.Equal("INNO001", Assert.Single(analysis.Diagnostics).Code);
+        Assert.True(Assert.Single(analysis.Diagnostics).RequiresManualAnalysis);
     }
 
     [Theory]
@@ -304,6 +322,196 @@ public class InnoProbeTests
     }
 
     [Fact]
+    public void Undefined_cp1252_bytes_are_replaced_and_diagnosed_instead_of_crashing()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(5, 6, 0),
+            Unicode = false,
+            AppNameBytesOverride = [0x81, (byte)'A'],
+            OldArchitecturesAllowed = 0x04,
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Contains('\uFFFD', metadata.AppName!);
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO004");
+    }
+
+    [Fact]
+    public void Dbcs_code_page_strings_decode_without_replacement_diagnostics()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(5, 6, 0),
+            Unicode = false,
+            AppName = "コマンダー",
+            AppVerName = "コマンダー 2.5",
+            Publisher = "コントソ",
+            OldArchitecturesAllowed = 0x04,
+            Languages = [new InnoFixtures.Language("日本語", 1041, 932)],
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal("コマンダー", metadata.AppName);
+        Assert.Equal("コントソ", metadata.Publisher);
+        Assert.DoesNotContain(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO004");
+    }
+
+    [Fact]
+    public void Out_of_range_ansi_code_page_falls_back_without_overflow()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(5, 6, 0),
+            Unicode = false,
+            AnsiEncodingCodePageOverride = 1252,
+            OldArchitecturesAllowed = 0x04,
+            Languages = [new InnoFixtures.Language("future", 1033, uint.MaxValue)],
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal("Contoso Commander", metadata.AppName);
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO005");
+    }
+
+    [Fact]
+    public void Empty_architectures_allowed_consults_embedded_payload()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "",
+            ArchitecturesInstallIn64BitMode = "",
+            PayloadMachines = [Machine.Amd64],
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
+        Assert.True(metadata.ArchitectureIsConclusive);
+    }
+
+    [Fact]
+    public void Empty_architectures_allowed_consults_64_bit_mode_as_a_hint()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "",
+            ArchitecturesInstallIn64BitMode = "arm64",
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal(Architecture.Arm64, metadata.EffectiveArchitecture);
+        Assert.False(metadata.ArchitectureIsConclusive);
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO011");
+    }
+
+    [Fact]
+    public void Dominant_largest_payload_is_selected_conservatively_from_mixed_evidence()
+    {
+        byte[] smallHelper = PeFixtures.BuildExe(Machine.I386);
+        byte[] largeApplication = SquirrelFixtures.BuildResourceSetup(
+            new byte[1024 * 1024],
+            "DATA",
+            999,
+            Machine.Amd64);
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "",
+            AdditionalPayloadBytes = AdvancedInstallerFixtures.Concat(smallHelper, largeApplication),
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
+        Assert.False(metadata.ArchitectureIsConclusive);
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO002");
+    }
+
+    [Fact]
+    public void Bzip2_payload_evidence_is_explicitly_unavailable()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            ArchitecturesInstallIn64BitMode = "",
+            HeaderCompression = 2,
+            AdditionalPayloadBytes = [1],
+        };
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "INNO003");
+        Assert.True(analysis.Diagnostics.Single(diagnostic => diagnostic.Code == "INNO003").RequiresManualAnalysis);
+    }
+
+    [Fact]
+    public void Future_setup_data_version_returns_manual_analysis_instead_of_throwing()
+    {
+        byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
+        {
+            Version = new Version(6, 5, 0),
+        });
+
+        using var stream = new MemoryStream(installer);
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(stream, "future-setup.exe");
+
+        Assert.Equal(DetectedInstallerFormat.InnoSetup, analysis.Format);
+        Assert.Equal(InstallerType.Inno, Assert.Single(analysis.Installers).InstallerType);
+        Assert.Equal("INNO010", Assert.Single(analysis.Diagnostics).Code);
+        Assert.True(Assert.Single(analysis.Diagnostics).RequiresManualAnalysis);
+    }
+
+    [Fact]
+    public void Legacy_x64_flag_is_strict_and_emits_unsupported_os_architectures()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(5, 6, 0),
+            Unicode = false,
+            OldArchitecturesAllowed = 0x04,
+            OldArchitecturesInstallIn64BitMode = 0x04,
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Equal("x64os", metadata.ArchitecturesAllowed);
+        Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
+        Assert.Equal([Architecture.X86, Architecture.Arm, Architecture.Arm64], installer.UnsupportedOSArchitectures);
+    }
+
+    [Fact]
+    public void Legacy_ia64_flag_is_preserved_as_manual_analysis()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(5, 6, 0),
+            Unicode = false,
+            OldArchitecturesAllowed = 0x08,
+        };
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Null(Assert.Single(analysis.Installers).Architecture);
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "INNO006");
+    }
+
+    [Fact]
+    public void Current_header_emits_supported_unsupported_os_architecture_evidence()
+    {
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller())).Installers);
+
+        Assert.Equal([Architecture.X86, Architecture.Arm], installer.UnsupportedOSArchitectures);
+    }
+
+    [Fact]
     public void Compiled_code_skip_is_bounded()
     {
         byte[] installer = InnoFixtures.BuildInstaller(
@@ -386,7 +594,7 @@ public class InnoProbeTests
         InnoSetupMetadata complete = Assert.IsType<InnoSetupMetadata>(Inspect(installer));
 
         Assert.Empty(limited.EmbeddedPayloadArchitectures);
-        Assert.Equal(Architecture.X86, limited.EffectiveArchitecture);
+        Assert.Null(limited.EffectiveArchitecture);
         Assert.Equal([Architecture.X64], complete.EmbeddedPayloadArchitectures);
         Assert.Equal(Architecture.X64, complete.EffectiveArchitecture);
     }
@@ -409,7 +617,7 @@ public class InnoProbeTests
         InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(installer, probe));
 
         Assert.Empty(metadata.EmbeddedPayloadArchitectures);
-        Assert.Equal(Architecture.X86, metadata.EffectiveArchitecture);
+        Assert.Null(metadata.EffectiveArchitecture);
     }
 
     [Fact]
@@ -425,7 +633,7 @@ public class InnoProbeTests
         InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
 
         Assert.Empty(metadata.EmbeddedPayloadArchitectures);
-        Assert.Equal(Architecture.X86, metadata.EffectiveArchitecture);
+        Assert.Null(metadata.EffectiveArchitecture);
     }
 
     [Fact]
@@ -435,13 +643,16 @@ public class InnoProbeTests
         {
             ArchitecturesAllowed = "x86compatible",
             ArchitecturesInstallIn64BitMode = "",
-            PayloadMachines = [Machine.I386, Machine.Amd64],
+            AdditionalPayloadBytes = AdvancedInstallerFixtures.Concat(
+                DependencyFixtures.BuildPe(Machine.I386),
+                DependencyFixtures.BuildPe(Machine.Amd64)),
         };
 
         InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
 
         Assert.Equal([Architecture.X86, Architecture.X64], metadata.EmbeddedPayloadArchitectures);
-        Assert.Equal(Architecture.X86, metadata.EffectiveArchitecture);
+        Assert.Null(metadata.EffectiveArchitecture);
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO002");
     }
 
     [Fact]

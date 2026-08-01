@@ -51,7 +51,7 @@ public sealed class BurnProbe : IExeFormatProbe
 
         BurnManifest manifest = BurnManifest.Parse(manifestBytes);
         VersionInfo version = peFile.VersionInfo;
-        Architecture architecture = DetermineArchitecture(peFile.Architecture, manifest, out AnalysisDiagnostic? architectureDiagnostic);
+        Architecture? architecture = DetermineArchitecture(peFile.Architecture, manifest, out AnalysisDiagnostic? architectureDiagnostic);
 
         var installer = new Installer
         {
@@ -110,16 +110,25 @@ public sealed class BurnProbe : IExeFormatProbe
         };
     }
 
-    private static Architecture DetermineArchitecture(
+    private static Architecture? DetermineArchitecture(
         Architecture stubArchitecture,
         BurnManifest manifest,
         out AnalysisDiagnostic? diagnostic)
     {
         Architecture[] targets = [.. manifest.ChainTargetArchitectures.Distinct()];
         if (targets.Length == 1
-            && !manifest.HasAmbiguousArchitectureCondition
-            && stubArchitecture == Architecture.X86)
+            && !manifest.HasAmbiguousArchitectureCondition)
         {
+            if (stubArchitecture != Architecture.X86 && stubArchitecture != targets[0])
+            {
+                diagnostic = new AnalysisDiagnostic(
+                    "BURN003",
+                    $"The Burn chain targets {targets[0]}, but the outer stub is {stubArchitecture}. "
+                        + "No architecture was selected because the wrapper and installed payload evidence conflict.",
+                    RequiresManualAnalysis: true);
+                return null;
+            }
+
             diagnostic = null;
             return targets[0];
         }

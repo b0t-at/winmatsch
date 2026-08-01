@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
 using WinMatsch.Analysis.Advanced;
+using WinMatsch.Analysis.Dependencies;
 using WinMatsch.Analysis.Pe;
 using WinMatsch.Core;
 
@@ -33,6 +34,9 @@ public sealed class SquirrelProbe : IExeFormatProbe
     private const int ClassicResourceId = 131;
     private const long MaxNupkgBytes = 256L * 1024 * 1024;
     private const long MaxNuspecBytes = 4L * 1024 * 1024;
+    private const long MaxPayloadPeBytes = 64L * 1024 * 1024;
+    private const long MaxTotalPayloadPeBytes = 256L * 1024 * 1024;
+    private const int MaxPayloadPeEntries = 256;
 
     public InstallerAnalysis? Probe(PeFile peFile, Stream stream)
     {
@@ -40,27 +44,39 @@ public sealed class SquirrelProbe : IExeFormatProbe
         ArgumentNullException.ThrowIfNull(stream);
 
         bool hasMarker = HasSquirrelMarker(peFile.VersionInfo);
+        SquirrelPackageInspection? package = InspectPackage(stream);
+        if (package is not null)
+        {
+            return Compose(peFile, package);
+        }
+
+        return hasMarker ? Compose(peFile, package: null) : null;
+    }
+
+    internal static IReadOnlyList<SquirrelPayloadPe> InspectPayloadPeEvidence(Stream stream)
+        => InspectPackage(stream)?.Payloads ?? [];
+
+    private static SquirrelPackageInspection? InspectPackage(Stream stream)
+    {
         byte[]? classicPayload = PeResourceReader.Read(stream, ClassicResourceType, ClassicResourceId);
         if (classicPayload is not null)
         {
             using var payload = new MemoryStream(classicPayload, writable: false);
-            NuspecMetadata metadata = ReadClassicPayload(payload, out string nupkgName);
-            return Compose(peFile, metadata, nupkgName);
+            return ReadClassicPayload(payload);
         }
 
         long imageEnd = PeOverlay.GetStart(stream);
         BundleLocation? bundle = FindClowdBundle(stream, imageEnd);
-        if (bundle is not null)
+        if (bundle is null)
         {
-            using var package = new SubStream(stream, bundle.Value.Offset, bundle.Value.Length);
-            NuspecMetadata metadata = ReadPackage(package, "The Clowd.Squirrel release package");
-            return Compose(peFile, metadata, nupkgName: null);
+            return null;
         }
 
-        return hasMarker ? Compose(peFile, metadata: null, nupkgName: null) : null;
+        using var package = new SubStream(stream, bundle.Value.Offset, bundle.Value.Length);
+        return ReadPackage(package, "The Clowd.Squirrel release package", nupkgName: null);
     }
 
-    private static NuspecMetadata ReadClassicPayload(Stream payload, out string nupkgName)
+    private static SquirrelPackageInspection ReadClassicPayload(Stream payload)
     {
         ZipArchiveBounds.Validate(payload, "The classic Squirrel payload resource");
         using var archive = OpenZip(payload, "The classic Squirrel payload resource");
@@ -72,11 +88,10 @@ public sealed class SquirrelProbe : IExeFormatProbe
                 "The classic Squirrel payload resource contains no release package.");
         }
 
-        nupkgName = Path.GetFileName(nupkg.FullName);
         return ReadNestedPackage(nupkg);
     }
 
-    private static NuspecMetadata ReadNestedPackage(ZipArchiveEntry entry)
+    private static SquirrelPackageInspection ReadNestedPackage(ZipArchiveEntry entry)
     {
         if (entry.Length > MaxNupkgBytes)
         {
@@ -89,17 +104,23 @@ public sealed class SquirrelProbe : IExeFormatProbe
             using Stream source = entry.Open();
             CopyBounded(source, package, MaxNupkgBytes);
         }
-        catch (InvalidDataException ex)
+        catch (InvalidDataException exception)
         {
             throw new InvalidDataException(
-                "The Squirrel release package is truncated or corrupt.", ex);
+                "The Squirrel release package is truncated or corrupt.", exception);
         }
 
         package.Position = 0;
-        return ReadPackage(package, "The Squirrel release package");
+        return ReadPackage(
+            package,
+            "The Squirrel release package",
+            Path.GetFileName(entry.FullName));
     }
 
-    private static NuspecMetadata ReadPackage(Stream package, string description)
+    private static SquirrelPackageInspection ReadPackage(
+        Stream package,
+        string description,
+        string? nupkgName)
     {
         ZipArchiveBounds.Validate(package, description);
         using ZipArchive archive = OpenZip(package, description);
@@ -112,7 +133,72 @@ public sealed class SquirrelProbe : IExeFormatProbe
             throw new InvalidDataException($"{description} has no root nuspec manifest.");
         }
 
-        return ReadNuspec(nuspec);
+        NuspecMetadata metadata = ReadNuspec(nuspec);
+        List<SquirrelPayloadPe> payloads =
+            InspectPayloadPes(archive, description, out IReadOnlyList<AnalysisDiagnostic> diagnostics);
+        return new SquirrelPackageInspection(metadata, nupkgName, payloads, diagnostics);
+    }
+
+    private static List<SquirrelPayloadPe> InspectPayloadPes(
+        ZipArchive archive,
+        string description,
+        out IReadOnlyList<AnalysisDiagnostic> diagnostics)
+    {
+        var payloads = new List<SquirrelPayloadPe>();
+        var findings = new List<AnalysisDiagnostic>();
+        long totalBytes = 0;
+        int candidates = 0;
+        foreach (ZipArchiveEntry entry in archive.Entries)
+        {
+            if (entry.FullName.EndsWith('/')
+                || (!entry.FullName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                    && !entry.FullName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            if (++candidates > MaxPayloadPeEntries)
+            {
+                findings.Add(new AnalysisDiagnostic(
+                    "SQUIRREL002",
+                    $"{description} contains more than {MaxPayloadPeEntries} PE payload candidates; remaining architecture evidence was skipped.",
+                    RequiresManualAnalysis: true));
+                break;
+            }
+
+            using Stream source = entry.Open();
+            using var content = new MemoryStream();
+            if (!CopyPayloadBounded(
+                    source,
+                    content,
+                    MaxPayloadPeBytes,
+                    MaxTotalPayloadPeBytes,
+                    ref totalBytes))
+            {
+                findings.Add(new AnalysisDiagnostic(
+                    "SQUIRREL002",
+                    $"Squirrel payload '{entry.FullName}' exceeded the bounded PE inspection budget; its architecture is unavailable.",
+                    RequiresManualAnalysis: true));
+                continue;
+            }
+
+            content.Position = 0;
+            PeImportInspection inspection = PeImportReader.Inspect(
+                content,
+                PayloadDependencyAnalyzerOptions.DefaultMaximumImportDescriptors,
+                PayloadDependencyAnalyzerOptions.DefaultMaximumImportNameBytes);
+            if (inspection.Architecture is { } architecture)
+            {
+                payloads.Add(new SquirrelPayloadPe(
+                    NormalizePackagePath(entry.FullName),
+                    content.Length,
+                    architecture,
+                    inspection));
+            }
+        }
+
+        diagnostics = findings;
+        return payloads;
     }
 
     private static ZipArchive OpenZip(Stream stream, string description)
@@ -122,9 +208,9 @@ public sealed class SquirrelProbe : IExeFormatProbe
         {
             return new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
         }
-        catch (InvalidDataException ex)
+        catch (InvalidDataException exception)
         {
-            throw new InvalidDataException($"{description} is truncated or corrupt.", ex);
+            throw new InvalidDataException($"{description} is truncated or corrupt.", exception);
         }
     }
 
@@ -204,13 +290,14 @@ public sealed class SquirrelProbe : IExeFormatProbe
         return null;
     }
 
-    private static InstallerAnalysis Compose(PeFile peFile, NuspecMetadata? metadata, string? nupkgName)
+    private static InstallerAnalysis Compose(PeFile peFile, SquirrelPackageInspection? package)
     {
         VersionInfo version = peFile.VersionInfo;
+        ArchitectureDecision architecture = DetermineArchitecture(package);
+        NuspecMetadata? metadata = package?.Metadata;
         var installer = new Installer
         {
-            Architecture = (nupkgName is null ? null : UrlArchitectureDetector.Detect(nupkgName))
-                ?? peFile.Architecture,
+            Architecture = architecture.Architecture,
             InstallerType = InstallerType.Exe,
             Scope = Scope.User,
             ElevationRequirement = peFile.RequestedElevation,
@@ -244,7 +331,83 @@ public sealed class SquirrelProbe : IExeFormatProbe
             Publisher = metadata?.Authors ?? version.CompanyName,
             ProductVersion = metadata?.Version ?? version.ProductVersion,
             Copyright = version.LegalCopyright,
+            Diagnostics =
+            [
+                .. (package?.Diagnostics ?? []),
+                .. (architecture.Diagnostic is null
+                    ? Array.Empty<AnalysisDiagnostic>()
+                    : [architecture.Diagnostic]),
+            ],
         };
+    }
+
+    private static ArchitectureDecision DetermineArchitecture(SquirrelPackageInspection? package)
+    {
+        Architecture? nameArchitecture = package?.NupkgName is null
+            ? null
+            : UrlArchitectureDetector.Detect(package.NupkgName);
+        SquirrelPayloadPe[] payloads = [.. (package?.Payloads ?? [])];
+        Architecture[] payloadArchitectures =
+            [.. payloads.Select(static payload => payload.Architecture).Distinct()];
+        if (nameArchitecture is { } named)
+        {
+            if (payloadArchitectures.Length == 0
+                || payloadArchitectures.All(architecture => architecture == named))
+            {
+                return new ArchitectureDecision(named, null);
+            }
+
+            return new ArchitectureDecision(
+                null,
+                new AnalysisDiagnostic(
+                    "SQUIRREL001",
+                    $"The Squirrel package name implies {named}, but bounded nupkg PE inspection found {string.Join(", ", payloadArchitectures)}.",
+                    RequiresManualAnalysis: true));
+        }
+
+        if (payloadArchitectures.Length == 1)
+        {
+            return new ArchitectureDecision(payloadArchitectures[0], null);
+        }
+
+        if (payloadArchitectures.Length > 1)
+        {
+            (Architecture Architecture, long Total, long Largest)[] weights =
+            [
+                .. payloads
+                    .GroupBy(static payload => payload.Architecture)
+                    .Select(static group => (
+                        Architecture: group.Key,
+                        Total: group.Sum(static payload => payload.Size),
+                        Largest: group.Max(static payload => payload.Size)))
+                    .OrderByDescending(static item => item.Total)
+                    .ThenByDescending(static item => item.Largest),
+            ];
+            if (weights[0].Total >= weights[1].Total * 2
+                && weights[0].Largest > weights[1].Largest)
+            {
+                return new ArchitectureDecision(
+                    weights[0].Architecture,
+                    new AnalysisDiagnostic(
+                        "SQUIRREL001",
+                        $"The Squirrel nupkg contains mixed PE architectures; {weights[0].Architecture} was selected from dominant payload size evidence.",
+                        RequiresManualAnalysis: true));
+            }
+
+            return new ArchitectureDecision(
+                null,
+                new AnalysisDiagnostic(
+                    "SQUIRREL001",
+                    $"The Squirrel nupkg contains mixed PE architectures ({string.Join(", ", payloadArchitectures)}); no architecture was selected.",
+                    RequiresManualAnalysis: true));
+        }
+
+        return new ArchitectureDecision(
+            null,
+            new AnalysisDiagnostic(
+                "SQUIRREL001",
+                "No bounded nupkg PE architecture evidence was available; the outer Squirrel bootstrap stub was not treated as the installed payload.",
+                RequiresManualAnalysis: true));
     }
 
     private static bool HasSquirrelMarker(VersionInfo version)
@@ -274,5 +437,69 @@ public sealed class SquirrelProbe : IExeFormatProbe
         }
     }
 
+    private static bool CopyPayloadBounded(
+        Stream source,
+        Stream destination,
+        long maxPayloadBytes,
+        long maxTotalBytes,
+        ref long totalBytes)
+    {
+        byte[] buffer = new byte[81920];
+        long payloadBytes = 0;
+        while (true)
+        {
+            int allowed = (int)Math.Min(
+                buffer.Length,
+                Math.Min(maxPayloadBytes - payloadBytes + 1, maxTotalBytes - totalBytes + 1));
+            if (allowed <= 0)
+            {
+                return false;
+            }
+
+            int read = source.Read(buffer, 0, allowed);
+            if (read == 0)
+            {
+                return true;
+            }
+
+            payloadBytes += read;
+            totalBytes += read;
+            if (payloadBytes > maxPayloadBytes || totalBytes > maxTotalBytes)
+            {
+                return false;
+            }
+
+            destination.Write(buffer, 0, read);
+        }
+    }
+
+    private static string NormalizePackagePath(string path)
+    {
+        string normalized = path.Replace('\\', '/');
+        if (normalized.StartsWith('/')
+            || normalized.Split('/').Any(static segment => segment is "" or "." or ".."))
+        {
+            throw new InvalidDataException($"The Squirrel package entry '{path}' has an unsafe path.");
+        }
+
+        return normalized;
+    }
+
     private readonly record struct BundleLocation(long Offset, long Length);
+
+    private sealed record SquirrelPackageInspection(
+        NuspecMetadata Metadata,
+        string? NupkgName,
+        IReadOnlyList<SquirrelPayloadPe> Payloads,
+        IReadOnlyList<AnalysisDiagnostic> Diagnostics);
+
+    private sealed record ArchitectureDecision(
+        Architecture? Architecture,
+        AnalysisDiagnostic? Diagnostic);
 }
+
+internal sealed record SquirrelPayloadPe(
+    string Path,
+    long Size,
+    Architecture Architecture,
+    PeImportInspection ImportInspection);

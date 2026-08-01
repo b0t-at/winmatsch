@@ -283,8 +283,7 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
             or NotSupportedException
             or OverflowException
             or IOException
-            or InvalidOperationException
-            or NullReferenceException;
+            or InvalidOperationException;
 
     private static void CopyBounded(Stream source, Stream destination, long maxBytes)
     {

@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using SharpCompress.Common;
 using SharpCompress.Compressors.LZMA;
+using WinMatsch.Analysis.Dependencies;
 using WinMatsch.Core;
 
 namespace WinMatsch.Analysis.Inno;
@@ -37,7 +38,36 @@ internal sealed record InnoParsedHeader(
     InnoPrivilegeLevel Privileges,
     bool PrivilegesMayBeOverridden,
     InnoCompression Compression,
-    IReadOnlyList<InnoLanguage> Languages);
+    IReadOnlyList<InnoLanguage> Languages,
+    bool HasUnsupportedIa64,
+    IReadOnlyList<AnalysisDiagnostic> Diagnostics);
+
+internal sealed record InnoPayloadCandidate(
+    Architecture Architecture,
+    long Size,
+    PeImportInspection ImportInspection);
+
+internal sealed record InnoPayloadScanResult(
+    IReadOnlyList<InnoPayloadCandidate> Candidates,
+    IReadOnlyList<AnalysisDiagnostic> Diagnostics,
+    bool IsComplete);
+
+internal sealed class UnsupportedInnoVersionException : Exception
+{
+    public UnsupportedInnoVersionException(Version version, bool isFuture)
+        : base(
+            isFuture
+                ? $"Inno Setup setup-data version {version} is newer than the supported 6.4.0.1 family."
+                : $"Inno Setup setup-data version {version} predates the supported 5.5.7 family.")
+    {
+        Version = version;
+        IsFuture = isFuture;
+    }
+
+    public Version Version { get; }
+
+    public bool IsFuture { get; }
+}
 
 internal static partial class InnoFormatReader
 {
@@ -207,10 +237,14 @@ internal static partial class InnoFormatReader
         var version = match.Groups[4].Success
             ? new Version(major, minor, build, revision)
             : new Version(major, minor, build);
-        if (version < new Version(5, 5, 7) || version > new Version(6, 4, 0, 1))
+        if (version < new Version(5, 5, 7))
         {
-            throw new InvalidDataException(
-                $"Inno Setup setup-data version {version} is outside the supported 5.5.7 through 6.4.0.1 families.");
+            throw new UnsupportedInnoVersionException(version, isFuture: false);
+        }
+
+        if (version > new Version(6, 4, 0, 1))
+        {
+            throw new UnsupportedInnoVersionException(version, isFuture: true);
         }
 
         bool unicode = version >= new Version(6, 3, 0)
@@ -265,9 +299,7 @@ internal static partial class InnoFormatReader
         try
         {
             using var input = new MemoryStream(packed, writable: false);
-            using Stream decoder = version >= new Version(4, 1, 6)
-                ? CreateLzma1(input, options.MaximumLzmaDictionaryBytes)
-                : new ZLibStream(input, CompressionMode.Decompress);
+            using Stream decoder = CreateLzma1(input, options.MaximumLzmaDictionaryBytes);
             return ReadToLimit(decoder, options.MaximumExpandedHeaderBytes, "Inno Setup header");
         }
         catch (Exception exception) when (exception is SharpCompressException or InvalidDataException or EndOfStreamException)
@@ -319,9 +351,27 @@ internal static partial class InnoFormatReader
         uint codePage = parsed.Languages.Any(language => language.CodePage == 1252)
             ? 1252
             : parsed.Languages[0].CodePage;
-        return codePage == 1252
-            ? parsed
-            : ParseHeaderWithCodePage(data, version, unicode, options, checked((int)codePage));
+        if (codePage == 1252)
+        {
+            return parsed;
+        }
+
+        if (codePage > int.MaxValue || !IsSupportedCodePage((int)codePage))
+        {
+            return parsed with
+            {
+                Diagnostics =
+                [
+                    .. parsed.Diagnostics,
+                    new AnalysisDiagnostic(
+                        "INNO005",
+                        $"The Inno Setup ANSI code page {codePage} is not supported; metadata was decoded with replacement characters using Windows-1252.",
+                        RequiresManualAnalysis: true),
+                ],
+            };
+        }
+
+        return ParseHeaderWithCodePage(data, version, unicode, options, (int)codePage);
     }
 
     private static InnoParsedHeader ParseHeaderWithCodePage(
@@ -434,10 +484,12 @@ internal static partial class InnoFormatReader
             _ => throw new InvalidDataException($"The Inno Setup compression value {compressionValue} is invalid."),
         };
 
+        bool hasUnsupportedIa64 = false;
         if (version < new Version(6, 3, 0))
         {
-            architecturesAllowed = FormatArchitectureFlags(reader.ReadByte());
-            architectures64 = FormatArchitectureFlags(reader.ReadByte());
+            (architecturesAllowed, hasUnsupportedIa64) = FormatArchitectureFlags(reader.ReadByte());
+            (architectures64, bool modeHasUnsupportedIa64) = FormatArchitectureFlags(reader.ReadByte());
+            hasUnsupportedIa64 |= modeHasUnsupportedIa64;
         }
 
         reader.Skip(2); // DisableDirPage and DisableProgramGroupPage.
@@ -448,6 +500,21 @@ internal static partial class InnoFormatReader
         for (int i = 0; i < languageCount; i++)
         {
             languages.Add(ReadLanguage(reader, version, unicode));
+        }
+
+        List<AnalysisDiagnostic> diagnostics = [];
+        if (reader.HadDecodingReplacement)
+        {
+            diagnostics.Add(new AnalysisDiagnostic(
+                "INNO004",
+                $"One or more Inno Setup ANSI strings contain bytes that are undefined in code page {ansiCodePage}; replacement characters were retained instead of aborting analysis."));
+        }
+        if (hasUnsupportedIa64)
+        {
+            diagnostics.Add(new AnalysisDiagnostic(
+                "INNO006",
+                "The legacy Inno Setup architecture flags include IA64, which WinGet cannot represent as an installer architecture. Architecture requires manual analysis.",
+                RequiresManualAnalysis: true));
         }
 
         return new InnoParsedHeader(
@@ -467,7 +534,9 @@ internal static partial class InnoFormatReader
             privileges,
             privilegeOverrides != 0,
             compression,
-            languages);
+            languages,
+            hasUnsupportedIa64,
+            diagnostics);
     }
 
     private static InnoLanguage ReadLanguage(InnoBinaryReader reader, Version version, bool unicode)
@@ -569,7 +638,7 @@ internal static partial class InnoFormatReader
         void Add(int amount) => count += amount;
     }
 
-    private static string? FormatArchitectureFlags(byte flags)
+    private static (string? Expression, bool HasUnsupportedIa64) FormatArchitectureFlags(byte flags)
     {
         List<string> values = [];
         if ((flags & 0x02) != 0)
@@ -579,9 +648,10 @@ internal static partial class InnoFormatReader
 
         if ((flags & 0x04) != 0)
         {
-            values.Add("x64compatible");
+            values.Add("x64os");
         }
 
+        bool hasUnsupportedIa64 = (flags & 0x08) != 0;
         if ((flags & 0x08) != 0)
         {
             values.Add("ia64");
@@ -592,22 +662,34 @@ internal static partial class InnoFormatReader
             values.Add("arm64");
         }
 
-        return values.Count == 0 ? null : string.Join(" or ", values);
+        return (values.Count == 0 ? null : string.Join(" or ", values), hasUnsupportedIa64);
     }
 
-    public static IReadOnlyList<(Architecture Architecture, long Size)> InspectPayloads(
+    public static InnoPayloadScanResult InspectPayloads(
         Stream stream,
         InnoLoaderOffsets offsets,
         InnoCompression compression,
         InnoProbeOptions options)
     {
         long start = offsets.DataOffset > 0 ? offsets.DataOffset : offsets.HeaderOffset;
+        long available = Math.Max(0, stream.Length - start);
+        int scanLimit = Math.Min(options.MaximumPayloadScanBytes, options.MaximumAggregatePayloadBytes);
         int length = (int)Math.Min(
-            Math.Max(0, stream.Length - start),
-            Math.Min(options.MaximumPayloadScanBytes, options.MaximumAggregatePayloadBytes));
+            available,
+            scanLimit);
+        var diagnostics = new List<AnalysisDiagnostic>();
+        bool complete = available <= scanLimit;
+        if (!complete)
+        {
+            diagnostics.Add(new AnalysisDiagnostic(
+                "INNO007",
+                $"Inno Setup payload inspection read {scanLimit} bytes from a {available}-byte payload region; architecture evidence outside the configured scan window is unavailable.",
+                RequiresManualAnalysis: true));
+        }
+
         if (length == 0)
         {
-            return [];
+            return new InnoPayloadScanResult([], diagnostics, complete);
         }
 
         var budget = new PayloadInspectionBudget(options.MaximumAggregatePayloadBytes);
@@ -615,7 +697,16 @@ internal static partial class InnoFormatReader
         stream.Position = start;
         stream.ReadExactly(data);
         budget.Consume(length);
-        List<(Architecture Architecture, long Size)> result = FindPeImages(data, options.MaximumPayloadCandidates);
+        List<InnoPayloadCandidate> result = FindPeImages(data, options.MaximumPayloadCandidates);
+
+        if (compression == InnoCompression.Bzip2)
+        {
+            diagnostics.Add(new AnalysisDiagnostic(
+                "INNO003",
+                "The Inno Setup payload uses bzip2 compression, which is not supported by the bounded payload inspector. Embedded architecture evidence is unavailable.",
+                RequiresManualAnalysis: true));
+            return new InnoPayloadScanResult(result, diagnostics, IsComplete: false);
+        }
 
         ReadOnlySpan<byte> magic = "zlb\x1a"u8;
         int search = 0;
@@ -633,11 +724,41 @@ internal static partial class InnoFormatReader
 
             int payloadOffset = search + relative + magic.Length;
             attempts++;
-            TryInspectCompressedPayload(data, payloadOffset, compression, options, budget, result);
+            TryInspectCompressedPayload(
+                data,
+                payloadOffset,
+                compression,
+                options,
+                budget,
+                result,
+                out bool budgetExceeded);
+            if (budgetExceeded)
+            {
+                complete = false;
+            }
+
             search = payloadOffset;
         }
 
-        return result;
+        if (attempts == options.MaximumPayloadMarkerAttempts
+            && search <= data.Length - magic.Length
+            && data.AsSpan(search).IndexOf(magic) >= 0)
+        {
+            complete = false;
+            diagnostics.Add(new AnalysisDiagnostic(
+                "INNO008",
+                $"Inno Setup payload inspection stopped after {options.MaximumPayloadMarkerAttempts} compressed-payload markers.",
+                RequiresManualAnalysis: true));
+        }
+        else if (!complete && diagnostics.All(static diagnostic => diagnostic.Code != "INNO007"))
+        {
+            diagnostics.Add(new AnalysisDiagnostic(
+                "INNO009",
+                "The Inno Setup aggregate payload-inspection budget was exhausted before every candidate could be checked.",
+                RequiresManualAnalysis: true));
+        }
+
+        return new InnoPayloadScanResult(result, diagnostics, complete);
     }
 
     private static void TryInspectCompressedPayload(
@@ -646,12 +767,15 @@ internal static partial class InnoFormatReader
         InnoCompression compression,
         InnoProbeOptions options,
         PayloadInspectionBudget budget,
-        List<(Architecture Architecture, long Size)> result)
+        List<InnoPayloadCandidate> result,
+        out bool budgetExceeded)
     {
+        budgetExceeded = false;
         int inputLimit = Math.Min(data.Length - offset, budget.Remaining / 2);
         int outputLimit = Math.Min(options.MaximumExpandedPayloadBytes, budget.Remaining - inputLimit);
         if (inputLimit <= 0 || outputLimit <= 0)
         {
+            budgetExceeded = true;
             return;
         }
 
@@ -665,7 +789,7 @@ internal static partial class InnoFormatReader
                 InnoCompression.Zlib => new ZLibStream(input, CompressionMode.Decompress, leaveOpen: true),
                 InnoCompression.Lzma1 => CreateLzma1(input, options.MaximumLzmaDictionaryBytes),
                 InnoCompression.Lzma2 => CreateLzma2(input, options.MaximumLzmaDictionaryBytes),
-                _ => throw new InvalidDataException(),
+                _ => throw new NotSupportedException(),
             };
             byte[] expanded = ReadToLimit(
                 decoded,
@@ -679,10 +803,13 @@ internal static partial class InnoFormatReader
             exception is InvalidDataException
                 or EndOfStreamException
                 or SharpCompressException
-                or ArgumentException)
+                or ArgumentException
+                or NotSupportedException)
         {
             // A zlb marker can occur in compressed bytes. Payload evidence is optional; a
             // candidate that does not decode is ignored rather than invalidating the header.
+            budgetExceeded = exception is InvalidDataException
+                && exception.Message.Contains("exceeds the configured limit", StringComparison.Ordinal);
         }
         finally
         {
@@ -691,9 +818,9 @@ internal static partial class InnoFormatReader
         }
     }
 
-    private static List<(Architecture Architecture, long Size)> FindPeImages(byte[] data, int maximum)
+    private static List<InnoPayloadCandidate> FindPeImages(byte[] data, int maximum)
     {
-        List<(Architecture Architecture, long Size)> result = [];
+        List<InnoPayloadCandidate> result = [];
         for (int i = 0; i <= data.Length - 64 && result.Count < maximum; i++)
         {
             if (data[i] != (byte)'M' || data[i + 1] != (byte)'Z')
@@ -706,7 +833,17 @@ internal static partial class InnoFormatReader
                 continue;
             }
 
-            result.Add((architecture, imageSize));
+            using var image = new MemoryStream(
+                data,
+                i,
+                checked((int)imageSize),
+                writable: false,
+                publiclyVisible: true);
+            PeImportInspection imports = PeImportReader.Inspect(
+                image,
+                PayloadDependencyAnalyzerOptions.DefaultMaximumImportDescriptors,
+                PayloadDependencyAnalyzerOptions.DefaultMaximumImportNameBytes);
+            result.Add(new InnoPayloadCandidate(architecture, imageSize, imports));
             i += 63;
         }
 
@@ -917,6 +1054,20 @@ internal static partial class InnoFormatReader
     private static string? NullIfEmpty(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value;
 
+    private static bool IsSupportedCodePage(int codePage)
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        try
+        {
+            _ = Encoding.GetEncoding(codePage);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     [GeneratedRegex(@"\((\d+)\.(\d+)\.(\d+)(?:\.(\d+))?")]
     private static partial Regex SetupVersionRegex();
 }
@@ -1017,6 +1168,8 @@ internal sealed class InnoBinaryReader
     private int _position;
     private int _totalStringBytes;
 
+    public bool HadDecodingReplacement { get; private set; }
+
     public InnoBinaryReader(byte[] data, bool unicode, int ansiCodePage, InnoProbeOptions options)
     {
         _data = data;
@@ -1028,17 +1181,10 @@ internal sealed class InnoBinaryReader
         }
         else
         {
-            try
-            {
-                _encoding = Encoding.GetEncoding(
-                    ansiCodePage,
-                    EncoderFallback.ExceptionFallback,
-                    DecoderFallback.ExceptionFallback);
-            }
-            catch (ArgumentException exception)
-            {
-                throw new InvalidDataException($"The Inno Setup ANSI code page {ansiCodePage} is not supported.", exception);
-            }
+            _encoding = Encoding.GetEncoding(
+                ansiCodePage,
+                EncoderFallback.ReplacementFallback,
+                new DecoderReplacementFallback("\uFFFD"));
         }
     }
 
@@ -1067,8 +1213,26 @@ internal sealed class InnoBinaryReader
         }
 
         Ensure((int)length);
-        Encoding encoding = ansi ? Encoding.GetEncoding(1252) : _encoding;
-        string value = encoding.GetString(_data, _position, (int)length).TrimEnd('\0');
+        Encoding encoding = ansi
+            ? Encoding.GetEncoding(
+                1252,
+                EncoderFallback.ReplacementFallback,
+                new DecoderReplacementFallback("\uFFFD"))
+            : _encoding;
+        ReadOnlySpan<byte> encoded = _data.AsSpan(_position, (int)length);
+        string value = encoding.GetString(encoded).TrimEnd('\0');
+        if (encoding.CodePage == 1252 && ContainsUndefinedWindows1252Byte(encoded))
+        {
+            value = value
+                .Replace('\u0081', '\uFFFD')
+                .Replace('\u008D', '\uFFFD')
+                .Replace('\u008F', '\uFFFD')
+                .Replace('\u0090', '\uFFFD')
+                .Replace('\u009D', '\uFFFD');
+            HadDecodingReplacement = true;
+        }
+
+        HadDecodingReplacement |= value.Contains('\uFFFD', StringComparison.Ordinal);
         _position += (int)length;
         _totalStringBytes += (int)length;
         return value;
@@ -1101,5 +1265,18 @@ internal sealed class InnoBinaryReader
             throw new InvalidDataException(
                 $"The Inno Setup header is truncated at byte {_position}; {count} more bytes were required.");
         }
+    }
+
+    private static bool ContainsUndefinedWindows1252Byte(ReadOnlySpan<byte> bytes)
+    {
+        foreach (byte value in bytes)
+        {
+            if (value is 0x81 or 0x8D or 0x8F or 0x90 or 0x9D)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

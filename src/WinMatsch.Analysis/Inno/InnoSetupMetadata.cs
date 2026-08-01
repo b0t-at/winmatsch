@@ -60,7 +60,13 @@ public sealed class InnoSetupMetadata
 
     public IReadOnlyList<Architecture> EmbeddedPayloadArchitectures { get; init; } = [];
 
+    public IReadOnlyList<Architecture> UnsupportedOSArchitectures { get; init; } = [];
+
     public Architecture? EffectiveArchitecture { get; init; }
 
     public bool ArchitectureIsConclusive { get; init; }
+
+    public IReadOnlyList<AnalysisDiagnostic> Diagnostics { get; init; } = [];
+
+    internal IReadOnlyList<InnoPayloadCandidate> EmbeddedPayloads { get; init; } = [];
 }
