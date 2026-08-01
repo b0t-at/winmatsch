@@ -53,8 +53,15 @@ public sealed class SquirrelProbe : IExeFormatProbe
         return hasMarker ? Compose(peFile, package: null) : null;
     }
 
-    internal static IReadOnlyList<SquirrelPayloadPe> InspectPayloadPeEvidence(Stream stream)
-        => InspectPackage(stream)?.Payloads ?? [];
+    internal static SquirrelPayloadInspection InspectPayloadPeEvidence(Stream stream)
+    {
+        SquirrelPackageInspection? package = InspectPackage(stream);
+        return package is null
+            ? new SquirrelPayloadInspection([], IsComplete: false)
+            : new SquirrelPayloadInspection(
+                package.Payloads,
+                package.Diagnostics.All(static diagnostic => diagnostic.Code != "SQUIRREL002"));
+    }
 
     private static SquirrelPackageInspection? InspectPackage(Stream stream)
     {
@@ -503,3 +510,7 @@ internal sealed record SquirrelPayloadPe(
     long Size,
     Architecture Architecture,
     PeImportInspection ImportInspection);
+
+internal sealed record SquirrelPayloadInspection(
+    IReadOnlyList<SquirrelPayloadPe> Payloads,
+    bool IsComplete);

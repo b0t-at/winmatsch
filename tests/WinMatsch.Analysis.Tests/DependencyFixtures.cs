@@ -60,6 +60,92 @@ internal static class DependencyFixtures
         return stream;
     }
 
+    public static MemoryStream BuildDeflateWorkAmplificationZip(
+        string path,
+        int emptyBlockCount,
+        byte payload)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(emptyBlockCount);
+        using var compressed = new MemoryStream();
+        for (int i = 0; i < emptyBlockCount; i++)
+        {
+            compressed.Write([0x00, 0x00, 0x00, 0xFF, 0xFF]);
+        }
+        compressed.Write([0x01, 0x01, 0x00, 0xFE, 0xFF, payload]);
+
+        byte[] pathBytes = Encoding.UTF8.GetBytes(path);
+        byte[] content = [payload];
+        uint crc = SevenZipFixtures.Crc32(content);
+        var stream = new MemoryStream();
+        WriteUInt32(stream, 0x04034B50);
+        WriteUInt16(stream, 20);
+        WriteUInt16(stream, 0);
+        WriteUInt16(stream, 8);
+        WriteUInt16(stream, 0);
+        WriteUInt16(stream, 0);
+        WriteUInt32(stream, crc);
+        WriteUInt32(stream, checked((uint)compressed.Length));
+        WriteUInt32(stream, 1);
+        WriteUInt16(stream, checked((ushort)pathBytes.Length));
+        WriteUInt16(stream, 0);
+        stream.Write(pathBytes);
+        compressed.Position = 0;
+        compressed.CopyTo(stream);
+
+        long centralOffset = stream.Position;
+        WriteUInt32(stream, 0x02014B50);
+        WriteUInt16(stream, 20);
+        WriteUInt16(stream, 20);
+        WriteUInt16(stream, 0);
+        WriteUInt16(stream, 8);
+        WriteUInt16(stream, 0);
+        WriteUInt16(stream, 0);
+        WriteUInt32(stream, crc);
+        WriteUInt32(stream, checked((uint)compressed.Length));
+        WriteUInt32(stream, 1);
+        WriteUInt16(stream, checked((ushort)pathBytes.Length));
+        WriteUInt16(stream, 0);
+        WriteUInt16(stream, 0);
+        WriteUInt16(stream, 0);
+        WriteUInt16(stream, 0);
+        WriteUInt32(stream, 0);
+        WriteUInt32(stream, 0);
+        stream.Write(pathBytes);
+        long centralSize = stream.Position - centralOffset;
+
+        WriteUInt32(stream, 0x06054B50);
+        WriteUInt16(stream, 0);
+        WriteUInt16(stream, 0);
+        WriteUInt16(stream, 1);
+        WriteUInt16(stream, 1);
+        WriteUInt32(stream, checked((uint)centralSize));
+        WriteUInt32(stream, checked((uint)centralOffset));
+        WriteUInt16(stream, 0);
+        stream.Position = 0;
+        return stream;
+    }
+
+    public static byte[] BuildStructurallyInvalidPeHeader()
+    {
+        byte[] image = new byte[512];
+        image[0] = (byte)'M';
+        image[1] = (byte)'Z';
+        BinaryPrimitives.WriteInt32LittleEndian(image.AsSpan(0x3C), 64);
+        "PE\0\0"u8.CopyTo(image.AsSpan(64));
+        BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(68), (ushort)Machine.Amd64);
+        BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(70), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(84), 240);
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            image.AsSpan(86),
+            (ushort)Characteristics.ExecutableImage);
+        BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(88), 0x20B);
+        BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(120), 4096);
+        BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(124), 512);
+        BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(144), 4096);
+        BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(148), 512);
+        return image;
+    }
+
     public static byte[] RuntimeConfig(string version) => Encoding.UTF8.GetBytes(
         $$"""
           {
@@ -71,6 +157,20 @@ internal static class DependencyFixtures
             }
           }
           """);
+
+    private static void WriteUInt16(Stream stream, ushort value)
+    {
+        Span<byte> bytes = stackalloc byte[2];
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes, value);
+        stream.Write(bytes);
+    }
+
+    private static void WriteUInt32(Stream stream, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        stream.Write(bytes);
+    }
 
     private sealed class ImportPeBuilder : PEBuilder
     {

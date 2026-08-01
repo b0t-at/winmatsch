@@ -67,14 +67,23 @@ public sealed class PayloadDependencyAnalysis
 {
     private readonly IReadOnlyList<DependencyEvidence> _evidence;
     private readonly IReadOnlyList<AnalysisDiagnostic> _diagnostics;
+    private readonly bool _isComplete;
+
+    public PayloadDependencyAnalysis(IReadOnlyList<DependencyEvidence> evidence)
+        : this(evidence, [], isComplete: true)
+    {
+    }
 
     public PayloadDependencyAnalysis(
         IReadOnlyList<DependencyEvidence> evidence,
-        IReadOnlyList<AnalysisDiagnostic>? diagnostics = null)
+        IReadOnlyList<AnalysisDiagnostic> diagnostics,
+        bool isComplete)
     {
         ArgumentNullException.ThrowIfNull(evidence);
+        ArgumentNullException.ThrowIfNull(diagnostics);
         _evidence = Array.AsReadOnly(evidence.ToArray());
-        _diagnostics = Array.AsReadOnly((diagnostics ?? []).ToArray());
+        _diagnostics = Array.AsReadOnly(diagnostics.ToArray());
+        _isComplete = isComplete;
     }
 
     public IReadOnlyList<DependencyEvidence> Evidence => _evidence;
@@ -83,5 +92,6 @@ public sealed class PayloadDependencyAnalysis
     public IReadOnlyList<AnalysisDiagnostic> Diagnostics => _diagnostics;
 
     /// <summary>Whether every relevant payload was inspected within the configured bounds.</summary>
-    public bool IsComplete => !_evidence.Any(static item => item.Status == DependencyEvidenceStatus.Unavailable);
+    public bool IsComplete => _isComplete
+        && !_evidence.Any(static item => item.Status == DependencyEvidenceStatus.Unavailable);
 }

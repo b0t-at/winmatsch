@@ -69,4 +69,6 @@ public sealed class InnoSetupMetadata
     public IReadOnlyList<AnalysisDiagnostic> Diagnostics { get; init; } = [];
 
     internal IReadOnlyList<InnoPayloadCandidate> EmbeddedPayloads { get; init; } = [];
+
+    internal bool PayloadInspectionIsComplete { get; init; }
 }

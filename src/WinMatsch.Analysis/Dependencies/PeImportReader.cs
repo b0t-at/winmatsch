@@ -53,17 +53,18 @@ internal static class PeImportReader
             Machine machine = (Machine)BinaryPrimitives.ReadUInt16LittleEndian(coff[4..]);
             int sectionCount = BinaryPrimitives.ReadUInt16LittleEndian(coff[6..]);
             int optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(coff[20..]);
-            Architecture? architecture = MapArchitecture(machine);
             if (sectionCount is <= 0 or > AnalysisLimits.MaxPeSections
-                || optionalSize is < 96 or > 4096)
+                || optionalSize is < 96 or > 4096
+                || (BinaryPrimitives.ReadUInt16LittleEndian(coff[22..])
+                    & (ushort)Characteristics.ExecutableImage) == 0)
             {
-                return new PeImportInspection(architecture, [], false, false);
+                return Incomplete();
             }
 
             byte[] optional = new byte[optionalSize];
             if (!TryReadAt(stream, peOffset + 24L, optional))
             {
-                return new PeImportInspection(architecture, [], false, false);
+                return Incomplete();
             }
 
             ushort magic = BinaryPrimitives.ReadUInt16LittleEndian(optional);
@@ -81,17 +82,44 @@ internal static class PeImportReader
             }
             else
             {
-                return new PeImportInspection(architecture, [], false, false);
+                return Incomplete();
             }
 
-            if (optional.Length < numberOfDirectoriesOffset + 4)
+            bool machineMatchesMagic = machine switch
             {
-                return new PeImportInspection(architecture, [], false, false);
+                Machine.Amd64 or Machine.Arm64 => magic == 0x20B,
+                Machine.I386 or Machine.Arm or Machine.Thumb or Machine.ArmThumb2 => magic == 0x10B,
+                _ => false,
+            };
+            if (!machineMatchesMagic
+                || optional.Length < numberOfDirectoriesOffset + 4)
+            {
+                return Incomplete();
             }
 
+            uint sectionAlignment = BinaryPrimitives.ReadUInt32LittleEndian(optional.AsSpan(32));
+            uint fileAlignment = BinaryPrimitives.ReadUInt32LittleEndian(optional.AsSpan(36));
+            uint sizeOfImage = BinaryPrimitives.ReadUInt32LittleEndian(optional.AsSpan(56));
             uint sizeOfHeaders = BinaryPrimitives.ReadUInt32LittleEndian(optional.AsSpan(60));
             uint directoryCount = BinaryPrimitives.ReadUInt32LittleEndian(optional.AsSpan(numberOfDirectoriesOffset));
+            long sectionTableEnd = peOffset + 24L + optionalSize + (sectionCount * 40L);
+            if (sectionAlignment == 0
+                || fileAlignment == 0
+                || sizeOfImage < sizeOfHeaders
+                || sizeOfImage % sectionAlignment != 0
+                || sizeOfHeaders < sectionTableEnd
+                || sizeOfHeaders > stream.Length)
+            {
+                return Incomplete();
+            }
+
             Section[] sections = ReadSections(stream, peOffset + 24L + optionalSize, sectionCount);
+            if (!ValidateSections(sections, sizeOfHeaders, sizeOfImage, stream.Length))
+            {
+                return Incomplete();
+            }
+
+            Architecture? architecture = MapArchitecture(machine);
 
             bool isManaged = false;
             if (directoryCount > 14
@@ -117,7 +145,7 @@ internal static class PeImportReader
             if (directoryCount <= 1
                 || !TryReadDirectory(optional, dataDirectoryOffset, 1, out uint importRva, out uint importSize))
             {
-                return new PeImportInspection(architecture, [], isManaged, true);
+                return new PeImportInspection(architecture, [], isManaged, false);
             }
 
             if (importRva == 0 || importSize == 0)
@@ -195,6 +223,41 @@ internal static class PeImportReader
         }
 
         return sections;
+    }
+
+    private static bool ValidateSections(
+        IReadOnlyList<Section> sections,
+        uint sizeOfHeaders,
+        uint sizeOfImage,
+        long streamLength)
+    {
+        bool hasRawSection = false;
+        foreach (Section section in sections)
+        {
+            long virtualExtent = Math.Max(section.VirtualSize, section.RawSize);
+            long virtualEnd = section.VirtualAddress + virtualExtent;
+            if (virtualExtent <= 0
+                || section.VirtualAddress >= sizeOfImage
+                || virtualEnd > sizeOfImage)
+            {
+                return false;
+            }
+
+            if (section.RawSize == 0)
+            {
+                continue;
+            }
+
+            long rawEnd = section.RawOffset + (long)section.RawSize;
+            if (section.RawOffset < sizeOfHeaders || rawEnd > streamLength)
+            {
+                return false;
+            }
+
+            hasRawSection = true;
+        }
+
+        return hasRawSection;
     }
 
     private static bool TryReadDirectory(

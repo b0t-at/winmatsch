@@ -66,7 +66,8 @@ public sealed partial class PayloadDependencyAnalyzer
             const string signal = "analysis-unavailable:non-seekable-executable";
             return new PayloadDependencyAnalysis(
                 CreateUnavailableEvidence(payloadPath, signal),
-                [new AnalysisDiagnostic("DEP001", $"Dependency evidence for '{payloadPath}' is unavailable because the executable stream is not seekable.")]);
+                [new AnalysisDiagnostic("DEP001", $"Dependency evidence for '{payloadPath}' is unavailable because the executable stream is not seekable.")],
+                isComplete: false);
         }
 
         PePayload payload = InspectPe(payloadPath, stream);
@@ -92,20 +93,21 @@ public sealed partial class PayloadDependencyAnalyzer
                         + (format is null ? "." : $" ({format}).")
                         + " Missing runtime imports in that stub are ambiguous; any bounded format-specific payload evidence is reported separately."),
             ]);
+        bool isComplete = payloadIsDirect;
         if (format == DetectedInstallerFormat.InnoSetup)
         {
-            AddInnoPayloadEvidence(stream, evidence, diagnostics, cancellationToken);
+            isComplete = AddInnoPayloadEvidence(stream, evidence, diagnostics, cancellationToken);
         }
         else if (format == DetectedInstallerFormat.Squirrel)
         {
-            AddSquirrelPayloadEvidence(stream, evidence, cancellationToken);
+            isComplete = AddSquirrelPayloadEvidence(stream, evidence, cancellationToken);
             diagnostics.AddRange(installerAnalysis?.Diagnostics ?? []);
         }
 
-        return new PayloadDependencyAnalysis(evidence, diagnostics);
+        return new PayloadDependencyAnalysis(evidence, diagnostics, isComplete);
     }
 
-    private static void AddInnoPayloadEvidence(
+    private static bool AddInnoPayloadEvidence(
         Stream stream,
         List<DependencyEvidence> evidence,
         List<AnalysisDiagnostic> diagnostics,
@@ -118,10 +120,10 @@ public sealed partial class PayloadDependencyAnalyzer
             stream.Position = 0;
             using var peFile = new PeFile(stream);
             stream.Position = 0;
-            InnoSetupMetadata? metadata = new InnoProbe().Inspect(peFile, stream);
+            InnoSetupMetadata? metadata = new InnoProbe().InspectForAnalysis(peFile, stream);
             if (metadata is null)
             {
-                return;
+                return false;
             }
 
             int index = 0;
@@ -140,12 +142,14 @@ public sealed partial class PayloadDependencyAnalyzer
             }
 
             diagnostics.AddRange(metadata.Diagnostics.Where(static diagnostic =>
-                diagnostic.Code is "INNO003" or "INNO007" or "INNO008" or "INNO009"));
+                diagnostic.Code is "INNO003" or "INNO007" or "INNO008" or "INNO009" or "INNO013"));
+            return metadata.PayloadInspectionIsComplete;
         }
         catch (UnsupportedInnoVersionException)
         {
             // The outer analysis already carries the future-version diagnostic. Dependency
             // evidence remains explicitly ambiguous through the outer-stub evidence above.
+            return false;
         }
         finally
         {
@@ -153,7 +157,7 @@ public sealed partial class PayloadDependencyAnalyzer
         }
     }
 
-    private static void AddSquirrelPayloadEvidence(
+    private static bool AddSquirrelPayloadEvidence(
         Stream stream,
         List<DependencyEvidence> evidence,
         CancellationToken cancellationToken)
@@ -162,7 +166,8 @@ public sealed partial class PayloadDependencyAnalyzer
         try
         {
             stream.Position = 0;
-            foreach (SquirrelPayloadPe candidate in SquirrelProbe.InspectPayloadPeEvidence(stream))
+            SquirrelPayloadInspection inspection = SquirrelProbe.InspectPayloadPeEvidence(stream);
+            foreach (SquirrelPayloadPe candidate in inspection.Payloads)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var payload = new PePayload(
@@ -175,6 +180,7 @@ public sealed partial class PayloadDependencyAnalyzer
                     allowAbsent: true,
                     additionalSignal: "squirrel:nupkg-pe"));
             }
+            return inspection.IsComplete;
         }
         finally
         {
@@ -184,7 +190,8 @@ public sealed partial class PayloadDependencyAnalyzer
 
     private PayloadDependencyAnalysis AnalyzeArchive(Stream stream, CancellationToken cancellationToken)
     {
-        using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+        var archiveStream = new BudgetedArchiveStream(stream);
+        using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
         if (archive.Entries.Count > _options.MaximumArchiveEntries)
         {
             throw new InvalidDataException(
@@ -198,7 +205,8 @@ public sealed partial class PayloadDependencyAnalyzer
         var diagnostics = new List<AnalysisDiagnostic>();
         var budget = new ArchiveReadBudget(
             _options.MaximumTotalPayloadBytes,
-            _options.MaximumArchiveReadOperations);
+            _options.MaximumArchiveReadOperations,
+            _options.MaximumTotalCompressedBytes);
 
         foreach (ZipArchiveEntry entry in archive.Entries)
         {
@@ -216,15 +224,30 @@ public sealed partial class PayloadDependencyAnalyzer
                 continue;
             }
 
-            using Stream entryStream = entry.Open();
             long perPayloadLimit = isRuntimeConfig
                 ? Math.Min(_options.MaximumPayloadBytes, _options.MaximumRuntimeConfigBytes)
                 : _options.MaximumPayloadBytes;
-            PayloadReadResult read = ReadPayload(
-                entryStream,
-                perPayloadLimit,
-                budget,
-                cancellationToken);
+            PayloadReadResult read;
+            using (archiveStream.EnterCompressedRead(
+                _options.MaximumCompressedPayloadBytes,
+                budget))
+            {
+                try
+                {
+                    using Stream entryStream = entry.Open();
+                    read = ReadPayload(
+                        entryStream,
+                        perPayloadLimit,
+                        budget,
+                        cancellationToken);
+                }
+                catch (CompressedReadBudgetExceededException exception)
+                {
+                    read = PayloadReadResult.Unavailable(
+                        "compressed-byte-budget",
+                        exception.Message);
+                }
+            }
             if (read.Content is null)
             {
                 string signal = $"analysis-unavailable:{read.Reason}";
@@ -277,7 +300,7 @@ public sealed partial class PayloadDependencyAnalyzer
             }
         }
 
-        return new PayloadDependencyAnalysis(evidence, diagnostics);
+        return new PayloadDependencyAnalysis(evidence, diagnostics, isComplete: true);
     }
 
     private PePayload InspectPe(string path, Stream stream)
@@ -616,13 +639,6 @@ public sealed partial class PayloadDependencyAnalyzer
         ArchiveReadBudget budget,
         CancellationToken cancellationToken)
     {
-        if (budget.RemainingBytes <= 0)
-        {
-            return PayloadReadResult.Unavailable(
-                "aggregate-byte-budget",
-                $"the aggregate read budget of {budget.MaximumBytes} bytes was exhausted");
-        }
-
         using var output = new MemoryStream((int)Math.Min(maximumBytes, 64 * 1024));
         byte[] chunk = new byte[81920];
         long total = 0;
@@ -638,32 +654,21 @@ public sealed partial class PayloadDependencyAnalyzer
 
             long remainingPerPayload = maximumBytes - total;
             long remainingAggregate = budget.RemainingBytes;
-            if (remainingPerPayload <= 0)
+            if (remainingPerPayload <= 0 || remainingAggregate <= 0)
             {
-                if (remainingAggregate <= 0)
-                {
-                    return PayloadReadResult.Unavailable(
-                        "aggregate-byte-budget",
-                        $"the aggregate read budget of {budget.MaximumBytes} bytes was exhausted");
-                }
-
                 int extra = stream.ReadByte();
                 if (extra < 0)
                 {
                     return PayloadReadResult.Success(output.ToArray());
                 }
 
-                budget.ConsumeBytes(1);
-                return PayloadReadResult.Unavailable(
-                    "payload-byte-budget",
-                    $"it expands beyond the per-payload read budget of {maximumBytes} bytes");
-            }
-
-            if (remainingAggregate <= 0)
-            {
-                return PayloadReadResult.Unavailable(
-                    "aggregate-byte-budget",
-                    $"the aggregate read budget of {budget.MaximumBytes} bytes was exhausted");
+                return remainingAggregate <= 0
+                    ? PayloadReadResult.Unavailable(
+                        "aggregate-byte-budget",
+                        $"the aggregate read budget of {budget.MaximumBytes} bytes was exhausted")
+                    : PayloadReadResult.Unavailable(
+                        "payload-byte-budget",
+                        $"it expands beyond the per-payload read budget of {maximumBytes} bytes");
             }
 
             int requested = (int)Math.Min(chunk.Length, Math.Min(remainingPerPayload, remainingAggregate));
@@ -758,21 +763,30 @@ public sealed partial class PayloadDependencyAnalyzer
 
     private sealed class ArchiveReadBudget
     {
-        public ArchiveReadBudget(long maximumBytes, int maximumOperations)
+        public ArchiveReadBudget(
+            long maximumBytes,
+            int maximumOperations,
+            long maximumCompressedBytes)
         {
             MaximumBytes = maximumBytes;
             MaximumOperations = maximumOperations;
+            MaximumCompressedBytes = maximumCompressedBytes;
             RemainingBytes = maximumBytes;
             RemainingOperations = maximumOperations;
+            RemainingCompressedBytes = maximumCompressedBytes;
         }
 
         public long MaximumBytes { get; }
 
         public int MaximumOperations { get; }
 
+        public long MaximumCompressedBytes { get; }
+
         public long RemainingBytes { get; private set; }
 
         public int RemainingOperations { get; private set; }
+
+        public long RemainingCompressedBytes { get; private set; }
 
         public bool TryConsumeOperation()
         {
@@ -794,7 +808,123 @@ public sealed partial class PayloadDependencyAnalyzer
 
             RemainingBytes -= bytes;
         }
+
+        public void ConsumeCompressedBytes(int bytes)
+        {
+            if (bytes < 0 || bytes > RemainingCompressedBytes)
+            {
+                throw new InvalidOperationException("The compressed dependency-analysis read budget was exceeded.");
+            }
+
+            RemainingCompressedBytes -= bytes;
+        }
     }
+
+    private sealed class BudgetedArchiveStream(Stream inner) : Stream
+    {
+        private CompressedReadScope? _scope;
+
+        public override bool CanRead => inner.CanRead;
+
+        public override bool CanSeek => inner.CanSeek;
+
+        public override bool CanWrite => false;
+
+        public override long Length => inner.Length;
+
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public IDisposable EnterCompressedRead(long maximumBytes, ArchiveReadBudget budget)
+        {
+            if (_scope is not null)
+            {
+                throw new InvalidOperationException("A compressed archive read budget is already active.");
+            }
+
+            _scope = new CompressedReadScope(maximumBytes, budget);
+            return new CompressedReadLease(this);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            ValidateBufferArguments(buffer, offset, count);
+            return Read(buffer.AsSpan(offset, count));
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (_scope is null)
+            {
+                return inner.Read(buffer);
+            }
+
+            long remaining = Math.Min(
+                _scope.RemainingBytes,
+                _scope.Budget.RemainingCompressedBytes);
+            if (remaining <= 0)
+            {
+                Span<byte> sentinel = stackalloc byte[1];
+                if (inner.Read(sentinel) == 0)
+                {
+                    return 0;
+                }
+
+                throw new CompressedReadBudgetExceededException(
+                    $"the compressed archive data exceeds the configured per-payload or aggregate read budget");
+            }
+
+            int allowed = (int)Math.Min(buffer.Length, remaining);
+            int read = inner.Read(buffer[..allowed]);
+            _scope.RemainingBytes -= read;
+            _scope.Budget.ConsumeCompressedBytes(read);
+            return read;
+        }
+
+        public override int ReadByte()
+        {
+            Span<byte> value = stackalloc byte[1];
+            return Read(value) == 0 ? -1 : value[0];
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void Flush()
+        {
+        }
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        private sealed class CompressedReadScope(
+            long remainingBytes,
+            ArchiveReadBudget budget)
+        {
+            public long RemainingBytes { get; set; } = remainingBytes;
+
+            public ArchiveReadBudget Budget { get; } = budget;
+        }
+
+        private sealed class CompressedReadLease(BudgetedArchiveStream owner) : IDisposable
+        {
+            private bool _disposed;
+
+            public void Dispose()
+            {
+                if (!_disposed)
+                {
+                    owner._scope = null;
+                    _disposed = true;
+                }
+            }
+        }
+    }
+
+    private sealed class CompressedReadBudgetExceededException(string message) : Exception(message);
 
     private sealed record RuntimeConfigInspection(
         DependencyEvidenceStatus Status,

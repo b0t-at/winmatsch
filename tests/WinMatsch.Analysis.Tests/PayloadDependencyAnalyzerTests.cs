@@ -213,6 +213,21 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Plausible_but_structurally_invalid_pe_header_is_not_absent_evidence()
+    {
+        using MemoryStream archive = DependencyFixtures.BuildZip(
+            ("malformed.exe", DependencyFixtures.BuildStructurallyInvalidPeHeader()));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "malformed.zip");
+
+        Assert.All(analysis.Evidence, evidence =>
+        {
+            Assert.Null(evidence.Architecture);
+            Assert.Equal(DependencyEvidenceStatus.Ambiguous, evidence.Status);
+        });
+    }
+
+    [Fact]
     public void Unassociated_runtimeconfig_does_not_invent_an_architecture()
     {
         using MemoryStream archive = DependencyFixtures.BuildZip(
@@ -340,6 +355,47 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Compressed_byte_budget_bounds_empty_deflate_block_cpu_amplification()
+    {
+        var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
+        {
+            MaximumCompressedPayloadBytes = 1024,
+            MaximumTotalCompressedBytes = 1024,
+        });
+        using MemoryStream archive = DependencyFixtures.BuildDeflateWorkAmplificationZip(
+            "amplified.exe",
+            emptyBlockCount: 20_000,
+            payload: (byte)'M');
+
+        PayloadDependencyAnalysis analysis = analyzer.Analyze(archive, "amplified.zip");
+
+        Assert.False(analysis.IsComplete);
+        Assert.Contains(
+            analysis.Evidence,
+            evidence => evidence.Status == DependencyEvidenceStatus.Unavailable
+                && evidence.Signals.Contains("analysis-unavailable:compressed-byte-budget"));
+    }
+
+    [Fact]
+    public void Payload_exactly_equal_to_aggregate_budget_is_complete()
+    {
+        byte[] pe = DependencyFixtures.BuildPe(Machine.Amd64, "VCRUNTIME140.dll");
+        var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
+        {
+            MaximumPayloadBytes = pe.Length,
+            MaximumTotalPayloadBytes = pe.Length,
+        });
+        using MemoryStream archive = DependencyFixtures.BuildZip(("app.exe", pe));
+
+        PayloadDependencyAnalysis analysis = analyzer.Analyze(archive, "exact.zip");
+
+        Assert.True(analysis.IsComplete);
+        Assert.Equal(
+            DependencyEvidenceStatus.Detected,
+            Find(analysis, "app.exe", DependencyEvidenceKind.VisualCppRuntime).Status);
+    }
+
+    [Fact]
     public void Two_hundred_megabyte_sparse_executable_uses_targeted_pe_reads()
     {
         using DependencyFixtures.SparsePrefixStream stream = DependencyFixtures.BuildSparsePeStream(
@@ -406,6 +462,27 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Inno_payload_candidate_exhaustion_marks_dependency_analysis_incomplete()
+    {
+        byte[][] payloads =
+        [
+            .. Enumerable.Range(0, 65)
+                .Select(_ => DependencyFixtures.BuildPe(Machine.Amd64)),
+        ];
+        byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            AdditionalPayloadBytes = AdvancedInstallerFixtures.Concat(payloads),
+        });
+        using var stream = new MemoryStream(installer);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "setup.exe");
+
+        Assert.False(analysis.IsComplete);
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "INNO013");
+    }
+
+    [Fact]
     public void Squirrel_nupkg_pe_supplies_inner_vc_runtime_evidence()
     {
         byte[] nupkg = SquirrelFixtures.BuildNupkg(
@@ -459,6 +536,10 @@ public class PayloadDependencyAnalyzerTests
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumPayloadBytes = -1 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalPayloadBytes = 0 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalPayloadBytes = -1 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumCompressedPayloadBytes = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumCompressedPayloadBytes = -1 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalCompressedBytes = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalCompressedBytes = -1 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumArchiveReadOperations = 0 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumArchiveReadOperations = -1 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumRuntimeConfigBytes = 0 });

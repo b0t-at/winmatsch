@@ -27,7 +27,7 @@ public sealed class InnoProbe : IExeFormatProbe
         InnoSetupMetadata? metadata;
         try
         {
-            metadata = Inspect(peFile, stream);
+            metadata = InspectForAnalysis(peFile, stream);
         }
         catch (UnsupportedInnoVersionException exception)
         {
@@ -123,6 +123,18 @@ public sealed class InnoProbe : IExeFormatProbe
     /// <summary>Returns detailed setup directives and payload evidence, or null for a non-Inno PE.</summary>
     public InnoSetupMetadata? Inspect(PeFile peFile, Stream stream)
     {
+        try
+        {
+            return InspectForAnalysis(peFile, stream);
+        }
+        catch (UnsupportedInnoVersionException exception)
+        {
+            throw new InvalidDataException(exception.Message, exception);
+        }
+    }
+
+    internal InnoSetupMetadata? InspectForAnalysis(PeFile peFile, Stream stream)
+    {
         ArgumentNullException.ThrowIfNull(peFile);
         ArgumentNullException.ThrowIfNull(stream);
 
@@ -197,6 +209,7 @@ public sealed class InnoProbe : IExeFormatProbe
             Languages = header.Languages,
             EmbeddedPayloadArchitectures = payloadArchitectures,
             EmbeddedPayloads = payloadScan.Candidates,
+            PayloadInspectionIsComplete = payloadScan.IsComplete,
             UnsupportedOSArchitectures = GetUnsupportedOSArchitectures(header, _options),
             EffectiveArchitecture = decision.Architecture,
             ArchitectureIsConclusive = decision.Conclusive,

@@ -643,7 +643,7 @@ internal static partial class InnoFormatReader
         List<string> values = [];
         if ((flags & 0x02) != 0)
         {
-            values.Add("x86compatible");
+            values.Add("x86os");
         }
 
         if ((flags & 0x04) != 0)
@@ -697,7 +697,10 @@ internal static partial class InnoFormatReader
         stream.Position = start;
         stream.ReadExactly(data);
         budget.Consume(length);
-        List<InnoPayloadCandidate> result = FindPeImages(data, options.MaximumPayloadCandidates);
+        List<InnoPayloadCandidate> result = FindPeImages(
+            data,
+            options.MaximumPayloadCandidates,
+            out bool candidateLimitExceeded);
 
         if (compression == InnoCompression.Bzip2)
         {
@@ -705,6 +708,13 @@ internal static partial class InnoFormatReader
                 "INNO003",
                 "The Inno Setup payload uses bzip2 compression, which is not supported by the bounded payload inspector. Embedded architecture evidence is unavailable.",
                 RequiresManualAnalysis: true));
+            if (candidateLimitExceeded)
+            {
+                diagnostics.Add(new AnalysisDiagnostic(
+                    "INNO013",
+                    $"Inno Setup payload inspection found more than {options.MaximumPayloadCandidates} valid PE candidates; remaining architecture evidence was skipped.",
+                    RequiresManualAnalysis: true));
+            }
             return new InnoPayloadScanResult(result, diagnostics, IsComplete: false);
         }
 
@@ -731,11 +741,13 @@ internal static partial class InnoFormatReader
                 options,
                 budget,
                 result,
-                out bool budgetExceeded);
+                out bool budgetExceeded,
+                out bool compressedCandidateLimitExceeded);
             if (budgetExceeded)
             {
                 complete = false;
             }
+            candidateLimitExceeded |= compressedCandidateLimitExceeded;
 
             search = payloadOffset;
         }
@@ -758,6 +770,15 @@ internal static partial class InnoFormatReader
                 RequiresManualAnalysis: true));
         }
 
+        if (candidateLimitExceeded)
+        {
+            complete = false;
+            diagnostics.Add(new AnalysisDiagnostic(
+                "INNO013",
+                $"Inno Setup payload inspection found more than {options.MaximumPayloadCandidates} valid PE candidates; remaining architecture evidence was skipped.",
+                RequiresManualAnalysis: true));
+        }
+
         return new InnoPayloadScanResult(result, diagnostics, complete);
     }
 
@@ -768,9 +789,11 @@ internal static partial class InnoFormatReader
         InnoProbeOptions options,
         PayloadInspectionBudget budget,
         List<InnoPayloadCandidate> result,
-        out bool budgetExceeded)
+        out bool budgetExceeded,
+        out bool candidateLimitExceeded)
     {
         budgetExceeded = false;
+        candidateLimitExceeded = false;
         int inputLimit = Math.Min(data.Length - offset, budget.Remaining / 2);
         int outputLimit = Math.Min(options.MaximumExpandedPayloadBytes, budget.Remaining - inputLimit);
         if (inputLimit <= 0 || outputLimit <= 0)
@@ -797,7 +820,10 @@ internal static partial class InnoFormatReader
                 "Inno Setup payload",
                 bytesRead => expandedCharge = bytesRead);
             expandedCharge = expanded.Length;
-            result.AddRange(FindPeImages(expanded, options.MaximumPayloadCandidates - result.Count));
+            result.AddRange(FindPeImages(
+                expanded,
+                options.MaximumPayloadCandidates - result.Count,
+                out candidateLimitExceeded));
         }
         catch (Exception exception) when (
             exception is InvalidDataException
@@ -818,10 +844,14 @@ internal static partial class InnoFormatReader
         }
     }
 
-    private static List<InnoPayloadCandidate> FindPeImages(byte[] data, int maximum)
+    private static List<InnoPayloadCandidate> FindPeImages(
+        byte[] data,
+        int maximum,
+        out bool limitExceeded)
     {
+        limitExceeded = false;
         List<InnoPayloadCandidate> result = [];
-        for (int i = 0; i <= data.Length - 64 && result.Count < maximum; i++)
+        for (int i = 0; i <= data.Length - 64; i++)
         {
             if (data[i] != (byte)'M' || data[i + 1] != (byte)'Z')
             {
@@ -831,6 +861,12 @@ internal static partial class InnoFormatReader
             if (!TryInspectPe(data, i, out Architecture architecture, out long imageSize))
             {
                 continue;
+            }
+
+            if (result.Count >= maximum)
+            {
+                limitExceeded = true;
+                break;
             }
 
             using var image = new MemoryStream(

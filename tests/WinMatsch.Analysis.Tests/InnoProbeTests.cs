@@ -71,12 +71,12 @@ public class InnoProbeTests
         Assert.Equal("Контосо", metadata.Publisher);
         Assert.Equal([1251u, 1251u], metadata.Languages.Select(language => language.CodePage));
         Assert.Equal([new LanguageTag("ru-RU"), new LanguageTag("uk-UA")], metadata.Languages.Select(language => language.Locale));
-        Assert.Null(installer.Architecture);
+        Assert.Equal(Architecture.X86, installer.Architecture);
         Assert.Equal(Scope.User, installer.Scope);
         Assert.Null(installer.ElevationRequirement);
         Assert.Null(installer.InstallerLocale);
         Assert.Equal(@"%LOCALAPPDATA%\Contoso", installer.InstallationMetadata!.DefaultInstallLocation);
-        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "INNO001");
+        Assert.DoesNotContain(analysis.Diagnostics, diagnostic => diagnostic.Code == "INNO001");
     }
 
     [Theory]
@@ -117,6 +117,19 @@ public class InnoProbeTests
         Assert.False(metadata.ArchitectureIsConclusive);
         Assert.Equal("INNO001", Assert.Single(analysis.Diagnostics).Code);
         Assert.True(Assert.Single(analysis.Diagnostics).RequiresManualAnalysis);
+    }
+
+    [Fact]
+    public void Public_inspect_preserves_invalid_data_exception_for_future_versions()
+    {
+        byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
+        {
+            Version = new Version(6, 5, 0),
+        });
+        using var stream = new MemoryStream(installer);
+        using var peFile = new PeFile(stream);
+
+        Assert.Throws<InvalidDataException>(() => new InnoProbe().Inspect(peFile, stream));
     }
 
     [Theory]
@@ -487,6 +500,25 @@ public class InnoProbeTests
     }
 
     [Fact]
+    public void Legacy_x86_flag_is_strict_and_emits_unsupported_os_architectures()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(5, 6, 0),
+            Unicode = false,
+            OldArchitecturesAllowed = 0x02,
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+        Installer installer = Assert.Single(
+            Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options))).Installers);
+
+        Assert.Equal("x86os", metadata.ArchitecturesAllowed);
+        Assert.Equal(Architecture.X86, metadata.EffectiveArchitecture);
+        Assert.Equal([Architecture.X64, Architecture.Arm, Architecture.Arm64], installer.UnsupportedOSArchitectures);
+    }
+
+    [Fact]
     public void Legacy_ia64_flag_is_preserved_as_manual_analysis()
     {
         var options = new InnoFixtures.Options
@@ -597,6 +629,27 @@ public class InnoProbeTests
         Assert.Null(limited.EffectiveArchitecture);
         Assert.Equal([Architecture.X64], complete.EmbeddedPayloadArchitectures);
         Assert.Equal(Architecture.X64, complete.EffectiveArchitecture);
+    }
+
+    [Fact]
+    public void Payload_candidate_limit_is_diagnosed_and_prevents_conclusive_architecture()
+    {
+        byte[] payload = AdvancedInstallerFixtures.Concat(
+            DependencyFixtures.BuildPe(Machine.Amd64),
+            DependencyFixtures.BuildPe(Machine.Amd64),
+            DependencyFixtures.BuildPe(Machine.Arm64));
+        byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            AdditionalPayloadBytes = payload,
+        });
+        var probe = new InnoProbe(new InnoProbeOptions { MaximumPayloadCandidates = 2 });
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(installer, probe));
+
+        Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
+        Assert.False(metadata.ArchitectureIsConclusive);
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO013");
     }
 
     [Fact]
