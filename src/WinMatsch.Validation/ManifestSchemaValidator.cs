@@ -6,35 +6,35 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Json.Schema;
 using WinMatsch.Core;
+using WinMatsch.Core.Yaml;
 using YamlDotNet.Core;
-using YamlDotNet.Core.Events;
 using YamlDotNet.RepresentationModel;
 
 namespace WinMatsch.Validation;
 
-/// <summary>Validates manifest YAML against the four bundled WinGet 1.12 Draft 7 schemas.</summary>
+/// <summary>Validates manifest YAML against the bundled WinGet Draft 7 schemas.</summary>
 public static partial class ManifestSchemaValidator
 {
-    public const string SchemaVersion = "1.12.0";
+    public static string SchemaVersion => ManifestVersion.Default.Value;
 
     private const string Draft7Identifier = "http://json-schema.org/draft-07/schema#";
-    private const int MaxManifestBytes = 16 * 1024 * 1024;
-    private const int MaxYamlDepth = 64;
-    private const int MaxYamlNodes = 100_000;
     private const int MaxNumericScalarCharacters = 256;
 
     private static readonly Dictionary<ManifestType, SchemaEntry> _schemas = LoadSchemas();
 
     internal static ValidationReport ReadHeader(
         ManifestDocument document,
-        out ManifestHeader? header)
+        out ManifestHeader? header,
+        out ManifestYamlDocument? yamlDocument)
     {
         ArgumentNullException.ThrowIfNull(document);
         header = null;
+        yamlDocument = null;
         JsonDocument instance;
         try
         {
-            (instance, _) = ConvertYamlToJson(document.Content);
+            yamlDocument = ManifestYamlDocument.Parse(document.Content);
+            instance = ConvertYamlToJson(yamlDocument);
         }
         catch (YamlException exception)
         {
@@ -73,6 +73,34 @@ public static partial class ManifestSchemaValidator
     public static ValidationReport Validate(ManifestDocument document, ManifestType manifestType)
     {
         ArgumentNullException.ThrowIfNull(document);
+        ManifestYamlDocument yamlDocument;
+        try
+        {
+            yamlDocument = ManifestYamlDocument.Parse(document.Content);
+        }
+        catch (YamlException exception)
+        {
+            return YamlFailure($"Invalid YAML: {exception.Message}", document.RepositoryPath);
+        }
+        catch (InvalidDataException exception)
+        {
+            return YamlFailure(exception.Message, document.RepositoryPath);
+        }
+        catch (ArgumentException exception)
+        {
+            return YamlFailure($"Invalid YAML: {exception.Message}", document.RepositoryPath);
+        }
+
+        return Validate(document, manifestType, yamlDocument);
+    }
+
+    internal static ValidationReport Validate(
+        ManifestDocument document,
+        ManifestType manifestType,
+        ManifestYamlDocument yamlDocument)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentNullException.ThrowIfNull(yamlDocument);
         if (!_schemas.TryGetValue(manifestType, out SchemaEntry? entry))
         {
             return new ValidationReport(
@@ -86,14 +114,9 @@ public static partial class ManifestSchemaValidator
 
         var findings = new List<ValidationFinding>();
         JsonDocument instance;
-        YamlMappingNode root;
         try
         {
-            (instance, root) = ConvertYamlToJson(document.Content);
-        }
-        catch (YamlException exception)
-        {
-            return YamlFailure($"Invalid YAML: {exception.Message}", document.RepositoryPath);
+            instance = ConvertYamlToJson(yamlDocument);
         }
         catch (JsonException exception)
         {
@@ -112,14 +135,38 @@ public static partial class ManifestSchemaValidator
 
         using (instance)
         {
-            ValidatePropertyCasing(root, entry.CanonicalProperties, document.RepositoryPath, findings);
-            EvaluationResults results = entry.Schema.Evaluate(
-                instance.RootElement,
-                new EvaluationOptions
-                {
-                    OutputFormat = OutputFormat.List,
-                    Culture = CultureInfo.InvariantCulture,
-                });
+            ValidatePropertyCasing(
+                yamlDocument.Root,
+                entry.CanonicalProperties,
+                document.RepositoryPath,
+                findings);
+            EvaluationResults results;
+            try
+            {
+                results = entry.Schema.Evaluate(
+                    instance.RootElement,
+                    new EvaluationOptions
+                    {
+                        OutputFormat = OutputFormat.List,
+                        Culture = CultureInfo.InvariantCulture,
+                    });
+            }
+            catch (FormatException)
+            {
+                findings.Add(Error(
+                    "VLD1003",
+                    "Schema validation could not represent a numeric manifest value.",
+                    document.RepositoryPath));
+                return new ValidationReport(findings);
+            }
+            catch (OverflowException)
+            {
+                findings.Add(Error(
+                    "VLD1003",
+                    "Schema validation found a numeric value outside the supported range.",
+                    document.RepositoryPath));
+                return new ValidationReport(findings);
+            }
 
             if (!results.IsValid)
             {
@@ -134,10 +181,10 @@ public static partial class ManifestSchemaValidator
     {
         var schemas = new Dictionary<ManifestType, SchemaEntry>
         {
-            [ManifestType.Version] = LoadSchema("manifest.version.1.12.0.json"),
-            [ManifestType.Installer] = LoadSchema("manifest.installer.1.12.0.json"),
-            [ManifestType.DefaultLocale] = LoadSchema("manifest.defaultLocale.1.12.0.json"),
-            [ManifestType.Locale] = LoadSchema("manifest.locale.1.12.0.json"),
+            [ManifestType.Version] = LoadSchema($"manifest.version.{SchemaVersion}.json"),
+            [ManifestType.Installer] = LoadSchema($"manifest.installer.{SchemaVersion}.json"),
+            [ManifestType.DefaultLocale] = LoadSchema($"manifest.defaultLocale.{SchemaVersion}.json"),
+            [ManifestType.Locale] = LoadSchema($"manifest.locale.{SchemaVersion}.json"),
         };
         return schemas;
     }
@@ -200,73 +247,16 @@ public static partial class ManifestSchemaValidator
         }
     }
 
-    private static (JsonDocument Document, YamlMappingNode Root) ConvertYamlToJson(string yaml)
+    private static JsonDocument ConvertYamlToJson(ManifestYamlDocument yamlDocument)
     {
-        if (Encoding.UTF8.GetByteCount(yaml) > MaxManifestBytes)
-        {
-            throw new InvalidDataException(
-                $"A manifest cannot exceed {MaxManifestBytes} UTF-8 bytes.");
-        }
-
-        ValidateYamlEvents(yaml);
-        var stream = new YamlStream();
-        using var reader = new StringReader(yaml);
-        stream.Load(reader);
-        if (stream.Documents.Count != 1
-            || stream.Documents[0].RootNode is not YamlMappingNode root)
-        {
-            throw new InvalidDataException("A manifest must contain exactly one YAML mapping document.");
-        }
-
         using var output = new MemoryStream();
         using (var writer = new Utf8JsonWriter(output))
         {
-            int nodesRemaining = MaxYamlNodes;
-            WriteNode(writer, root, depth: 0, ref nodesRemaining);
+            int nodesRemaining = ManifestYamlDocument.MaxYamlNodes;
+            WriteNode(writer, yamlDocument.Root, depth: 0, ref nodesRemaining);
         }
 
-        return (JsonDocument.Parse(output.ToArray()), root);
-    }
-
-    private static void ValidateYamlEvents(string yaml)
-    {
-        using var reader = new StringReader(yaml);
-        var parser = new Parser(reader);
-        int depth = 0;
-        int nodes = 0;
-        while (parser.MoveNext())
-        {
-            ParsingEvent parsingEvent = parser.Current
-                ?? throw new InvalidDataException("YAML parser returned an empty event.");
-            if (parsingEvent is AnchorAlias)
-            {
-                throw new InvalidDataException(
-                    "YAML anchors and aliases are not permitted in manifests.");
-            }
-
-            if (parsingEvent is NodeEvent node)
-            {
-                nodes++;
-                if (nodes > MaxYamlNodes)
-                {
-                    throw new InvalidDataException(
-                        $"A manifest cannot contain more than {MaxYamlNodes} YAML nodes.");
-                }
-
-                if (!node.Anchor.IsEmpty)
-                {
-                    throw new InvalidDataException(
-                        "YAML anchors and aliases are not permitted in manifests.");
-                }
-            }
-
-            depth += parsingEvent.NestingIncrease;
-            if (depth > MaxYamlDepth)
-            {
-                throw new InvalidDataException(
-                    $"YAML nesting cannot exceed {MaxYamlDepth} levels.");
-            }
-        }
+        return JsonDocument.Parse(output.ToArray());
     }
 
     private static void WriteNode(
@@ -283,17 +273,17 @@ public static partial class ManifestSchemaValidator
 
         ValidateContainerTag(node);
 
-        if (depth > MaxYamlDepth)
+        if (depth > ManifestYamlDocument.MaxYamlDepth)
         {
             throw new InvalidDataException(
-                $"YAML nesting cannot exceed {MaxYamlDepth} levels.");
+                $"YAML nesting cannot exceed {ManifestYamlDocument.MaxYamlDepth} levels.");
         }
 
         nodesRemaining--;
         if (nodesRemaining < 0)
         {
             throw new InvalidDataException(
-                $"A manifest cannot contain more than {MaxYamlNodes} YAML nodes.");
+                $"A manifest cannot contain more than {ManifestYamlDocument.MaxYamlNodes} YAML nodes.");
         }
 
         switch (node)

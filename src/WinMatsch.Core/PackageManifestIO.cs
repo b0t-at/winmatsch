@@ -21,14 +21,13 @@ public static class PackageManifestIO
         var locales = new List<LocaleManifest>();
         var fileNames = new Dictionary<object, string>(ReferenceEqualityComparer.Instance);
 
-        IEnumerable<string> paths = Directory.EnumerateFiles(directoryPath)
-            .Where(IsYamlFile)
-            .OrderBy(Path.GetFileName, StringComparer.Ordinal);
-
-        foreach (string path in paths)
+        foreach (ManifestYamlFile file in ManifestYamlDirectory.ReadFiles(
+                     directoryPath,
+                     directoryPath))
         {
-            string yaml = File.ReadAllText(path);
-            ManifestHeader header = ManifestYamlReader.ReadHeader(yaml);
+            string path = file.Path;
+            ManifestYamlDocument document = file.Document;
+            ManifestHeader header = ManifestYamlReader.ReadHeader(document);
             string typeValue = header.ManifestType
                 ?? throw InvalidManifestSet($"Manifest '{Path.GetFileName(path)}' has no ManifestType.");
             _ = new ManifestVersion(header.ManifestVersion
@@ -54,32 +53,55 @@ public static class PackageManifestIO
                     + $"expected '{type.ToYaml()}'.");
             }
 
-            switch (type)
+            object parsed;
+            try
             {
-                case ManifestType.Installer:
+                parsed = type switch
+                {
+                    ManifestType.Installer => ManifestYamlReader.ReadInstaller(document),
+                    ManifestType.DefaultLocale => ManifestYamlReader.ReadDefaultLocale(document),
+                    ManifestType.Locale => ManifestYamlReader.ReadLocale(document),
+                    ManifestType.Version => ManifestYamlReader.ReadVersion(document),
+                    ManifestType.Singleton => throw InvalidManifestSet(
+                        "Singleton manifests cannot be part of a multi-file manifest set."),
+                    _ => throw InvalidManifestSet($"Unsupported manifest type '{type}'."),
+                };
+            }
+            catch (Exception exception) when (
+                exception is YamlDotNet.Core.YamlException
+                    or FormatException
+                    or ArgumentException
+                    or OverflowException)
+            {
+                throw InvalidManifestSet(
+                    $"Manifest '{fileName}' contains an invalid typed value: {exception.Message}",
+                    exception);
+            }
+
+            switch (parsed)
+            {
+                case InstallerManifest parsedInstaller:
                     EnsureMissing(installer, ManifestType.Installer);
-                    installer = ManifestYamlReader.ReadInstaller(yaml);
+                    installer = parsedInstaller;
                     fileNames.Add(installer, fileName);
                     break;
-                case ManifestType.DefaultLocale:
+                case DefaultLocaleManifest parsedDefaultLocale:
                     EnsureMissing(defaultLocale, ManifestType.DefaultLocale);
-                    defaultLocale = ManifestYamlReader.ReadDefaultLocale(yaml);
+                    defaultLocale = parsedDefaultLocale;
                     fileNames.Add(defaultLocale, fileName);
                     break;
-                case ManifestType.Locale:
-                    LocaleManifest locale = ManifestYamlReader.ReadLocale(yaml);
+                case LocaleManifest locale:
                     locales.Add(locale);
                     fileNames.Add(locale, fileName);
                     break;
-                case ManifestType.Version:
+                case VersionManifest parsedVersion:
                     EnsureMissing(version, ManifestType.Version);
-                    version = ManifestYamlReader.ReadVersion(yaml);
+                    version = parsedVersion;
                     fileNames.Add(version, fileName);
                     break;
-                case ManifestType.Singleton:
-                    throw InvalidManifestSet("Singleton manifests cannot be part of a multi-file manifest set.");
                 default:
-                    throw InvalidManifestSet($"Unsupported manifest type '{type}'.");
+                    throw InvalidManifestSet(
+                        $"Manifest '{fileName}' materialized as unsupported model '{parsed.GetType().Name}'.");
             }
         }
 
@@ -134,7 +156,8 @@ public static class PackageManifestIO
 
     /// <summary>
     /// Writes a complete manifest set. Existing unexpected YAML files are rejected so a stale
-    /// locale cannot remain in the directory unnoticed.
+    /// locale cannot remain in the directory unnoticed. Replaced files retain their existing LF
+    /// or CRLF style; newly generated files use canonical LF.
     /// </summary>
     public static void WriteDirectory(
         string directoryPath,
@@ -145,9 +168,14 @@ public static class PackageManifestIO
         IReadOnlyDictionary<string, string> files = SerializeFiles(manifests, options);
         Directory.CreateDirectory(directoryPath);
 
-        foreach (string path in Directory.EnumerateFiles(directoryPath).Where(IsYamlFile))
+        Dictionary<string, string> existingFiles = ManifestYamlDirectory
+            .ReadFiles(directoryPath, directoryPath)
+            .ToDictionary(
+                static file => Path.GetFileName(file.Path),
+                static file => file.Document.Content,
+                StringComparer.Ordinal);
+        foreach (string fileName in existingFiles.Keys)
         {
-            string fileName = Path.GetFileName(path);
             if (!files.ContainsKey(fileName))
             {
                 throw new IOException(
@@ -166,8 +194,14 @@ public static class PackageManifestIO
                 string destinationPath = Path.Combine(directoryPath, fileName);
                 string stagingPath = Path.Combine(directoryPath, $".{fileName}.{token}.tmp");
                 string backupPath = Path.Combine(directoryPath, $".{fileName}.{token}.bak");
-                stagedFiles.Add(new StagedFile(destinationPath, stagingPath, backupPath, File.Exists(destinationPath)));
-                File.WriteAllText(stagingPath, yaml, utf8WithoutBom);
+                bool hadDestination = existingFiles.TryGetValue(fileName, out string? existingSource);
+                stagedFiles.Add(new StagedFile(destinationPath, stagingPath, backupPath, hadDestination));
+                string output = hadDestination
+                    ? ManifestYamlText.PreserveExistingLineEndings(
+                        yaml,
+                        existingSource!)
+                    : yaml;
+                File.WriteAllText(stagingPath, output, utf8WithoutBom);
             }
 
             foreach (StagedFile file in stagedFiles)
@@ -375,11 +409,6 @@ public static class PackageManifestIO
 
     private static InvalidDataException InvalidManifestSet(string message, Exception? innerException = null)
         => new($"Invalid WinGet manifest set: {message}", innerException);
-
-    private static bool IsYamlFile(string path)
-        => Path.GetExtension(path) is { } extension
-            && (extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase)
-                || extension.Equals(".yml", StringComparison.OrdinalIgnoreCase));
 
     private static void RollBack(IReadOnlyList<StagedFile> files)
     {

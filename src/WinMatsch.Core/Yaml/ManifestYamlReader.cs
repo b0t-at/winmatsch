@@ -14,8 +14,12 @@ public static class ManifestYamlReader
 {
     /// <summary>Reads only the common header fields, without validating them.</summary>
     public static ManifestHeader ReadHeader(string yaml)
+        => ReadHeader(ManifestYamlDocument.Parse(yaml));
+
+    public static ManifestHeader ReadHeader(ManifestYamlDocument document)
     {
-        MappingReader reader = LoadRoot(yaml);
+        ArgumentNullException.ThrowIfNull(document);
+        var reader = new MappingReader(document.Root);
         return new ManifestHeader
         {
             PackageIdentifier = reader.String("PackageIdentifier"),
@@ -41,11 +45,23 @@ public static class ManifestYamlReader
         {
             return null;
         }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
     }
 
     public static InstallerManifest ReadInstaller(string yaml)
+        => ReadInstaller(ManifestYamlDocument.Parse(yaml));
+
+    public static InstallerManifest ReadInstaller(ManifestYamlDocument document)
     {
-        MappingReader reader = LoadRoot(yaml);
+        ArgumentNullException.ThrowIfNull(document);
+        var reader = new MappingReader(document.Root);
         var manifest = new InstallerManifest
         {
             PackageIdentifier = reader.Value("PackageIdentifier", static s => new PackageIdentifier(s)),
@@ -59,8 +75,12 @@ public static class ManifestYamlReader
     }
 
     public static DefaultLocaleManifest ReadDefaultLocale(string yaml)
+        => ReadDefaultLocale(ManifestYamlDocument.Parse(yaml));
+
+    public static DefaultLocaleManifest ReadDefaultLocale(ManifestYamlDocument document)
     {
-        MappingReader reader = LoadRoot(yaml);
+        ArgumentNullException.ThrowIfNull(document);
+        var reader = new MappingReader(document.Root);
         var manifest = new DefaultLocaleManifest
         {
             Moniker = reader.String("Moniker"),
@@ -70,16 +90,24 @@ public static class ManifestYamlReader
     }
 
     public static LocaleManifest ReadLocale(string yaml)
+        => ReadLocale(ManifestYamlDocument.Parse(yaml));
+
+    public static LocaleManifest ReadLocale(ManifestYamlDocument document)
     {
-        MappingReader reader = LoadRoot(yaml);
+        ArgumentNullException.ThrowIfNull(document);
+        var reader = new MappingReader(document.Root);
         var manifest = new LocaleManifest();
         ReadLocaleFields(reader, manifest);
         return manifest;
     }
 
     public static VersionManifest ReadVersion(string yaml)
+        => ReadVersion(ManifestYamlDocument.Parse(yaml));
+
+    public static VersionManifest ReadVersion(ManifestYamlDocument document)
     {
-        MappingReader reader = LoadRoot(yaml);
+        ArgumentNullException.ThrowIfNull(document);
+        var reader = new MappingReader(document.Root);
         var manifest = new VersionManifest
         {
             PackageIdentifier = reader.Value("PackageIdentifier", static s => new PackageIdentifier(s)),
@@ -272,22 +300,6 @@ public static class ManifestYamlReader
         {
             setVersion(version);
         }
-    }
-
-    private static MappingReader LoadRoot(string yaml)
-    {
-        ArgumentNullException.ThrowIfNull(yaml);
-
-        var stream = new YamlStream();
-        using var stringReader = new StringReader(yaml);
-        stream.Load(stringReader);
-
-        if (stream.Documents.Count == 0 || stream.Documents[0].RootNode is not YamlMappingNode root)
-        {
-            throw new FormatException("The document is not a YAML mapping and cannot be a WinGet manifest.");
-        }
-
-        return new MappingReader(root);
     }
 
     /// <summary>Typed access to the children of a YAML mapping node.</summary>

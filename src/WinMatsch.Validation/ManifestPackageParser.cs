@@ -24,11 +24,13 @@ internal static class ManifestPackageParser
 
         foreach (ManifestDocument document in documents.OrderBy(static item => item.RepositoryPath, StringComparer.Ordinal))
         {
+            int findingStart = findings.Count;
             ValidationReport headerReport = ManifestSchemaValidator.ReadHeader(
                 document,
-                out ManifestHeader? header);
+                out ManifestHeader? header,
+                out ManifestYamlDocument? yamlDocument);
             findings.AddRange(headerReport.Findings);
-            if (header is null)
+            if (header is null || yamlDocument is null)
             {
                 continue;
             }
@@ -44,7 +46,11 @@ internal static class ManifestPackageParser
             }
 
             ValidateSchemaHeader(document, type.Value, findings);
-            findings.AddRange(ManifestSchemaValidator.Validate(document, type.Value).Findings);
+            ValidationReport schemaReport = ManifestSchemaValidator.Validate(
+                document,
+                type.Value,
+                yamlDocument);
+            findings.AddRange(schemaReport.Findings);
             if (!string.Equals(header.ManifestType, type.Value.ToYaml(), StringComparison.Ordinal))
             {
                 findings.Add(Error(
@@ -64,14 +70,22 @@ internal static class ManifestPackageParser
                     document.RepositoryPath));
             }
 
+            if (!schemaReport.IsValid
+                || findings
+                    .Skip(findingStart)
+                    .Any(static finding => finding.Severity == ValidationSeverity.Error))
+            {
+                continue;
+            }
+
             try
             {
                 object manifest = type.Value switch
                 {
-                    ManifestType.Installer => ManifestYamlReader.ReadInstaller(document.Content),
-                    ManifestType.DefaultLocale => ManifestYamlReader.ReadDefaultLocale(document.Content),
-                    ManifestType.Locale => ManifestYamlReader.ReadLocale(document.Content),
-                    ManifestType.Version => ManifestYamlReader.ReadVersion(document.Content),
+                    ManifestType.Installer => ManifestYamlReader.ReadInstaller(yamlDocument),
+                    ManifestType.DefaultLocale => ManifestYamlReader.ReadDefaultLocale(yamlDocument),
+                    ManifestType.Locale => ManifestYamlReader.ReadLocale(yamlDocument),
+                    ManifestType.Version => ManifestYamlReader.ReadVersion(yamlDocument),
                     _ => throw new InvalidOperationException($"Unsupported manifest type '{type.Value}'."),
                 };
 
@@ -112,6 +126,14 @@ internal static class ManifestPackageParser
             catch (ArgumentException exception)
             {
                 findings.Add(Error("VLD2003", $"Manifest contains an invalid value: {exception.Message}", document.RepositoryPath));
+            }
+            catch (OverflowException exception)
+            {
+                findings.Add(Error("VLD2003", $"Manifest contains a numeric value outside the supported range: {exception.Message}", document.RepositoryPath));
+            }
+            catch (InvalidDataException exception)
+            {
+                findings.Add(Error("VLD2003", $"Manifest could not be read: {exception.Message}", document.RepositoryPath));
             }
         }
 
@@ -167,17 +189,39 @@ internal static class ManifestPackageParser
         const string prefix = "# yaml-language-server: $schema=";
         string expected = $"{prefix}https://aka.ms/winget-manifest.{type.ToYaml()}."
             + $"{ManifestSchemaValidator.SchemaVersion}.schema.json";
-        string? actual = document.Content
-            .Split('\n')
-            .Select(static line => line.TrimEnd('\r'))
-            .FirstOrDefault(line => line.StartsWith(prefix, StringComparison.Ordinal));
+        int newline = document.Content.IndexOf('\n');
+        string actual = (newline >= 0 ? document.Content[..newline] : document.Content)
+            .TrimEnd('\r');
         if (!string.Equals(actual, expected, StringComparison.Ordinal))
         {
+            string message;
+            if (actual.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                message = $"The first-line schema header '{actual}' must be exactly '{expected}'.";
+            }
+            else
+            {
+                int misplacedStart = document.Content.IndexOf(
+                    $"\n{prefix}",
+                    StringComparison.Ordinal);
+                if (misplacedStart >= 0)
+                {
+                    misplacedStart++;
+                    int misplacedEnd = document.Content.IndexOf('\n', misplacedStart);
+                    string misplaced = document.Content[
+                        misplacedStart..(misplacedEnd >= 0 ? misplacedEnd : document.Content.Length)]
+                        .TrimEnd('\r');
+                    message = $"Schema header '{misplaced}' must appear as the exact first line '{expected}'.";
+                }
+                else
+                {
+                    message = $"The first line must be the exact schema header '{expected}'.";
+                }
+            }
+
             findings.Add(Error(
                 "VLD2104",
-                actual is null
-                    ? $"Manifest must include exact schema header '{expected}'."
-                    : $"Manifest schema header must be exactly '{expected}'.",
+                message,
                 document.RepositoryPath));
         }
     }

@@ -17,7 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="..\..\schemas\manifest.*.1.12.0.json"
+    <EmbeddedResource Include="..\..\schemas\manifest.*.json"
                       LogicalName="WinMatsch.Validation.Schemas.%(Filename)%(Extension)" />
     <None Include="..\..\THIRD-PARTY-NOTICES.txt"
           Link="THIRD-PARTY-NOTICES.txt"

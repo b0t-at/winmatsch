@@ -3,11 +3,8 @@ using WinMatsch.Core;
 namespace WinMatsch.Rules;
 
 /// <summary>
-/// WM0102: reports an error when two installers share the same effective
-/// Architecture+InstallerType+Scope key (looking through root defaults). Exact duplicates
-/// (same key and same URL) are removed by WM0005 during normalization; what remains here is
-/// the "Duplicate installer entry found" class of failure that kills winget-pkgs pipeline
-/// runs, usually caused by two different assets collapsing onto one architecture.
+/// WM0102: reports an error when two installers match WinGet's duplicate-installer relation,
+/// looking through root defaults and treating absent scope/locale as wildcards.
 /// </summary>
 public sealed class DuplicateInstallerEntriesRule : IRule
 {
@@ -17,7 +14,7 @@ public sealed class DuplicateInstallerEntriesRule : IRule
 
     public RuleSeverity Severity => RuleSeverity.Error;
 
-    public string Description => "Reports installers that collide on architecture, installer type and scope.";
+    public string Description => "Reports installers that collide under WinGet's duplicate-installer relation.";
 
     public void Apply(ManifestContext context)
     {
@@ -30,21 +27,25 @@ public sealed class DuplicateInstallerEntriesRule : IRule
             return;
         }
 
-        var firstIndexByKey = new Dictionary<string, int>(StringComparer.Ordinal);
-        var reported = new HashSet<string>(StringComparer.Ordinal);
         for (int i = 0; i < installers.Count; i++)
         {
-            string key = EffectiveInstallerValues.GetEntryKey(manifest, installers[i]);
-            if (!firstIndexByKey.TryGetValue(key, out int firstIndex))
+            int firstIndex = -1;
+            for (int candidate = 0; candidate < i; candidate++)
             {
-                firstIndexByKey.Add(key, i);
-                continue;
+                if (InstallerDuplicateRelation.AreDuplicates(
+                        manifest,
+                        installers[candidate],
+                        installers[i]))
+                {
+                    firstIndex = candidate;
+                    break;
+                }
             }
 
-            if (reported.Add(key))
+            if (firstIndex >= 0)
             {
                 context.AddFinding(this,
-                    $"Installers[{firstIndex}] and Installers[{i}] share the same Architecture+InstallerType+Scope ({key.Replace('|', '/')}); winget rejects manifests with duplicate installer entries.",
+                    $"Installers[{firstIndex}] and Installers[{i}] collide under WinGet's effective architecture, installer type, nested installer type, scope, and locale relation.",
                     $"Installers[{i}]");
             }
         }

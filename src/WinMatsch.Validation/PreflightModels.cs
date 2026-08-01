@@ -1,4 +1,5 @@
 using WinMatsch.Core;
+using WinMatsch.Core.Yaml;
 using WinMatsch.Downloads;
 
 namespace WinMatsch.Validation;
@@ -67,7 +68,9 @@ public sealed class PreflightRequest
         string fullRoot = Path.GetFullPath(repositoryRoot);
         string fullDirectory = Path.GetFullPath(versionDirectory);
         string relativeDirectory = Path.GetRelativePath(fullRoot, fullDirectory);
-        if (relativeDirectory.StartsWith("..", StringComparison.Ordinal)
+        if (relativeDirectory.Equals("..", StringComparison.Ordinal)
+            || relativeDirectory.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            || relativeDirectory.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal)
             || Path.IsPathRooted(relativeDirectory))
         {
             throw new ArgumentException("The version directory must be inside the repository root.", nameof(versionDirectory));
@@ -75,14 +78,10 @@ public sealed class PreflightRequest
 
         ManifestDocument[] documents =
         [
-            .. Directory.EnumerateFiles(fullDirectory)
-                .Where(static path => Path.GetExtension(path) is { } extension
-                    && (extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase)
-                        || extension.Equals(".yml", StringComparison.OrdinalIgnoreCase)))
-                .OrderBy(static path => path, StringComparer.Ordinal)
-                .Select(path => new ManifestDocument(
-                    NormalizeRepositoryPath(Path.GetRelativePath(fullRoot, path)),
-                    File.ReadAllText(path))),
+            .. ManifestYamlDirectory.ReadFiles(fullDirectory, fullRoot)
+                .Select(file => new ManifestDocument(
+                    NormalizeRepositoryPath(Path.GetRelativePath(fullRoot, file.Path)),
+                    file.Document.Content)),
         ];
 
         return new PreflightRequest

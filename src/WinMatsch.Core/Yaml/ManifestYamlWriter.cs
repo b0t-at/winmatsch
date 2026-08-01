@@ -143,19 +143,26 @@ public static class ManifestYamlWriter
     private static void WriteInstallerFieldsTail(YamlEmitter emitter, InstallerFieldsBase fields)
     {
         emitter.ScalarSequence("InstallModes", fields.InstallModes, static m => m.ToYaml());
-        if (fields.InstallerSwitches is { IsEmpty: false } switches)
+        if (fields.InstallerSwitches is { } switches)
         {
-            emitter.Mapping("InstallerSwitches", e =>
+            if (switches.IsEmpty)
             {
-                e.Scalar("Silent", switches.Silent);
-                e.Scalar("SilentWithProgress", switches.SilentWithProgress);
-                e.Scalar("Interactive", switches.Interactive);
-                e.Scalar("InstallLocation", switches.InstallLocation);
-                e.Scalar("Log", switches.Log);
-                e.Scalar("Upgrade", switches.Upgrade);
-                e.Scalar("Custom", switches.Custom);
-                e.Scalar("Repair", switches.Repair);
-            });
+                emitter.EmptyMapping("InstallerSwitches");
+            }
+            else
+            {
+                emitter.Mapping("InstallerSwitches", e =>
+                {
+                    e.Scalar("Silent", switches.Silent);
+                    e.Scalar("SilentWithProgress", switches.SilentWithProgress);
+                    e.Scalar("Interactive", switches.Interactive);
+                    e.Scalar("InstallLocation", switches.InstallLocation);
+                    e.Scalar("Log", switches.Log);
+                    e.Scalar("Upgrade", switches.Upgrade);
+                    e.Scalar("Custom", switches.Custom);
+                    e.Scalar("Repair", switches.Repair);
+                });
+            }
         }
 
         emitter.NumberSequence("InstallerSuccessCodes", fields.InstallerSuccessCodes);
@@ -170,23 +177,29 @@ public static class ManifestYamlWriter
         emitter.StringSequence("Protocols", fields.Protocols);
         emitter.StringSequence("FileExtensions", fields.FileExtensions);
 
-        if (fields.Dependencies is { } dependencies
-            && (dependencies.WindowsFeatures is { Count: > 0 }
-                || dependencies.WindowsLibraries is { Count: > 0 }
-                || dependencies.PackageDependencies is { Count: > 0 }
-                || dependencies.ExternalDependencies is { Count: > 0 }))
+        if (fields.Dependencies is { } dependencies)
         {
-            emitter.Mapping("Dependencies", e =>
+            if (dependencies.WindowsFeatures is null
+                && dependencies.WindowsLibraries is null
+                && dependencies.PackageDependencies is null
+                && dependencies.ExternalDependencies is null)
             {
-                e.StringSequence("WindowsFeatures", dependencies.WindowsFeatures);
-                e.StringSequence("WindowsLibraries", dependencies.WindowsLibraries);
-                e.MappingSequence("PackageDependencies", dependencies.PackageDependencies, static (pe, dependency) =>
+                emitter.EmptyMapping("Dependencies");
+            }
+            else
+            {
+                emitter.Mapping("Dependencies", e =>
                 {
-                    pe.Scalar("PackageIdentifier", Require(dependency.PackageIdentifier, "PackageDependencies.PackageIdentifier").Value);
-                    pe.Scalar("MinimumVersion", dependency.MinimumVersion?.Value);
+                    e.StringSequence("WindowsFeatures", dependencies.WindowsFeatures);
+                    e.StringSequence("WindowsLibraries", dependencies.WindowsLibraries);
+                    e.MappingSequence("PackageDependencies", dependencies.PackageDependencies, static (pe, dependency) =>
+                    {
+                        pe.Scalar("PackageIdentifier", Require(dependency.PackageIdentifier, "PackageDependencies.PackageIdentifier").Value);
+                        pe.Scalar("MinimumVersion", dependency.MinimumVersion?.Value);
+                    });
+                    e.StringSequence("ExternalDependencies", dependencies.ExternalDependencies);
                 });
-                e.StringSequence("ExternalDependencies", dependencies.ExternalDependencies);
-            });
+            }
         }
 
         emitter.Scalar("PackageFamilyName", fields.PackageFamilyName);
@@ -233,21 +246,27 @@ public static class ManifestYamlWriter
         });
         emitter.Scalar("ElevationRequirement", fields.ElevationRequirement?.ToYaml());
 
-        if (fields.InstallationMetadata is { } metadata
-            && (metadata.DefaultInstallLocation is not null || metadata.Files is { Count: > 0 }))
+        if (fields.InstallationMetadata is { } metadata)
         {
-            emitter.Mapping("InstallationMetadata", e =>
+            if (metadata.DefaultInstallLocation is null && metadata.Files is null)
             {
-                e.Scalar("DefaultInstallLocation", metadata.DefaultInstallLocation);
-                e.MappingSequence("Files", metadata.Files, static (fe, file) =>
+                emitter.EmptyMapping("InstallationMetadata");
+            }
+            else
+            {
+                emitter.Mapping("InstallationMetadata", e =>
                 {
-                    fe.Scalar("RelativeFilePath", Require(file.RelativeFilePath, "InstallationMetadata.Files.RelativeFilePath"));
-                    fe.Scalar("FileSha256", file.FileSha256?.Value);
-                    fe.Scalar("FileType", file.FileType?.ToYaml());
-                    fe.Scalar("InvocationParameter", file.InvocationParameter);
-                    fe.Scalar("DisplayName", file.DisplayName);
+                    e.Scalar("DefaultInstallLocation", metadata.DefaultInstallLocation);
+                    e.MappingSequence("Files", metadata.Files, static (fe, file) =>
+                    {
+                        fe.Scalar("RelativeFilePath", Require(file.RelativeFilePath, "InstallationMetadata.Files.RelativeFilePath"));
+                        fe.Scalar("FileSha256", file.FileSha256?.Value);
+                        fe.Scalar("FileType", file.FileType?.ToYaml());
+                        fe.Scalar("InvocationParameter", file.InvocationParameter);
+                        fe.Scalar("DisplayName", file.DisplayName);
+                    });
                 });
-            });
+            }
         }
 
         emitter.Scalar("DownloadCommandProhibited", fields.DownloadCommandProhibited);
@@ -260,13 +279,20 @@ public static class ManifestYamlWriter
             {
                 e.Scalar("AuthenticationType", Require(authentication.AuthenticationType, "Authentication.AuthenticationType").ToYaml());
                 if (authentication.MicrosoftEntraIdAuthenticationInfo is { } info
-                    && (info.Resource is not null || info.Scope is not null))
+                    )
                 {
-                    e.Mapping("MicrosoftEntraIdAuthenticationInfo", ie =>
+                    if (info.Resource is null && info.Scope is null)
                     {
-                        ie.Scalar("Resource", info.Resource);
-                        ie.Scalar("Scope", info.Scope);
-                    });
+                        e.EmptyMapping("MicrosoftEntraIdAuthenticationInfo");
+                    }
+                    else
+                    {
+                        e.Mapping("MicrosoftEntraIdAuthenticationInfo", ie =>
+                        {
+                            ie.Scalar("Resource", info.Resource);
+                            ie.Scalar("Scope", info.Scope);
+                        });
+                    }
                 }
             });
         }
@@ -298,15 +324,15 @@ public static class ManifestYamlWriter
         options ??= ManifestWriteOptions.Default;
 
         bool wroteAnyHeader = false;
-        if (options.CreatedWith is { } createdWith)
-        {
-            emitter.Comment($"Created with {createdWith}");
-            wroteAnyHeader = true;
-        }
-
         if (options.IncludeSchemaHeader)
         {
             emitter.Comment($"yaml-language-server: $schema=https://aka.ms/winget-manifest.{type.ToYaml()}.{version.Value}.schema.json");
+            wroteAnyHeader = true;
+        }
+
+        if (options.CreatedWith is { } createdWith)
+        {
+            emitter.Comment($"Created with {createdWith}");
             wroteAnyHeader = true;
         }
 

@@ -281,7 +281,7 @@ public sealed class ManifestSchemaValidatorTests
             """);
         for (int index = 0; index <= 100_000; index++)
         {
-            _ = yaml.AppendLine("  - null");
+            _ = yaml.AppendLine("  - {}");
         }
 
         ValidationReport report = ManifestSchemaValidator.Validate(

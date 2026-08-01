@@ -123,8 +123,8 @@ public sealed class RoundTripTests
         """;
 
     private const string CanonicalDefaultLocale = """
-        # Created with winmatsch v0.1.0
         # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+        # Created with winmatsch v0.1.0
 
         PackageIdentifier: WinMatsch.Test
         PackageVersion: 1.2.3

@@ -166,27 +166,30 @@ internal static class ManifestSemanticValidator
             return;
         }
 
-        var keys = new Dictionary<EffectiveInstallerKey, int>();
         var urlSemantics = new Dictionary<string, (InstallerSemantics Semantics, int Index)>(StringComparer.Ordinal);
 
         for (int i = 0; i < installers.Count; i++)
         {
             Installer installer = installers[i];
-            var key = new EffectiveInstallerKey(
-                installer.Architecture,
-                installer.InstallerType ?? manifest.InstallerType,
-                installer.Scope ?? manifest.Scope,
-                installer.InstallerLocale ?? manifest.InstallerLocale);
-            if (keys.TryGetValue(key, out int priorIndex))
+            int priorIndex = -1;
+            for (int candidate = 0; candidate < i; candidate++)
+            {
+                if (InstallerDuplicateRelation.AreDuplicates(
+                        manifest,
+                        installers[candidate],
+                        installer))
+                {
+                    priorIndex = candidate;
+                    break;
+                }
+            }
+
+            if (priorIndex >= 0)
             {
                 findings.Add(Error(
                     "VLD3001",
-                    $"Installer has the same effective architecture/type/scope/locale key as Installers[{priorIndex}].",
+                    $"Installer duplicates Installers[{priorIndex}] under WinGet's effective architecture, installer type, nested installer type, scope, and locale relation.",
                     $"Installers[{i}]"));
-            }
-            else
-            {
-                keys.Add(key, i);
             }
 
             ValidateUrlSemantics(manifest, installer, i, urlSemantics, findings);
@@ -285,7 +288,7 @@ internal static class ManifestSemanticValidator
             {
                 findings.Add(Error(
                     "VLD3006",
-                    "Nested installer paths must be unique across the package set.",
+                    "Nested installer paths must be unique within this NestedInstallerFiles list.",
                     $"{nestedPath}.RelativeFilePath"));
             }
 
@@ -321,7 +324,7 @@ internal static class ManifestSemanticValidator
             {
                 findings.Add(Error(
                     "VLD3010",
-                    "Portable command aliases must be unique across the package set.",
+                    "Portable command aliases must be unique within this NestedInstallerFiles list.",
                     $"{nestedPath}.PortableCommandAlias"));
             }
         }
@@ -706,6 +709,18 @@ internal static class ManifestSemanticValidator
                 continue;
             }
 
+            string? exactOverlap = FindEquivalentVersion(
+                currentDisplayVersions,
+                existing.DisplayVersions);
+            if (exactOverlap is not null)
+            {
+                findings.Add(Error(
+                    "VLD3101",
+                    $"ARP DisplayVersion '{exactOverlap}' is also declared by package version '{existing.PackageVersion}'.",
+                    "AppsAndFeaturesEntries.DisplayVersion"));
+                continue;
+            }
+
             VersionRange? existingRange = CreateVersionRange(existing.DisplayVersions);
             if (currentRange is not null
                 && existingRange is not null
@@ -733,6 +748,11 @@ internal static class ManifestSemanticValidator
                     PackageVersion.TryCreate(value, out PackageVersion? parsed) ? parsed : null)),
         ];
         if (versions.Length == 0)
+        {
+            return null;
+        }
+
+        if (versions.Any(static version => version.Parsed is null))
         {
             return null;
         }
@@ -768,7 +788,40 @@ internal static class ManifestSemanticValidator
                 : left.Parsed.CompareTo(right.Parsed);
         }
 
-        return string.Compare(left.Raw, right.Raw, StringComparison.OrdinalIgnoreCase);
+        throw new InvalidOperationException(
+            "Version ranges can only compare successfully parsed package versions.");
+    }
+
+    private static string? FindEquivalentVersion(
+        IEnumerable<string> left,
+        IEnumerable<string> right)
+    {
+        ComparableVersion[] rightVersions =
+        [
+            .. right
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Select(static value => new ComparableVersion(
+                    value,
+                    PackageVersion.TryCreate(value, out PackageVersion? parsed) ? parsed : null)),
+        ];
+        foreach (string value in left.Where(static value => !string.IsNullOrWhiteSpace(value)))
+        {
+            PackageVersion? parsed = PackageVersion.TryCreate(value, out PackageVersion? candidate)
+                ? candidate
+                : null;
+            foreach (ComparableVersion other in rightVersions)
+            {
+                if (string.Equals(value, other.Raw, StringComparison.OrdinalIgnoreCase)
+                    || (parsed is not null
+                        && other.Parsed is not null
+                        && parsed.IsEquivalentTo(other.Parsed)))
+                {
+                    return value;
+                }
+            }
+        }
+
+        return null;
     }
 
     private static HashSet<string> GetEffectiveDisplayVersions(InstallerManifest manifest)
@@ -910,12 +963,6 @@ internal static class ManifestSemanticValidator
 
     private static ValidationFinding Warning(string code, string message, string? path = null)
         => new(code, ValidationSeverity.Warning, message, path);
-
-    private sealed record EffectiveInstallerKey(
-        Architecture? Architecture,
-        InstallerType? InstallerType,
-        Scope? Scope,
-        LanguageTag? Locale);
 
     private sealed record InstallerSemantics(
         InstallerType? InstallerType,

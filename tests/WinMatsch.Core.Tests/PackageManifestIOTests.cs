@@ -1,4 +1,6 @@
+using System.Text;
 using WinMatsch.Core;
+using WinMatsch.Core.Yaml;
 using Xunit;
 
 namespace WinMatsch.Core.Tests;
@@ -208,6 +210,179 @@ public sealed class PackageManifestIOTests : IDisposable
             static path => Path.GetExtension(path) is ".tmp" or ".bak");
     }
 
+    [Fact]
+    public void WriteDirectory_Preserves_existing_line_endings_and_uses_lf_for_new_files()
+    {
+        PackageManifests manifests = CreateValid();
+        manifests.Locales.Clear();
+        PackageManifestIO.WriteDirectory(_directory, manifests);
+        foreach (string path in Directory.EnumerateFiles(_directory))
+        {
+            string lf = File.ReadAllText(path);
+            File.WriteAllText(path, lf.Replace("\n", "\r\n", StringComparison.Ordinal));
+        }
+
+        manifests.DefaultLocale.Publisher = "Updated";
+        manifests.Locales.Add(CreateLocale("fr-FR"));
+        PackageManifestIO.WriteDirectory(_directory, manifests);
+
+        byte[] existing = File.ReadAllBytes(
+            Path.Combine(_directory, "WinMatsch.Test.locale.en-US.yaml"));
+        byte[] added = File.ReadAllBytes(
+            Path.Combine(_directory, "WinMatsch.Test.locale.fr-FR.yaml"));
+        Assert.True(existing.AsSpan().IndexOf("\r\n"u8) >= 0);
+        AssertNoBareLineFeeds(existing);
+        Assert.DoesNotContain((byte)'\r', added);
+        Assert.Equal((byte)'\n', added[^1]);
+    }
+
+    [Fact]
+    public void Empty_schema_valid_collections_and_mappings_round_trip()
+    {
+        PackageManifests manifests = CreateValid();
+        manifests.DefaultLocale.Tags = [];
+        manifests.Installer.Commands = [];
+        manifests.Installer.Dependencies = new Dependencies();
+        manifests.Installer.InstallerSwitches = new InstallerSwitches();
+
+        IReadOnlyDictionary<string, string> files = PackageManifestIO.SerializeFiles(manifests);
+        string locale = files["WinMatsch.Test.locale.en-US.yaml"];
+        string installer = files["WinMatsch.Test.installer.yaml"];
+        Assert.Contains("Tags: []\n", locale, StringComparison.Ordinal);
+        Assert.Contains("Commands: []\n", installer, StringComparison.Ordinal);
+        Assert.Contains("Dependencies: {}\n", installer, StringComparison.Ordinal);
+        Assert.Contains("InstallerSwitches: {}\n", installer, StringComparison.Ordinal);
+
+        PackageManifestIO.WriteDirectory(_directory, manifests);
+        PackageManifests loaded = PackageManifestIO.LoadDirectory(_directory);
+        Assert.Empty(loaded.DefaultLocale.Tags!);
+        Assert.Empty(loaded.Installer.Commands!);
+        Assert.NotNull(loaded.Installer.Dependencies);
+        Assert.NotNull(loaded.Installer.InstallerSwitches);
+    }
+
+    [Fact]
+    public void LoadDirectory_Rejects_files_above_the_manifest_byte_budget()
+    {
+        Directory.CreateDirectory(_directory);
+        string path = Path.Combine(_directory, "oversized.yaml");
+        using (FileStream stream = File.Create(path))
+        {
+            stream.SetLength(ManifestYamlDocument.MaxManifestBytes + 1L);
+        }
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => PackageManifestIO.LoadDirectory(_directory));
+
+        Assert.Contains("cannot exceed", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadDirectory_Rejects_excessive_directory_entries_before_sorting()
+    {
+        Directory.CreateDirectory(_directory);
+        for (int index = 0; index <= ManifestYamlDirectory.MaxDirectoryEntries; index++)
+        {
+            File.WriteAllBytes(Path.Combine(_directory, $"{index:D4}.txt"), []);
+        }
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => PackageManifestIO.LoadDirectory(_directory));
+
+        Assert.Contains("manifest directory", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("entries", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadDirectory_Rejects_excessive_manifest_file_count_before_parsing()
+    {
+        Directory.CreateDirectory(_directory);
+        for (int index = 0; index <= ManifestYamlDirectory.MaxManifestFiles; index++)
+        {
+            File.WriteAllText(
+                Path.Combine(_directory, $"{index:D3}.yaml"),
+                "Value: test\n");
+        }
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => PackageManifestIO.LoadDirectory(_directory));
+
+        Assert.Contains("YAML files", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadDirectory_Rejects_aggregate_yaml_resource_exhaustion()
+    {
+        Directory.CreateDirectory(_directory);
+        var yaml = new StringBuilder("Values:\n");
+        for (int index = 0; index < 70_000; index++)
+        {
+            _ = yaml.AppendLine("- {}");
+        }
+
+        for (int index = 0; index < 3; index++)
+        {
+            File.WriteAllText(
+                Path.Combine(_directory, $"{index}.yaml"),
+                yaml.ToString());
+        }
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => PackageManifestIO.LoadDirectory(_directory));
+
+        Assert.Contains("aggregate YAML resource budget", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadDirectory_Rejects_hostile_depth_before_tree_materialization()
+    {
+        Directory.CreateDirectory(_directory);
+        string nested = $"{new string('[', 70)}null{new string(']', 70)}";
+        File.WriteAllText(
+            Path.Combine(_directory, "hostile.yaml"),
+            $"ManifestType: version\nExtra: {nested}\n");
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => PackageManifestIO.LoadDirectory(_directory));
+
+        Assert.Contains("nesting cannot exceed", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadDirectory_Rejects_a_reparse_point_directory()
+    {
+        string target = Path.Combine(Path.GetTempPath(), $"winmatsch-link-target-{Guid.NewGuid():N}");
+        string link = Path.Combine(_directory, "linked");
+        Directory.CreateDirectory(target);
+        Directory.CreateDirectory(_directory);
+        try
+        {
+            PackageManifestIO.WriteDirectory(target, CreateValid());
+            try
+            {
+                Directory.CreateSymbolicLink(link, target);
+            }
+            catch (IOException) when (OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            InvalidDataException exception = Assert.Throws<InvalidDataException>(
+                () => PackageManifestIO.LoadDirectory(link));
+
+            Assert.Contains("symbolic link or reparse point", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(link))
+            {
+                Directory.Delete(link);
+            }
+
+            Directory.Delete(target, recursive: true);
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_directory))
@@ -266,4 +441,15 @@ public sealed class PackageManifestIOTests : IDisposable
             PackageVersion = new PackageVersion("1.2.3"),
             PackageLocale = new LanguageTag(locale),
         };
+
+    private static void AssertNoBareLineFeeds(ReadOnlySpan<byte> content)
+    {
+        for (int index = 0; index < content.Length; index++)
+        {
+            if (content[index] == (byte)'\n')
+            {
+                Assert.True(index > 0 && content[index - 1] == (byte)'\r');
+            }
+        }
+    }
 }
