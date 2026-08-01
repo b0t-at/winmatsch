@@ -33,7 +33,10 @@ public sealed record HumanCorrectionReview(
     string FieldPath,
     string? BotValue,
     string? HumanValue,
-    string? GeneratedValue);
+    string? GeneratedValue,
+    string? DocumentKey = null,
+    string? SemanticPath = null,
+    string? CorrectionFingerprint = null);
 
 /// <summary>Evidence attached by a rule to a specific structured change.</summary>
 public sealed record RuleChangeEvidence(string Source, RuleChangeConfidence Confidence);

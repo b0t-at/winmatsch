@@ -376,6 +376,9 @@ public sealed class Meta5FieldSetParityRule : IRule
     {
         private readonly HashSet<string> _values = new(values, StringComparer.OrdinalIgnoreCase);
 
-        public bool Contains(string value) => _values.Contains(value);
+        public bool Contains(string value)
+            => _values.Contains(value)
+                || _values.Any(selector =>
+                    selector.EndsWith($".{value}", StringComparison.OrdinalIgnoreCase));
     }
 }

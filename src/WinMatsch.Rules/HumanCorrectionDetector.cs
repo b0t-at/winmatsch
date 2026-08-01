@@ -134,10 +134,33 @@ internal static class HumanCorrectionDetector
                     generatedChange?.FieldPath ?? humanChange.FieldPath,
                     RuleLogSanitizer.Sanitize(humanChange.FieldPath, botValue),
                     RuleLogSanitizer.Sanitize(humanChange.FieldPath, humanValue),
-                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, reviewGeneratedValue)));
+                    RuleLogSanitizer.Sanitize(humanChange.FieldPath, reviewGeneratedValue),
+                    humanChange.DocumentKey,
+                    humanChange.SemanticPath,
+                    CorrectionFingerprint(
+                        humanChange.DocumentKey,
+                        humanChange.SemanticPath,
+                        botValue,
+                        humanValue,
+                        reviewGeneratedValue)));
             }
         }
     }
+
+    private static string CorrectionFingerprint(
+        string documentKey,
+        string semanticPath,
+        string? botValue,
+        string? humanValue,
+        string? generatedValue)
+        => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(string.Join(
+                '\u001f',
+                documentKey,
+                semanticPath,
+                botValue ?? "<null>",
+                humanValue ?? "<null>",
+                generatedValue ?? "<null>"))));
 
     private readonly record struct SemanticChangeKey(string DocumentKey, string SemanticPath);
 

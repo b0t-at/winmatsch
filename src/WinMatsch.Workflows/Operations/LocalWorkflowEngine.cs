@@ -4,6 +4,7 @@ using WinMatsch.Analysis.Dependencies;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.Rules;
+using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Rules.Policy;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Discovery;
@@ -22,6 +23,7 @@ public sealed class LocalWorkflowEngine
     private readonly IWorkflowPreflight _preflight;
     private readonly IWorkflowFileTransaction _transaction;
     private readonly IWorkflowClock _clock;
+    private readonly IOverridePackStore? _overridePackStore;
 
     public LocalWorkflowEngine(
         IManifestSnapshotSource manifests,
@@ -30,7 +32,8 @@ public sealed class LocalWorkflowEngine
         IWorkflowFileTransaction transaction,
         IWorkflowReleaseSource? releases = null,
         IWorkflowArtifactProcessor? artifacts = null,
-        IWorkflowClock? clock = null)
+        IWorkflowClock? clock = null,
+        IOverridePackStore? overridePackStore = null)
     {
         _manifests = manifests ?? throw new ArgumentNullException(nameof(manifests));
         _rules = rules ?? throw new ArgumentNullException(nameof(rules));
@@ -39,6 +42,7 @@ public sealed class LocalWorkflowEngine
         _releases = releases;
         _artifacts = artifacts;
         _clock = clock ?? new SystemWorkflowClock();
+        _overridePackStore = overridePackStore;
     }
 
     public Task<WorkflowOperationResult> NewAsync(
@@ -314,6 +318,22 @@ public sealed class LocalWorkflowEngine
         PackageIdentifier identifier = create?.PackageIdentifier
             ?? update?.PackageIdentifier
             ?? throw new ArgumentException("Unsupported create/update request.", nameof(operationRequest));
+        OverridePackStoreSnapshot learnedSnapshot = _overridePackStore is null
+            ? new(null, null, null)
+            : await _overridePackStore.LoadAsync(
+                identifier,
+                allowRecoveryWrites: operationRequest.ExecutionMode == WorkflowExecutionMode.Apply,
+                cancellationToken).ConfigureAwait(false);
+        if (learnedSnapshot.Pack is not null)
+        {
+            operationRequest = WithOverridePacks(
+                operationRequest,
+                OverridePackSet.Compose(
+                    new OverridePackSet([learnedSnapshot.Pack]),
+                    operationRequest.OverridePacks));
+            create = operationRequest as NewOperationRequest;
+            update = operationRequest as UpdateOperationRequest;
+        }
         ImmutableArray<PackageSnapshot> packageVersions = await _manifests.ListVersionsAsync(
             operationRequest.OutputDirectory,
             identifier,
@@ -328,6 +348,32 @@ public sealed class LocalWorkflowEngine
         if (assets.IsEmpty)
         {
             return InvalidResult(isUpdate ? "update" : "new", operationRequest, "No Windows release assets were supplied or discovered.");
+        }
+
+        ImmutableArray<WorkflowAuditEntry> releaseMetadataAudit = [];
+        if (create is not null && _releases is IWorkflowReleaseMetadataSource metadataSource)
+        {
+            WorkflowReleaseMetadata releaseMetadata = await metadataSource.DiscoverMetadataAsync(
+                identifier,
+                release,
+                assets,
+                cancellationToken).ConfigureAwait(false);
+            create = create with
+            {
+                Locale = MergeReleaseMetadata(create.Locale, releaseMetadata.Metadata),
+            };
+            operationRequest = create;
+            releaseMetadataAudit =
+            [
+                .. releaseMetadata.Metadata.Provenance.Select(pair => new WorkflowAuditEntry(
+                    "RELEASE_METADATA",
+                    pair.Key,
+                    pair.Value)),
+                new(
+                    "REPOSITORY_METADATA_STATUS",
+                    releaseMetadata.Availability.ToString(),
+                    releaseMetadata.Diagnostic),
+            ];
         }
 
         using var artifactDirectory = new ArtifactDirectoryLease(
@@ -549,6 +595,86 @@ public sealed class LocalWorkflowEngine
             existingVersionEvidence,
             cancellationToken).ConfigureAwait(false);
         validation = MergeRuleFindings(validation, rules.Summary);
+        LearnedOverridePlan? learnedOverride = null;
+        if (!rules.Summary.Reviews.IsEmpty && ReviewApproval.Matches(operationRequest, rules.Summary))
+        {
+            if (_overridePackStore is null
+                || previous?.OriginalBotSubmission is null)
+            {
+                validation = AddValidationFinding(validation, new ValidationFinding(
+                    "WF_LEARNED_OVERRIDE_UNAVAILABLE",
+                    ValidationSeverity.Error,
+                    "Approved human corrections require a configured override store and the original bot submission."));
+            }
+            else
+            {
+                try
+                {
+                    bool scopeLayoutChanged =
+                        (previous.OriginalBotSubmission.Installer.Scope is null)
+                        != (previous.Manifests.Installer.Scope is null);
+                    bool layoutReviewApproved = rules.Summary.Reviews.Any(
+                        static review => string.Equals(
+                            review.FieldPath,
+                            "Scope",
+                            StringComparison.Ordinal));
+                    bool learnedScopeLayout = scopeLayoutChanged && layoutReviewApproved;
+                    HumanCorrectionReview[] fieldReviews =
+                    [
+                        .. rules.Summary.Reviews.Where(review =>
+                            !learnedScopeLayout
+                            || previous.Manifests.Installer.Scope is not null
+                            || !string.Equals(review.FieldPath, "Scope", StringComparison.Ordinal)),
+                    ];
+                    ImmutableArray<LearnedFieldOverride> approved = LearnedOverrideBuilder.Create(
+                        previous.OriginalBotSubmission,
+                        previous.Manifests,
+                        fieldReviews);
+                    ScopeLayoutOverride? scopeLayout = learnedScopeLayout
+                        ? previous.Manifests.Installer.Scope is null
+                            ? ScopeLayoutOverride.PerInstaller
+                            : ScopeLayoutOverride.Root
+                        : null;
+                    ScopeLayoutOverride? previousScopeLayout = learnedScopeLayout
+                        ? previous.OriginalBotSubmission.Installer.Scope is null
+                            ? ScopeLayoutOverride.PerInstaller
+                            : ScopeLayoutOverride.Root
+                        : null;
+                    var proposed = new OverridePack
+                    {
+                        PackageIdentifier = identifier,
+                        LearnedFields = approved,
+                        ScopeLayout = scopeLayout,
+                        PreservedFields =
+                        [
+                            .. approved
+                                .Where(static item => item.DocumentKey == "defaultLocale")
+                                .Select(static item => $"DefaultLocale.{item.SemanticPath.Split('.').Last()}")
+                                .Distinct(StringComparer.Ordinal)
+                                .Order(StringComparer.Ordinal),
+                        ],
+                    };
+                    OverridePack merged = learnedSnapshot.Pack is null
+                        ? proposed
+                        : OverridePackSet.Merge(learnedSnapshot.Pack, proposed);
+                    learnedOverride = new(
+                        merged,
+                        learnedSnapshot.ContentSha256,
+                        learnedSnapshot.FormatVersion,
+                        approved,
+                        scopeLayout,
+                        previousScopeLayout,
+                        learnedSnapshot.Pack);
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or FormatException)
+                {
+                    validation = AddValidationFinding(validation, new ValidationFinding(
+                        "WF_LEARNED_OVERRIDE_UNSAFE",
+                        ValidationSeverity.Error,
+                        exception.Message));
+                }
+            }
+        }
         ImmutableArray<WorkflowAuditEntry> audit =
         [
             new("VERSION", $"Resolved package version {newVersion.Value}.", versionResolution.Source?.ToString()),
@@ -560,6 +686,7 @@ public sealed class LocalWorkflowEngine
                 $"MAP_{decision.Kind.ToString().ToUpperInvariant()}",
                 decision.Reason,
                 decision.Installer?.Url.AbsoluteUri)),
+            .. releaseMetadataAudit,
             new("CREATED_AT", _clock.UtcNow.ToString("O"), "workflow-clock"),
         ];
         LocalOperationPlan plan = Plan(
@@ -578,6 +705,7 @@ public sealed class LocalWorkflowEngine
             existingVersionEvidence) with
         {
             Release = CreateReleaseProvenance(enrichedAssets),
+            LearnedOverride = learnedOverride,
         };
         return await CompleteAsync(operationRequest, plan, cancellationToken).ConfigureAwait(false);
     }
@@ -741,17 +869,89 @@ public sealed class LocalWorkflowEngine
             return new() { Code = code, Plan = plan, Applied = false };
         }
 
+        OverridePackWriteResult? persisted = null;
         try
         {
             ValidationReport finalValidation = await _preflight.ExecuteAsync(
                 plan.Preflight,
-                token => _transaction.ApplyAsync(
-                    request.OutputDirectory,
-                    plan.PackageIdentifier.Value,
-                    plan.FileChanges,
-                    token),
+                async token =>
+                {
+                    IOverridePackWriteStage? stage = null;
+                    if (plan.LearnedOverride is { } learnedOverride)
+                    {
+                        stage = await _overridePackStore!.StageAsync(
+                            new(
+                                plan.PackageIdentifier,
+                                learnedOverride.Pack,
+                                learnedOverride.ExpectedContentSha256,
+                                learnedOverride.ExpectedFormatVersion),
+                            token).ConfigureAwait(false);
+                    }
+
+                    try
+                    {
+                        await _transaction.ApplyAsync(
+                            request.OutputDirectory,
+                            plan.PackageIdentifier.Value,
+                            plan.FileChanges,
+                            token).ConfigureAwait(false);
+                    }
+                    catch (WorkflowCommittedException)
+                    {
+                        if (stage is not null)
+                        {
+                            try
+                            {
+                                persisted = await stage.CommitAsync(CancellationToken.None)
+                                    .ConfigureAwait(false);
+                            }
+                            catch (Exception commitException)
+                            {
+                                Exception failure = await CombineStageFailureAsync(
+                                    stage,
+                                    commitException).ConfigureAwait(false);
+                                throw new WorkflowCommittedLearnedOverrideException(
+                                    "The manifest transaction committed, but its learned override could not be committed.",
+                                    failure);
+                            }
+                        }
+
+                        throw;
+                    }
+                    catch
+                    {
+                        if (stage is not null)
+                        {
+                            await stage.AbortAsync().ConfigureAwait(false);
+                        }
+                        throw;
+                    }
+
+                    if (stage is not null)
+                    {
+                        try
+                        {
+                            persisted = await stage.CommitAsync(CancellationToken.None)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception commitException)
+                        {
+                            Exception failure = await CombineStageFailureAsync(
+                                stage,
+                                commitException).ConfigureAwait(false);
+                            throw new WorkflowCommittedLearnedOverrideException(
+                                "The manifest transaction committed, but its learned override could not be committed.",
+                                failure);
+                        }
+                    }
+                },
                 cancellationToken).ConfigureAwait(false);
             finalValidation = MergeRuleFindings(finalValidation, plan.Rules);
+            if (persisted is not null && plan.LearnedOverride is not null)
+            {
+                plan = AddLearnedOverrideAudit(plan, plan.LearnedOverride, persisted);
+            }
+
             LocalOperationPlan finalPlan = plan with { Validation = finalValidation };
             return finalValidation.CanProceed(plan.WarningPolicy)
                 ? new() { Code = WorkflowResultCode.Succeeded, Plan = finalPlan, Applied = true }
@@ -769,6 +969,11 @@ public sealed class LocalWorkflowEngine
         }
         catch (WorkflowCommittedException exception)
         {
+            if (persisted is not null && plan.LearnedOverride is not null)
+            {
+                plan = AddLearnedOverrideAudit(plan, plan.LearnedOverride, persisted);
+            }
+
             return new()
             {
                 Code = WorkflowResultCode.Succeeded,
@@ -791,6 +996,7 @@ public sealed class LocalWorkflowEngine
                     exception.JournalRetained),
             };
         }
+
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return new()
@@ -801,6 +1007,50 @@ public sealed class LocalWorkflowEngine
                 ErrorMessage = exception.Message,
                 Recovery = new(exception.Message, [], JournalRetained: false),
             };
+        }
+    }
+
+    private static LocalOperationPlan AddLearnedOverrideAudit(
+        LocalOperationPlan plan,
+        LearnedOverridePlan learnedOverride,
+        OverridePackWriteResult persisted)
+        => plan with
+        {
+            Audit =
+            [
+                .. plan.Audit,
+                .. learnedOverride.ApprovedFields.Select(field => new WorkflowAuditEntry(
+                    "LEARNED_OVERRIDE_PERSISTED",
+                    $"{field.DocumentKey}:{field.SemanticPath}",
+                    $"{field.BotValueSha256}->{field.ValueSha256}|{field.SourceFingerprint}|{field.Source}")),
+                .. learnedOverride.ApprovedScopeLayout is { } layout
+                    ? new[]
+                    {
+                        new WorkflowAuditEntry(
+                            "LEARNED_SCOPE_LAYOUT_PERSISTED",
+                            layout.ToString(),
+                            $"{learnedOverride.PreviousScopeLayout}->{layout}|approved merged-manifest scope layout"),
+                    }
+                    : [],
+                new(
+                    "LEARNED_OVERRIDE_WRITE",
+                    persisted.Path,
+                    $"{persisted.BeforeSha256 ?? "<absent>"}->{persisted.AfterSha256}"),
+            ],
+        };
+
+    private static async Task<Exception> CombineStageFailureAsync(
+        IOverridePackWriteStage stage,
+        Exception commitException)
+    {
+        try
+        {
+            await stage.AbortAsync().ConfigureAwait(false);
+            return commitException;
+        }
+        catch (Exception abortException)
+        {
+            return new AggregateException(commitException, abortException);
         }
     }
 
@@ -865,6 +1115,20 @@ public sealed class LocalWorkflowEngine
 
         return plan.FileChanges.IsEmpty ? WorkflowResultCode.NoChanges : WorkflowResultCode.Succeeded;
     }
+
+    private static WorkflowOperationRequest WithOverridePacks(
+        WorkflowOperationRequest request,
+        OverridePackSet overridePacks)
+        => request switch
+        {
+            NewOperationRequest value => value with { OverridePacks = overridePacks },
+            UpdateOperationRequest value => value with { OverridePacks = overridePacks },
+            RemoveOperationRequest value => value with { OverridePacks = overridePacks },
+            SubmitOperationRequest value => value with { OverridePacks = overridePacks },
+            NewLocaleOperationRequest value => value with { OverridePacks = overridePacks },
+            UpdateLocaleOperationRequest value => value with { OverridePacks = overridePacks },
+            _ => throw new ArgumentException("Unsupported workflow request.", nameof(request)),
+        };
 
     private WorkflowRuleResult RunRules(
         WorkflowOperationRequest request,
@@ -957,14 +1221,16 @@ public sealed class LocalWorkflowEngine
                     NestedInstallerType = planned.NestedInstallerType,
                     Scope = planned.Scope,
                     InstallerLocale = planned.InstallerLocale,
-                    NestedInstallerFiles =
-                    [
-                        .. planned.NestedInstallerFiles.Select(static file => new NestedInstallerFile
-                        {
-                            RelativeFilePath = file.RelativeFilePath,
-                            PortableCommandAlias = file.PortableCommandAlias,
-                        }),
-                    ],
+                    NestedInstallerFiles = planned.NestedInstallerFiles.IsEmpty
+                        ? null
+                        :
+                        [
+                            .. planned.NestedInstallerFiles.Select(static file => new NestedInstallerFile
+                            {
+                                RelativeFilePath = file.RelativeFilePath,
+                                PortableCommandAlias = file.PortableCommandAlias,
+                            }),
+                        ],
                     ArchiveBinariesDependOnPath = planned.ArchiveBinariesDependOnPath,
                     AppsAndFeaturesEntries = planned.DisplayVersion is null
                         ? null
@@ -1038,8 +1304,48 @@ public sealed class LocalWorkflowEngine
             {
                 questions.Add(new($"METADATA_{field.ToUpperInvariant()}", $"Provide required locale metadata '{field}'.", []));
             }
+
         }
     }
+
+    private static PackageLocaleMetadata MergeReleaseMetadata(
+        PackageLocaleMetadata explicitMetadata,
+        PackageLocaleMetadata discovered)
+    {
+        var provenance = explicitMetadata.Provenance.ToBuilder();
+        foreach ((string field, string source) in discovered.Provenance)
+        {
+            if (!HasExplicitValue(explicitMetadata, field))
+            {
+                provenance[field] = source;
+            }
+        }
+
+        return explicitMetadata with
+        {
+            PublisherUrl = explicitMetadata.PublisherUrl ?? discovered.PublisherUrl,
+            PackageUrl = explicitMetadata.PackageUrl ?? discovered.PackageUrl,
+            License = explicitMetadata.License ?? discovered.License,
+            LicenseUrl = explicitMetadata.LicenseUrl ?? discovered.LicenseUrl,
+            Tags = explicitMetadata.Tags ?? discovered.Tags,
+            ReleaseNotes = explicitMetadata.ReleaseNotes ?? discovered.ReleaseNotes,
+            ReleaseNotesUrl = explicitMetadata.ReleaseNotesUrl ?? discovered.ReleaseNotesUrl,
+            Provenance = provenance.ToImmutable(),
+        };
+    }
+
+    private static bool HasExplicitValue(PackageLocaleMetadata metadata, string field)
+        => field switch
+        {
+            nameof(PackageLocaleMetadata.PublisherUrl) => metadata.PublisherUrl is not null,
+            nameof(PackageLocaleMetadata.PackageUrl) => metadata.PackageUrl is not null,
+            nameof(PackageLocaleMetadata.License) => metadata.License is not null,
+            nameof(PackageLocaleMetadata.LicenseUrl) => metadata.LicenseUrl is not null,
+            nameof(PackageLocaleMetadata.Tags) => metadata.Tags is not null,
+            nameof(PackageLocaleMetadata.ReleaseNotes) => metadata.ReleaseNotes is not null,
+            nameof(PackageLocaleMetadata.ReleaseNotesUrl) => metadata.ReleaseNotesUrl is not null,
+            _ => true,
+        };
 
     private static ImmutableArray<RawManifestDocument> Serialize(
         PackageManifests manifests,
@@ -1321,6 +1627,11 @@ public sealed class LocalWorkflowEngine
                 finding.Path)),
         ]);
 
+    private static ValidationReport AddValidationFinding(
+        ValidationReport validation,
+        ValidationFinding finding)
+        => new([.. validation.Findings, finding]);
+
     private static PreflightOptions PreflightOptions(WorkflowOperationRequest request)
         => new()
         {
@@ -1364,7 +1675,7 @@ public sealed class LocalWorkflowEngine
             },
             Rules = rules,
             Questions = questions,
-            ReviewApproved = request.ApproveReview,
+            ReviewApproved = ReviewApproval.Matches(request, rules),
             Audit =
             [
                 .. audit

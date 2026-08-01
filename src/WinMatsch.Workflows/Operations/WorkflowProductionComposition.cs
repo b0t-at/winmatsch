@@ -12,7 +12,8 @@ public static class WorkflowProductionComposition
     public static LocalWorkflowEngine CreateLocalEngine(
         InstallerDownloader downloader,
         IWorkflowReleaseSource? releaseSource = null,
-        IWorkflowClock? clock = null)
+        IWorkflowClock? clock = null,
+        OverridePackStoreOptions? overridePackStoreOptions = null)
     {
         ArgumentNullException.ThrowIfNull(downloader);
         var originalSubmissions = new FileOriginalSubmissionStore();
@@ -27,7 +28,8 @@ public static class WorkflowProductionComposition
             new AtomicWorkflowFileTransaction(originalSubmissions),
             releaseSource,
             new InstallerWorkflowArtifactProcessor(downloader),
-            clock);
+            clock,
+            new FileOverridePackStore(overridePackStoreOptions ?? OverridePackStoreOptions.CreateDefault()));
     }
 
     public static GitHubLifecycleWorkflow CreateGitHubLifecycle(

@@ -21,6 +21,14 @@ public enum EvidenceConfidence
     Explicit,
 }
 
+public enum InstallerVersionEvidenceKind
+{
+    Unspecified,
+    PackageMetadata,
+    PeVersionInfoProductVersion,
+    ArchiveConsensus,
+}
+
 /// <summary>A stable snapshot of downloaded bytes and their HTTP identity.</summary>
 public sealed record AssetContentEvidence(
     DownloadContentIdentity Identity,
@@ -65,6 +73,13 @@ public sealed record AssetAnalysisEvidence
     public string? ProductVersion { get; init; }
 
     public bool IsProductVersionTrustworthy { get; init; }
+
+    public InstallerVersionEvidenceKind ProductVersionEvidenceKind { get; init; }
+
+    public EvidenceConfidence ProductVersionConfidence { get; init; } = EvidenceConfidence.Low;
+
+    /// <summary>Whether dependency analysis inspected every relevant payload within its bounds.</summary>
+    public bool DependencyAnalysisComplete { get; init; } = true;
 
     /// <summary>Correlated installer shapes emitted by the analyzer for this one asset.</summary>
     public ImmutableArray<AnalyzedInstallerShape> InstallerShapes { get; init; } = [];
@@ -184,7 +199,9 @@ public sealed record AssetAnalysisEvidence
         AssetContentEvidence content,
         PayloadDependencyAnalysis? dependencyAnalysis = null,
         IEnumerable<string>? boundedArchiveEntries = null,
-        bool isProductVersionTrustworthy = false)
+        bool isProductVersionTrustworthy = false,
+        InstallerVersionEvidenceKind productVersionEvidenceKind = InstallerVersionEvidenceKind.Unspecified,
+        EvidenceConfidence productVersionConfidence = EvidenceConfidence.Low)
     {
         ArgumentNullException.ThrowIfNull(analysis);
         ArgumentNullException.ThrowIfNull(content);
@@ -223,6 +240,9 @@ public sealed record AssetAnalysisEvidence
             AnalyzedUrl = content.FinalUrl,
             ProductVersion = analysis.ProductVersion,
             IsProductVersionTrustworthy = isProductVersionTrustworthy,
+            ProductVersionEvidenceKind = productVersionEvidenceKind,
+            ProductVersionConfidence = productVersionConfidence,
+            DependencyAnalysisComplete = dependencyAnalysis?.IsComplete ?? true,
             InstallerShapes =
             [
                 .. installers
@@ -272,6 +292,11 @@ public sealed record AssetAnalysisEvidence
             [
                 .. analysis.Diagnostics
                     .Select(static diagnostic => $"{diagnostic.Code}:{diagnostic.Message}")
+                    .Concat((dependencyAnalysis?.Diagnostics ?? [])
+                        .Select(static diagnostic => $"{diagnostic.Code}:{diagnostic.Message}"))
+                    .Concat(dependencyAnalysis is { IsComplete: false }
+                        ? ["DEPENDENCY_ANALYSIS_INCOMPLETE:Payload dependency evidence is incomplete and requires review."]
+                        : [])
                     .Concat(hasPathDependencyConflict
                         ? ["ANALYSIS_ARCHIVE_PATH_DEPENDENCY_CONFLICT:Analyzer entries disagree about ArchiveBinariesDependOnPath."]
                         : [])

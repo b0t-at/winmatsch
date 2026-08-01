@@ -15,14 +15,20 @@ using WinMatsch.GitHub;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.Mapping;
+using WinMatsch.Workflows.Versioning;
 
 namespace WinMatsch.Workflows.Operations;
 
 public sealed class GitHubWorkflowReleaseSource(
     IGitHubRepositoryClient client,
-    RepositoryCoordinates repository) : IWorkflowReleaseSource
+    RepositoryCoordinates repository,
+    IRepositoryReleaseMetadataSource? repositoryMetadataSource = null) :
+    IWorkflowReleaseSource,
+    IWorkflowReleaseMetadataSource
 {
+    private const int MaximumTopics = 20;
     private readonly IGitHubRepositoryClient _client = client ?? throw new ArgumentNullException(nameof(client));
+    private RepositoryReleaseMetadata? _cachedMetadata;
 
     public async Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
         PackageIdentifier packageIdentifier,
@@ -72,6 +78,143 @@ public sealed class GitHubWorkflowReleaseSource(
                 .OrderBy(static asset => asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal),
         ];
     }
+
+    public async Task<WorkflowReleaseMetadata> DiscoverMetadataAsync(
+        PackageIdentifier packageIdentifier,
+        ReleaseRequest request,
+        ImmutableArray<DiscoveredAsset> assets,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(packageIdentifier);
+        GitHubRelease? release = null;
+        long[] releaseIds = assets
+            .Where(static asset => asset.ReleaseId > 0)
+            .Select(static asset => asset.ReleaseId)
+            .Distinct()
+            .ToArray();
+        if (releaseIds.Length == 1)
+        {
+            IReadOnlyList<GitHubRelease> releases = await _client.GetReleasesAsync(
+                repository,
+                cancellationToken).ConfigureAwait(false);
+            release = releases.SingleOrDefault(candidate => candidate.Id == releaseIds[0]);
+        }
+
+        RepositoryReleaseMetadata repositoryMetadata = await GetRepositoryMetadataAsync(
+            repositoryMetadataSource,
+            cancellationToken).ConfigureAwait(false);
+        var provenance = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
+        string? releaseNotes = string.IsNullOrWhiteSpace(release?.Body) ? null : release.Body.Trim();
+        if (releaseNotes is not null)
+        {
+            provenance[nameof(PackageLocaleMetadata.ReleaseNotes)] = $"github-release:{release!.Id}:body";
+        }
+
+        string? releaseNotesUrl = release?.WebUri.AbsoluteUri;
+        if (releaseNotesUrl is not null)
+        {
+            provenance[nameof(PackageLocaleMetadata.ReleaseNotesUrl)] = $"github-release:{release!.Id}:html_url";
+        }
+
+        if (repositoryMetadata.License is not null)
+        {
+            provenance[nameof(PackageLocaleMetadata.License)] = $"{repositoryMetadata.Provenance}:license";
+        }
+
+        if (repositoryMetadata.LicenseUrl is not null)
+        {
+            provenance[nameof(PackageLocaleMetadata.LicenseUrl)] = $"{repositoryMetadata.Provenance}:license_url";
+        }
+
+        if (!repositoryMetadata.Topics.IsEmpty)
+        {
+            provenance[nameof(PackageLocaleMetadata.Tags)] = $"{repositoryMetadata.Provenance}:topics";
+        }
+
+        if (repositoryMetadata.PublisherUrl is not null)
+        {
+            provenance[nameof(PackageLocaleMetadata.PublisherUrl)] = $"{repositoryMetadata.Provenance}:publisher_url";
+        }
+
+        Uri? repositoryUrl = repositoryMetadata.RepositoryUrl
+            ?? TryRepositoryUri(release?.WebUri);
+        if (repositoryUrl is not null)
+        {
+            provenance[nameof(PackageLocaleMetadata.PackageUrl)] = repositoryMetadata.RepositoryUrl is not null
+                ? $"{repositoryMetadata.Provenance}:repository_url"
+                : $"github-release:{release!.Id}:repository_url";
+        }
+
+        return new(
+            new PackageLocaleMetadata
+            {
+                PackageLocale = new LanguageTag("und"),
+                PublisherUrl = repositoryMetadata.PublisherUrl?.AbsoluteUri,
+                PackageUrl = repositoryUrl?.AbsoluteUri,
+                License = repositoryMetadata.License,
+                LicenseUrl = repositoryMetadata.LicenseUrl?.AbsoluteUri,
+                Tags =
+                [
+                    .. repositoryMetadata.Topics
+                        .Where(IsSafeTopic)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .Order(StringComparer.OrdinalIgnoreCase)
+                        .Take(MaximumTopics),
+                ],
+                ReleaseNotes = releaseNotes,
+                ReleaseNotesUrl = releaseNotesUrl,
+                Provenance = provenance.ToImmutable(),
+            },
+            repositoryMetadata.Availability,
+            repositoryMetadata.Diagnostic);
+    }
+
+    private async Task<RepositoryReleaseMetadata> GetRepositoryMetadataAsync(
+        IRepositoryReleaseMetadataSource? source,
+        CancellationToken cancellationToken)
+    {
+        if (_cachedMetadata is not null)
+        {
+            return _cachedMetadata;
+        }
+
+        if (source is null)
+        {
+            return new()
+            {
+                Availability = RepositoryMetadataAvailability.Unavailable,
+                Provenance = "repository-metadata-source",
+                Diagnostic = "No repository metadata source was configured.",
+            };
+        }
+
+        RepositoryReleaseMetadata loaded = await source.GetAsync(repository, cancellationToken)
+            .ConfigureAwait(false);
+        return Interlocked.CompareExchange(ref _cachedMetadata, loaded, comparand: null) ?? loaded;
+    }
+
+    private static Uri? TryRepositoryUri(Uri? releaseUri)
+    {
+        if (releaseUri is null
+            || !releaseUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || !releaseUri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        string[] segments = releaseUri.AbsolutePath.Split(
+            '/',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return segments.Length < 2
+            ? null
+            : new Uri($"https://github.com/{segments[0]}/{segments[1]}");
+    }
+
+    private static bool IsSafeTopic(string topic)
+        => !string.IsNullOrWhiteSpace(topic)
+            && topic.Length <= 40
+            && topic.All(static character =>
+                char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.');
 }
 
 /// <summary>Creates release assets from explicit installer URLs without network discovery.</summary>
@@ -107,12 +250,15 @@ public sealed class DirectWorkflowReleaseSource : IWorkflowReleaseSource
 
 public sealed class InstallerWorkflowArtifactProcessor(
     InstallerDownloader downloader,
-    PayloadDependencyAnalyzer? dependencyAnalyzer = null) : IWorkflowArtifactProcessor
+    PayloadDependencyAnalyzer? dependencyAnalyzer = null,
+    InstallerVersionTrustPolicy? versionTrustPolicy = null) : IWorkflowArtifactProcessor
 {
     private readonly InstallerDownloader _downloader =
         downloader ?? throw new ArgumentNullException(nameof(downloader));
     private readonly PayloadDependencyAnalyzer _dependencyAnalyzer =
         dependencyAnalyzer ?? new PayloadDependencyAnalyzer();
+    private readonly InstallerVersionTrustPolicy _versionTrustPolicy =
+        versionTrustPolicy ?? new InstallerVersionTrustPolicy();
 
     public async Task<ArtifactSnapshot> AcquireAsync(
         DiscoveredAsset asset,
@@ -133,18 +279,34 @@ public sealed class InstallerWorkflowArtifactProcessor(
             || Path.GetExtension(download.FileName).Equals(".exe", StringComparison.OrdinalIgnoreCase))
         {
             await using FileStream stream = File.OpenRead(download.FilePath);
-            dependencies = _dependencyAnalyzer.Analyze(stream, download.FileName);
+            dependencies = _dependencyAnalyzer.AnalyzeWithCancellation(
+                stream,
+                download.FileName,
+                cancellationToken);
         }
 
         AssetContentEvidence content = AssetContentEvidence.FromDownload(download);
+        InstallerVersionTrustDecision versionTrust = InstallerVersionTrustEvaluator.Evaluate(
+            analysis,
+            _versionTrustPolicy);
         AssetAnalysisEvidence analysisEvidence = AssetAnalysisEvidence.FromAnalysis(
             analysis,
             content,
             dependencies,
-            isProductVersionTrustworthy: analysis.Format is
-                DetectedInstallerFormat.Msi
-                or DetectedInstallerFormat.Msix
-                or DetectedInstallerFormat.MsixBundle);
+            isProductVersionTrustworthy: versionTrust.IsTrustworthy,
+            productVersionEvidenceKind: versionTrust.Kind,
+            productVersionConfidence: versionTrust.Confidence);
+        if (versionTrust.Diagnostic is not null)
+        {
+            analysisEvidence = analysisEvidence with
+            {
+                Diagnostics =
+                [
+                    .. analysisEvidence.Diagnostics,
+                    versionTrust.Diagnostic,
+                ],
+            };
+        }
         return new()
         {
             Asset = asset with { Content = content, Analysis = analysisEvidence },

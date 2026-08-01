@@ -120,7 +120,10 @@ public sealed class InstallerDiagnosticService : IInstallerDiagnosticService
 
             cancellationToken.ThrowIfCancellationRequested();
             stream.Position = 0;
-            dependencies = new PayloadDependencyAnalyzer().Analyze(stream, installer.FileName);
+            dependencies = new PayloadDependencyAnalyzer().AnalyzeWithCancellation(
+                stream,
+                installer.FileName,
+                cancellationToken);
 
             cancellationToken.ThrowIfCancellationRequested();
             string confidence = GetConfidence(analysis);

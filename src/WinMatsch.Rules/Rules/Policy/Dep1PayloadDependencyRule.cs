@@ -71,6 +71,7 @@ public sealed class Dep1PayloadDependencyRule : IRule
                     break;
                 case DependencyEvidenceStatus.Inferred:
                 case DependencyEvidenceStatus.Ambiguous:
+                case DependencyEvidenceStatus.Unavailable:
                     context.AddFinding(this, RuleSeverity.Info,
                         $"{evidence.Status} {Describe(evidence)} evidence from '{evidence.PayloadPath}' is not strong enough for a mandatory dependency; confirm manually or via a package override.",
                         $"Installers[{index}]");

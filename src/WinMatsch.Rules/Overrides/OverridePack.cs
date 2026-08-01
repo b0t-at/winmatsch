@@ -30,6 +30,8 @@ public sealed record OverridePack
 
     public ImmutableArray<string> DroppedFields { get; init; } = [];
 
+    public ImmutableArray<LearnedFieldOverride> LearnedFields { get; init; } = [];
+
     public ImmutableArray<string> VanityUrls { get; init; } = [];
 
     public bool ManualOnly { get; init; }
@@ -75,4 +77,23 @@ public sealed record PolicyAnnotation
     public required string Id { get; init; }
 
     public required string Annotation { get; init; }
+}
+
+public sealed record LearnedFieldOverride
+{
+    public required string DocumentKey { get; init; }
+
+    public required string SemanticPath { get; init; }
+
+    public required string Value { get; init; }
+
+    public required string ValueSha256 { get; init; }
+
+    public required string BotValueSha256 { get; init; }
+
+    public required string SourceFingerprint { get; init; }
+
+    public required string Source { get; init; }
+
+    public string? InstallerSelectorSha256 { get; init; }
 }

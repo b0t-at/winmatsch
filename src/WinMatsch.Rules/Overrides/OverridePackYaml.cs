@@ -87,6 +87,7 @@ public static class OverridePackYaml
             "metadataUrlReplacements",
             "preservedFields",
             "droppedFields",
+            "learnedFields",
             "vanityUrls",
             "manualOnly",
             "policies",
@@ -99,7 +100,7 @@ public static class OverridePackYaml
                 $"Unsupported override-pack formatVersion '{formatVersion}'; expected {OverridePack.CurrentFormatVersion}.");
         }
 
-        return new()
+        var pack = new OverridePack
         {
             FormatVersion = formatVersion,
             PackageIdentifier = new(values.RequiredScalar("packageIdentifier")),
@@ -111,11 +112,14 @@ public static class OverridePackYaml
             MetadataUrlReplacements = ParseStringMap(values.OptionalMapping("metadataUrlReplacements")),
             PreservedFields = ParseStringList(values.OptionalSequence("preservedFields"), "preservedFields"),
             DroppedFields = ParseStringList(values.OptionalSequence("droppedFields"), "droppedFields"),
+            LearnedFields = ParseLearnedFields(values.OptionalSequence("learnedFields")),
             VanityUrls = ParseStringList(values.OptionalSequence("vanityUrls"), "vanityUrls"),
             ManualOnly = ParseOptionalBoolean(values.OptionalScalar("manualOnly"), "manualOnly"),
             Policies = ParsePolicies(values.OptionalSequence("policies")),
             Quirks = ParseQuirks(values.OptionalMapping("quirks")),
         };
+        ValidateSemantics(pack);
+        return pack;
     }
 
     public static void WriteFile(string path, OverridePack pack)
@@ -162,6 +166,7 @@ public static class OverridePackYaml
         WriteStringMap(yaml, "metadataUrlReplacements", pack.MetadataUrlReplacements);
         WriteStringList(yaml, "preservedFields", pack.PreservedFields);
         WriteStringList(yaml, "droppedFields", pack.DroppedFields);
+        WriteLearnedFields(yaml, pack.LearnedFields);
         WriteStringList(yaml, "vanityUrls", pack.VanityUrls);
         yaml.AppendLine($"manualOnly: {(pack.ManualOnly ? "true" : "false")}");
         WritePolicies(yaml, pack.Policies);
@@ -184,7 +189,6 @@ public static class OverridePackYaml
         ArgumentNullException.ThrowIfNull(pack.RuleModes);
         ArgumentNullException.ThrowIfNull(pack.MetadataUrlReplacements);
         ArgumentNullException.ThrowIfNull(pack.Quirks);
-
         int nodeCount = 7;
         long scalarOutputLength = ValidateScalar(pack.PackageIdentifier.Value, "packageIdentifier");
 
@@ -260,10 +264,31 @@ public static class OverridePackYaml
                 scalarOutputLength += ValidateScalar(source, "a metadataUrlReplacements key");
                 scalarOutputLength += ValidateScalar(replacement, $"metadataUrlReplacements.{source}");
             }
+
         }
 
         AddStringSequenceBudget(pack.PreservedFields, "preservedFields", ref nodeCount, ref scalarOutputLength);
         AddStringSequenceBudget(pack.DroppedFields, "droppedFields", ref nodeCount, ref scalarOutputLength);
+        if (!pack.LearnedFields.IsDefaultOrEmpty)
+        {
+            nodeCount += 2 + (17 * pack.LearnedFields.Length);
+            foreach (LearnedFieldOverride value in pack.LearnedFields)
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                scalarOutputLength += ValidateScalar(value.DocumentKey, "learnedFields.documentKey");
+                scalarOutputLength += ValidateScalar(value.SemanticPath, "learnedFields.semanticPath");
+                scalarOutputLength += ValidateScalar(value.Value, "learnedFields.value");
+                scalarOutputLength += ValidateScalar(value.ValueSha256, "learnedFields.valueSha256");
+                scalarOutputLength += ValidateScalar(value.BotValueSha256, "learnedFields.botValueSha256");
+                scalarOutputLength += ValidateScalar(value.SourceFingerprint, "learnedFields.sourceFingerprint");
+                scalarOutputLength += ValidateScalar(value.Source, "learnedFields.source");
+                if (value.InstallerSelectorSha256 is { } selector)
+                {
+                    scalarOutputLength += ValidateScalar(selector, "learnedFields.installerSelectorSha256");
+                }
+                OverridePackFieldSelector.ValidateLearned(value);
+            }
+        }
         AddStringSequenceBudget(pack.VanityUrls, "vanityUrls", ref nodeCount, ref scalarOutputLength);
 
         if (!pack.Policies.IsDefaultOrEmpty)
@@ -304,6 +329,7 @@ public static class OverridePackYaml
                 nameof(pack));
         }
 
+        ValidateSemantics(pack);
         return (int)estimatedLength;
     }
 
@@ -350,6 +376,45 @@ public static class OverridePackYaml
         }
 
         return escapedLength;
+    }
+
+    private static void ValidateSemantics(OverridePack pack)
+    {
+        if (pack.VersionSource is { } versionSource)
+        {
+            string normalized = versionSource.Trim();
+            bool literal = normalized.StartsWith("literal:", StringComparison.OrdinalIgnoreCase)
+                && PackageVersion.TryCreate(normalized["literal:".Length..].Trim(), out _);
+            bool known = normalized.ToLowerInvariant() is
+                "installer" or "installer.productversion" or "product-version"
+                or "release" or "release.tag" or "release-tag" or "tag"
+                or "url" or "url.token" or "url-token";
+            if (!literal && !known)
+            {
+                throw new FormatException(
+                    $"versionSource '{versionSource}' is unsupported; use installer.productVersion, release-tag, url-token, or literal:<version>.");
+            }
+        }
+
+        foreach ((string source, string replacement) in pack.MetadataUrlReplacements)
+        {
+            OverridePackFieldSelector.ValidateMetadataUrlReplacement(source, replacement);
+        }
+
+        foreach (string selector in pack.PreservedFields)
+        {
+            OverridePackFieldSelector.ValidateSelector(selector, "preservedFields");
+        }
+
+        foreach (string selector in pack.DroppedFields)
+        {
+            OverridePackFieldSelector.ValidateSelector(selector, "droppedFields");
+        }
+
+        foreach (LearnedFieldOverride learned in pack.LearnedFields)
+        {
+            OverridePackFieldSelector.ValidateLearned(learned);
+        }
     }
 
     private static void ValidateEnum<T>(T value, string description)
@@ -508,6 +573,46 @@ public static class OverridePackYaml
             Mapping item = Mapping.Create(RequireMapping(sequence.Children[i], $"policies[{i}]"), $"policies[{i}]");
             item.RequireKnownKeys("id", "annotation");
             values.Add(new() { Id = item.RequiredScalar("id"), Annotation = item.RequiredScalar("annotation") });
+        }
+
+        return values.ToImmutable();
+    }
+
+    private static ImmutableArray<LearnedFieldOverride> ParseLearnedFields(YamlSequenceNode? sequence)
+    {
+        if (sequence is null)
+        {
+            return [];
+        }
+
+        var values = ImmutableArray.CreateBuilder<LearnedFieldOverride>();
+        for (int i = 0; i < sequence.Children.Count; i++)
+        {
+            Mapping item = Mapping.Create(
+                RequireMapping(sequence.Children[i], $"learnedFields[{i}]"),
+                $"learnedFields[{i}]");
+            item.RequireKnownKeys(
+                "documentKey",
+                "semanticPath",
+                "value",
+                "valueSha256",
+                "botValueSha256",
+                "sourceFingerprint",
+                "source",
+                "installerSelectorSha256");
+            var learned = new LearnedFieldOverride
+            {
+                DocumentKey = item.RequiredScalar("documentKey"),
+                SemanticPath = item.RequiredScalar("semanticPath"),
+                Value = item.RequiredScalar("value"),
+                ValueSha256 = item.RequiredScalar("valueSha256"),
+                BotValueSha256 = item.RequiredScalar("botValueSha256"),
+                SourceFingerprint = item.RequiredScalar("sourceFingerprint"),
+                Source = item.RequiredScalar("source"),
+                InstallerSelectorSha256 = item.OptionalScalar("installerSelectorSha256"),
+            };
+            OverridePackFieldSelector.ValidateLearned(learned);
+            values.Add(learned);
         }
 
         return values.ToImmutable();
@@ -690,6 +795,29 @@ public static class OverridePackYaml
         {
             yaml.AppendLine($"  - id: {Quote(value.Id)}");
             yaml.AppendLine($"    annotation: {Quote(value.Annotation)}");
+        }
+    }
+
+    private static void WriteLearnedFields(StringBuilder yaml, ImmutableArray<LearnedFieldOverride> values)
+    {
+        if (values.IsDefaultOrEmpty)
+        {
+            return;
+        }
+
+        yaml.AppendLine("learnedFields:");
+        foreach (LearnedFieldOverride value in values
+                     .OrderBy(static item => item.DocumentKey, StringComparer.Ordinal)
+                     .ThenBy(static item => item.SemanticPath, StringComparer.Ordinal))
+        {
+            yaml.AppendLine($"  - documentKey: {Quote(value.DocumentKey)}");
+            yaml.AppendLine($"    semanticPath: {Quote(value.SemanticPath)}");
+            yaml.AppendLine($"    value: {Quote(value.Value)}");
+            yaml.AppendLine($"    valueSha256: {Quote(value.ValueSha256)}");
+            yaml.AppendLine($"    botValueSha256: {Quote(value.BotValueSha256)}");
+            yaml.AppendLine($"    sourceFingerprint: {Quote(value.SourceFingerprint)}");
+            yaml.AppendLine($"    source: {Quote(value.Source)}");
+            Scalar(yaml, "installerSelectorSha256", value.InstallerSelectorSha256, indentation: 4);
         }
     }
 

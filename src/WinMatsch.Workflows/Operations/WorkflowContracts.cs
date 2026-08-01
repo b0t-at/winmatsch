@@ -48,6 +48,15 @@ public interface IWorkflowReleaseSource
         CancellationToken cancellationToken);
 }
 
+public interface IWorkflowReleaseMetadataSource
+{
+    public Task<WorkflowReleaseMetadata> DiscoverMetadataAsync(
+        PackageIdentifier packageIdentifier,
+        ReleaseRequest request,
+        ImmutableArray<DiscoveredAsset> assets,
+        CancellationToken cancellationToken);
+}
+
 public sealed record ArtifactSnapshot
 {
     public required DiscoveredAsset Asset { get; init; }

@@ -81,13 +81,14 @@ public static partial class PackageVersionResolver
 
         foreach (DiscoveredAsset asset in input.Assets)
         {
-            if (asset.Analysis is { IsProductVersionTrustworthy: true } analysis)
+            if (asset.Analysis is { IsProductVersionTrustworthy: true } analysis
+                && IsConsistentBinaryVersion(input.PackageIdentifier, asset, analysis, diagnostics))
             {
                 AddCandidate(
                     analysis.ProductVersion,
                     PackageVersionSource.InstallerProductVersion,
-                    EvidenceConfidence.High,
-                    $"analysis:{asset.DownloadUri.AbsoluteUri}",
+                    analysis.ProductVersionConfidence,
+                    $"analysis:{analysis.ProductVersionEvidenceKind}:{asset.DownloadUri.AbsoluteUri}",
                     candidates,
                     diagnostics);
             }
@@ -341,6 +342,35 @@ public static partial class PackageVersionResolver
         return null;
     }
 
+    private static bool IsConsistentBinaryVersion(
+        PackageIdentifier packageIdentifier,
+        DiscoveredAsset asset,
+        AssetAnalysisEvidence analysis,
+        ImmutableArray<string>.Builder diagnostics)
+    {
+        if (analysis.ProductVersionEvidenceKind is not (
+                InstallerVersionEvidenceKind.PeVersionInfoProductVersion
+                or InstallerVersionEvidenceKind.ArchiveConsensus)
+            || string.IsNullOrWhiteSpace(analysis.ProductVersion))
+        {
+            return true;
+        }
+
+        string? normalizedTag = NormalizeReleaseTag(asset.ReleaseTag, packageIdentifier);
+        if (string.IsNullOrWhiteSpace(normalizedTag)
+            || ReleaseBuildTagRegex().IsMatch(normalizedTag)
+            || !PackageVersion.TryCreate(normalizedTag, out PackageVersion? tagVersion)
+            || !PackageVersion.TryCreate(analysis.ProductVersion.Trim(), out PackageVersion? binaryVersion)
+            || binaryVersion!.IsEquivalentTo(tagVersion!))
+        {
+            return true;
+        }
+
+        diagnostics.Add(
+            $"VERSION_BINARY_INCONSISTENT:{analysis.ProductVersion}:{asset.ReleaseTag}:{asset.DownloadUri.AbsoluteUri}");
+        return false;
+    }
+
     private static PackageVersionCandidate[] CollapseEquivalentCandidates(
         IEnumerable<PackageVersionCandidate> candidates)
     {
@@ -400,7 +430,7 @@ public static partial class PackageVersionResolver
     private static partial Regex CalendarDateRegex();
 
     [GeneratedRegex(
-        @"(?:^|[-_.])(?:build|nightly|snapshot)(?:[-_.]|$)|\d{4}-\d{2}-\d{2}",
+        @"^(?:b|build[-_.]?)\d+$|(?:^|[-_.])(?:build|nightly|snapshot)(?:[-_.]|$)|\d{4}-\d{2}-\d{2}",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ReleaseBuildTagRegex();
 }

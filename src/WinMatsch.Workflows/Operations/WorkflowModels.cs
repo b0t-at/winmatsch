@@ -105,6 +105,15 @@ public enum ExpectedFileState
 
 public sealed record WorkflowAuditEntry(string Code, string Message, string? Provenance = null);
 
+public sealed record LearnedOverridePlan(
+    OverridePack Pack,
+    string? ExpectedContentSha256,
+    int? ExpectedFormatVersion,
+    ImmutableArray<LearnedFieldOverride> ApprovedFields,
+    ScopeLayoutOverride? ApprovedScopeLayout = null,
+    ScopeLayoutOverride? PreviousScopeLayout = null,
+    OverridePack? PreviousPack = null);
+
 public sealed record WorkflowReleaseProvenance(
     WinMatsch.GitHub.RepositoryCoordinates Repository,
     long ReleaseId,
@@ -147,6 +156,8 @@ public sealed record LocalOperationPlan
     public required RuleRunSummary Rules { get; init; }
 
     public WorkflowReleaseProvenance? Release { get; init; }
+
+    public LearnedOverridePlan? LearnedOverride { get; init; }
 
     public ImmutableArray<WorkflowQuestion> Questions { get; init; } = [];
 
@@ -237,6 +248,8 @@ public abstract record WorkflowOperationRequest
     public bool ExplainRules { get; init; }
 
     public bool ApproveReview { get; init; }
+
+    public ImmutableArray<string> ApprovedReviewFingerprints { get; init; } = [];
 }
 
 public sealed record PackageLocaleMetadata
@@ -274,7 +287,15 @@ public sealed record PackageLocaleMetadata
     public string? ReleaseNotes { get; init; }
 
     public string? ReleaseNotesUrl { get; init; }
+
+    public ImmutableDictionary<string, string> Provenance { get; init; }
+        = ImmutableDictionary<string, string>.Empty;
 }
+
+public sealed record WorkflowReleaseMetadata(
+    PackageLocaleMetadata Metadata,
+    RepositoryMetadataAvailability Availability,
+    string? Diagnostic);
 
 public sealed record ReleaseRequest(
     string? Release,

@@ -46,6 +46,7 @@ public static class ProductionRuleComposer
             new Pipe2ManifestVersionPinRule(runEvidence),
             new Pipe4ArchiveBinariesDependOnPathRule(runEvidence),
             new Pipe5ContentPolicyAnnotationRule(packs),
+            new ApplyOverridePackFieldsRule(packs),
 
             // Finding-only policy rules run after every mutation; PIPE-1 is the final policy guard.
             new Arp4ShapeParityRule(packs),

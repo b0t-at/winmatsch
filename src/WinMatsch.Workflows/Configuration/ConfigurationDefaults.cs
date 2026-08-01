@@ -9,7 +9,7 @@ public static class ConfigurationDefaults
 
     public const bool CacheEnabled = true;
 
-    public static readonly TimeSpan FreshnessDelay = TimeSpan.FromHours(3);
+    public static readonly TimeSpan FreshnessDelay = TimeSpan.FromHours(4);
 
     public const OutputFormat OutputFormat = Configuration.OutputFormat.Text;
 

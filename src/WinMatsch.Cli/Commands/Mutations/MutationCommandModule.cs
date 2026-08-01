@@ -348,7 +348,7 @@ public sealed class MutationCommandModule : ICommandModule
                 return ExitCodes.OperationFailed;
             }
 
-            request = ApproveReview(request);
+            request = ReviewApproval.Bind(request, local.Plan);
             local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
         }
 
@@ -984,18 +984,6 @@ public sealed class MutationCommandModule : ICommandModule
                 + $"'{update.PreviousVersion.Value}'.");
         }
     }
-
-    private static WorkflowOperationRequest ApproveReview(WorkflowOperationRequest request)
-        => request switch
-        {
-            NewOperationRequest value => value with { ApproveReview = true },
-            UpdateOperationRequest value => value with { ApproveReview = true },
-            RemoveOperationRequest value => value with { ApproveReview = true },
-            SubmitOperationRequest value => value with { ApproveReview = true },
-            NewLocaleOperationRequest value => value with { ApproveReview = true },
-            UpdateLocaleOperationRequest value => value with { ApproveReview = true },
-            _ => throw new ArgumentException("Unsupported mutation request.", nameof(request)),
-        };
 
     private static WorkflowOperationRequest WithExecutionMode(
         WorkflowOperationRequest request,
