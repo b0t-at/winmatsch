@@ -10,7 +10,7 @@ namespace WinMatsch.Downloads;
 /// Streams installer payloads to disk, computes stable identities, captures HTTP validators,
 /// probes origins, and revalidates bytes immediately before callers submit derived manifests.
 /// </summary>
-public sealed class InstallerDownloader : IDisposable
+public sealed class InstallerDownloader : IDisposable, IAsyncDisposable
 {
     private const int CopyBufferSize = 81920;
     private const string FallbackFileName = "download";
@@ -22,7 +22,15 @@ public sealed class InstallerDownloader : IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly DownloadCache? _cache;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _downloadGates = new(StringComparer.Ordinal);
-    private bool _disposed;
+    private readonly object _lifecycleLock = new();
+    private readonly CancellationTokenSource _shutdown = new();
+    private readonly TaskCompletionSource _disposeCompletion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly AsyncLocal<int> _operationDepth = new();
+    private int _activeOperations;
+    private bool _disposeStarted;
+    private bool _shutdownSignaled;
+    private bool _resourcesDisposed;
 
     /// <summary>Creates a downloader with validated redirects and automatic decompression enabled.</summary>
     public InstallerDownloader(DownloaderOptions? options = null)
@@ -51,6 +59,8 @@ public sealed class InstallerDownloader : IDisposable
                     TimeToLive = _options.CacheTtl,
                     MaxEntries = _options.CacheMaxEntries,
                     MaxBytes = _options.CacheMaxBytes,
+                    ProcessLockTimeout = _options.CacheProcessLockTimeout,
+                    AbandonedTemporaryFileAge = _options.CacheAbandonedTemporaryFileAge,
                     TimeProvider = _timeProvider,
                 });
         }
@@ -71,11 +81,25 @@ public sealed class InstallerDownloader : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(url);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationDirectory);
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        using OperationLease operation = EnterOperation(cancellationToken);
+        return await DownloadCoreAsync(
+            url,
+            destinationDirectory,
+            progress,
+            useCache: true,
+            operation.CancellationToken).ConfigureAwait(false);
+    }
 
+    private async Task<DownloadResult> DownloadCoreAsync(
+        string url,
+        string destinationDirectory,
+        IProgress<DownloadProgress>? progress,
+        bool useCache,
+        CancellationToken cancellationToken)
+    {
         Uri initialUri = ValidateUrl(url);
         CreateDestinationDirectory(destinationDirectory);
-        if (_cache is null)
+        if (!useCache || _cache is null)
         {
             DownloadAttemptResult attempt = await DownloadFromOriginAsync(
                 url,
@@ -126,18 +150,13 @@ public sealed class InstallerDownloader : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(url);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationDirectory);
-        ObjectDisposedException.ThrowIf(_disposed, this);
-
-        Uri initialUri = ValidateUrl(url);
-        CreateDestinationDirectory(destinationDirectory);
-        DownloadAttemptResult attempt = await DownloadFromOriginAsync(
+        using OperationLease operation = EnterOperation(cancellationToken);
+        return await DownloadCoreAsync(
             url,
-            initialUri,
             destinationDirectory,
             progress,
-            null,
-            cancellationToken).ConfigureAwait(false);
-        return attempt.Result;
+            useCache: false,
+            operation.CancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -150,12 +169,13 @@ public sealed class InstallerDownloader : IDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(previous);
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        using OperationLease operation = EnterOperation(cancellationToken);
+        CancellationToken operationToken = operation.CancellationToken;
 
         Uri initialUri = ValidateUrl(previous.InitialUrl);
         string destinationDirectory = Path.GetDirectoryName(previous.FilePath)
             ?? throw new InvalidOperationException("The downloaded file has no parent directory.");
-        DownloadContentIdentity localIdentity = await ComputeFileIdentityAsync(previous.FilePath, cancellationToken).ConfigureAwait(false);
+        DownloadContentIdentity localIdentity = await ComputeFileIdentityAsync(previous.FilePath, operationToken).ConfigureAwait(false);
         if (localIdentity != previous.ContentIdentity)
         {
             throw new DownloadContentChangedException(previous.ContentIdentity, localIdentity, previous.FilePath);
@@ -167,10 +187,10 @@ public sealed class InstallerDownloader : IDisposable
             destinationDirectory,
             progress,
             previous,
-            cancellationToken).ConfigureAwait(false);
+            operationToken).ConfigureAwait(false);
         if (attempt.NotModified)
         {
-            DownloadContentIdentity confirmedIdentity = await ComputeFileIdentityAsync(previous.FilePath, cancellationToken).ConfigureAwait(false);
+            DownloadContentIdentity confirmedIdentity = await ComputeFileIdentityAsync(previous.FilePath, operationToken).ConfigureAwait(false);
             if (confirmedIdentity != previous.ContentIdentity)
             {
                 throw new DownloadContentChangedException(previous.ContentIdentity, confirmedIdentity, previous.FilePath);
@@ -179,7 +199,7 @@ public sealed class InstallerDownloader : IDisposable
 
         if (_cache is not null)
         {
-            await _cache.StoreAsync(attempt.Result, cancellationToken).ConfigureAwait(false);
+            await _cache.StoreAsync(attempt.Result, operationToken).ConfigureAwait(false);
         }
 
         if (attempt.NotModified)
@@ -208,7 +228,7 @@ public sealed class InstallerDownloader : IDisposable
     public async Task<DownloadProbeResult> ProbeAsync(string url, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(url);
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        using OperationLease operation = EnterOperation(cancellationToken);
         Uri initialUri = ValidateUrl(url);
 
         return await ExecuteWithRetriesAsync(
@@ -233,7 +253,7 @@ public sealed class InstallerDownloader : IDisposable
                 return CreateProbeResult(url, rangeExchange, DownloadProbeMethod.RangeGet);
             },
             url,
-            cancellationToken).ConfigureAwait(false);
+            operation.CancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Downloads several URLs concurrently while preserving input order.</summary>
@@ -247,12 +267,13 @@ public sealed class InstallerDownloader : IDisposable
         ArgumentNullException.ThrowIfNull(urls);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationDirectory);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxConcurrency, 1);
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        using OperationLease operation = EnterOperation(cancellationToken);
 
         List<string> urlList = [.. urls];
         var results = new DownloadResult[urlList.Count];
         using SemaphoreSlim gate = new(maxConcurrency);
-        using CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using CancellationTokenSource linkedCts =
+            CancellationTokenSource.CreateLinkedTokenSource(operation.CancellationToken);
         Task[] tasks = [.. Enumerable.Range(0, urlList.Count).Select(DownloadOneAsync)];
         await Task.WhenAll(tasks).ConfigureAwait(false);
         return results;
@@ -262,7 +283,12 @@ public sealed class InstallerDownloader : IDisposable
             await gate.WaitAsync(linkedCts.Token).ConfigureAwait(false);
             try
             {
-                results[index] = await DownloadAsync(urlList[index], destinationDirectory, progress, linkedCts.Token).ConfigureAwait(false);
+                results[index] = await DownloadCoreAsync(
+                    urlList[index],
+                    destinationDirectory,
+                    progress,
+                    useCache: true,
+                    linkedCts.Token).ConfigureAwait(false);
             }
             catch
             {
@@ -276,19 +302,123 @@ public sealed class InstallerDownloader : IDisposable
         }
     }
 
+    /// <summary>
+    /// Rejects new work, cancels accepted operations, and waits for them before releasing shared resources.
+    /// A reentrant call from accepted work initiates shutdown without waiting for itself; use
+    /// <see cref="DisposeAsync"/> to observe completion after that operation unwinds.
+    /// </summary>
     public void Dispose()
     {
-        if (_disposed)
+        Task completion = BeginDispose();
+        if (_operationDepth.Value == 0)
         {
-            return;
+            completion.GetAwaiter().GetResult();
+        }
+    }
+
+    /// <summary>
+    /// Rejects new work, cancels accepted operations, and asynchronously drains them before releasing resources.
+    /// A reentrant call from accepted work initiates shutdown without awaiting itself.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        Task completion = BeginDispose();
+        if (_operationDepth.Value == 0)
+        {
+            await completion.ConfigureAwait(false);
+        }
+    }
+
+    private Task BeginDispose()
+    {
+        bool signalShutdown = false;
+        lock (_lifecycleLock)
+        {
+            if (!_disposeStarted)
+            {
+                _disposeStarted = true;
+                signalShutdown = true;
+            }
         }
 
-        _disposed = true;
+        if (signalShutdown)
+        {
+            try
+            {
+                _shutdown.Cancel();
+            }
+            finally
+            {
+                bool disposeResources;
+                lock (_lifecycleLock)
+                {
+                    _shutdownSignaled = true;
+                    disposeResources = TryReserveResourceDisposal();
+                }
+
+                if (disposeResources)
+                {
+                    DisposeResources();
+                }
+            }
+        }
+
+        return _disposeCompletion.Task;
+    }
+
+    private OperationLease EnterOperation(CancellationToken cancellationToken)
+    {
+        lock (_lifecycleLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposeStarted, this);
+            CancellationTokenSource operationCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdown.Token);
+            _activeOperations++;
+            _operationDepth.Value++;
+            return new OperationLease(this, operationCancellation);
+        }
+    }
+
+    private void ExitOperation()
+    {
+        _operationDepth.Value--;
+        bool disposeResources;
+        lock (_lifecycleLock)
+        {
+            _activeOperations--;
+            disposeResources = TryReserveResourceDisposal();
+        }
+
+        if (disposeResources)
+        {
+            DisposeResources();
+        }
+    }
+
+    private bool TryReserveResourceDisposal()
+    {
+        if (!_disposeStarted
+            || !_shutdownSignaled
+            || _activeOperations != 0
+            || _resourcesDisposed)
+        {
+            return false;
+        }
+
+        _resourcesDisposed = true;
+        return true;
+    }
+
+    private void DisposeResources()
+    {
         _httpClient.Dispose();
         foreach (SemaphoreSlim gate in _downloadGates.Values)
         {
             gate.Dispose();
         }
+
+        _shutdown.Dispose();
+        _disposeCompletion.TrySetResult();
     }
 
     private async Task<DownloadAttemptResult> DownloadFromOriginAsync(
@@ -852,8 +982,41 @@ public sealed class InstallerDownloader : IDisposable
         }
 
         string sanitized = new(chars);
-        return sanitized is "." or ".." ? FallbackFileName : sanitized;
+        if (sanitized is "." or "..")
+        {
+            return FallbackFileName;
+        }
+
+        int extensionSeparator = sanitized.IndexOf('.');
+        ReadOnlySpan<char> stem = extensionSeparator < 0
+            ? sanitized.AsSpan()
+            : sanitized.AsSpan(0, extensionSeparator);
+        while (!stem.IsEmpty && stem[^1] is ' ' or '.')
+        {
+            stem = stem[..^1];
+        }
+
+        return IsWindowsReservedDeviceName(stem) ? "_" + sanitized : sanitized;
     }
+
+    private static bool IsWindowsReservedDeviceName(ReadOnlySpan<char> stem)
+    {
+        if (stem.Equals("CON", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("PRN", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("AUX", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return stem.Length == 4
+            && IsReservedDeviceNumber(stem[3])
+            && (stem[..3].Equals("COM", StringComparison.OrdinalIgnoreCase)
+                || stem[..3].Equals("LPT", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsReservedDeviceNumber(char character)
+        => character is >= '1' and <= '9' or '\u00B9' or '\u00B2' or '\u00B3';
 
     private static void TryDeleteFile(string path)
     {
@@ -886,10 +1049,40 @@ public sealed class InstallerDownloader : IDisposable
             throw new ArgumentOutOfRangeException(nameof(options), "Timeout must be positive.");
         }
 
+        if (options.CacheProcessLockTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Cache process lock timeout must be positive.");
+        }
+
+        if (options.CacheAbandonedTemporaryFileAge <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Abandoned cache temp file age must be positive.");
+        }
+
         ArgumentNullException.ThrowIfNull(options.TimeProvider);
     }
 
     private sealed record DownloadAttemptResult(DownloadResult Result, bool NotModified);
+
+    private sealed class OperationLease(
+        InstallerDownloader owner,
+        CancellationTokenSource cancellation) : IDisposable
+    {
+        private int _disposed;
+
+        public CancellationToken CancellationToken => cancellation.Token;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            cancellation.Dispose();
+            owner.ExitOperation();
+        }
+    }
 
     private sealed class RedirectedResponse : IDisposable
     {

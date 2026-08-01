@@ -113,6 +113,57 @@ public sealed class InstallerDownloaderTests : IDisposable
         Assert.True(File.Exists(result.FilePath));
     }
 
+    [Theory]
+    [InlineData("CON", "_CON")]
+    [InlineData("prn.exe", "_prn.exe")]
+    [InlineData("AuX.tar.gz", "_AuX.tar.gz")]
+    [InlineData("NUL.txt", "_NUL.txt")]
+    [InlineData("COM1.exe", "_COM1.exe")]
+    [InlineData("com9", "_com9")]
+    [InlineData("LPT1.bin", "_LPT1.bin")]
+    [InlineData("lpt9.txt", "_lpt9.txt")]
+    [InlineData("COM10.exe", "COM10.exe")]
+    [InlineData("console.exe", "console.exe")]
+    public async Task DownloadAsync_SanitizesWindowsReservedDeviceNamesOnEveryPlatform(
+        string suppliedName,
+        string expectedName)
+    {
+        using StubHttpMessageHandler stub = new((request, _) =>
+        {
+            HttpResponseMessage response = Ok(request, CreatePayload(16));
+            response.Content.Headers.TryAddWithoutValidation(
+                "Content-Disposition",
+                $"attachment; filename=\"{suppliedName}\"");
+            return response;
+        });
+        using InstallerDownloader downloader = new(stub);
+
+        DownloadResult result = await downloader.DownloadAsync("https://example.com/download", _tempDir);
+
+        Assert.Equal(expectedName, result.FileName);
+        Assert.True(File.Exists(result.FilePath));
+    }
+
+    [Theory]
+    [InlineData("COM\u00B9.exe", "_COM\u00B9.exe")]
+    [InlineData("com\u00B2", "_com\u00B2")]
+    [InlineData("LPT\u00B3.bin", "_LPT\u00B3.bin")]
+    public async Task DownloadAsync_SanitizesSuperscriptWindowsReservedDeviceNames(
+        string suppliedName,
+        string expectedName)
+    {
+        using StubHttpMessageHandler stub = new((request, _) => Ok(request, CreatePayload(16)));
+        using InstallerDownloader downloader = new(stub);
+        string encodedName = Uri.EscapeDataString(suppliedName);
+
+        DownloadResult result = await downloader.DownloadAsync(
+            "https://example.com/" + encodedName,
+            _tempDir);
+
+        Assert.Equal(expectedName, result.FileName);
+        Assert.True(File.Exists(result.FilePath));
+    }
+
     [Fact]
     public async Task DownloadAsync_FallsBackToDefaultFileName_WhenNothingUsable()
     {
@@ -498,6 +549,107 @@ public sealed class InstallerDownloaderTests : IDisposable
             () => downloader.DownloadManyAsync(urls, _tempDir, maxConcurrency: 2));
 
         Assert.Equal(HttpStatusCode.NotFound, exception.StatusCode);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_CancelsAndDrainsDownloadManyBeforeDisposingSharedResources()
+    {
+        var handler = new CancellationBlockingHttpMessageHandler(expectedConcurrentRequests: 2);
+        var downloader = new InstallerDownloader(
+            handler,
+            new DownloaderOptions { MaxRetryAttempts = 0 });
+        string[] urls =
+        [
+            "https://example.com/one.exe",
+            "https://example.com/two.exe",
+            "https://example.com/three.exe",
+            "https://example.com/four.exe",
+        ];
+        Task<IReadOnlyList<DownloadResult>> download =
+            downloader.DownloadManyAsync(urls, _tempDir, maxConcurrency: 2);
+        await handler.AllRequestsStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Task disposal = downloader.DisposeAsync().AsTask();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => download);
+        await disposal.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, handler.DisposeCount);
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => downloader.DownloadAsync(urls[0], _tempDir));
+        downloader.Dispose();
+        await downloader.DisposeAsync();
+        Assert.Equal(1, handler.DisposeCount);
+        Assert.DoesNotContain(
+            Directory.EnumerateFiles(_tempDir, "*", SearchOption.AllDirectories),
+            path => path.Contains(".part.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Dispose_CancelsAndDrainsRevalidationWithoutDisposedSemaphoreFailures()
+    {
+        const string Url = "https://example.com/setup.exe";
+        using StubHttpMessageHandler initialHandler = new((request, _) => Ok(request, CreatePayload(128)));
+        using var initialDownloader = new InstallerDownloader(initialHandler);
+        DownloadResult previous = await initialDownloader.DownloadAsync(Url, _tempDir);
+        var blockingHandler = new CancellationBlockingHttpMessageHandler(expectedConcurrentRequests: 1);
+        var downloader = new InstallerDownloader(
+            blockingHandler,
+            new DownloaderOptions { MaxRetryAttempts = 0 });
+        Task<DownloadRevalidationResult> revalidation = downloader.RevalidateAsync(previous);
+        await blockingHandler.AllRequestsStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Task disposal = Task.Run(downloader.Dispose);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => revalidation);
+        await disposal.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, blockingHandler.DisposeCount);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => downloader.RevalidateAsync(previous));
+    }
+
+    [Fact]
+    public async Task Dispose_ReentrantFromProgressInitiatesShutdownWithoutDeadlock()
+    {
+        using StubHttpMessageHandler handler = new((request, _) => Ok(request, CreatePayload(200_000)));
+        var downloader = new InstallerDownloader(
+            handler,
+            new DownloaderOptions { MaxRetryAttempts = 0 });
+        int disposeCalls = 0;
+        var progress = new CallbackProgress<DownloadProgress>(_ =>
+        {
+            if (Interlocked.Increment(ref disposeCalls) == 1)
+            {
+                downloader.Dispose();
+            }
+        });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => downloader.DownloadAsync(
+                "https://example.com/reentrant.exe",
+                _tempDir,
+                progress)).WaitAsync(TimeSpan.FromSeconds(5));
+        await downloader.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => downloader.DownloadAsync("https://example.com/rejected.exe", _tempDir));
+    }
+
+    [Fact]
+    public async Task DisposeAsync_ReentrantFromHandlerInitiatesShutdownWithoutAwaitingItself()
+    {
+        InstallerDownloader? downloader = null;
+        var handler = new ReentrantAsyncDisposalHttpMessageHandler(
+            () => downloader!.DisposeAsync());
+        downloader = new InstallerDownloader(
+            handler,
+            new DownloaderOptions { MaxRetryAttempts = 0 });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => downloader.DownloadAsync(
+                "https://example.com/reentrant-async.exe",
+                _tempDir)).WaitAsync(TimeSpan.FromSeconds(5));
+        await downloader.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, handler.DisposeCount);
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => downloader.DownloadAsync("https://example.com/rejected.exe", _tempDir));
     }
 
     private static byte[] CreatePayload(int length)

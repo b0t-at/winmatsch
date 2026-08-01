@@ -50,6 +50,12 @@ public sealed class DownloaderOptions
     /// <summary>The maximum aggregate payload size retained in the persistent cache.</summary>
     public long CacheMaxBytes { get; set; } = 5L * 1024 * 1024 * 1024;
 
+    /// <summary>The maximum time to wait for another process to release the persistent cache lock.</summary>
+    public TimeSpan CacheProcessLockTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>The minimum age of an owned cache temp file before maintenance may remove it.</summary>
+    public TimeSpan CacheAbandonedTemporaryFileAge { get; set; } = TimeSpan.FromHours(1);
+
     /// <summary>
     /// The clock used for HTTP age and freshness calculations. Override in deterministic hosts or tests.
     /// </summary>

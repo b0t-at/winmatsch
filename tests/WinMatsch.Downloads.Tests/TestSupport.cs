@@ -216,3 +216,70 @@ internal sealed class ConstrainedFallbackHandler : HttpMessageHandler
         }
     }
 }
+
+internal sealed class CancellationBlockingHttpMessageHandler(int expectedConcurrentRequests) : HttpMessageHandler
+{
+    private readonly TaskCompletionSource _allRequestsStarted =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _disposeCount;
+    private int _requestCount;
+
+    public Task AllRequestsStarted => _allRequestsStarted.Task;
+
+    public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        if (Interlocked.Increment(ref _requestCount) >= expectedConcurrentRequests)
+        {
+            _allRequestsStarted.TrySetResult();
+        }
+
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        throw new InvalidOperationException("An infinite cancellation-aware delay returned without cancellation.");
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            Interlocked.Increment(ref _disposeCount);
+        }
+
+        base.Dispose(disposing);
+    }
+}
+
+internal sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
+{
+    public void Report(T value) => callback(value);
+}
+
+internal sealed class ReentrantAsyncDisposalHttpMessageHandler(
+    Func<ValueTask> disposeAsync) : HttpMessageHandler
+{
+    private int _disposeCount;
+
+    public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        await disposeAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        throw new InvalidOperationException("Reentrant disposal did not cancel the active request.");
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            Interlocked.Increment(ref _disposeCount);
+        }
+
+        base.Dispose(disposing);
+    }
+}
