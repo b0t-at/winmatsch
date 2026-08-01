@@ -33,6 +33,11 @@ public interface IManifestSnapshotSource
         PackageIdentifier packageIdentifier,
         PackageVersion packageVersion,
         CancellationToken cancellationToken);
+
+    public Task<ImmutableArray<PackageSnapshot>> ListVersionsAsync(
+        string outputDirectory,
+        PackageIdentifier packageIdentifier,
+        CancellationToken cancellationToken);
 }
 
 public interface IWorkflowReleaseSource
@@ -112,6 +117,11 @@ public interface IWorkflowPreflight
     public Task<ValidationReport> ValidateAsync(
         WorkflowPreflightRequest request,
         CancellationToken cancellationToken);
+
+    public Task<ValidationReport> ExecuteAsync(
+        WorkflowPreflightRequest request,
+        Func<CancellationToken, Task> boundary,
+        CancellationToken cancellationToken);
 }
 
 public interface IWorkflowFileTransaction
@@ -168,7 +178,7 @@ public sealed class PreflightGateWorkflowAdapter(PreflightGate gate) : IWorkflow
 {
     private readonly PreflightGate _gate = gate ?? throw new ArgumentNullException(nameof(gate));
 
-    public Task<ValidationReport> ValidateAsync(
+    public async Task<ValidationReport> ValidateAsync(
         WorkflowPreflightRequest request,
         CancellationToken cancellationToken)
     {
@@ -177,21 +187,101 @@ public sealed class PreflightGateWorkflowAdapter(PreflightGate gate) : IWorkflow
             && !request.BeforeDocuments.IsEmpty
             && request.Changes.All(static change => change.Kind == PlannedChangeKind.Delete))
         {
-            return Task.FromResult(new ValidationReport());
+            return new ValidationReport();
         }
 
-        return _gate.ValidateAsync(
-            new PreflightRequest
-            {
-                Documents =
-                [
-                    .. request.AfterDocuments.Select(static document => new ManifestDocument(
-                        document.RepositoryPath,
-                        StrictUtf8.Decode(document.Content.AsSpan()))),
-                ],
-                Changes =
-                [
-                    .. request.Changes.Select(static change => new RepositoryFileChange(
+        ValidationReport report = await _gate.ValidateAsync(CreateRequest(request), cancellationToken)
+            .ConfigureAwait(false);
+        return IsInstallerUnchanged(request) ? RemoveArtifactRevalidationFindings(report) : report;
+    }
+
+    public Task<ValidationReport> ExecuteAsync(
+        WorkflowPreflightRequest request,
+        Func<CancellationToken, Task> boundary,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(boundary);
+        if (request.AfterDocuments.IsEmpty
+            && !request.BeforeDocuments.IsEmpty
+            && request.Changes.All(static change => change.Kind == PlannedChangeKind.Delete))
+        {
+            return ExecuteRemovalAsync(request, boundary, cancellationToken);
+        }
+
+        return IsInstallerUnchanged(request)
+            ? ExecuteUnchangedInstallerAsync(request, boundary, cancellationToken)
+            : _gate.ExecuteAsync(
+                CreateRequest(request),
+                new DelegatePreflightBoundary(boundary),
+                cancellationToken);
+    }
+
+    private static async Task<ValidationReport> ExecuteRemovalAsync(
+        WorkflowPreflightRequest request,
+        Func<CancellationToken, Task> boundary,
+        CancellationToken cancellationToken)
+    {
+        ValidationReport report = new();
+        if (report.CanProceed(request.Options.WarningPolicy))
+        {
+            await boundary(cancellationToken).ConfigureAwait(false);
+        }
+
+        return report;
+    }
+
+    private async Task<ValidationReport> ExecuteUnchangedInstallerAsync(
+        WorkflowPreflightRequest request,
+        Func<CancellationToken, Task> boundary,
+        CancellationToken cancellationToken)
+    {
+        ValidationReport report = await ValidateAsync(request, cancellationToken).ConfigureAwait(false);
+        if (report.CanProceed(request.Options.WarningPolicy))
+        {
+            await boundary(cancellationToken).ConfigureAwait(false);
+        }
+
+        return report;
+    }
+
+    private static bool IsInstallerUnchanged(WorkflowPreflightRequest request)
+    {
+        RawManifestDocument? before = request.BeforeDocuments.SingleOrDefault(IsInstaller);
+        RawManifestDocument? after = request.AfterDocuments.SingleOrDefault(IsInstaller);
+        return before is not null
+            && after is not null
+            && string.Equals(before.RepositoryPath, after.RepositoryPath, StringComparison.Ordinal)
+            && before.Content.AsSpan().SequenceEqual(after.Content.AsSpan());
+
+        static bool IsInstaller(RawManifestDocument document)
+            => document.RepositoryPath.EndsWith(".installer.yaml", StringComparison.Ordinal);
+    }
+
+    private static ValidationReport RemoveArtifactRevalidationFindings(ValidationReport report)
+        => new(report.Findings.Where(static finding =>
+            finding.Code is not ("VLD6001" or "VLD6002" or "VLD6005")));
+
+    private static PreflightRequest CreateRequest(WorkflowPreflightRequest request)
+        => new()
+        {
+            Documents =
+            [
+                .. request.AfterDocuments.Select(static document => new ManifestDocument(
+                    document.RepositoryPath,
+                    StrictUtf8.Decode(document.Content.AsSpan()))),
+            ],
+            Changes =
+            [
+                .. request.Changes
+                    .Where(change => change.Kind != PlannedChangeKind.Delete
+                        || request.AfterDocuments.Any(document =>
+                            document.RepositoryPath.StartsWith(
+                                VersionDirectory(document.RepositoryPath),
+                                StringComparison.Ordinal)
+                            && change.RepositoryPath.StartsWith(
+                                VersionDirectory(document.RepositoryPath),
+                                StringComparison.Ordinal)))
+                    .Select(static change => new RepositoryFileChange(
                         change.RepositoryPath,
                         change.Kind switch
                         {
@@ -200,12 +290,21 @@ public sealed class PreflightGateWorkflowAdapter(PreflightGate gate) : IWorkflow
                             PlannedChangeKind.Delete => RepositoryChangeKind.Deleted,
                             _ => throw new ArgumentOutOfRangeException(nameof(request)),
                         })),
-                ],
-                ExistingVersions = request.ExistingVersions,
-                InstallerArtifacts = request.InstallerArtifacts,
-                Options = request.Options,
-            },
-            cancellationToken);
+            ],
+            ExistingVersions = request.ExistingVersions,
+            InstallerArtifacts = request.InstallerArtifacts,
+            Options = request.Options,
+        };
+
+    private static string VersionDirectory(string path)
+    {
+        string[] segments = path.Split('/');
+        return segments.Length < 5 ? path : string.Join('/', segments.Take(segments.Length - 1)) + "/";
+    }
+
+    private sealed class DelegatePreflightBoundary(Func<CancellationToken, Task> boundary) : IPreflightBoundary
+    {
+        public Task ExecuteAsync(CancellationToken cancellationToken) => boundary(cancellationToken);
     }
 }
 

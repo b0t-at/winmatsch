@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Security.Cryptography;
 using WinMatsch.Core;
 using WinMatsch.Rules;
 using WinMatsch.Rules.OverridePacks;
@@ -47,11 +48,28 @@ public sealed record WorkflowFileChange
     public WorkflowFileChange(
         PlannedChangeKind kind,
         string repositoryPath,
-        ReadOnlySpan<byte> content = default)
+        ReadOnlySpan<byte> content = default,
+        ExpectedFileState expectedState = ExpectedFileState.Unspecified,
+        string? expectedSha256 = null)
     {
         Kind = kind;
         RepositoryPath = WorkflowPath.NormalizeRepositoryPath(repositoryPath);
         Content = kind == PlannedChangeKind.Delete ? [] : [.. content];
+        ExpectedState = expectedState == ExpectedFileState.Unspecified
+            ? kind == PlannedChangeKind.Add
+                ? ExpectedFileState.Absent
+                : throw new ArgumentException(
+                    "Updates and deletions require an expected existing-file state.",
+                    nameof(expectedState))
+            : expectedState;
+        ExpectedSha256 = expectedSha256;
+        if (expectedState == ExpectedFileState.Present
+            && string.IsNullOrWhiteSpace(expectedSha256))
+        {
+            throw new ArgumentException(
+                "Expected content SHA-256 is required for an existing file.",
+                nameof(expectedSha256));
+        }
     }
 
     public PlannedChangeKind Kind { get; }
@@ -59,6 +77,20 @@ public sealed record WorkflowFileChange
     public string RepositoryPath { get; }
 
     public ImmutableArray<byte> Content { get; }
+
+    public ExpectedFileState ExpectedState { get; }
+
+    public string? ExpectedSha256 { get; }
+
+    public static string Hash(ReadOnlySpan<byte> content)
+        => Convert.ToHexString(SHA256.HashData(content));
+}
+
+public enum ExpectedFileState
+{
+    Unspecified,
+    Absent,
+    Present,
 }
 
 public sealed record WorkflowAuditEntry(string Code, string Message, string? Provenance = null);
@@ -94,6 +126,8 @@ public sealed record LocalOperationPlan
     public required ValidationReport Validation { get; init; }
 
     public WarningPolicy WarningPolicy { get; init; }
+
+    public required WorkflowPreflightRequest Preflight { get; init; }
 
     public required RuleRunSummary Rules { get; init; }
 
@@ -279,6 +313,8 @@ public sealed record SubmitOperationRequest : WorkflowOperationRequest
     public required ImmutableArray<RawManifestDocument> Documents { get; init; }
 
     public bool Normalize { get; init; }
+
+    public string? ArtifactDirectory { get; init; }
 }
 
 public sealed record NewLocaleOperationRequest : WorkflowOperationRequest

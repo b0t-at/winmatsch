@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text;
 using WinMatsch.Analysis.Dependencies;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
@@ -8,6 +9,7 @@ using WinMatsch.Validation;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.Versioning;
+using YamlDotNet.Core;
 
 namespace WinMatsch.Workflows.Operations;
 
@@ -86,7 +88,9 @@ public sealed class LocalWorkflowEngine
                 .OrderBy(static document => document.RepositoryPath, StringComparer.Ordinal)
                 .Select(static document => new WorkflowFileChange(
                     PlannedChangeKind.Delete,
-                    document.RepositoryPath)),
+                    document.RepositoryPath,
+                    expectedState: ExpectedFileState.Present,
+                    expectedSha256: WorkflowFileChange.Hash(document.Content.AsSpan()))),
         ];
         ValidationReport validation = await _preflight.ValidateAsync(
             new()
@@ -122,7 +126,12 @@ public sealed class LocalWorkflowEngine
         {
             parsed = ParseRawSet(request.Documents);
         }
-        catch (Exception exception) when (exception is InvalidDataException or FormatException)
+        catch (Exception exception) when (
+            exception is InvalidDataException
+                or FormatException
+                or ArgumentException
+                or DecoderFallbackException
+                or YamlException)
         {
             return InvalidResult("submit", request, exception.Message);
         }
@@ -132,6 +141,12 @@ public sealed class LocalWorkflowEngine
             parsed.Identifier,
             parsed.Version,
             cancellationToken).ConfigureAwait(false);
+        ImmutableArray<ExistingVersionSnapshot> existingVersions = CreateExistingVersions(
+            await _manifests.ListVersionsAsync(
+                request.OutputDirectory,
+                parsed.Identifier,
+                cancellationToken).ConfigureAwait(false),
+            parsed.Version);
         PackageManifests candidate = parsed.Manifests;
         RuleRunSummary ruleSummary = RuleRunSummary.Empty;
         ImmutableArray<RawManifestDocument> after = request.Documents;
@@ -143,13 +158,53 @@ public sealed class LocalWorkflowEngine
             after = Serialize(candidate, request.CreatedWith);
         }
 
+        using var artifactDirectory = new ArtifactDirectoryLease(
+            request.ExecutionMode,
+            request.ArtifactDirectory);
+        ImmutableArray<InstallerArtifact> installerArtifacts = [];
+        if (_artifacts is not null)
+        {
+            var acquired = ImmutableArray.CreateBuilder<InstallerArtifact>();
+            int assetId = 0;
+            foreach (string installerUrl in (candidate.Installer.Installers ?? [])
+                         .Select(static installer => installer.InstallerUrl)
+                         .Where(static url => !string.IsNullOrWhiteSpace(url))
+                         .Select(static url => url!)
+                         .Distinct(StringComparer.Ordinal)
+                         .Order(StringComparer.Ordinal))
+            {
+                var uri = new Uri(installerUrl, UriKind.Absolute);
+                ArtifactSnapshot artifact = await _artifacts.AcquireAsync(
+                    new DiscoveredAsset
+                    {
+                        ReleaseId = 0,
+                        ReleaseTag = candidate.Version.PackageVersion!.Value,
+                        ReleaseName = "local submit",
+                        ReleaseUri = uri,
+                        IsPrerelease = false,
+                        AssetId = assetId++,
+                        AssetName = Path.GetFileName(uri.LocalPath),
+                        DownloadUri = uri,
+                        DeclaredContentType = "application/octet-stream",
+                        DeclaredSize = 0,
+                        AssetCreatedAt = DateTimeOffset.UnixEpoch,
+                    },
+                    artifactDirectory.Path,
+                    cancellationToken).ConfigureAwait(false);
+                acquired.Add(new InstallerArtifact(installerUrl, artifact.Download));
+            }
+
+            installerArtifacts = acquired.ToImmutable();
+        }
+
         ImmutableArray<WorkflowFileChange> changes = Diff(before?.Documents ?? [], after);
         ValidationReport validation = await ValidateAsync(
             request,
             before?.Documents ?? [],
             after,
             changes,
-            [],
+            installerArtifacts,
+            existingVersions,
             cancellationToken).ConfigureAwait(false);
         validation = MergeRuleFindings(validation, ruleSummary);
         LocalOperationPlan plan = Plan(
@@ -165,7 +220,9 @@ public sealed class LocalWorkflowEngine
             [],
             [new("SUBMIT_RAW", request.Normalize
                 ? "User manifests were explicitly normalized."
-                : "User manifest bytes were preserved exactly.")]);
+                : "User manifest bytes were preserved exactly.")],
+            installerArtifacts,
+            existingVersions);
         return await CompleteAsync(request, plan, cancellationToken).ConfigureAwait(false);
     }
 
@@ -190,6 +247,10 @@ public sealed class LocalWorkflowEngine
         PackageIdentifier identifier = create?.PackageIdentifier
             ?? update?.PackageIdentifier
             ?? throw new ArgumentException("Unsupported create/update request.", nameof(operationRequest));
+        ImmutableArray<PackageSnapshot> packageVersions = await _manifests.ListVersionsAsync(
+            operationRequest.OutputDirectory,
+            identifier,
+            cancellationToken).ConfigureAwait(false);
         ImmutableArray<DiscoveredAsset> assets = create?.Assets ?? update!.Assets;
         ReleaseRequest release = create?.Release ?? update!.Release;
         if (assets.IsEmpty && _releases is not null)
@@ -202,7 +263,9 @@ public sealed class LocalWorkflowEngine
             return InvalidResult(isUpdate ? "update" : "new", operationRequest, "No Windows release assets were supplied or discovered.");
         }
 
-        string? artifactDirectory = create?.ArtifactDirectory ?? update?.ArtifactDirectory;
+        using var artifactDirectory = new ArtifactDirectoryLease(
+            operationRequest.ExecutionMode,
+            create?.ArtifactDirectory ?? update?.ArtifactDirectory);
         var artifactSnapshots = ImmutableArray.CreateBuilder<ArtifactSnapshot>();
         var enrichedAssets = ImmutableArray.CreateBuilder<DiscoveredAsset>();
         foreach (DiscoveredAsset asset in assets.OrderBy(static item => item.DownloadUri.AbsoluteUri, StringComparer.Ordinal))
@@ -214,7 +277,7 @@ public sealed class LocalWorkflowEngine
                 continue;
             }
 
-            if (_artifacts is null || string.IsNullOrWhiteSpace(artifactDirectory))
+            if (_artifacts is null)
             {
                 return InvalidResult(
                     isUpdate ? "update" : "new",
@@ -224,7 +287,7 @@ public sealed class LocalWorkflowEngine
 
             ArtifactSnapshot snapshot = await _artifacts.AcquireAsync(
                 asset,
-                artifactDirectory,
+                artifactDirectory.Path,
                 cancellationToken).ConfigureAwait(false);
             artifactSnapshots.Add(snapshot);
             enrichedAssets.Add(snapshot.Asset);
@@ -338,7 +401,8 @@ public sealed class LocalWorkflowEngine
         PolicyEvidence policyEvidence = MergePolicyEvidence(
             operationRequest.PolicyEvidence,
             artifactSnapshots,
-            enrichedAssets);
+            enrichedAssets,
+            packageVersions);
         WorkflowRuleResult rules = RunRules(
             operationRequest,
             candidate,
@@ -355,13 +419,17 @@ public sealed class LocalWorkflowEngine
             changes =
             [
                 .. previous.Documents.Select(static document =>
-                    new WorkflowFileChange(PlannedChangeKind.Delete, document.RepositoryPath)),
+                    new WorkflowFileChange(
+                        PlannedChangeKind.Delete,
+                        document.RepositoryPath,
+                        expectedState: ExpectedFileState.Present,
+                        expectedSha256: WorkflowFileChange.Hash(document.Content.AsSpan()))),
                 .. changes,
             ];
             beforeDocuments = [.. previous.Documents, .. beforeDocuments];
         }
 
-        if (isUpdate && InstallerHashesEqual(previous!.Manifests, candidate))
+        if (isUpdate && changes.IsEmpty)
         {
             return NoChangeResult("update", operationRequest, identifier, newVersion, beforeDocuments);
         }
@@ -376,6 +444,7 @@ public sealed class LocalWorkflowEngine
                     snapshot.Asset.DownloadUri.AbsoluteUri,
                     snapshot.Download)),
             ],
+            CreateExistingVersions(packageVersions, newVersion),
             cancellationToken).ConfigureAwait(false);
         validation = MergeRuleFindings(validation, rules.Summary);
         ImmutableArray<WorkflowAuditEntry> audit =
@@ -402,7 +471,13 @@ public sealed class LocalWorkflowEngine
             validation,
             rules.Summary,
             [],
-            audit);
+            audit,
+            [
+                .. artifactSnapshots.Select(static snapshot => new InstallerArtifact(
+                    snapshot.Asset.DownloadUri.AbsoluteUri,
+                    snapshot.Download)),
+            ],
+            CreateExistingVersions(packageVersions, newVersion));
         return await CompleteAsync(operationRequest, plan, cancellationToken).ConfigureAwait(false);
     }
 
@@ -440,6 +515,12 @@ public sealed class LocalWorkflowEngine
         {
             return MissingResult(update ? "update-locale" : "new-locale", operationRequest, identifier, version);
         }
+        ImmutableArray<ExistingVersionSnapshot> existingVersions = CreateExistingVersions(
+            await _manifests.ListVersionsAsync(
+                operationRequest.OutputDirectory,
+                identifier,
+                cancellationToken).ConfigureAwait(false),
+            version);
 
         LanguageTag defaultLocale = snapshot.Manifests.Version.DefaultLocale!;
         if (metadata.PackageLocale == defaultLocale)
@@ -483,7 +564,8 @@ public sealed class LocalWorkflowEngine
             operationRequest.PolicyEvidence);
         candidate = rules.Manifests;
         ImmutableArray<RawManifestDocument> serialized = Serialize(candidate, operationRequest.CreatedWith);
-        string localeFile = $"{ManifestPaths.GetVersionDirectory(identifier, version)}/{ManifestPaths.GetLocaleFileName(identifier, metadata.PackageLocale)}";
+        LanguageTag outputLocale = locale.PackageLocale!;
+        string localeFile = $"{ManifestPaths.GetVersionDirectory(identifier, version)}/{ManifestPaths.GetLocaleFileName(identifier, outputLocale)}";
         RawManifestDocument changedLocale = serialized.Single(document =>
             string.Equals(document.RepositoryPath, localeFile, StringComparison.Ordinal));
         ImmutableArray<RawManifestDocument> after =
@@ -500,6 +582,7 @@ public sealed class LocalWorkflowEngine
             after,
             changes,
             [],
+            existingVersions,
             cancellationToken).ConfigureAwait(false);
         validation = MergeRuleFindings(validation, rules.Summary);
         LocalOperationPlan plan = Plan(
@@ -513,7 +596,8 @@ public sealed class LocalWorkflowEngine
             validation,
             rules.Summary,
             [],
-            [new("LOCALE_EXACT", $"{(update ? "Updated" : "Added")} locale {metadata.PackageLocale.Value}.", localeFile)]);
+            [new("LOCALE_EXACT", $"{(update ? "Updated" : "Added")} locale {metadata.PackageLocale.Value}.", localeFile)],
+            existingVersions: existingVersions);
         return await CompleteAsync(operationRequest, plan, cancellationToken).ConfigureAwait(false);
     }
 
@@ -523,6 +607,7 @@ public sealed class LocalWorkflowEngine
         ImmutableArray<RawManifestDocument> after,
         ImmutableArray<WorkflowFileChange> changes,
         ImmutableArray<InstallerArtifact> artifacts,
+        ImmutableArray<ExistingVersionSnapshot> existingVersions,
         CancellationToken cancellationToken)
         => await _preflight.ValidateAsync(
             new()
@@ -531,6 +616,7 @@ public sealed class LocalWorkflowEngine
                 AfterDocuments = after,
                 Changes = changes,
                 InstallerArtifacts = artifacts,
+                ExistingVersions = existingVersions,
                 Options = PreflightOptions(request),
             },
             cancellationToken).ConfigureAwait(false);
@@ -548,12 +634,19 @@ public sealed class LocalWorkflowEngine
 
         try
         {
-            await _transaction.ApplyAsync(
-                request.OutputDirectory,
-                plan.PackageIdentifier.Value,
-                plan.FileChanges,
+            ValidationReport finalValidation = await _preflight.ExecuteAsync(
+                plan.Preflight,
+                token => _transaction.ApplyAsync(
+                    request.OutputDirectory,
+                    plan.PackageIdentifier.Value,
+                    plan.FileChanges,
+                    token),
                 cancellationToken).ConfigureAwait(false);
-            return new() { Code = WorkflowResultCode.Succeeded, Plan = plan, Applied = true };
+            finalValidation = MergeRuleFindings(finalValidation, plan.Rules);
+            LocalOperationPlan finalPlan = plan with { Validation = finalValidation };
+            return finalValidation.CanProceed(plan.WarningPolicy)
+                ? new() { Code = WorkflowResultCode.Succeeded, Plan = finalPlan, Applied = true }
+                : new() { Code = WorkflowResultCode.ValidationFailed, Plan = finalPlan, Applied = false };
         }
         catch (WorkflowOperationException exception)
         {
@@ -562,6 +655,16 @@ public sealed class LocalWorkflowEngine
                 Code = exception.Code,
                 Plan = plan,
                 Applied = false,
+                ErrorMessage = exception.Message,
+            };
+        }
+        catch (WorkflowCommittedCleanupException exception)
+        {
+            return new()
+            {
+                Code = WorkflowResultCode.Succeeded,
+                Plan = plan,
+                Applied = true,
                 ErrorMessage = exception.Message,
             };
         }
@@ -718,7 +821,6 @@ public sealed class LocalWorkflowEngine
         LocaleManifest locale,
         PackageLocaleMetadata metadata)
     {
-        locale.PackageLocale = metadata.PackageLocale;
         locale.Publisher = metadata.Publisher ?? locale.Publisher;
         locale.PublisherUrl = metadata.PublisherUrl ?? locale.PublisherUrl;
         locale.PublisherSupportUrl = metadata.PublisherSupportUrl ?? locale.PublisherSupportUrl;
@@ -864,39 +966,41 @@ public sealed class LocalWorkflowEngine
         {
             if (!oldFiles.TryGetValue(path, out RawManifestDocument? old))
             {
-                changes.Add(new(PlannedChangeKind.Add, path, document.Content.AsSpan()));
+                changes.Add(new(
+                    PlannedChangeKind.Add,
+                    path,
+                    document.Content.AsSpan(),
+                    ExpectedFileState.Absent));
             }
             else if (!old.Content.AsSpan().SequenceEqual(document.Content.AsSpan()))
             {
-                changes.Add(new(PlannedChangeKind.Update, path, document.Content.AsSpan()));
+                changes.Add(new(
+                    PlannedChangeKind.Update,
+                    path,
+                    document.Content.AsSpan(),
+                    ExpectedFileState.Present,
+                    WorkflowFileChange.Hash(old.Content.AsSpan())));
             }
         }
 
         foreach (string path in oldFiles.Keys.Except(newFiles.Keys, StringComparer.Ordinal).Order(StringComparer.Ordinal))
         {
-            changes.Add(new(PlannedChangeKind.Delete, path));
+            RawManifestDocument old = oldFiles[path];
+            changes.Add(new(
+                PlannedChangeKind.Delete,
+                path,
+                expectedState: ExpectedFileState.Present,
+                expectedSha256: WorkflowFileChange.Hash(old.Content.AsSpan())));
         }
 
         return changes.ToImmutable();
     }
 
-    private static bool InstallerHashesEqual(PackageManifests before, PackageManifests after)
-    {
-        string[] previous = (before.Installer.Installers ?? [])
-            .Select(static installer => $"{installer.InstallerUrl}|{installer.InstallerSha256}")
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-        string[] current = (after.Installer.Installers ?? [])
-            .Select(static installer => $"{installer.InstallerUrl}|{installer.InstallerSha256}")
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-        return previous.SequenceEqual(current, StringComparer.Ordinal);
-    }
-
     private static PolicyEvidence MergePolicyEvidence(
         PolicyEvidence supplied,
         ImmutableArray<ArtifactSnapshot>.Builder artifacts,
-        ImmutableArray<DiscoveredAsset>.Builder assets)
+        ImmutableArray<DiscoveredAsset>.Builder assets,
+        ImmutableArray<PackageSnapshot> existingVersions)
     {
         var dependencies = new Dictionary<string, PayloadDependencyAnalysis>(
             supplied.DependencyAnalyses,
@@ -917,7 +1021,11 @@ public sealed class LocalWorkflowEngine
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Order(StringComparer.Ordinal)
                 .ToArray(),
-            ExistingDisplayVersions = supplied.ExistingDisplayVersions,
+            ExistingDisplayVersions = supplied.ExistingDisplayVersions
+                .Concat(existingVersions.SelectMany(GetDisplayVersions))
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray(),
             DependencyAnalyses = dependencies,
             InstallerScopes = supplied.InstallerScopes,
             SiblingImportUrls = supplied.SiblingImportUrls,
@@ -931,6 +1039,33 @@ public sealed class LocalWorkflowEngine
                 .FirstOrDefault(),
         };
     }
+
+    private static ImmutableArray<ExistingVersionSnapshot> CreateExistingVersions(
+        ImmutableArray<PackageSnapshot> versions,
+        PackageVersion excludedVersion)
+        =>
+        [
+            .. versions
+                .Where(snapshot => !snapshot.PackageVersion.Equals(excludedVersion))
+                .OrderBy(static snapshot => snapshot.PackageVersion.Value, StringComparer.Ordinal)
+                .Select(static snapshot => new ExistingVersionSnapshot(
+                    snapshot.PackageVersion.Value,
+                    GetDisplayVersions(snapshot))),
+        ];
+
+    private static string[] GetDisplayVersions(PackageSnapshot snapshot)
+        => GetDisplayVersions(snapshot.Manifests);
+
+    private static string[] GetDisplayVersions(PackageManifests manifests)
+        => (manifests.Installer.AppsAndFeaturesEntries ?? [])
+            .Concat((manifests.Installer.Installers ?? [])
+                .SelectMany(static installer => installer.AppsAndFeaturesEntries ?? []))
+            .Select(static entry => entry.DisplayVersion)
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value!)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
 
     private static ValidationReport MergeRuleFindings(
         ValidationReport validation,
@@ -969,7 +1104,9 @@ public sealed class LocalWorkflowEngine
         ValidationReport validation,
         RuleRunSummary rules,
         ImmutableArray<WorkflowQuestion> questions,
-        IEnumerable<WorkflowAuditEntry> audit)
+        IEnumerable<WorkflowAuditEntry> audit,
+        ImmutableArray<InstallerArtifact> installerArtifacts = default,
+        ImmutableArray<ExistingVersionSnapshot> existingVersions = default)
         => new()
         {
             Operation = operation,
@@ -981,6 +1118,15 @@ public sealed class LocalWorkflowEngine
             AfterDocuments = after,
             Validation = validation,
             WarningPolicy = request.WarningPolicy,
+            Preflight = new WorkflowPreflightRequest
+            {
+                BeforeDocuments = before,
+                AfterDocuments = after,
+                Changes = changes,
+                InstallerArtifacts = installerArtifacts.IsDefault ? [] : installerArtifacts,
+                ExistingVersions = existingVersions.IsDefault ? [] : existingVersions,
+                Options = PreflightOptions(request),
+            },
             Rules = rules,
             Questions = questions,
             ReviewApproved = request.ApproveReview,
@@ -1113,6 +1259,36 @@ public sealed class LocalWorkflowEngine
         PackageIdentifier Identifier,
         PackageVersion Version,
         PackageManifests Manifests);
+
+    private sealed class ArtifactDirectoryLease : IDisposable
+    {
+        private readonly bool _owned;
+
+        public ArtifactDirectoryLease(WorkflowExecutionMode mode, string? requestedPath)
+        {
+            if (mode == WorkflowExecutionMode.Apply && !string.IsNullOrWhiteSpace(requestedPath))
+            {
+                Path = System.IO.Path.GetFullPath(requestedPath);
+                return;
+            }
+
+            Path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                "winmatsch-artifacts",
+                Guid.NewGuid().ToString("N"));
+            _owned = true;
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            if (_owned && Directory.Exists(Path))
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+        }
+    }
 }
 
 public sealed class NewWorkflow(LocalWorkflowEngine engine)

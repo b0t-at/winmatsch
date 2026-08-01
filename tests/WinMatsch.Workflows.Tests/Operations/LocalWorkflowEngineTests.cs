@@ -36,6 +36,33 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task New_plan_uses_cleaned_scratch_instead_of_the_requested_artifact_directory()
+    {
+        using var temporary = new TemporaryDirectory();
+        string requestedArtifacts = Path.Combine(temporary.Path, "requested-artifacts");
+        var processor = new WritingArtifactProcessor();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            artifacts: processor,
+            clock: new FixedClock());
+        NewOperationRequest request = NewRequest(temporary.Path, WorkflowExecutionMode.Plan) with
+        {
+            Assets = [Asset("2.0.0", "A") with { Content = null, Analysis = null }],
+            ArtifactDirectory = requestedArtifacts,
+        };
+
+        WorkflowOperationResult result = await engine.NewAsync(request);
+
+        Assert.NotEqual(WorkflowResultCode.ApplyFailed, result.Code);
+        Assert.False(Directory.Exists(requestedArtifacts));
+        Assert.NotNull(processor.UsedDirectory);
+        Assert.False(Directory.Exists(processor.UsedDirectory));
+    }
+
+    [Fact]
     public async Task New_apply_publishes_complete_valid_manifest_set()
     {
         using var temporary = new TemporaryDirectory();
@@ -65,9 +92,12 @@ public sealed class LocalWorkflowEngineTests
         PackageManifests retainedPackage = CreatePackage("2.0.0", "B");
         WritePackage(temporary.Path, oldPackage);
         WritePackage(temporary.Path, retainedPackage);
-        LocalWorkflowEngine engine = CreateEngine(
+        var engine = new LocalWorkflowEngine(
             new LocalManifestSnapshotSource(),
-            new AtomicWorkflowFileTransaction());
+            new PassThroughRuleRunner(),
+            new PreflightGateWorkflowAdapter(new PreflightGate()),
+            new AtomicWorkflowFileTransaction(),
+            clock: new FixedClock());
 
         WorkflowOperationResult result = await engine.RemoveAsync(new RemoveOperationRequest
         {
@@ -117,9 +147,12 @@ public sealed class LocalWorkflowEngineTests
             VersionDirectory(temporary.Path, "1.0.0"),
             ManifestPaths.GetInstallerFileName(new PackageIdentifier("Example.App")));
         byte[] installerBefore = await File.ReadAllBytesAsync(installerPath);
-        LocalWorkflowEngine engine = CreateEngine(
+        var engine = new LocalWorkflowEngine(
             new LocalManifestSnapshotSource(),
-            new AtomicWorkflowFileTransaction());
+            new PassThroughRuleRunner(),
+            new PreflightGateWorkflowAdapter(new PreflightGate()),
+            new AtomicWorkflowFileTransaction(),
+            clock: new FixedClock());
 
         WorkflowOperationResult result = await engine.NewLocaleAsync(new NewLocaleOperationRequest
         {
@@ -221,7 +254,12 @@ public sealed class LocalWorkflowEngineTests
         var transaction = new AtomicWorkflowFileTransaction();
         ImmutableArray<WorkflowFileChange> changes =
         [
-            new(PlannedChangeKind.Update, "a.txt", "after"u8),
+            new(
+                PlannedChangeKind.Update,
+                "a.txt",
+                "after"u8,
+                ExpectedFileState.Present,
+                WorkflowFileChange.Hash("before"u8)),
             new(PlannedChangeKind.Add, "blocked/file.txt", "new"u8),
         ];
 
@@ -253,7 +291,7 @@ public sealed class LocalWorkflowEngineTests
     {
         using var temporary = new TemporaryDirectory();
         PackageManifests package = CreatePackage("1.0.0", "A");
-        PackageSnapshot snapshot = Snapshot(package);
+        PackageSnapshot snapshot = Snapshot(package) with { Documents = Documents(package, "winmatsch") };
         var source = new DictionarySnapshotSource(snapshot);
         LocalWorkflowEngine engine = CreateEngine(source, new RecordingTransaction());
         DiscoveredAsset asset = Asset("1.0.0", "A");
@@ -340,10 +378,103 @@ public sealed class LocalWorkflowEngineTests
             () => new AtomicWorkflowFileTransaction().ApplyAsync(
                 temporary.Path,
                 "Example.App",
-                [new WorkflowFileChange(PlannedChangeKind.Update, "a.txt", "after"u8)],
+                [
+                    new WorkflowFileChange(
+                        PlannedChangeKind.Update,
+                        "a.txt",
+                        "after"u8,
+                        ExpectedFileState.Present,
+                        WorkflowFileChange.Hash("before"u8)),
+                ],
                 cancellation.Token));
 
         Assert.Equal("before", await File.ReadAllTextAsync(original));
+    }
+
+    [Fact]
+    public async Task Transaction_rejects_a_destination_changed_after_planning()
+    {
+        using var temporary = new TemporaryDirectory();
+        string path = Path.Combine(temporary.Path, "a.txt");
+        byte[] before = "before"u8.ToArray();
+        await File.WriteAllBytesAsync(path, before);
+        var change = new WorkflowFileChange(
+            PlannedChangeKind.Update,
+            "a.txt",
+            "planned"u8,
+            ExpectedFileState.Present,
+            WorkflowFileChange.Hash(before));
+        await File.WriteAllTextAsync(path, "concurrent");
+
+        WorkflowOperationException exception = await Assert.ThrowsAsync<WorkflowOperationException>(
+            () => new AtomicWorkflowFileTransaction().ApplyAsync(
+                temporary.Path,
+                "Example.App",
+                [change],
+                CancellationToken.None));
+
+        Assert.Equal(WorkflowResultCode.Conflict, exception.Code);
+        Assert.Equal("concurrent", await File.ReadAllTextAsync(path));
+    }
+
+    [Fact]
+    public async Task Malformed_raw_submit_returns_a_stable_invalid_result()
+    {
+        using var temporary = new TemporaryDirectory();
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(),
+            new RecordingTransaction());
+
+        WorkflowOperationResult result = await engine.SubmitAsync(new SubmitOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            Documents = [new RawManifestDocument("manifest.yaml", [0xFF])],
+        });
+
+        Assert.Equal(WorkflowResultCode.InvalidRequest, result.Code);
+        Assert.Contains(result.Plan.Validation.Findings, static finding => finding.Code == "WF_INVALID");
+    }
+
+    [Fact]
+    public async Task Replace_preflight_accepts_complete_prior_version_deletion()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests beforePackage = CreatePackage("1.0.0", "A");
+        PackageManifests afterPackage = CreatePackage("2.0.0", "B");
+        ImmutableArray<RawManifestDocument> before = Documents(beforePackage, "winmatsch");
+        ImmutableArray<RawManifestDocument> after = Documents(afterPackage, "winmatsch");
+        DownloadResult download = Download("B", temporary.Path);
+        ImmutableArray<WorkflowFileChange> changes =
+        [
+            .. before.Select(static document => new WorkflowFileChange(
+                PlannedChangeKind.Delete,
+                document.RepositoryPath,
+                expectedState: ExpectedFileState.Present,
+                expectedSha256: WorkflowFileChange.Hash(document.Content.AsSpan()))),
+            .. after.Select(static document => new WorkflowFileChange(
+                PlannedChangeKind.Add,
+                document.RepositoryPath,
+                document.Content.AsSpan(),
+                ExpectedFileState.Absent)),
+        ];
+        var adapter = new PreflightGateWorkflowAdapter(
+            new PreflightGate(new StablePreflightNetwork(download)));
+
+        ValidationReport report = await adapter.ValidateAsync(
+            new WorkflowPreflightRequest
+            {
+                BeforeDocuments = before,
+                AfterDocuments = after,
+                Changes = changes,
+                InstallerArtifacts =
+                [
+                    new InstallerArtifact("https://example.test/app-x64.exe", download),
+                ],
+            },
+            CancellationToken.None);
+
+        Assert.True(report.IsValid, report.ToText());
+        Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD4003");
     }
 
     private static LocalWorkflowEngine CreateEngine(
@@ -507,6 +638,18 @@ public sealed class LocalWorkflowEngineTests
                     new PackageVersion(version))
                 .Replace('/', Path.DirectorySeparatorChar));
 
+    private static DownloadResult Download(string hashSeed, string directory)
+        => new()
+        {
+            FilePath = Path.Combine(directory, "artifact.exe"),
+            FileName = "artifact.exe",
+            Sha256 = new Sha256Hash(string.Concat(Enumerable.Repeat(hashSeed, 64))),
+            SizeInBytes = 42,
+            RetrievedAt = new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero),
+            InitialUrl = "https://example.test/app-x64.exe",
+            FinalUrl = "https://example.test/app-x64.exe",
+        };
+
     private sealed class DictionarySnapshotSource(params PackageSnapshot[] snapshots) : IManifestSnapshotSource
     {
         private readonly IReadOnlyList<PackageSnapshot> _snapshots = snapshots;
@@ -522,6 +665,16 @@ public sealed class LocalWorkflowEngineTests
                 snapshot.PackageIdentifier.Equals(packageIdentifier)
                 && snapshot.PackageVersion.Equals(packageVersion)));
         }
+
+        public Task<ImmutableArray<PackageSnapshot>> ListVersionsAsync(
+            string outputDirectory,
+            PackageIdentifier packageIdentifier,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(
+                _snapshots.Where(snapshot => snapshot.PackageIdentifier.Equals(packageIdentifier)).ToImmutableArray());
+        }
     }
 
     private sealed class PassThroughRuleRunner : IWorkflowRuleRunner
@@ -536,6 +689,61 @@ public sealed class LocalWorkflowEngineTests
             => new(request.Manifests, summary);
     }
 
+    private sealed class WritingArtifactProcessor : IWorkflowArtifactProcessor
+    {
+        public string? UsedDirectory { get; private set; }
+
+        public async Task<ArtifactSnapshot> AcquireAsync(
+            DiscoveredAsset asset,
+            string artifactDirectory,
+            CancellationToken cancellationToken)
+        {
+            UsedDirectory = artifactDirectory;
+            Directory.CreateDirectory(artifactDirectory);
+            string file = Path.Combine(artifactDirectory, asset.AssetName);
+            await File.WriteAllBytesAsync(file, "installer"u8.ToArray(), cancellationToken);
+            var sha = new Sha256Hash(
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+            var download = new DownloadResult
+            {
+                FilePath = file,
+                FileName = asset.AssetName,
+                Sha256 = sha,
+                SizeInBytes = 9,
+                RetrievedAt = new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero),
+                InitialUrl = asset.DownloadUri.AbsoluteUri,
+                FinalUrl = asset.DownloadUri.AbsoluteUri,
+            };
+            var analysis = new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.GenericInstallerExe,
+                ProductVersion = "2.0.0",
+                Installers =
+                [
+                    new Installer
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Exe,
+                    },
+                ],
+            };
+            AssetContentEvidence content = AssetContentEvidence.FromDownload(download);
+            return new()
+            {
+                Asset = asset with
+                {
+                    Content = content,
+                    Analysis = AssetAnalysisEvidence.FromAnalysis(
+                        analysis,
+                        content,
+                        isProductVersionTrustworthy: false),
+                },
+                Download = download,
+                Analysis = analysis,
+            };
+        }
+    }
+
     private sealed class CapturingPreflight : IWorkflowPreflight
     {
         public WorkflowPreflightRequest? Last { get; private set; }
@@ -547,6 +755,16 @@ public sealed class LocalWorkflowEngineTests
             cancellationToken.ThrowIfCancellationRequested();
             Last = request;
             return Task.FromResult(new ValidationReport());
+        }
+
+        public async Task<ValidationReport> ExecuteAsync(
+            WorkflowPreflightRequest request,
+            Func<CancellationToken, Task> boundary,
+            CancellationToken cancellationToken)
+        {
+            Last = request;
+            await boundary(cancellationToken);
+            return new ValidationReport();
         }
     }
 
@@ -569,6 +787,28 @@ public sealed class LocalWorkflowEngineTests
     {
         public DateTimeOffset UtcNow { get; } =
             new(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+    }
+
+    private sealed class StablePreflightNetwork(DownloadResult download) : IPreflightNetwork
+    {
+        public Task<DownloadProbeResult> ProbeAsync(
+            string url,
+            CancellationToken cancellationToken)
+            => Task.FromResult(new DownloadProbeResult
+            {
+                InitialUrl = url,
+                FinalUrl = url,
+                Method = DownloadProbeMethod.Head,
+            });
+
+        public Task<DownloadRevalidationResult> RevalidateAsync(
+            DownloadResult previous,
+            CancellationToken cancellationToken)
+            => Task.FromResult(new DownloadRevalidationResult
+            {
+                Status = DownloadRevalidationStatus.Unchanged,
+                Result = download,
+            });
     }
 
     private sealed class TemporaryDirectory : IDisposable

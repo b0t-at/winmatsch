@@ -105,7 +105,10 @@ public sealed class InstallerWorkflowArtifactProcessor(
             analysis,
             content,
             dependencies,
-            isProductVersionTrustworthy: true);
+            isProductVersionTrustworthy: analysis.Format is
+                DetectedInstallerFormat.Msi
+                or DetectedInstallerFormat.Msix
+                or DetectedInstallerFormat.MsixBundle);
         return new()
         {
             Asset = asset with { Content = content, Analysis = analysisEvidence },
@@ -160,6 +163,48 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
             Documents = documents,
         });
     }
+
+    public async Task<ImmutableArray<PackageSnapshot>> ListVersionsAsync(
+        string outputDirectory,
+        PackageIdentifier packageIdentifier,
+        CancellationToken cancellationToken)
+    {
+        string root = Path.GetFullPath(outputDirectory);
+        if (!Directory.Exists(root))
+        {
+            return [];
+        }
+
+        string packageDirectory = ManifestPaths.GetPackageDirectory(packageIdentifier);
+        string? fullPackageDirectory = SecurePath.ResolveExactExistingDirectory(root, packageDirectory);
+        if (fullPackageDirectory is null)
+        {
+            return [];
+        }
+
+        var snapshots = ImmutableArray.CreateBuilder<PackageSnapshot>();
+        foreach (string versionDirectory in Directory.EnumerateDirectories(fullPackageDirectory)
+                     .OrderBy(static path => Path.GetFileName(path), StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!PackageVersion.TryCreate(Path.GetFileName(versionDirectory), out PackageVersion? version))
+            {
+                continue;
+            }
+
+            PackageSnapshot? snapshot = await LoadAsync(
+                outputDirectory,
+                packageIdentifier,
+                version!,
+                cancellationToken).ConfigureAwait(false);
+            if (snapshot is not null)
+            {
+                snapshots.Add(snapshot);
+            }
+        }
+
+        return snapshots.ToImmutable();
+    }
 }
 
 public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
@@ -181,7 +226,13 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         }
 
         string root = Path.GetFullPath(outputDirectory);
-        string normalizedLockKey = $"{root}\u001f{operationLockKey}";
+        string canonicalRoot = Path.TrimEndingDirectorySeparator(root);
+        if (OperatingSystem.IsWindows())
+        {
+            canonicalRoot = canonicalRoot.ToUpperInvariant();
+        }
+
+        string normalizedLockKey = $"{canonicalRoot}\u001f{operationLockKey.ToUpperInvariant()}";
         SemaphoreSlim gate = _locks.GetOrAdd(normalizedLockKey, static _ => new SemaphoreSlim(1, 1));
         if (!await gate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
         {
@@ -191,9 +242,14 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         }
 
         string token = Guid.NewGuid().ToString("N");
-        string transactionRoot = Path.Combine(root, $".winmatsch-transaction-{token}");
+        string transactionPrefix =
+            $".winmatsch-transaction-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalizedLockKey)))[..16]}";
+        string transactionRoot = Path.Combine(root, $"{transactionPrefix}-{token}");
         var installed = new List<TransactionEntry>(changes.Length);
         CrossProcessOperationLock? processLock = null;
+        bool cleanupAllowed = false;
+        bool committed = false;
+        Exception? committedCleanupFailure = null;
         try
         {
             SecurePath.ValidateOutputRoot(root);
@@ -218,14 +274,22 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                         .ConfigureAwait(false);
                 }
 
-                installed.Add(new(change, destination, stage, backup, File.Exists(destination)));
+                installed.Add(new(change, destination, stage, backup));
             }
 
             // Named Mutex ownership is thread-affine, so acquire only after the final await.
             processLock = CrossProcessOperationLock.Acquire(normalizedLockKey);
+            RecoverAbandonedTransactions(root, transactionPrefix, transactionRoot);
+            foreach (TransactionEntry entry in installed)
+            {
+                VerifyPrecondition(entry);
+            }
+
+            WriteJournal(transactionRoot, "prepared", installed);
             foreach (TransactionEntry entry in installed)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                SecurePath.RejectReparsePoints(root, Path.GetDirectoryName(entry.Destination)!);
                 if (entry.HadDestination)
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(entry.Backup)!);
@@ -236,25 +300,50 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 if (entry.Change.Kind != PlannedChangeKind.Delete)
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(entry.Destination)!);
+                    SecurePath.RejectReparsePoints(root, Path.GetDirectoryName(entry.Destination)!);
                     File.Move(entry.Stage, entry.Destination);
                     entry.DestinationInstalled = true;
                 }
             }
 
             DeleteEmptyManifestDirectories(root, installed);
+            WriteJournal(transactionRoot, "committed", installed);
+            committed = true;
+            cleanupAllowed = true;
         }
         catch
         {
-            RollBack(installed);
+            try
+            {
+                RollBack(installed);
+                cleanupAllowed = true;
+            }
+            catch
+            {
+                cleanupAllowed = false;
+                throw;
+            }
+
             throw;
         }
         finally
         {
             try
             {
-                if (Directory.Exists(transactionRoot))
+                if (cleanupAllowed && Directory.Exists(transactionRoot))
                 {
-                    Directory.Delete(transactionRoot, recursive: true);
+                    try
+                    {
+                        Directory.Delete(transactionRoot, recursive: true);
+                    }
+                    catch (IOException exception) when (committed)
+                    {
+                        committedCleanupFailure = exception;
+                    }
+                    catch (UnauthorizedAccessException exception) when (committed)
+                    {
+                        committedCleanupFailure = exception;
+                    }
                 }
             }
             finally
@@ -262,6 +351,13 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 processLock?.Dispose();
                 gate.Release();
             }
+        }
+
+        if (committedCleanupFailure is not null)
+        {
+            throw new WorkflowCommittedCleanupException(
+                "The manifest transaction committed, but its recovery directory could not be removed.",
+                committedCleanupFailure);
         }
     }
 
@@ -280,6 +376,129 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 Directory.CreateDirectory(Path.GetDirectoryName(entry.Destination)!);
                 File.Move(entry.Backup, entry.Destination);
             }
+        }
+    }
+
+    private static void VerifyPrecondition(TransactionEntry entry)
+    {
+        bool exists = File.Exists(entry.Destination);
+        entry.HadDestination = exists;
+        if (entry.Change.ExpectedState == ExpectedFileState.Absent && exists)
+        {
+            throw new WorkflowOperationException(
+                WorkflowResultCode.Conflict,
+                $"Destination '{entry.Change.RepositoryPath}' was created after planning.");
+        }
+
+        if (entry.Change.ExpectedState != ExpectedFileState.Present)
+        {
+            return;
+        }
+
+        if (!exists)
+        {
+            throw new WorkflowOperationException(
+                WorkflowResultCode.Conflict,
+                $"Destination '{entry.Change.RepositoryPath}' was removed after planning.");
+        }
+
+        using FileStream stream = File.OpenRead(entry.Destination);
+        string actual = Convert.ToHexString(SHA256.HashData(stream));
+        if (!string.Equals(actual, entry.Change.ExpectedSha256, StringComparison.Ordinal))
+        {
+            throw new WorkflowOperationException(
+                WorkflowResultCode.Conflict,
+                $"Destination '{entry.Change.RepositoryPath}' changed after planning.");
+        }
+    }
+
+    private static void WriteJournal(
+        string transactionRoot,
+        string status,
+        IReadOnlyList<TransactionEntry> entries)
+    {
+        string journalPath = Path.Combine(transactionRoot, "journal");
+        string temporaryPath = $"{journalPath}.tmp";
+        string content = string.Join(
+            '\n',
+            [
+                status,
+                .. entries.Select(static entry => string.Join(
+                    '|',
+                    entry.Change.Kind,
+                    entry.HadDestination ? "1" : "0",
+                    Convert.ToBase64String(Encoding.UTF8.GetBytes(entry.Change.RepositoryPath)))),
+                "",
+            ]);
+        File.WriteAllText(temporaryPath, content, new UTF8Encoding(false));
+        using (FileStream stream = new(
+                   temporaryPath,
+                   FileMode.Open,
+                   FileAccess.ReadWrite,
+                   FileShare.Read,
+                   bufferSize: 1,
+                   FileOptions.WriteThrough))
+        {
+            stream.Flush(flushToDisk: true);
+        }
+
+        File.Move(temporaryPath, journalPath, overwrite: true);
+    }
+
+    private static void RecoverAbandonedTransactions(
+        string root,
+        string transactionPrefix,
+        string currentTransaction)
+    {
+        foreach (string transaction in Directory.EnumerateDirectories(root, $"{transactionPrefix}-*")
+                     .Where(path => !string.Equals(path, currentTransaction, StringComparison.OrdinalIgnoreCase))
+                     .Order(StringComparer.Ordinal))
+        {
+            string journalPath = Path.Combine(transaction, "journal");
+            if (!File.Exists(journalPath))
+            {
+                Directory.Delete(transaction, recursive: true);
+                continue;
+            }
+
+            string[] lines = File.ReadAllLines(journalPath);
+            bool committed = lines.Length > 0 && string.Equals(lines[0], "committed", StringComparison.Ordinal);
+            if (!committed)
+            {
+                foreach (string line in lines.Skip(1).Where(static line => line.Length > 0).Reverse())
+                {
+                    string[] parts = line.Split('|');
+                    if (parts.Length != 3
+                        || !Enum.TryParse(parts[0], out PlannedChangeKind kind))
+                    {
+                        throw new InvalidDataException($"Invalid transaction journal '{journalPath}'.");
+                    }
+
+                    bool hadDestination = parts[1] == "1";
+                    string repositoryPath = Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]));
+                    string destination = SecurePath.Resolve(root, repositoryPath, requireExistingLeaf: false);
+                    string backup = SecurePath.Resolve(
+                        Path.Combine(transaction, "backup"),
+                        repositoryPath,
+                        requireExistingLeaf: false);
+                    if (hadDestination && File.Exists(backup))
+                    {
+                        if (File.Exists(destination))
+                        {
+                            File.Delete(destination);
+                        }
+
+                        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                        File.Move(backup, destination);
+                    }
+                    else if (!hadDestination && kind != PlannedChangeKind.Delete && File.Exists(destination))
+                    {
+                        File.Delete(destination);
+                    }
+                }
+            }
+
+            Directory.Delete(transaction, recursive: true);
         }
     }
 
@@ -306,14 +525,13 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         WorkflowFileChange change,
         string destination,
         string stage,
-        string backup,
-        bool hadDestination)
+        string backup)
     {
         public WorkflowFileChange Change { get; } = change;
         public string Destination { get; } = destination;
         public string Stage { get; } = stage;
         public string Backup { get; } = backup;
-        public bool HadDestination { get; } = hadDestination;
+        public bool HadDestination { get; set; }
         public bool BackupCreated { get; set; }
         public bool DestinationInstalled { get; set; }
     }
@@ -486,4 +704,12 @@ public sealed class WorkflowOperationException : Exception
     }
 
     public WorkflowResultCode Code { get; }
+}
+
+public sealed class WorkflowCommittedCleanupException : IOException
+{
+    public WorkflowCommittedCleanupException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
 }
