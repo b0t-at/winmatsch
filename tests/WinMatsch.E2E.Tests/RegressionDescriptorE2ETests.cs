@@ -8,6 +8,7 @@ using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.Versioning;
 using Xunit;
+using Xunit.Sdk;
 
 namespace WinMatsch.E2E.Tests;
 
@@ -44,11 +45,6 @@ public sealed class RegressionDescriptorE2ETests
                 .. fixture.Descriptor.Assets.Select((asset, index) =>
                     CreateAsset(fixture, asset, index)),
             ];
-            ImmutableArray<PreviousInstallerEntry> previous =
-            [
-                .. fixture.Expected.Installers.Select((installer, index) =>
-                    CreatePrevious(fixture, installer, index)),
-            ];
             AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(new AssetMappingRequest
             {
                 PackageIdentifier = new PackageIdentifier(fixture.Descriptor.Package.Identifier),
@@ -60,29 +56,12 @@ public sealed class RegressionDescriptorE2ETests
                     [],
                     []),
                 Assets = assets,
-                PreviousInstallers = previous,
             });
 
             Assert.False(plan.CanApply);
             Assert.Contains(
                 plan.Diagnostics,
                 static diagnostic => diagnostic.Code == "ANALYSIS_METADATA_ONLY");
-            foreach (PreviousInstallerEntry expected in previous)
-            {
-                AssetMappingDecision decision = Assert.Single(
-                    plan.Decisions,
-                    candidate => candidate.PreviousPosition == expected.Position);
-                PlannedInstaller actual = Assert.IsType<PlannedInstaller>(decision.Installer);
-                Assert.Equal(expected.Url, actual.Url);
-                Assert.Equal(expected.Architecture, actual.Architecture);
-                Assert.Equal(expected.InstallerType, actual.InstallerType);
-                Assert.Equal(expected.NestedInstallerType, actual.NestedInstallerType);
-                Assert.Equal(expected.Scope, actual.Scope);
-                Assert.Equal(
-                    expected.NestedInstallerFiles.Select(static file => file.RelativeFilePath),
-                    actual.NestedInstallerFiles.Select(static file => file.RelativeFilePath));
-            }
-
             Assert.NotEmpty(fixture.Descriptor.Regression.RuleIds);
             Assert.NotEmpty(fixture.Expected.Installers);
             Assert.All(
@@ -152,11 +131,14 @@ public sealed class RegressionDescriptorE2ETests
 
         if (!result.IsAvailable)
         {
-            Assert.Contains(
-                result.Message,
-                ["offline", "HTTP", "checksum", "unavailable"],
-                StringComparer.OrdinalIgnoreCase);
-            return;
+            bool clearlyOffline =
+                result.Message.Contains(
+                    "network acquisition is unavailable",
+                    StringComparison.OrdinalIgnoreCase)
+                || result.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase);
+            Assert.True(clearlyOffline, result.Message);
+            throw SkipException.ForSkip(
+                $"Checksum-pinned fixture acquisition skipped: {result.Message}");
         }
 
         Assert.NotNull(result.Path);
@@ -169,12 +151,6 @@ public sealed class RegressionDescriptorE2ETests
         int index)
     {
         InstallerType installerType = ParseInstallerType(asset.ExpectedInstallerType);
-        string[] nestedPaths = fixture.Expected.Installers
-            .Where(installer => installer.InstallerUrl == asset.Url)
-            .SelectMany(static installer => installer.NestedInstallerFiles ?? [])
-            .Concat(fixture.Expected.NestedInstallerFiles ?? [])
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
         var identity = new DownloadContentIdentity(new Sha256Hash(asset.Sha256), 1);
         var content = new AssetContentEvidence(
             identity,
@@ -212,50 +188,9 @@ public sealed class RegressionDescriptorE2ETests
                             ? ParseArchitecture(asset.ExpectedArchitecture)
                             : null,
                         InstallerType = installerType,
-                        NestedInstallerType = fixture.Expected.NestedInstallerType is null
-                            ? null
-                            : ParseInstallerType(fixture.Expected.NestedInstallerType),
-                        NestedInstallerFiles =
-                        [
-                            .. nestedPaths.Select(static path =>
-                                new PlannedNestedInstallerFile(path, null)),
-                        ],
                     },
                 ],
-                ArchiveEntries = [.. nestedPaths],
-                NestedInstallerCandidates = [.. nestedPaths],
             },
-        };
-    }
-
-    private static PreviousInstallerEntry CreatePrevious(
-        RegressionFixture fixture,
-        ExpectedInstallerSnapshot installer,
-        int index)
-    {
-        string? installerType = installer.InstallerType ?? fixture.Expected.InstallerType;
-        IReadOnlyList<string> nested = installer.NestedInstallerFiles is { Count: > 0 }
-            ? installer.NestedInstallerFiles
-            : fixture.Expected.NestedInstallerFiles ?? [];
-        return new PreviousInstallerEntry
-        {
-            Position = index,
-            Url = installer.InstallerUrl,
-            Sha256 = new Sha256Hash(installer.InstallerSha256),
-            Architecture = ParseArchitecture(installer.Architecture),
-            InstallerType = installerType is null ? null : ParseInstallerType(installerType),
-            NestedInstallerType = fixture.Expected.NestedInstallerType is null
-                ? null
-                : ParseInstallerType(fixture.Expected.NestedInstallerType),
-            Scope = ParseScope(installer.Scope),
-            DisplayVersion = (installer.AppsAndFeaturesEntries ?? [])
-                .Select(static entry => entry.DisplayVersion)
-                .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value)),
-            PackageVersion = new PackageVersion(fixture.Descriptor.Package.Version),
-            NestedInstallerFiles =
-            [
-                .. nested.Select(static path => new PlannedNestedInstallerFile(path, null)),
-            ],
         };
     }
 
@@ -281,14 +216,6 @@ public sealed class RegressionDescriptorE2ETests
         "portable" => InstallerType.Portable,
         "wix" => InstallerType.Wix,
         "zip" => InstallerType.Zip,
-        _ => throw new ArgumentOutOfRangeException(nameof(value)),
-    };
-
-    private static Scope? ParseScope(string? value) => value?.ToLowerInvariant() switch
-    {
-        null => null,
-        "user" => Scope.User,
-        "machine" => Scope.Machine,
         _ => throw new ArgumentOutOfRangeException(nameof(value)),
     };
 

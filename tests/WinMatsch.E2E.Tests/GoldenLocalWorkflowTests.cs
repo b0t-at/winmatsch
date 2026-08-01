@@ -265,6 +265,8 @@ public sealed class GoldenLocalWorkflowTests
     {
         using var temporary = new TemporaryDirectory();
         var transaction = new AtomicWorkflowFileTransaction();
+        int successes = 0;
+        int conflicts = 0;
         ImmutableArray<WorkflowFileChange> changes =
         [
             new(PlannedChangeKind.Add, "manifests/e/Example/Golden/1.0.0/value.yaml", "winner"u8),
@@ -280,16 +282,20 @@ public sealed class GoldenLocalWorkflowTests
                         "Example.Golden",
                         changes,
                         CancellationToken.None);
+                    Interlocked.Increment(ref successes);
                 }
                 catch (WorkflowOperationException exception)
                     when (exception.Code == WorkflowResultCode.Conflict)
                 {
+                    Interlocked.Increment(ref conflicts);
                 }
             }),
         ];
 
         await Task.WhenAll(attempts);
 
+        Assert.Equal(1, successes);
+        Assert.Equal(15, conflicts);
         string path = Path.Combine(
             temporary.Path,
             "manifests",

@@ -15,6 +15,8 @@ namespace WinMatsch.E2E.Tests;
 
 public sealed class GitHubLifecycleE2ETests
 {
+    private const string LiveMutationRepository = "b0t-at/winmatsch-e2e";
+
     [Fact]
     public async Task Sanitized_lifecycle_fixture_covers_success_duplicate_race_and_partial_state()
     {
@@ -135,6 +137,12 @@ public sealed class GitHubLifecycleE2ETests
         using var client = new GitHubRepositoryClient(new HttpClient(recorder), token);
 
         RepositoryInfo info = await client.GetRepositoryAsync(repository);
+        Assert.Single(recorder.Requests);
+        Assert.Equal(HttpMethod.Post, recorder.Requests[0].Method);
+        Assert.Equal("https://api.github.com/graphql", recorder.Requests[0].Uri.AbsoluteUri);
+        Assert.Contains("\"query\"", recorder.Requests[0].Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("mutation(", recorder.Requests[0].Body, StringComparison.OrdinalIgnoreCase);
+        recorder.Requests.Clear();
         GitHubLifecycleResult plan = await new GitHubLifecycleWorkflow(
                 client,
                 new NoOpPreflight(),
@@ -147,17 +155,7 @@ public sealed class GitHubLifecycleE2ETests
             });
 
         Assert.Equal(GitHubLifecycleResultCode.Planned, plan.Code);
-        Assert.NotEmpty(recorder.Requests);
-        Assert.All(
-            recorder.Requests,
-            static request =>
-            {
-                Assert.DoesNotContain("mutation(", request.Body, StringComparison.OrdinalIgnoreCase);
-                Assert.False(
-                    request.Method == HttpMethod.Put
-                    || request.Method == HttpMethod.Patch
-                    || request.Method == HttpMethod.Delete);
-            });
+        Assert.Empty(recorder.Requests);
     }
 
     [EnvironmentFact("WINMATSCH_E2E_LIVE_MUTATION", "1")]
@@ -165,13 +163,10 @@ public sealed class GitHubLifecycleE2ETests
     {
         string repository = Environment.GetEnvironmentVariable("WINMATSCH_E2E_LIVE_REPOSITORY")
             ?? throw new InvalidOperationException("WINMATSCH_E2E_LIVE_REPOSITORY is required.");
-        string allowlist = Environment.GetEnvironmentVariable("WINMATSCH_E2E_LIVE_ALLOWLIST")
-            ?? throw new InvalidOperationException("WINMATSCH_E2E_LIVE_ALLOWLIST is required.");
         string token = Environment.GetEnvironmentVariable("WINMATSCH_E2E_GITHUB_TOKEN")
             ?? throw new InvalidOperationException("WINMATSCH_E2E_GITHUB_TOKEN is required.");
 
-        Assert.Equal(allowlist, repository);
-        Assert.Contains("test", repository, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(LiveMutationRepository, repository);
         Assert.NotEmpty(token);
         RepositoryCoordinates coordinates = RepositoryCoordinates.Parse(repository);
         var package = new PackageIdentifier($"WinMatsch.E2E.{Guid.NewGuid():N}");
@@ -220,6 +215,11 @@ public sealed class GitHubLifecycleE2ETests
             IdempotencyKey = $"live-e2e-{Guid.NewGuid():N}",
             CreatedWith = "winmatsch live E2E",
         };
+        string branchName = new DefaultGitHubBranchNameGenerator().Create(new(
+            package,
+            version,
+            GitHubManifestOperation.New,
+            null));
         using var client = new GitHubRepositoryClient(new HttpClient(), token);
         var workflow = new GitHubLifecycleWorkflow(
             client,
@@ -227,6 +227,7 @@ public sealed class GitHubLifecycleE2ETests
             new NoOpRevalidator(),
             new NoOpLockProvider());
         GitHubLifecycleResult? result = null;
+        Exception? operationFailure = null;
         var cleanupFailures = new List<Exception>();
         try
         {
@@ -234,44 +235,56 @@ public sealed class GitHubLifecycleE2ETests
             Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
             Assert.True(result.RemoteState.PullRequestCreated);
         }
+        catch (Exception exception)
+        {
+            operationFailure = exception;
+        }
         finally
         {
-            if (result?.RemoteState.PullRequestNumber is { } pullRequest)
+            try
             {
-                try
+                IReadOnlyList<PullRequestInfo> pullRequests = await client.SearchPullRequestsAsync(
+                    coordinates,
+                    new PullRequestSearch(
+                        PullRequestState.Open,
+                        HeadOwner: coordinates.Owner,
+                        ExactTitleToken: package.Value));
+                foreach (PullRequestInfo pullRequest in pullRequests.Where(candidate =>
+                             string.Equals(candidate.HeadBranch, branchName, StringComparison.Ordinal)))
                 {
                     await client.ClosePullRequestAsync(
                         coordinates,
-                        pullRequest,
+                        pullRequest.Number,
                         new MutationRequest($"{request.IdempotencyKey}:cleanup-pr"));
                 }
-                catch (Exception exception)
-                {
-                    cleanupFailures.Add(exception);
-                }
+            }
+            catch (Exception exception)
+            {
+                cleanupFailures.Add(exception);
             }
 
-            if (result?.RemoteState.BranchName is { } branch)
+            try
             {
-                try
-                {
-                    await client.DeleteReferenceAsync(
-                        coordinates,
-                        branch,
-                        new MutationRequest($"{request.IdempotencyKey}:cleanup-branch"));
-                }
-                catch (Exception exception)
-                {
-                    cleanupFailures.Add(exception);
-                }
+                await client.DeleteReferenceAsync(
+                    coordinates,
+                    branchName,
+                    new MutationRequest($"{request.IdempotencyKey}:cleanup-branch"));
+            }
+            catch (Exception exception)
+            {
+                cleanupFailures.Add(exception);
             }
         }
 
         Assert.True(
             cleanupFailures.Count == 0,
             "Live cleanup failed. Close the reported pull request and delete branch "
-            + $"'{result?.RemoteState.BranchName}' in '{coordinates}' before retrying. "
+            + $"'{branchName}' in '{coordinates}' before retrying. "
             + string.Join(" | ", cleanupFailures.Select(static failure => failure.Message)));
+        if (operationFailure is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(operationFailure).Throw();
+        }
     }
 
     private sealed class BlockingLockProvider : IRemoteOperationLockProvider
@@ -307,7 +320,7 @@ public sealed class GitHubLifecycleE2ETests
 
     private sealed class RecordingNetworkHandler(HttpMessageHandler inner) : DelegatingHandler(inner)
     {
-        public List<(HttpMethod Method, string Body)> Requests { get; } = [];
+        public List<(HttpMethod Method, Uri Uri, string Body)> Requests { get; } = [];
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -316,7 +329,7 @@ public sealed class GitHubLifecycleE2ETests
             string body = request.Content is null
                 ? ""
                 : await request.Content.ReadAsStringAsync(cancellationToken);
-            Requests.Add((request.Method, body));
+            Requests.Add((request.Method, request.RequestUri!, body));
             return await base.SendAsync(request, cancellationToken);
         }
     }
