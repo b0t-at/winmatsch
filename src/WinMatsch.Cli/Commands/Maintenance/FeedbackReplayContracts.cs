@@ -85,8 +85,7 @@ public sealed class AllowlistedApprovedRepairPlanner(
             return null;
         }
 
-        (PackageIdentifier identifier, PackageVersion version, GitHubManifestOperation operation) =
-            ParseAssociation(
+        RepairAssociation association = ParseAssociation(
             pullRequest.PullRequest.Body);
         ImmutableArray<RawManifestDocument> documents = await loader.LoadAsync(
             directory,
@@ -108,23 +107,33 @@ public sealed class AllowlistedApprovedRepairPlanner(
         if (local.Code != WorkflowResultCode.Succeeded
             || local.Plan.RequiresReview
             || !local.Plan.Questions.IsEmpty
-            || local.Plan.PackageIdentifier != identifier
-            || local.Plan.PackageVersion != version)
+            || local.Plan.PackageIdentifier != association.Identifier
+            || local.Plan.PackageVersion != association.Version)
         {
             throw new CliOperationException(
                 $"Approved repair for PR #{pullRequest.PullRequest.Number} did not pass "
                 + "full local preflight or match the pull request package identity.");
         }
 
+        LocalOperationPlan repairPlan = association.Operation == GitHubManifestOperation.Replace
+            ? await AddReplacementDeletionsAsync(
+                local.Plan,
+                association,
+                context.Configuration.OutputDirectory ?? Environment.CurrentDirectory,
+                cancellationToken).ConfigureAwait(false)
+            : local.Plan;
         return new GitHubSubmissionRequest
         {
-            LocalPlan = local.Plan,
+            LocalPlan = repairPlan,
             UpstreamRepository = context.Configuration.Repository,
             ExecutionMode = WorkflowExecutionMode.Apply,
-            Operation = operation,
+            Operation = association.Operation,
             Policy = new()
             {
                 ForkConsent = ForkConsentPolicy.ExistingOnly,
+                ReplacePreviousVersion =
+                    association.Operation == GitHubManifestOperation.Replace,
+                PreviousVersion = association.PreviousVersion,
             },
             CreatedWith = "winmatsch approved repair",
             SupersedesPullRequestNumber = pullRequest.PullRequest.Number,
@@ -133,10 +142,7 @@ public sealed class AllowlistedApprovedRepairPlanner(
         };
     }
 
-    private static (
-        PackageIdentifier Identifier,
-        PackageVersion Version,
-        GitHubManifestOperation Operation) ParseAssociation(
+    private static RepairAssociation ParseAssociation(
         string? body)
     {
         const string marker = "<!-- winmatsch:package=";
@@ -168,11 +174,128 @@ public sealed class AllowlistedApprovedRepairPlanner(
                 "Approved repair pull request contains an unknown operation.");
         }
 
-        return (
+        ImmutableArray<string> deletions =
+        [
+            .. body.Split('\n')
+                .Select(static line => line.TrimEnd('\r'))
+                .Where(static line => line.StartsWith(
+                    "- Delete: `",
+                    StringComparison.Ordinal))
+                .Select(static line =>
+                {
+                    const string prefix = "- Delete: `";
+                    int end = line.IndexOf('`', prefix.Length);
+                    return end > prefix.Length
+                        ? line[prefix.Length..end]
+                        : "";
+                })
+                .Where(static path => path.Length > 0)
+                .Distinct(StringComparer.Ordinal),
+        ];
+        PackageVersion? previousVersion = operation == GitHubManifestOperation.Replace
+            ? InferPreviousVersion(new PackageIdentifier(package), deletions)
+            : null;
+        return new(
             new PackageIdentifier(package),
             new PackageVersion(version
                 ?? throw new CliOperationException(
                     "Approved repair association marker is missing the version.")),
-            operation);
+            operation,
+            previousVersion,
+            deletions);
     }
+
+    private static PackageVersion InferPreviousVersion(
+        PackageIdentifier identifier,
+        ImmutableArray<string> deletions)
+    {
+        string packageDirectory = ManifestPaths.GetPackageDirectory(identifier) + "/";
+        string[] versions =
+        [
+            .. deletions.Select(path =>
+            {
+                if (!path.StartsWith(packageDirectory, StringComparison.Ordinal))
+                {
+                    throw new CliOperationException(
+                        "Replacement repair deletion path is outside the associated package.");
+                }
+
+                string remainder = path[packageDirectory.Length..];
+                int separator = remainder.IndexOf('/');
+                return separator > 0 ? remainder[..separator] : "";
+            }).Where(static value => value.Length > 0)
+                .Distinct(StringComparer.Ordinal),
+        ];
+        if (versions.Length != 1)
+        {
+            throw new CliOperationException(
+                "Replacement repair requires deletion paths for exactly one previous version.");
+        }
+
+        return new PackageVersion(versions[0]);
+    }
+
+    private static async Task<LocalOperationPlan> AddReplacementDeletionsAsync(
+        LocalOperationPlan plan,
+        RepairAssociation association,
+        string outputDirectory,
+        CancellationToken cancellationToken)
+    {
+        string root = Path.GetFullPath(outputDirectory);
+        var before = plan.BeforeDocuments.ToBuilder();
+        var changes = plan.FileChanges.ToBuilder();
+        foreach (string repositoryPath in association.OriginalDeletions)
+        {
+            string fullPath = Path.GetFullPath(Path.Combine(
+                root,
+                repositoryPath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!fullPath.StartsWith(
+                    root + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase)
+                || !File.Exists(fullPath))
+            {
+                throw new CliOperationException(
+                    $"Approved replacement deletion source '{repositoryPath}' is unavailable.");
+            }
+
+            byte[] content = await File.ReadAllBytesAsync(fullPath, cancellationToken)
+                .ConfigureAwait(false);
+            before.Add(new(repositoryPath, content));
+            changes.Add(new(
+                PlannedChangeKind.Delete,
+                repositoryPath,
+                expectedState: ExpectedFileState.Present,
+                expectedSha256: WorkflowFileChange.Hash(content)));
+        }
+
+        ImmutableArray<RawManifestDocument> beforeDocuments =
+        [
+            .. before.DistinctBy(
+                static document => document.RepositoryPath,
+                StringComparer.Ordinal),
+        ];
+        ImmutableArray<WorkflowFileChange> fileChanges =
+        [
+            .. changes.DistinctBy(
+                static change => change.RepositoryPath,
+                StringComparer.Ordinal),
+        ];
+        return plan with
+        {
+            BeforeDocuments = beforeDocuments,
+            FileChanges = fileChanges,
+            Preflight = plan.Preflight with
+            {
+                BeforeDocuments = beforeDocuments,
+                Changes = fileChanges,
+            },
+        };
+    }
+
+    private sealed record RepairAssociation(
+        PackageIdentifier Identifier,
+        PackageVersion Version,
+        GitHubManifestOperation Operation,
+        PackageVersion? PreviousVersion,
+        ImmutableArray<string> OriginalDeletions);
 }

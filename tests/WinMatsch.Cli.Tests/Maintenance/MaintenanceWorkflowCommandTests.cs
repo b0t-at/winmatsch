@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using WinMatsch.Cli.Commands.Maintenance;
 using WinMatsch.Cli.Commands.Mutations;
 using WinMatsch.Cli.Tests.Harness;
+using WinMatsch.Core;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.GitHub;
@@ -705,6 +706,15 @@ public sealed class MaintenanceWorkflowCommandTests
     [Fact]
     public async Task Allowlisted_repair_preserves_replace_operation()
     {
+        string output = Directory.CreateTempSubdirectory(
+            "winmatsch-approved-replace-").FullName;
+        string deletionPath =
+            "manifests/e/Example/App/0.9/Example.App.yaml";
+        string deletionFile = Path.Combine(
+            output,
+            deletionPath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(deletionFile)!);
+        await File.WriteAllTextAsync(deletionFile, "old: true\n");
         var workflow = new FakeMutationWorkflow();
         GitHubSubmissionRequest? planned = null;
         var harness = new CliHarness();
@@ -718,7 +728,9 @@ public sealed class MaintenanceWorkflowCommandTests
             PullRequestInfo pullRequest = MaintenancePullRequests.ToolOwned(41) with
             {
                 Body = "<!-- winmatsch:package=Example.App;version=1.0 -->\n"
-                    + "Operation: Replace",
+                    + "Operation: Replace\n"
+                    + "## Changes\n"
+                    + $"- Delete: `{deletionPath}`",
             };
             planned = await planner.PlanApprovedRepairAsync(
                 Assert.Single(MaintenancePullRequests.Observe(pullRequest)),
@@ -727,10 +739,24 @@ public sealed class MaintenanceWorkflowCommandTests
             return ExitCodes.Success;
         }));
 
-        CliRunResult result = await harness.RunAsync(["probe"]);
+        try
+        {
+            CliRunResult result = await harness.RunAsync(
+                ["probe", "--output", output]);
 
-        Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(GitHubManifestOperation.Replace, planned!.Operation);
+            Assert.Equal(ExitCodes.Success, result.ExitCode);
+            Assert.Equal(GitHubManifestOperation.Replace, planned!.Operation);
+            Assert.True(planned.Policy.ReplacePreviousVersion);
+            Assert.Equal("0.9", planned.Policy.PreviousVersion!.Value);
+            Assert.Contains(
+                planned.LocalPlan.FileChanges,
+                change => change.Kind == PlannedChangeKind.Delete
+                    && change.RepositoryPath == deletionPath);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
     }
 
     [Fact]
