@@ -84,7 +84,7 @@ public sealed class GitHubLifecycleWorkflow
         string versionDirectory = ManifestPaths.GetVersionDirectory(
             request.LocalPlan.PackageIdentifier,
             request.LocalPlan.PackageVersion);
-        string title = GitHubSubmissionFormatter.CreateTitle(
+        string title = request.Presentation?.CommitTitle ?? GitHubSubmissionFormatter.CreateTitle(
             request.Operation,
             request.LocalPlan.PackageIdentifier,
             request.LocalPlan.PackageVersion,
@@ -118,16 +118,23 @@ public sealed class GitHubLifecycleWorkflow
         {
             Request = request,
             CommitTitle = title,
-            PullRequestTitle = title,
-            PullRequestBody = GitHubSubmissionFormatter.CreateBody(request, versionDirectory),
+            PullRequestTitle = request.Presentation?.PullRequestTitle ?? title,
+            PullRequestBody = request.Presentation?.PullRequestBody
+                ?? GitHubSubmissionFormatter.CreateBody(request, versionDirectory),
             PackageVersionDirectory = versionDirectory,
             Operations = operations.ToImmutable(),
             Diagnostics = diagnostics.ToImmutable(),
         };
     }
 
+    public Task<GitHubLifecycleResult> ExecuteAsync(
+        GitHubSubmissionRequest request,
+        CancellationToken cancellationToken = default)
+        => ExecuteAsync(request, progress: null, cancellationToken);
+
     public async Task<GitHubLifecycleResult> ExecuteAsync(
         GitHubSubmissionRequest request,
+        ISubmissionProgressSink? progress,
         CancellationToken cancellationToken = default)
     {
         GitHubSubmissionPlan plan = CreatePlan(request, _clock.UtcNow);
@@ -143,7 +150,20 @@ public sealed class GitHubLifecycleWorkflow
 
         var audit = ImmutableArray.CreateBuilder<GitHubLifecycleAuditEntry>();
         var recoveryDiagnostics = ImmutableArray.CreateBuilder<GitHubLifecycleDiagnostic>();
-        RemoteMutationState state = new();
+        RemoteMutationState state = request.ResumeFrom ?? new();
+        if (state.RemoteOutcomeUncertain)
+        {
+            return Result(
+                GitHubLifecycleResultCode.HumanEscalationRequired,
+                plan,
+                state,
+                diagnostics:
+                [
+                    new(
+                        "GH2035",
+                        "The previous remote mutation outcome is uncertain; automatic retry is forbidden."),
+                ]);
+        }
         RemoteOperationKind? attemptedMutation = null;
         RepositoryCoordinates? mutationRepository = null;
         string? expectedReservationSha = null;
@@ -179,7 +199,8 @@ public sealed class GitHubLifecycleWorkflow
                     plan.Diagnostics);
             }
 
-            if (!request.Policy.SkipPullRequestCheck)
+            if (!request.Policy.SkipPullRequestCheck
+                && request.ResumeFrom?.PullRequestCreated != true)
             {
                 PullRequestInfo? duplicate = await FindDuplicateAsync(
                     plan,
@@ -238,6 +259,18 @@ public sealed class GitHubLifecycleWorkflow
                 cancellationToken).ConfigureAwait(false);
             Audit(audit, "GH2031", "Completed full non-mutating validation before any remote mutation.");
 
+            if (request.ResumeFrom?.PullRequestCreated == true)
+            {
+                return await ReconcileResumedPullRequestAsync(
+                    request,
+                    plan,
+                    target,
+                    upstreamDefault,
+                    state,
+                    audit,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             attemptedMutation = RemoteOperationKind.EnsureFork;
             (RepositoryInfo targetRepository, bool forkCreated) = await EnsureTargetAsync(
                 request,
@@ -288,14 +321,15 @@ public sealed class GitHubLifecycleWorkflow
                     [new("GH2004", "The target default branch is not an exact fresh copy of upstream.")]);
             }
 
-            string branchName = _branchNames.Create(new(
-                request.LocalPlan.PackageIdentifier,
-                request.LocalPlan.PackageVersion,
-                request.Operation,
-                request.SupersedesPullRequestNumber,
-                upstreamDefault.Name,
-                upstreamDefault.HeadSha,
-                request.IdempotencyKey));
+            string branchName = request.ResumeFrom?.BranchName
+                ?? _branchNames.Create(new(
+                    request.LocalPlan.PackageIdentifier,
+                    request.LocalPlan.PackageVersion,
+                    request.Operation,
+                    request.SupersedesPullRequestNumber,
+                    upstreamDefault.Name,
+                    upstreamDefault.HeadSha,
+                    request.IdempotencyKey));
 
             GitReference? branch = null;
             ServerCommitResult? commit = null;
@@ -337,6 +371,38 @@ public sealed class GitHubLifecycleWorkflow
                             "Upstream or the target default branch moved during final validation.");
                     }
 
+                    if (request.ResumeFrom?.CommitCreated == true)
+                    {
+                        string resumedBranchName = request.ResumeFrom.BranchName
+                            ?? throw new RemoteStateConflictException(
+                                "The resumed commit has no journaled branch name.");
+                        string resumedCommitSha = request.ResumeFrom.CommitSha
+                            ?? throw new RemoteStateConflictException(
+                                "The resumed commit has no journaled commit SHA.");
+                        GitReference? resumedBranch = await _gitHub.GetReferenceAsync(
+                            targetRepository.Coordinates,
+                            resumedBranchName,
+                            boundaryCancellation).ConfigureAwait(false);
+                        if (resumedBranch is null
+                            || !string.Equals(
+                                resumedBranch.Sha,
+                                resumedCommitSha,
+                                StringComparison.Ordinal))
+                        {
+                            throw new RemoteStateConflictException(
+                                "The journaled remote commit no longer owns the exact target branch.");
+                        }
+
+                        branchName = resumedBranchName;
+                        branch = resumedBranch;
+                        commit = new(
+                            resumedCommitSha,
+                            request.ResumeFrom.CommitUri
+                                ?? new Uri(
+                                    $"https://github.com/{targetRepository.Coordinates}/commit/{resumedCommitSha}"));
+                        return;
+                    }
+
                     for (int attempt = 0; attempt < MaximumBranchReservationAttempts; attempt++)
                     {
                         boundaryCancellation.ThrowIfCancellationRequested();
@@ -374,7 +440,16 @@ public sealed class GitHubLifecycleWorkflow
 
                         attemptedMutation = RemoteOperationKind.CreateBranch;
                         expectedReservationSha = upstreamDefault.HeadSha;
-                        state = state with { BranchName = candidateName };
+                        state = state with
+                        {
+                            BranchName = candidateName,
+                            LastAttemptedOperation = RemoteOperationKind.CreateBranch,
+                            RemoteOutcomeUncertain = true,
+                        };
+                        await RecordProgressAsync(
+                            progress,
+                            state,
+                            SubmissionJournalState.Pending).ConfigureAwait(false);
                         try
                         {
                             branch = await _gitHub.CreateUniqueReferenceAsync(
@@ -390,6 +465,15 @@ public sealed class GitHubLifecycleWorkflow
                         catch (GitHubApiException exception) when (exception.IsConflict)
                         {
                             attemptedMutation = null;
+                            state = state with
+                            {
+                                LastAttemptedOperation = null,
+                                RemoteOutcomeUncertain = false,
+                            };
+                            await RecordProgressAsync(
+                                progress,
+                                state,
+                                SubmissionJournalState.Pending).ConfigureAwait(false);
                         }
                     }
 
@@ -404,11 +488,17 @@ public sealed class GitHubLifecycleWorkflow
                         BranchName = branchName,
                         BranchHeadSha = branch.Sha,
                         BranchCreated = !state.BranchAdopted,
+                        LastAttemptedOperation = null,
+                        RemoteOutcomeUncertain = false,
                     };
                     if (!state.BranchAdopted)
                     {
                         Audit(audit, "GH2006", $"Created fresh tool branch '{branchName}'.");
                     }
+                    await RecordProgressAsync(
+                        progress,
+                        state,
+                        SubmissionJournalState.BranchCreated).ConfigureAwait(false);
 
                     attemptedMutation = null;
 
@@ -430,6 +520,15 @@ public sealed class GitHubLifecycleWorkflow
 
                     boundaryCancellation.ThrowIfCancellationRequested();
                     attemptedMutation = RemoteOperationKind.CreateCommit;
+                    state = state with
+                    {
+                        LastAttemptedOperation = RemoteOperationKind.CreateCommit,
+                        RemoteOutcomeUncertain = true,
+                    };
+                    await RecordProgressAsync(
+                        progress,
+                        state,
+                        SubmissionJournalState.BranchCreated).ConfigureAwait(false);
                     commit = await _gitHub.CreateCommitAsync(
                         targetRepository.Coordinates,
                         CreateCommit(plan, branchName, branch.Sha),
@@ -455,8 +554,14 @@ public sealed class GitHubLifecycleWorkflow
                 CommitUri = commit.WebUri,
                 CommitCreated = true,
                 BranchHeadSha = commit.Sha,
+                LastAttemptedOperation = null,
+                RemoteOutcomeUncertain = false,
             };
             Audit(audit, "GH2007", $"Created server-side commit '{commit.Sha}'.");
+            await RecordProgressAsync(
+                progress,
+                state,
+                SubmissionJournalState.CommitCreated).ConfigureAwait(false);
             attemptedMutation = null;
 
             await VerifyLiveReleaseFreshnessAsync(request, cancellationToken).ConfigureAwait(false);
@@ -520,6 +625,15 @@ public sealed class GitHubLifecycleWorkflow
 
             cancellationToken.ThrowIfCancellationRequested();
             attemptedMutation = RemoteOperationKind.CreatePullRequest;
+            state = state with
+            {
+                LastAttemptedOperation = RemoteOperationKind.CreatePullRequest,
+                RemoteOutcomeUncertain = true,
+            };
+            await RecordProgressAsync(
+                progress,
+                state,
+                SubmissionJournalState.CommitCreated).ConfigureAwait(false);
             PullRequestInfo pullRequest = await _gitHub.CreatePullRequestAsync(
                 request.UpstreamRepository,
                 new(
@@ -535,7 +649,13 @@ public sealed class GitHubLifecycleWorkflow
                 PullRequestNumber = pullRequest.Number,
                 PullRequestUri = pullRequest.WebUri,
                 PullRequestCreated = true,
+                LastAttemptedOperation = null,
+                RemoteOutcomeUncertain = false,
             };
+            await RecordProgressAsync(
+                progress,
+                state,
+                SubmissionJournalState.PullRequestCreated).ConfigureAwait(false);
             if (!string.Equals(pullRequest.HeadSha, commit.Sha, StringComparison.Ordinal)
                 || !string.Equals(pullRequest.HeadOwner, targetRepository.Coordinates.Owner, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(pullRequest.HeadBranch, branchName, StringComparison.Ordinal)
@@ -791,7 +911,13 @@ public sealed class GitHubLifecycleWorkflow
                 }
             }
 
-            state = exception.IsConflict ? state : MarkUncertain(state, attemptedMutation);
+            state = exception.IsConflict
+                ? state with
+                {
+                    LastAttemptedOperation = null,
+                    RemoteOutcomeUncertain = false,
+                }
+                : MarkUncertain(state, attemptedMutation);
             return Result(
                 exception.IsConflict
                     ? GitHubLifecycleResultCode.Conflict
@@ -808,6 +934,86 @@ public sealed class GitHubLifecycleWorkflow
                     ]);
         }
     }
+
+    private async Task<GitHubLifecycleResult> ReconcileResumedPullRequestAsync(
+        GitHubSubmissionRequest request,
+        GitHubSubmissionPlan plan,
+        RepositoryCoordinates target,
+        BranchState upstream,
+        RemoteMutationState state,
+        ImmutableArray<GitHubLifecycleAuditEntry>.Builder audit,
+        CancellationToken cancellationToken)
+    {
+        if (state.PullRequestNumber is null
+            || state.CommitSha is null
+            || state.BranchName is null
+            || state.Fork is null)
+        {
+            return Result(
+                GitHubLifecycleResultCode.HumanEscalationRequired,
+                plan,
+                state with { RemoteOutcomeUncertain = true },
+                audit,
+                [new("GH2036", "The pull-request recovery journal is incomplete.")]);
+        }
+
+        if (state.Fork != target)
+        {
+            return Result(
+                GitHubLifecycleResultCode.Conflict,
+                plan,
+                state,
+                audit,
+                [new("GH2037", "The journaled fork differs from the intended recovery target.")]);
+        }
+
+        PullRequestInfo pullRequest = await _gitHub.GetPullRequestAsync(
+            request.UpstreamRepository,
+            state.PullRequestNumber.Value,
+            cancellationToken).ConfigureAwait(false);
+        GitReference? branch = await _gitHub.GetReferenceAsync(
+            state.Fork,
+            state.BranchName,
+            cancellationToken).ConfigureAwait(false);
+        if (pullRequest.State != PullRequestState.Open
+            || branch is null
+            || !string.Equals(branch.Sha, state.CommitSha, StringComparison.Ordinal)
+            || !string.Equals(pullRequest.HeadSha, state.CommitSha, StringComparison.Ordinal)
+            || !string.Equals(
+                pullRequest.HeadOwner,
+                state.Fork.Owner,
+                StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(pullRequest.HeadBranch, state.BranchName, StringComparison.Ordinal)
+            || !string.Equals(pullRequest.BaseBranch, upstream.Name, StringComparison.Ordinal))
+        {
+            return Result(
+                GitHubLifecycleResultCode.HumanEscalationRequired,
+                plan,
+                state with { RemoteOutcomeUncertain = true },
+                audit,
+                [new("GH2038", "The journaled pull request no longer has its exact proven identity.")]);
+        }
+
+        Audit(audit, "GH2039", $"Recovered verified pull request #{pullRequest.Number}.");
+        return Result(
+            GitHubLifecycleResultCode.Succeeded,
+            plan,
+            state with
+            {
+                PullRequestUri = pullRequest.WebUri,
+                PullRequestCreated = true,
+            },
+            audit,
+            []);
+    }
+
+    private static Task RecordProgressAsync(
+        ISubmissionProgressSink? progress,
+        RemoteMutationState state,
+        SubmissionJournalState journalState)
+        => progress is null
+            ? Task.CompletedTask
+            : progress.RecordAsync(state, journalState, CancellationToken.None);
 
     private async Task<(RepositoryInfo Repository, bool Created)> EnsureTargetAsync(
         GitHubSubmissionRequest request,

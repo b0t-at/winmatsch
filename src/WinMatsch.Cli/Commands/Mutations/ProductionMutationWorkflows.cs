@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+using WinMatsch.Core;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.GitHub.Auth;
@@ -35,7 +37,7 @@ public sealed class ProductionSubmissionWorkflowFactory : ISubmissionWorkflowFac
 
 internal sealed class ProductionMutationWorkflow(
     WinMatschConfiguration configuration,
-    Hosting.ITokenAccessor tokens) : IMutationWorkflow
+    Hosting.ITokenAccessor tokens) : IVerifiedMutationWorkflow
 {
     public async Task<WorkflowOperationResult> ExecuteAsync(
         WorkflowOperationRequest request,
@@ -63,6 +65,35 @@ internal sealed class ProductionMutationWorkflow(
         return await new LocalMutationWorkflow(engine)
             .ExecuteAsync(request, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task<WorkflowOperationResult> ApplyVerifiedAsync(
+        WorkflowOperationRequest request,
+        string expectedPlanFingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        using var downloader = new InstallerDownloader(DownloaderOptions(configuration));
+        using HttpClient? gitHubHttp = await CreateReleaseHttpClientAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        using IGitHubRepositoryClient? gitHub = gitHubHttp is null
+            ? null
+            : new GitHubRepositoryClient(
+                gitHubHttp,
+                (await tokens.RequireAsync(cancellationToken).ConfigureAwait(false)).Token.RevealValue());
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+            downloader,
+            CreateReleaseSource(request, gitHub),
+            overridePackStoreOptions: configuration.OverrideStoreDirectory is null
+                ? null
+                : new OverridePackStoreOptions
+                {
+                    RootDirectory = configuration.OverrideStoreDirectory,
+                });
+        return await engine.ApplyVerifiedPlanAsync(
+            request,
+            expectedPlanFingerprint,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private static IWorkflowReleaseSource? CreateReleaseSource(
@@ -152,20 +183,48 @@ internal sealed class ProductionMutationWorkflow(
             "downloads");
 }
 
-internal sealed class ProductionSubmissionWorkflow(
-    WinMatschConfiguration configuration,
-    GitHubToken token) : ISubmissionWorkflow
+internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflow
 {
+    private readonly WinMatschConfiguration _configuration;
+    private readonly GitHubToken _token;
+    private readonly ISubmissionJournalStore _journals;
+
+    public ProductionSubmissionWorkflow(
+        WinMatschConfiguration configuration,
+        GitHubToken token)
+        : this(
+            configuration,
+            token,
+            WorkflowProductionComposition.CreateSubmissionJournal(
+                configuration.OverrideStoreDirectory is null
+                    ? null
+                    : new OverridePackStoreOptions
+                    {
+                        RootDirectory = configuration.OverrideStoreDirectory,
+                    }))
+    {
+    }
+
+    internal ProductionSubmissionWorkflow(
+        WinMatschConfiguration configuration,
+        GitHubToken token,
+        ISubmissionJournalStore journals)
+    {
+        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        _token = token ?? throw new ArgumentNullException(nameof(token));
+        _journals = journals ?? throw new ArgumentNullException(nameof(journals));
+    }
+
     public async Task<GitHubLifecycleResult> ExecuteAsync(
         GitHubSubmissionRequest request,
         CancellationToken cancellationToken = default)
     {
         using var httpClient = new HttpClient();
-        using var gitHub = new GitHubRepositoryClient(httpClient, token.RevealValue());
+        using var gitHub = new GitHubRepositoryClient(httpClient, _token.RevealValue());
         using var downloader = new InstallerDownloader(new DownloaderOptions
         {
-            CacheDirectory = configuration.CacheEnabled
-                ? configuration.CacheDirectory ?? Path.Combine(
+            CacheDirectory = _configuration.CacheEnabled
+                ? _configuration.CacheDirectory ?? Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "winmatsch",
                     "downloads")
@@ -176,5 +235,177 @@ internal sealed class ProductionSubmissionWorkflow(
         return await new LifecycleSubmissionWorkflow(workflow)
             .ExecuteAsync(request, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public Task<SubmissionJournalHandle> PrepareAsync(
+        GitHubSubmissionRequest request,
+        CancellationToken cancellationToken = default)
+        => _journals.PrepareAsync(request, cancellationToken);
+
+    public async Task<GitHubLifecycleResult> ExecutePreparedAsync(
+        SubmissionJournalHandle handle,
+        CancellationToken cancellationToken = default)
+    {
+        SubmissionJournalEntry entry = await _journals.ActivateAsync(
+            handle,
+            CancellationToken.None).ConfigureAwait(false);
+        return await ExecuteEntryAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<GitHubLifecycleResult?> ResumePendingAsync(
+        string outputDirectory,
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion,
+        RepositoryCoordinates upstreamRepository,
+        CancellationToken cancellationToken = default)
+    {
+        _ = await _journals.RecoverAsync(outputDirectory, cancellationToken).ConfigureAwait(false);
+        ImmutableArray<SubmissionJournalEntry> candidates =
+        [
+            .. (await _journals.ListPendingAsync(cancellationToken).ConfigureAwait(false))
+                .Where(entry =>
+                    string.Equals(
+                        Path.GetFullPath(entry.Repository.CanonicalPath),
+                        Path.GetFullPath(outputDirectory),
+                        OperatingSystem.IsWindows()
+                            ? StringComparison.OrdinalIgnoreCase
+                            : StringComparison.Ordinal)
+                    && entry.LocalPlan.PackageIdentifier == packageIdentifier
+                    && entry.LocalPlan.PackageVersion == packageVersion
+                    && entry.RemoteRequest.UpstreamRepository == upstreamRepository),
+        ];
+        if (candidates.IsEmpty)
+        {
+            return null;
+        }
+
+        if (candidates.Length != 1)
+        {
+            throw new SubmissionJournalConflictException(
+                "Multiple pending submission journals match this package version.");
+        }
+
+        return await ExecuteEntryAsync(candidates[0], cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<ImmutableArray<SubmissionJournalEntry>> ListPendingAsync(
+        CancellationToken cancellationToken = default)
+        => _journals.ListPendingAsync(cancellationToken);
+
+    public Task CancelAsync(
+        string id,
+        long expectedRevision,
+        CancellationToken cancellationToken = default)
+        => _journals.CancelAsync(id, expectedRevision, cancellationToken);
+
+    private async Task<GitHubLifecycleResult> ExecuteEntryAsync(
+        SubmissionJournalEntry entry,
+        CancellationToken cancellationToken)
+    {
+        using var httpClient = new HttpClient();
+        using var gitHub = new GitHubRepositoryClient(httpClient, _token.RevealValue());
+        using var downloader = new InstallerDownloader(new DownloaderOptions
+        {
+            CacheDirectory = _configuration.CacheEnabled
+                ? _configuration.CacheDirectory ?? Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "winmatsch",
+                    "downloads")
+                : null,
+        });
+        GitHubSubmissionRequest request = await SubmissionJournalMaterializer.MaterializeAsync(
+            entry,
+            gitHub,
+            cancellationToken).ConfigureAwait(false);
+        GitHubLifecycleWorkflow workflow =
+            WorkflowProductionComposition.CreateGitHubLifecycle(gitHub, downloader);
+        var progress = new JournalProgressSink(_journals, entry);
+        GitHubLifecycleResult result;
+        if (entry.RemoteState.RemoteOutcomeUncertain)
+        {
+            result = new()
+            {
+                Code = GitHubLifecycleResultCode.HumanEscalationRequired,
+                Plan = GitHubLifecycleWorkflow.Plan(request),
+                RemoteState = entry.RemoteState,
+                Diagnostics =
+                [
+                    new(
+                        "GH2035",
+                        "The previous remote mutation outcome is uncertain; automatic retry is forbidden."),
+                ],
+            };
+        }
+        else
+        {
+            result = await workflow.ExecuteAsync(request, progress, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        SubmissionJournalEntry current = progress.Current;
+        if (result.Applied)
+        {
+            if (current.State != SubmissionJournalState.PullRequestCreated)
+            {
+                current = await _journals.RecordRemoteStateAsync(
+                    current.Id,
+                    current.Revision,
+                    result.RemoteState,
+                    SubmissionJournalState.PullRequestCreated,
+                    errorMessage: null,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+
+            await _journals.CompleteAsync(
+                current.Id,
+                current.Revision,
+                CancellationToken.None).ConfigureAwait(false);
+            return result;
+        }
+
+        SubmissionJournalState next = result.Code == GitHubLifecycleResultCode.HumanEscalationRequired
+                || result.RemoteState.RemoteOutcomeUncertain
+            ? SubmissionJournalState.EscalationRequired
+            : StateFor(result.RemoteState, current.State);
+        _ = await _journals.RecordRemoteStateAsync(
+            current.Id,
+            current.Revision,
+            result.RemoteState,
+            next,
+            string.Join("; ", result.Diagnostics.Select(static diagnostic => diagnostic.Message)),
+            CancellationToken.None).ConfigureAwait(false);
+        return result;
+    }
+
+    private static SubmissionJournalState StateFor(
+        RemoteMutationState state,
+        SubmissionJournalState current)
+        => state.PullRequestCreated
+            ? SubmissionJournalState.PullRequestCreated
+            : state.CommitCreated
+                ? SubmissionJournalState.CommitCreated
+                : state.BranchCreated || state.BranchAdopted
+                    ? SubmissionJournalState.BranchCreated
+                    : current;
+
+    private sealed class JournalProgressSink(
+        ISubmissionJournalStore journals,
+        SubmissionJournalEntry entry) : ISubmissionProgressSink
+    {
+        public SubmissionJournalEntry Current { get; private set; } = entry;
+
+        public async Task RecordAsync(
+            RemoteMutationState remoteState,
+            SubmissionJournalState state,
+            CancellationToken cancellationToken)
+        {
+            Current = await journals.RecordRemoteStateAsync(
+                Current.Id,
+                Current.Revision,
+                remoteState,
+                state,
+                errorMessage: null,
+                cancellationToken).ConfigureAwait(false);
+        }
     }
 }

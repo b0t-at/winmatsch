@@ -21,6 +21,7 @@ public enum WorkflowResultCode
     Conflict,
     InvalidRequest,
     ApplyFailed,
+    StalePlan,
 }
 
 public sealed record WorkflowQuestion(
@@ -159,11 +160,25 @@ public sealed record LocalOperationPlan
 
     public LearnedOverridePlan? LearnedOverride { get; init; }
 
+    public string PlanningInputsFingerprint { get; init; } = "";
+
+    public string RuleEvaluationFingerprint { get; init; } = "";
+
+    public string ValidationFingerprint { get; init; } = "";
+
+    public string AuditFingerprint { get; init; } = "";
+
+    public string PreflightEvidenceFingerprint { get; init; } = "";
+
+    public string? LearnedOverrideFingerprint { get; init; }
+
     public ImmutableArray<WorkflowQuestion> Questions { get; init; } = [];
 
     public ImmutableArray<WorkflowAuditEntry> Audit { get; init; } = [];
 
     public bool ReviewApproved { get; init; }
+
+    public string Fingerprint => LocalOperationPlanFingerprint.Create(this);
 
     public bool RequiresReview => Rules.RequiresReview && !ReviewApproved;
 
@@ -366,6 +381,8 @@ public sealed record SubmitOperationRequest : WorkflowOperationRequest
     public bool Normalize { get; init; }
 
     public string? ArtifactDirectory { get; init; }
+
+    public WorkflowReleaseProvenance? ReleaseProvenance { get; init; }
 }
 
 public sealed record NewLocaleOperationRequest : WorkflowOperationRequest

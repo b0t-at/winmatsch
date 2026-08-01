@@ -15,7 +15,7 @@ winmatsch [command] [options]
 - [Non-interactive and CI behavior](#non-interactive-and-ci-behavior)
 - [Read-only commands](#read-only-commands): [`analyze`](#analyze), [`validate`](#validate), [`show`](#show), [`list-versions`](#list-versions)
 - [Mutation commands](#mutation-commands): [`new`](#new), [`update`](#update), [`remove`](#remove), [`submit`](#submit), [`new-locale`](#new-locale), [`update-locale`](#update-locale)
-- [Repository maintenance](#repository-maintenance): [`sync`](#sync), [`cleanup`](#cleanup), [`complete`](#complete), [`remove-dead-versions` (hidden)](#remove-dead-versions-hidden)
+- [Repository maintenance](#repository-maintenance): [`sync`](#sync), [`cleanup`](#cleanup), [`complete`](#complete), [`submissions`](#submissions), [`remove-dead-versions` (hidden)](#remove-dead-versions-hidden)
 - [Local maintenance](#local-maintenance): [`token`](#token), [`config`](#config), [`cache`](#cache), [`completion`](#completion)
 
 ## Global options
@@ -161,10 +161,10 @@ defense in depth; do not put secrets into URLs or manifest fields.
 - **Partial remote state.** Remote submission is a sequence (fork → branch →
   commit → pull request). If it is interrupted, the `remote.state` object
   reports exactly which steps completed and `outcomeUncertain: true` when the
-  tool could not verify the final state. Re-running is safe: completed steps
-  are detected and not repeated blindly, and the duplicate-PR preflight
-  prevents accidental double submissions (`--skip-pr-check` disables only
-  that early check).
+  tool could not verify the final state. WinMatsch retains the submission
+  journal and **does not automatically retry** that uncertain mutation.
+  Verified branch/commit/PR boundaries can resume; uncertain boundaries require
+  human reconciliation.
 
 ## Non-interactive and CI behavior
 
@@ -267,6 +267,11 @@ cache entries.
 | `--rule-mode <RULE_ID=mode>` | Per-rule override, repeatable. Highest-precedence rule setting. |
 | `--explain-rules` | Include deterministic rule trace output. |
 | `--override-pack <file>` | Path to a package override-pack YAML file. See [rules guide](rules.md). |
+
+`--submit` persists a recovery journal outside the repository after the exact
+local commit is verified. A later identical command resumes that journal even
+when local planning now reports `NoChanges`; it never reconstructs a submission
+from unchecked journal paths or bytes.
 
 `new` and `update` additionally accept installer selection options:
 
@@ -399,6 +404,17 @@ recommended action for each.
 | `--fork <owner/name>` | Fork repository (default: `<authenticated user>/<upstream name>`). |
 | `--apply-safe` | After inspection, apply only known-safe responses (fixed keep-alive comments for transient infrastructure failures). Requires confirmation; never posts arbitrary comments and never repairs manifests. |
 | `--yes` | Confirm mutating actions without prompting. |
+
+### submissions
+
+```text
+winmatsch submissions
+```
+
+List pending local-to-GitHub submission journals, including CAS revision,
+package/version, lifecycle state, PR number when known, and whether the last
+remote outcome is uncertain. This command is read-only and never exposes
+tokens, credential-bearing URLs, or raw installer URLs.
 
 ### remove-dead-versions (hidden)
 

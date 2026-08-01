@@ -357,6 +357,35 @@ public sealed class MutationCommandModule : ICommandModule
         bool learningOnly = local.Code == WorkflowResultCode.NoChanges
             && local.Plan.LearnedOverride is not null
             && local.Plan.ReviewApproved;
+        bool submitRequested = context.ParseResult.GetValue(options.Submit) && !learningOnly;
+        if (local.Code == WorkflowResultCode.NoChanges
+            && submitRequested
+            && !context.IsDryRun)
+        {
+            if (_submissionFactory is null)
+            {
+                throw new CliOperationException(
+                    "Remote submission is unavailable because no submission workflow was composed.");
+            }
+
+            ISubmissionWorkflow recoveryWorkflow =
+                await CreateSubmissionWorkflowAsync(context).ConfigureAwait(false);
+            if (recoveryWorkflow is not IJournaledSubmissionWorkflow journaledRecovery)
+            {
+                MutationOutput.Write(context, local, remote: null);
+                return ExitCodes.OperationFailed;
+            }
+
+            GitHubLifecycleResult? recovered = await RunResumeAsync(
+                journaledRecovery,
+                local.Plan,
+                context).ConfigureAwait(false);
+            MutationOutput.Write(context, local, recovered);
+            return recovered?.Applied == true
+                ? ExitCodes.Success
+                : ExitCodes.OperationFailed;
+        }
+
         if (local.Code != WorkflowResultCode.Succeeded && !learningOnly)
         {
             MutationOutput.Write(context, local, remote: null);
@@ -441,6 +470,7 @@ public sealed class MutationCommandModule : ICommandModule
             {
                 OutputDirectory = request.OutputDirectory,
                 Documents = editedDocuments,
+                ReleaseProvenance = releaseProvenance,
             });
             local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
             if (releaseProvenance is not null
@@ -455,6 +485,10 @@ public sealed class MutationCommandModule : ICommandModule
             else
             {
                 releaseProvenance = null;
+                request = request is SubmitOperationRequest submitRequest
+                    ? submitRequest with { ReleaseProvenance = null }
+                    : request;
+                local = local with { Plan = local.Plan with { Release = null } };
             }
 
             if (local.Code != WorkflowResultCode.Succeeded)
@@ -485,9 +519,11 @@ public sealed class MutationCommandModule : ICommandModule
 
         GitHubLifecycleResult? remote = null;
         bool outputWritten = false;
-        bool submit = context.ParseResult.GetValue(options.Submit) && !learningOnly;
+        bool submit = submitRequested;
         bool submissionConsent = context.ParseResult.GetValue(options.Yes);
         ISubmissionWorkflow? submission = null;
+        GitHubSubmissionRequest? submissionRequest = null;
+        SubmissionJournalHandle? submissionHandle = null;
         if (submit)
         {
             if (_submissionFactory is null)
@@ -516,12 +552,35 @@ public sealed class MutationCommandModule : ICommandModule
             }
 
             submission = await CreateSubmissionWorkflowAsync(context).ConfigureAwait(false);
+            submissionRequest = CreateSubmissionRequest(
+                context,
+                options,
+                operation,
+                request,
+                local.Plan,
+                submissionConsent);
+            if (!context.IsDryRun && submission is IJournaledSubmissionWorkflow journaled)
+            {
+                submissionHandle = await RunPrepareAsync(
+                    journaled,
+                    submissionRequest,
+                    context).ConfigureAwait(false);
+            }
         }
 
         if (!context.IsDryRun)
         {
-            request = WithExecutionMode(request, WorkflowExecutionMode.Apply);
-            local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
+            string expectedPlanFingerprint = local.Plan.Fingerprint;
+            local = workflow is IVerifiedMutationWorkflow verified
+                ? await RunVerifiedLocalAsync(
+                    verified,
+                    request,
+                    expectedPlanFingerprint,
+                    context).ConfigureAwait(false)
+                : await RunLocalAsync(
+                    workflow,
+                    WithExecutionMode(request, WorkflowExecutionMode.Apply),
+                    context).ConfigureAwait(false);
             if (releaseProvenance is not null)
             {
                 local = local with
@@ -545,16 +604,15 @@ public sealed class MutationCommandModule : ICommandModule
 
         if (submit)
         {
-            remote = await RunRemoteAsync(
-                submission!,
-                CreateSubmissionRequest(
-                    context,
-                    options,
-                    operation,
-                    request,
-                    local.Plan,
-                    submissionConsent),
-                context).ConfigureAwait(false);
+            remote = submissionHandle is not null
+                ? await RunPreparedRemoteAsync(
+                    (IJournaledSubmissionWorkflow)submission!,
+                    submissionHandle,
+                    context).ConfigureAwait(false)
+                : await RunRemoteAsync(
+                    submission!,
+                    submissionRequest!,
+                    context).ConfigureAwait(false);
             MutationOutput.Write(context, local, remote);
             outputWritten = true;
             if (remote.Applied
@@ -658,6 +716,7 @@ public sealed class MutationCommandModule : ICommandModule
         {
             return await workflow.ExecuteAsync(request, context.CancellationToken).ConfigureAwait(false);
         }
+
         catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
         {
             throw;
@@ -680,6 +739,43 @@ public sealed class MutationCommandModule : ICommandModule
         }
     }
 
+    private static async Task<WorkflowOperationResult> RunVerifiedLocalAsync(
+        IVerifiedMutationWorkflow workflow,
+        WorkflowOperationRequest request,
+        string expectedPlanFingerprint,
+        CommandContext context)
+    {
+        try
+        {
+            return await workflow.ApplyVerifiedAsync(
+                request,
+                expectedPlanFingerprint,
+                context.CancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException exception)
+        {
+            throw new CliOperationException(
+                $"Verified local mutation timed out: {exception.Message}",
+                exception);
+        }
+        catch (Exception exception) when (
+            exception is FormatException
+                or IOException
+                or UnauthorizedAccessException
+                or HttpRequestException
+                or DownloadException
+                or WorkflowOperationException)
+        {
+            throw new CliOperationException(
+                $"Verified local mutation failed: {exception.Message}",
+                exception);
+        }
+    }
+
     private static async Task<GitHubLifecycleResult> RunRemoteAsync(
         ISubmissionWorkflow submissions,
         GitHubSubmissionRequest request,
@@ -690,6 +786,7 @@ public sealed class MutationCommandModule : ICommandModule
             return await submissions.ExecuteAsync(request, context.CancellationToken)
                 .ConfigureAwait(false);
         }
+
         catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
         {
             throw;
@@ -707,6 +804,87 @@ public sealed class MutationCommandModule : ICommandModule
                 or HttpRequestException)
         {
             throw new CliOperationException($"Remote submission failed: {exception.Message}", exception);
+        }
+    }
+
+    private static async Task<SubmissionJournalHandle> RunPrepareAsync(
+        IJournaledSubmissionWorkflow submissions,
+        GitHubSubmissionRequest request,
+        CommandContext context)
+    {
+        try
+        {
+            return await submissions.PrepareAsync(request, context.CancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is FormatException
+                or IOException
+                or UnauthorizedAccessException)
+        {
+            throw new CliOperationException(
+                $"Submission journal preparation failed: {exception.Message}",
+                exception);
+        }
+    }
+
+    private static async Task<GitHubLifecycleResult> RunPreparedRemoteAsync(
+        IJournaledSubmissionWorkflow submissions,
+        SubmissionJournalHandle handle,
+        CommandContext context)
+    {
+        try
+        {
+            return await submissions.ExecutePreparedAsync(handle, context.CancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is FormatException
+                or IOException
+                or UnauthorizedAccessException
+                or HttpRequestException)
+        {
+            throw new CliOperationException(
+                $"Journaled remote submission failed: {exception.Message}",
+                exception);
+        }
+    }
+
+    private static async Task<GitHubLifecycleResult?> RunResumeAsync(
+        IJournaledSubmissionWorkflow submissions,
+        LocalOperationPlan noChangesPlan,
+        CommandContext context)
+    {
+        try
+        {
+            return await submissions.ResumePendingAsync(
+                noChangesPlan.OutputDirectory,
+                noChangesPlan.PackageIdentifier,
+                noChangesPlan.PackageVersion,
+                context.Configuration.Repository,
+                context.CancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is FormatException
+                or IOException
+                or UnauthorizedAccessException
+                or HttpRequestException)
+        {
+            throw new CliOperationException(
+                $"Pending submission recovery failed: {exception.Message}",
+                exception);
         }
     }
 

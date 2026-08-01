@@ -57,6 +57,18 @@ public static class WorkflowProductionComposition
         IWorkflowClock? clock = null)
         => new(gitHub, clock);
 
+    public static ISubmissionJournalStore CreateSubmissionJournal(
+        OverridePackStoreOptions? overridePackStoreOptions = null,
+        IWorkflowClock? clock = null)
+        => new FileSubmissionJournalStore(
+            new SubmissionJournalOptions
+            {
+                OverrideStoreDirectory =
+                    (overridePackStoreOptions ?? OverridePackStoreOptions.CreateDefault())
+                    .RootDirectory,
+            },
+            clock);
+
     public static GitHubFeedbackWorkflow CreateGitHubFeedback(
         IGitHubRepositoryClient gitHub,
         GitHubLifecycleWorkflow lifecycle,

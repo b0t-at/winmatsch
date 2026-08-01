@@ -168,7 +168,16 @@ public sealed record GitHubSubmissionRequest
     public RepositoryCoordinates? ReleaseRepository { get; init; }
 
     public long? ReleaseId { get; init; }
+
+    public GitHubSubmissionPresentation? Presentation { get; init; }
+
+    public RemoteMutationState? ResumeFrom { get; init; }
 }
+
+public sealed record GitHubSubmissionPresentation(
+    string CommitTitle,
+    string PullRequestTitle,
+    string PullRequestBody);
 
 public sealed record GitHubSubmissionPlan
 {

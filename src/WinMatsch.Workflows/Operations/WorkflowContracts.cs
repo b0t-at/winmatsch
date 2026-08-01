@@ -133,6 +133,14 @@ public interface IWorkflowPreflight
         CancellationToken cancellationToken);
 }
 
+public interface IWorkflowVerifiedPreflight : IWorkflowPreflight
+{
+    public Task<ValidationReport> ExecuteVerifiedAsync(
+        WorkflowPreflightRequest request,
+        Func<ValidationReport, CancellationToken, Task> boundary,
+        CancellationToken cancellationToken);
+}
+
 internal interface IWorkflowPreflightDiagnosticSource
 {
     public ImmutableArray<ValidationFinding> DrainDiagnostics();
@@ -160,6 +168,14 @@ public interface IWorkflowCoordinatedRecovery : IWorkflowFileTransactionRecovery
     public Task<IDisposable> RecoverAndHoldAsync(
         string outputDirectory,
         string operationLockKey,
+        CancellationToken cancellationToken);
+}
+
+public interface ILocalOperationLockProvider
+{
+    public ValueTask<IAsyncDisposable> AcquireAsync(
+        string outputDirectory,
+        PackageIdentifier packageIdentifier,
         CancellationToken cancellationToken);
 }
 
@@ -204,7 +220,7 @@ public sealed class RulePipelineWorkflowRunner(
     }
 }
 
-public sealed class PreflightGateWorkflowAdapter : IWorkflowPreflight
+public sealed class PreflightGateWorkflowAdapter : IWorkflowVerifiedPreflight
 {
     private readonly PreflightGate _gate;
     private readonly IWorkflowPreflightDiagnosticSource? _diagnostics;
@@ -261,6 +277,22 @@ public sealed class PreflightGateWorkflowAdapter : IWorkflowPreflight
                 new DelegatePreflightBoundary(boundary),
                 cancellationToken).ConfigureAwait(false);
         return AppendDiagnostics(report);
+    }
+
+    public async Task<ValidationReport> ExecuteVerifiedAsync(
+        WorkflowPreflightRequest request,
+        Func<ValidationReport, CancellationToken, Task> boundary,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(boundary);
+        ValidationReport report = await ValidateAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        if (report.CanProceed(request.Options.WarningPolicy))
+        {
+            await boundary(report, cancellationToken).ConfigureAwait(false);
+        }
+
+        return report;
     }
 
     private static async Task<ValidationReport> ExecuteRemovalAsync(

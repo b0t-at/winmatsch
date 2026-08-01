@@ -11,6 +11,14 @@ public interface IFinalArtifactRevalidator
         CancellationToken cancellationToken);
 }
 
+public interface ISubmissionProgressSink
+{
+    public Task RecordAsync(
+        RemoteMutationState remoteState,
+        SubmissionJournalState state,
+        CancellationToken cancellationToken);
+}
+
 public interface IRemoteOperationLockProvider
 {
     public ValueTask<IAsyncDisposable> AcquireAsync(

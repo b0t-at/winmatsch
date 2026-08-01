@@ -24,6 +24,7 @@ public sealed class LocalWorkflowEngine
     private readonly IWorkflowFileTransaction _transaction;
     private readonly IWorkflowClock _clock;
     private readonly IOverridePackStore? _overridePackStore;
+    private readonly ILocalOperationLockProvider _planLocks;
 
     public LocalWorkflowEngine(
         IManifestSnapshotSource manifests,
@@ -33,7 +34,8 @@ public sealed class LocalWorkflowEngine
         IWorkflowReleaseSource? releases = null,
         IWorkflowArtifactProcessor? artifacts = null,
         IWorkflowClock? clock = null,
-        IOverridePackStore? overridePackStore = null)
+        IOverridePackStore? overridePackStore = null,
+        ILocalOperationLockProvider? planLocks = null)
     {
         _manifests = manifests ?? throw new ArgumentNullException(nameof(manifests));
         _rules = rules ?? throw new ArgumentNullException(nameof(rules));
@@ -43,6 +45,151 @@ public sealed class LocalWorkflowEngine
         _artifacts = artifacts;
         _clock = clock ?? new SystemWorkflowClock();
         _overridePackStore = overridePackStore;
+        _planLocks = planLocks ?? new FileLocalOperationLockProvider();
+    }
+
+    public async Task<WorkflowOperationResult> ApplyVerifiedPlanAsync(
+        WorkflowOperationRequest request,
+        string expectedPlanFingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedPlanFingerprint);
+        PackageIdentifier identifier = PackageIdentifierFor(request);
+        await using IAsyncDisposable packageLock = await _planLocks.AcquireAsync(
+            request.OutputDirectory,
+            identifier,
+            cancellationToken).ConfigureAwait(false);
+
+        WorkflowOperationRequest planningRequest = WithExecutionMode(
+            request,
+            WorkflowExecutionMode.Plan);
+        WorkflowOperationResult current = await ExecuteCurrentAsync(
+            planningRequest,
+            cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await RecoverForVerifiedApplyAsync(
+                request,
+                identifier,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (WorkflowOperationException exception)
+        {
+            return current with
+            {
+                Code = exception.Code,
+                Applied = false,
+                ErrorMessage = exception.Message,
+            };
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or InvalidDataException)
+        {
+            return current with
+            {
+                Code = WorkflowResultCode.ApplyFailed,
+                Applied = false,
+                ErrorMessage = exception.Message,
+                Recovery = new(exception.Message, [], JournalRetained: true),
+            };
+        }
+
+        current = await ExecuteCurrentAsync(
+            planningRequest,
+            cancellationToken).ConfigureAwait(false);
+        if (!string.Equals(
+                current.Plan.Fingerprint,
+                expectedPlanFingerprint,
+                StringComparison.Ordinal))
+        {
+            return current with
+            {
+                Code = WorkflowResultCode.StalePlan,
+                Applied = false,
+                ErrorMessage = "The operation changed after approval; review the new plan before applying.",
+            };
+        }
+
+        if (current.Plan.RequiresReview
+            || current.Plan.Rules.RequiresReview && !current.Plan.ReviewApproved)
+        {
+            return current with
+            {
+                Code = WorkflowResultCode.Conflict,
+                Applied = false,
+                ErrorMessage = "The current review set is not bound to the approved plan fingerprint.",
+            };
+        }
+
+        WorkflowResultCode code = ResultCode(current.Plan);
+        bool learningOnly = code == WorkflowResultCode.NoChanges
+            && current.Plan.LearnedOverride is not null
+            && current.Plan.ReviewApproved;
+        if (code != WorkflowResultCode.Succeeded && !learningOnly)
+        {
+            return current with { Applied = false };
+        }
+
+        return await CompleteAsync(
+            WithExecutionMode(request, WorkflowExecutionMode.Apply),
+            current.Plan,
+            cancellationToken,
+            expectedPlanFingerprint).ConfigureAwait(false);
+    }
+
+    private async Task RecoverForVerifiedApplyAsync(
+        WorkflowOperationRequest request,
+        PackageIdentifier identifier,
+        CancellationToken cancellationToken)
+    {
+        if (_transaction is IWorkflowCoordinatedRecovery coordinatedTransaction
+            && _overridePackStore is IOverridePackCoordinatedRecovery coordinatedStore)
+        {
+            await using IOverridePackRecoveryLease overrideLease =
+                await coordinatedStore.AcquireRecoveryLeaseAsync(
+                    identifier,
+                    cancellationToken).ConfigureAwait(false);
+            string recoveryRoot = overrideLease.PendingOutputDirectory
+                ?? request.OutputDirectory;
+            using IDisposable transactionLease =
+                await coordinatedTransaction.RecoverAndHoldAsync(
+                    recoveryRoot,
+                    identifier.Value,
+                    cancellationToken).ConfigureAwait(false);
+            _ = await overrideLease.CompleteAfterManifestRecoveryAsync()
+                .ConfigureAwait(false);
+            if (!string.Equals(
+                    Path.GetFullPath(recoveryRoot),
+                    Path.GetFullPath(request.OutputDirectory),
+                    OperatingSystem.IsWindows()
+                        ? StringComparison.OrdinalIgnoreCase
+                        : StringComparison.Ordinal))
+            {
+                await coordinatedTransaction.RecoverAsync(
+                    request.OutputDirectory,
+                    identifier.Value,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        if (_transaction is IWorkflowFileTransactionRecovery recovery)
+        {
+            await recovery.RecoverAsync(
+                request.OutputDirectory,
+                identifier.Value,
+                cancellationToken).ConfigureAwait(false);
+            if (_overridePackStore is IOverridePackStoreRecovery recoveryStore)
+            {
+                _ = await recoveryStore.LoadAfterManifestRecoveryAsync(
+                    identifier,
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     public Task<WorkflowOperationResult> NewAsync(
@@ -293,7 +440,10 @@ public sealed class LocalWorkflowEngine
                 ? "User manifests were explicitly normalized."
                 : "User manifest bytes were preserved exactly.")],
             installerArtifacts,
-            existingVersions);
+            existingVersions) with
+        {
+            Release = request.ReleaseProvenance,
+        };
         return await CompleteAsync(request, plan, cancellationToken).ConfigureAwait(false);
     }
 
@@ -680,7 +830,7 @@ public sealed class LocalWorkflowEngine
         bool reviewApproved = ReviewApproval.Matches(
             operationRequest,
             rules.Summary,
-            ReviewApproval.CreatePlanFingerprint(reviewedPlan));
+            LocalOperationPlanFingerprint.CreateApprovalFingerprint(reviewedPlan));
         LearnedOverridePlan? learnedOverride = null;
         if (!rules.Summary.Reviews.IsEmpty && reviewApproved)
         {
@@ -860,6 +1010,9 @@ public sealed class LocalWorkflowEngine
         {
             Release = releaseProvenance,
             LearnedOverride = learnedOverride,
+            LearnedOverrideFingerprint = learnedOverride is null
+                ? null
+                : LocalOperationPlanFingerprint.CreateComponent(learnedOverride),
         };
         if (learnedOverride is not null)
         {
@@ -1030,7 +1183,8 @@ public sealed class LocalWorkflowEngine
     private async Task<WorkflowOperationResult> CompleteAsync(
         WorkflowOperationRequest request,
         LocalOperationPlan plan,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? expectedPlanFingerprint = null)
     {
         WorkflowResultCode code = ResultCode(plan);
         bool learningOnly = code == WorkflowResultCode.NoChanges
@@ -1045,91 +1199,139 @@ public sealed class LocalWorkflowEngine
         OverridePackWriteResult? persisted = null;
         try
         {
-            ValidationReport finalValidation = await _preflight.ExecuteAsync(
-                plan.Preflight,
-                async token =>
+            async Task ApplyBoundaryAsync(CancellationToken token)
+            {
+                IOverridePackWriteStage? stage = null;
+                if (plan.LearnedOverride is { } learnedOverride)
                 {
-                    IOverridePackWriteStage? stage = null;
-                    if (plan.LearnedOverride is { } learnedOverride)
-                    {
-                        stage = await _overridePackStore!.StageAsync(
-                            new(
-                                plan.PackageIdentifier,
-                                learnedOverride.Pack,
-                                learnedOverride.ExpectedContentSha256,
-                                learnedOverride.ExpectedFormatVersion,
-                                plan.FileChanges.IsEmpty
-                                    ? null
-                                    : request.OutputDirectory,
-                                plan.FileChanges),
-                            token).ConfigureAwait(false);
-                    }
+                    stage = await _overridePackStore!.StageAsync(
+                        new(
+                            plan.PackageIdentifier,
+                            learnedOverride.Pack,
+                            learnedOverride.ExpectedContentSha256,
+                            learnedOverride.ExpectedFormatVersion,
+                            plan.FileChanges.IsEmpty
+                                ? null
+                                : request.OutputDirectory,
+                            plan.FileChanges),
+                        token).ConfigureAwait(false);
+                }
 
-                    try
+                try
+                {
+                    await _transaction.ApplyAsync(
+                        request.OutputDirectory,
+                        plan.PackageIdentifier.Value,
+                        plan.FileChanges,
+                        token).ConfigureAwait(false);
+                }
+                catch (WorkflowCommittedProvenanceException provenanceException)
+                {
+                    if (stage is not null)
                     {
-                        await _transaction.ApplyAsync(
-                            request.OutputDirectory,
-                            plan.PackageIdentifier.Value,
-                            plan.FileChanges,
-                            token).ConfigureAwait(false);
-                    }
-                    catch (WorkflowCommittedProvenanceException provenanceException)
-                    {
-                        if (stage is not null)
+                        try
                         {
-                            try
-                            {
-                                await stage.RetainForRecoveryAsync().ConfigureAwait(false);
-                            }
-                            catch (Exception retentionException)
-                            {
-                                throw new WorkflowCommittedLearnedOverrideException(
-                                    "The manifests committed, but provenance finalization failed and the approved learned override recovery lock could not be released.",
-                                    new AggregateException(provenanceException, retentionException));
-                            }
+                            await stage.RetainForRecoveryAsync().ConfigureAwait(false);
                         }
-
-                        throw;
-                    }
-                    catch (WorkflowCommittedException)
-                    {
-                        if (stage is not null)
+                        catch (Exception retentionException)
                         {
-                            persisted = await ActivateLearnedOverrideAsync(stage)
-                                .ConfigureAwait(false);
+                            throw new WorkflowCommittedLearnedOverrideException(
+                                "The manifests committed, but provenance finalization failed and the approved learned override recovery lock could not be released.",
+                                new AggregateException(provenanceException, retentionException));
                         }
-
-                        throw;
-                    }
-                    catch (Exception primaryException)
-                    {
-                        if (stage is not null)
-                        {
-                            await AbortLearnedOverrideAsync(
-                                stage,
-                                primaryException).ConfigureAwait(false);
-                        }
-
-                        System.Runtime.ExceptionServices.ExceptionDispatchInfo
-                            .Capture(primaryException)
-                            .Throw();
-                        throw;
                     }
 
+                    throw;
+                }
+                catch (WorkflowCommittedException)
+                {
                     if (stage is not null)
                     {
                         persisted = await ActivateLearnedOverrideAsync(stage)
                             .ConfigureAwait(false);
                     }
-                },
-                cancellationToken).ConfigureAwait(false);
+
+                    throw;
+                }
+                catch (Exception primaryException)
+                {
+                    if (stage is not null)
+                    {
+                        await AbortLearnedOverrideAsync(
+                            stage,
+                            primaryException).ConfigureAwait(false);
+                    }
+
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                        .Capture(primaryException)
+                        .Throw();
+                    throw;
+                }
+
+                if (stage is not null)
+                {
+                    persisted = await ActivateLearnedOverrideAsync(stage)
+                        .ConfigureAwait(false);
+                }
+            }
+
+            ValidationReport finalValidation;
+            if (expectedPlanFingerprint is not null)
+            {
+                if (_preflight is not IWorkflowVerifiedPreflight verifiedPreflight)
+                {
+                    throw new WorkflowOperationException(
+                        WorkflowResultCode.Conflict,
+                        "The configured preflight cannot enforce the verified apply boundary.");
+                }
+
+                finalValidation = await verifiedPreflight.ExecuteVerifiedAsync(
+                    plan.Preflight,
+                    async (boundaryValidation, token) =>
+                    {
+                        ValidationReport completeValidation = MergeRuleFindings(
+                            boundaryValidation,
+                            plan.Rules);
+                        LocalOperationPlan boundaryPlan = plan with
+                        {
+                            Validation = completeValidation,
+                            ValidationFingerprint =
+                                LocalOperationPlanFingerprint.CreateComponent(
+                                    completeValidation.Findings),
+                        };
+                        if (!string.Equals(
+                                boundaryPlan.Fingerprint,
+                                expectedPlanFingerprint,
+                                StringComparison.Ordinal))
+                        {
+                            throw new WorkflowOperationException(
+                                WorkflowResultCode.StalePlan,
+                                "Final preflight changed the approved operation plan.");
+                        }
+
+                        await ApplyBoundaryAsync(token).ConfigureAwait(false);
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                finalValidation = await _preflight.ExecuteAsync(
+                    plan.Preflight,
+                    ApplyBoundaryAsync,
+                    cancellationToken).ConfigureAwait(false);
+            }
             finalValidation = MergeRuleFindings(finalValidation, plan.Rules);
             if (persisted is not null && plan.LearnedOverride is not null)
             {
                 plan = AddLearnedOverrideAudit(plan, plan.LearnedOverride, persisted);
             }
 
-            LocalOperationPlan finalPlan = plan with { Validation = finalValidation };
+            LocalOperationPlan finalPlan = plan with
+            {
+                Validation = finalValidation,
+                ValidationFingerprint =
+                    LocalOperationPlanFingerprint.CreateComponent(finalValidation.Findings),
+            };
             return finalValidation.CanProceed(plan.WarningPolicy)
                 ? new()
                 {
@@ -2150,6 +2352,15 @@ public sealed class LocalWorkflowEngine
                 Options = PreflightOptions(request),
             },
             Rules = rules,
+            PlanningInputsFingerprint =
+                LocalOperationPlanFingerprint.CreateRequestFingerprint(request),
+            RuleEvaluationFingerprint =
+                LocalOperationPlanFingerprint.CreateComponent(rules),
+            ValidationFingerprint =
+                LocalOperationPlanFingerprint.CreateComponent(validation.Findings),
+            AuditFingerprint = LocalOperationPlanFingerprint.CreateComponent(
+                audit.Where(static entry =>
+                    !string.Equals(entry.Code, "CREATED_AT", StringComparison.Ordinal))),
             Questions = questions,
             ReviewApproved = false,
             Audit =
@@ -2160,15 +2371,60 @@ public sealed class LocalWorkflowEngine
                     .ThenBy(static entry => entry.Message, StringComparer.Ordinal),
             ],
         };
+        plan = plan with
+        {
+            PreflightEvidenceFingerprint =
+                LocalOperationPlanFingerprint.CreatePreflightFingerprint(plan.Preflight),
+        };
         return plan with
         {
             ReviewApproved = reviewApproved
                 ?? ReviewApproval.Matches(
                     request,
                     rules,
-                    ReviewApproval.CreatePlanFingerprint(plan)),
+                    LocalOperationPlanFingerprint.CreateApprovalFingerprint(plan)),
         };
     }
+
+    private Task<WorkflowOperationResult> ExecuteCurrentAsync(
+        WorkflowOperationRequest request,
+        CancellationToken cancellationToken)
+        => request switch
+        {
+            NewOperationRequest value => NewAsync(value, cancellationToken),
+            UpdateOperationRequest value => UpdateAsync(value, cancellationToken),
+            RemoveOperationRequest value => RemoveAsync(value, cancellationToken),
+            SubmitOperationRequest value => SubmitAsync(value, cancellationToken),
+            NewLocaleOperationRequest value => NewLocaleAsync(value, cancellationToken),
+            UpdateLocaleOperationRequest value => UpdateLocaleAsync(value, cancellationToken),
+            _ => throw new ArgumentException("Unsupported workflow request.", nameof(request)),
+        };
+
+    private static PackageIdentifier PackageIdentifierFor(WorkflowOperationRequest request)
+        => request switch
+        {
+            NewOperationRequest value => value.PackageIdentifier,
+            UpdateOperationRequest value => value.PackageIdentifier,
+            RemoveOperationRequest value => value.PackageIdentifier,
+            SubmitOperationRequest value => ParseRawSet(value.Documents).Identifier,
+            NewLocaleOperationRequest value => value.PackageIdentifier,
+            UpdateLocaleOperationRequest value => value.PackageIdentifier,
+            _ => throw new ArgumentException("Unsupported workflow request.", nameof(request)),
+        };
+
+    private static WorkflowOperationRequest WithExecutionMode(
+        WorkflowOperationRequest request,
+        WorkflowExecutionMode mode)
+        => request switch
+        {
+            NewOperationRequest value => value with { ExecutionMode = mode },
+            UpdateOperationRequest value => value with { ExecutionMode = mode },
+            RemoveOperationRequest value => value with { ExecutionMode = mode },
+            SubmitOperationRequest value => value with { ExecutionMode = mode },
+            NewLocaleOperationRequest value => value with { ExecutionMode = mode },
+            UpdateLocaleOperationRequest value => value with { ExecutionMode = mode },
+            _ => throw new ArgumentException("Unsupported workflow request.", nameof(request)),
+        };
 
     private static WorkflowReleaseProvenance? CreateReleaseProvenance(
         IEnumerable<DiscoveredAsset> assets)

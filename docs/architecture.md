@@ -61,6 +61,44 @@ Mutation workflows run a fixed pipeline:
 7. **Submit** (opt-in) — fork → branch → commit → pull request, with
    duplicate-PR preflight, provenance tracking, and partial-state reporting.
 
+### Verified apply and submission recovery
+
+Every `LocalOperationPlan` has a canonical SHA-256 fingerprint. Its
+length-prefixed encoding distinguishes null from empty values and covers
+operation identity, exact before/after/change bytes and expected old hashes,
+rules and reviews, validation policy, mapping/configuration inputs, installer
+evidence, release provenance, replacement semantics, and learned-override
+state. The presentation-only `CREATED_AT` audit timestamp is excluded.
+
+Apply callers do not pass a plan object back to the engine.
+`ApplyVerifiedPlanAsync` acquires the external local package lock, rebuilds the
+plan and final preflight from current inputs, checks the expected fingerprint
+and review binding, and only then enters the manifest transaction. Drift
+returns `StalePlan` or `Conflict` without writes.
+
+For `--submit`, the CLI prepares a secret-free intent before local apply. After
+the manifest transaction, provenance capture, and learned-override activation
+have completed, exact local bytes promote that intent to a durable submission
+journal outside the repository. The journal records CAS revisions and branch,
+commit, and pull-request boundaries. Each remote mutation is first marked
+uncertain, so a crash never causes automatic retry of an unknown outcome.
+Recovery rematerializes the request only from verified local bytes, pinned
+upstream bytes, artifact identities, and journaled presentation/idempotency
+fields. A verified PR removes the journal; conflicts and escalation retain it.
+
+The lock order is:
+
+1. local verified-plan package lock;
+2. learned-override recovery lease;
+3. manifest transaction/recovery lock;
+4. release local locks before crossing to remote work;
+5. submission-journal CAS lock;
+6. GitHub per-package remote lock.
+
+No path acquires an earlier lock while holding a later one. Local and override
+transactions finish before journal promotion, and journal file locks are
+released before GitHub calls.
+
 Evidence is trusted in tiers: values proven by installer analysis rank above
 values inferred from downloads, which rank above defaults; human corrections
 detected in the merged upstream manifest outrank all regeneration and force

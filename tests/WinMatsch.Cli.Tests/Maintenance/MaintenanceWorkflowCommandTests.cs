@@ -29,6 +29,23 @@ public sealed class MaintenanceWorkflowCommandTests
     }
 
     [Fact]
+    public async Task Submissions_reports_pending_journal_visibility_without_a_token()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        using var state = new TemporaryDirectory();
+        CliHarness harness = CreateHarness(
+            client,
+            submissionJournals: new FileSubmissionJournalStore(
+                new SubmissionJournalOptions { RootDirectory = state.Path }));
+        harness.EnvironmentVariables.Remove("GITHUB_TOKEN");
+
+        CliRunResult result = await harness.RunAsync(["submissions", "--format", "json"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("\"pendingSubmissions\":[]", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Sync_dry_run_plans_without_mutation()
     {
         FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-behind");
@@ -402,14 +419,37 @@ public sealed class MaintenanceWorkflowCommandTests
 
     private static CliHarness CreateHarness(
         FakeMaintenanceGitHubClient client,
-        IPullRequestFeedbackSource? source = null)
+        IPullRequestFeedbackSource? source = null,
+        ISubmissionJournalStore? submissionJournals = null)
     {
         var harness = new CliHarness();
         harness.EnvironmentVariables["GITHUB_TOKEN"] = Token;
         harness.Modules.Add(new MaintenanceCommandModule(
             clientFactory: _ => client,
-            sourceFactory: source is null ? null : (_, _) => source));
+            sourceFactory: source is null ? null : (_, _) => source,
+            submissionJournals: submissionJournals));
         return harness;
+    }
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public TemporaryDirectory()
+        {
+            Path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                $"winmatsch-cli-submissions-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Path))
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+        }
     }
 
     private sealed class ScriptedFeedbackSource : IPullRequestFeedbackSource

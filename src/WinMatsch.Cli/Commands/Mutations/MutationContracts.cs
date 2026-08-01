@@ -4,6 +4,7 @@ using System.Text;
 using WinMatsch.Cli.Hosting;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
+using WinMatsch.GitHub;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
 
@@ -13,6 +14,14 @@ public interface IMutationWorkflow
 {
     public Task<WorkflowOperationResult> ExecuteAsync(
         WorkflowOperationRequest request,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IVerifiedMutationWorkflow : IMutationWorkflow
+{
+    public Task<WorkflowOperationResult> ApplyVerifiedAsync(
+        WorkflowOperationRequest request,
+        string expectedPlanFingerprint,
         CancellationToken cancellationToken = default);
 }
 
@@ -27,6 +36,32 @@ public interface ISubmissionWorkflow
 {
     public Task<GitHubLifecycleResult> ExecuteAsync(
         GitHubSubmissionRequest request,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IJournaledSubmissionWorkflow : ISubmissionWorkflow
+{
+    public Task<SubmissionJournalHandle> PrepareAsync(
+        GitHubSubmissionRequest request,
+        CancellationToken cancellationToken = default);
+
+    public Task<GitHubLifecycleResult> ExecutePreparedAsync(
+        SubmissionJournalHandle handle,
+        CancellationToken cancellationToken = default);
+
+    public Task<GitHubLifecycleResult?> ResumePendingAsync(
+        string outputDirectory,
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion,
+        RepositoryCoordinates upstreamRepository,
+        CancellationToken cancellationToken = default);
+
+    public Task<ImmutableArray<SubmissionJournalEntry>> ListPendingAsync(
+        CancellationToken cancellationToken = default);
+
+    public Task CancelAsync(
+        string id,
+        long expectedRevision,
         CancellationToken cancellationToken = default);
 }
 
@@ -105,7 +140,7 @@ public sealed class FixedSubmissionWorkflowFactory(ISubmissionWorkflow workflow)
         => Task.FromResult(_workflow);
 }
 
-public sealed class LocalMutationWorkflow(LocalWorkflowEngine engine) : IMutationWorkflow
+public sealed class LocalMutationWorkflow(LocalWorkflowEngine engine) : IVerifiedMutationWorkflow
 {
     private readonly LocalWorkflowEngine _engine = engine ?? throw new ArgumentNullException(nameof(engine));
 
@@ -122,6 +157,15 @@ public sealed class LocalMutationWorkflow(LocalWorkflowEngine engine) : IMutatio
             UpdateLocaleOperationRequest value => _engine.UpdateLocaleAsync(value, cancellationToken),
             _ => throw new ArgumentException("Unsupported mutation request.", nameof(request)),
         };
+
+    public Task<WorkflowOperationResult> ApplyVerifiedAsync(
+        WorkflowOperationRequest request,
+        string expectedPlanFingerprint,
+        CancellationToken cancellationToken = default)
+        => _engine.ApplyVerifiedPlanAsync(
+            request,
+            expectedPlanFingerprint,
+            cancellationToken);
 }
 
 public sealed class LifecycleSubmissionWorkflow(GitHubLifecycleWorkflow workflow) : ISubmissionWorkflow

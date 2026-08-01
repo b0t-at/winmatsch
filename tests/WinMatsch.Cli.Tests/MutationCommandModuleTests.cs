@@ -1411,7 +1411,7 @@ internal sealed class GoldenRuleRunner : IWorkflowRuleRunner
         => new(request.Manifests, RuleRunSummary.Empty);
 }
 
-internal sealed class GoldenPreflight : IWorkflowPreflight
+internal sealed class GoldenPreflight : IWorkflowVerifiedPreflight
 {
     public Task<ValidationReport> ValidateAsync(
         WorkflowPreflightRequest request,
@@ -1425,6 +1425,16 @@ internal sealed class GoldenPreflight : IWorkflowPreflight
     {
         await boundary(cancellationToken);
         return new ValidationReport();
+    }
+
+    public async Task<ValidationReport> ExecuteVerifiedAsync(
+        WorkflowPreflightRequest request,
+        Func<ValidationReport, CancellationToken, Task> boundary,
+        CancellationToken cancellationToken)
+    {
+        var report = new ValidationReport();
+        await boundary(report, cancellationToken);
+        return report;
     }
 }
 

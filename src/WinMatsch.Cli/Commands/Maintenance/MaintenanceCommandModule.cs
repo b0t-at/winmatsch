@@ -26,13 +26,15 @@ public sealed class MaintenanceCommandModule : ICommandModule
     private readonly Func<IGitHubRepositoryClient, string, IPullRequestFeedbackSource> _sourceFactory;
     private readonly Func<IGitHubRepositoryClient, GitHubFeedbackWorkflow> _feedbackFactory;
     private readonly IWorkflowClock _clock;
+    private readonly ISubmissionJournalStore _submissionJournals;
 
     public MaintenanceCommandModule(
         Func<string, IGitHubRepositoryClient>? clientFactory = null,
         Func<IGitHubRepositoryClient, IDeadVersionInspector>? inspectorFactory = null,
         Func<IGitHubRepositoryClient, string, IPullRequestFeedbackSource>? sourceFactory = null,
         Func<IGitHubRepositoryClient, GitHubFeedbackWorkflow>? feedbackFactory = null,
-        IWorkflowClock? clock = null)
+        IWorkflowClock? clock = null,
+        ISubmissionJournalStore? submissionJournals = null)
     {
         _clientFactory = clientFactory
             ?? (token => new GitHubRepositoryClient(new HttpClient(), token));
@@ -42,6 +44,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
             ?? ((client, forkOwner) => new ToolPullRequestObservationSource(client, forkOwner));
         _clock = clock ?? new SystemWorkflowClock();
         _feedbackFactory = feedbackFactory ?? CreateDefaultFeedbackWorkflow;
+        _submissionJournals = submissionJournals ?? new FileSubmissionJournalStore();
     }
 
     public string Name => "maintenance";
@@ -52,7 +55,89 @@ public sealed class MaintenanceCommandModule : ICommandModule
         RegisterSync(registry);
         RegisterCleanup(registry);
         RegisterComplete(registry);
+        RegisterSubmissions(registry);
         RegisterRemoveDeadVersions(registry);
+    }
+
+    private void RegisterSubmissions(ICommandRegistry registry)
+    {
+        var command = new Command(
+            "submissions",
+            "List pending local-to-GitHub submission recovery journals.");
+        registry.AddCommand(command);
+        registry.SetHandler(command, async context =>
+        {
+            ImmutableArray<SubmissionJournalEntry> entries;
+            try
+            {
+                entries = await _submissionJournals.ListPendingAsync(context.CancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                throw new CliOperationException(
+                    $"Listing pending submissions failed: {exception.Message}",
+                    exception);
+            }
+
+            context.Output.WriteFormatted(
+                writer =>
+                {
+                    writer.WriteLine("Pending submissions:");
+                    if (entries.IsEmpty)
+                    {
+                        writer.WriteLine("  (none)");
+                    }
+
+                    foreach (SubmissionJournalEntry entry in entries)
+                    {
+                        writer.WriteLine(
+                            $"  {entry.Id} r{entry.Revision} [{entry.State}] "
+                            + $"{entry.LocalPlan.PackageIdentifier.Value} "
+                            + $"{entry.LocalPlan.PackageVersion.Value}"
+                            + (entry.RemoteState.PullRequestNumber is { } number
+                                ? $" PR #{number}"
+                                : ""));
+                    }
+                },
+                writer =>
+                {
+                    writer.WriteStartObject();
+                    writer.WriteStartArray("pendingSubmissions");
+                    foreach (SubmissionJournalEntry entry in entries)
+                    {
+                        writer.WriteStartObject();
+                        writer.WriteString("id", entry.Id);
+                        writer.WriteNumber("revision", entry.Revision);
+                        writer.WriteString(
+                            "state",
+                            MaintenanceCommandHelpers.ToCamelCase(entry.State));
+                        writer.WriteString(
+                            "packageIdentifier",
+                            entry.LocalPlan.PackageIdentifier.Value);
+                        writer.WriteString(
+                            "packageVersion",
+                            entry.LocalPlan.PackageVersion.Value);
+                        writer.WriteString(
+                            "upstreamRepository",
+                            entry.RemoteRequest.UpstreamRepository.ToString());
+                        if (entry.RemoteState.PullRequestNumber is { } number)
+                        {
+                            writer.WriteNumber("pullRequestNumber", number);
+                        }
+
+                        writer.WriteBoolean(
+                            "remoteOutcomeUncertain",
+                            entry.RemoteState.RemoteOutcomeUncertain);
+                        writer.WriteEndObject();
+                    }
+
+                    writer.WriteEndArray();
+                    writer.WriteEndObject();
+                });
+            return ExitCodes.Success;
+        });
     }
 
     private void RegisterSync(ICommandRegistry registry)
