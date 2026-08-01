@@ -123,6 +123,16 @@ internal sealed class ProductionMutationWorkflow(
             catch (Exception cleanupFailure) when (
                 cleanupFailure is IOException or UnauthorizedAccessException)
             {
+                if (primaryFailure is OperationCanceledException
+                    && cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(
+                        $"{primaryFailure.Message} Cleanup of the mutation artifact directory "
+                        + $"also failed: {cleanupFailure.Message}",
+                        new AggregateException(primaryFailure, cleanupFailure),
+                        cancellationToken);
+                }
+
                 throw new IOException(
                     $"{primaryFailure.Message} Cleanup of the mutation artifact directory also "
                     + $"failed: {cleanupFailure.Message}",
@@ -336,17 +346,31 @@ internal sealed class ProductionMutationWorkflow(
         var urls = ImmutableArray.CreateBuilder<string>();
         foreach (RawManifestDocument document in documents)
         {
-            string yaml = new UTF8Encoding(false, true).GetString(document.Content.AsSpan());
-            if (ManifestYamlReader.TryDetectType(yaml) != ManifestType.Installer)
+            try
             {
-                continue;
-            }
+                string yaml = new UTF8Encoding(false, true).GetString(document.Content.AsSpan());
+                if (ManifestYamlReader.TryDetectType(yaml) != ManifestType.Installer)
+                {
+                    continue;
+                }
 
-            InstallerManifest manifest = ManifestYamlReader.ReadInstaller(yaml);
-            urls.AddRange((manifest.Installers ?? [])
-                .Select(static installer => installer.InstallerUrl)
-                .OfType<string>()
-                .Where(static url => !string.IsNullOrWhiteSpace(url)));
+                InstallerManifest manifest = ManifestYamlReader.ReadInstaller(yaml);
+                urls.AddRange((manifest.Installers ?? [])
+                    .Select(static installer => installer.InstallerUrl)
+                    .OfType<string>()
+                    .Where(static url => !string.IsNullOrWhiteSpace(url)));
+            }
+            catch (Exception exception) when (
+                exception is DecoderFallbackException
+                    or FormatException
+                    or ArgumentException
+                    or InvalidOperationException
+                    or YamlDotNet.Core.YamlException)
+            {
+                // Prefetch is an optimization. Structured SubmitAsync validation owns malformed
+                // input diagnostics and must remain the user-facing failure path.
+                return [];
+            }
         }
 
         return urls

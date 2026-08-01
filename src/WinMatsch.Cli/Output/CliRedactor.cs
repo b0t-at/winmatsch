@@ -19,23 +19,11 @@ public static partial class CliRedactor
     public static string Redact(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        string redacted = ReplaceBounded(
-            value,
-            GitHubTokenPattern(),
-            static _ => Placeholder);
-        redacted = ReplaceBounded(
-            redacted,
-            JwtPattern(),
-            static match => IsJwt(match.Value) ? Placeholder : match.Value);
+        string redacted = RedactGitHubTokens(value);
+        redacted = RedactJwtCandidates(redacted);
         redacted = RedactSecretAssignments(redacted);
-        redacted = ReplaceBounded(
-            redacted,
-            AuthorizationPattern(),
-            static match => match.Groups[1].Value + Placeholder);
-        redacted = ReplaceBounded(
-            redacted,
-            UriUserInfoPattern(),
-            static match => match.Groups[1].Value + Placeholder + "@");
+        redacted = RedactAuthorizationValues(redacted);
+        redacted = RedactUrlUserInfo(redacted);
         return RedactQueryValues(redacted, redactAll: false);
     }
 
@@ -72,26 +60,219 @@ public static partial class CliRedactor
     }
 
     private static string RedactQueryValues(string value, bool redactAll)
-        => ReplaceBounded(
-            value,
-            QueryPairPattern(),
-            match =>
+    {
+        var replacements = new List<Replacement>();
+        for (int index = 0; index < value.Length; index++)
+        {
+            if (value[index] is not ('?' or '&'))
             {
-                string encodedKey = match.Groups["key"].Value;
-                string key;
-                try
+                continue;
+            }
+
+            int keyStart = index + 1;
+            int keyEnd = keyStart;
+            while (keyEnd < value.Length
+                   && value[keyEnd] is not ('=' or '&' or '#' or '\r' or '\n')
+                   && !char.IsWhiteSpace(value[keyEnd]))
+            {
+                keyEnd++;
+            }
+
+            if (keyEnd >= value.Length || value[keyEnd] != '=')
+            {
+                index = Math.Max(index, keyEnd - 1);
+                continue;
+            }
+
+            string encodedKey = value[keyStart..keyEnd];
+            string key;
+            try
+            {
+                key = Uri.UnescapeDataString(encodedKey);
+            }
+            catch (UriFormatException)
+            {
+                key = encodedKey;
+            }
+
+            int valueStart = keyEnd + 1;
+            int valueEnd = valueStart;
+            while (valueEnd < value.Length
+                   && value[valueEnd] is not ('&' or '#' or '\r' or '\n')
+                   && !char.IsWhiteSpace(value[valueEnd]))
+            {
+                valueEnd++;
+            }
+
+            if (valueEnd > valueStart && (redactAll || IsSensitiveQueryKey(key)))
+            {
+                replacements.Add(new(
+                    valueStart,
+                    valueEnd - valueStart,
+                    Placeholder));
+            }
+
+            index = Math.Max(index, valueEnd - 1);
+        }
+
+        return ApplyReplacements(value, replacements);
+    }
+
+    private static string RedactUrlUserInfo(string value)
+    {
+        var replacements = new List<Replacement>();
+        int search = 0;
+        while (search < value.Length)
+        {
+            int http = value.IndexOf("http://", search, StringComparison.OrdinalIgnoreCase);
+            int https = value.IndexOf("https://", search, StringComparison.OrdinalIgnoreCase);
+            int scheme = http < 0 ? https
+                : https < 0 ? http
+                : Math.Min(http, https);
+            if (scheme < 0)
+            {
+                break;
+            }
+
+            int authorityStart = scheme + (value.AsSpan(scheme).StartsWith(
+                "https://",
+                StringComparison.OrdinalIgnoreCase) ? 8 : 7);
+            int authorityEnd = authorityStart;
+            int at = -1;
+            while (authorityEnd < value.Length
+                   && value[authorityEnd] is not ('/' or '?' or '#' or '\r' or '\n')
+                   && !char.IsWhiteSpace(value[authorityEnd]))
+            {
+                if (value[authorityEnd] == '@')
                 {
-                    key = Uri.UnescapeDataString(encodedKey);
-                }
-                catch (UriFormatException)
-                {
-                    key = encodedKey;
+                    at = authorityEnd;
                 }
 
-                return redactAll || IsSensitiveQueryKey(key)
-                    ? match.Groups[1].Value + encodedKey + "=" + Placeholder
-                    : match.Value;
-            });
+                authorityEnd++;
+            }
+
+            if (at > authorityStart)
+            {
+                replacements.Add(new(
+                    authorityStart,
+                    at - authorityStart,
+                    Placeholder));
+            }
+
+            search = Math.Max(authorityEnd, authorityStart);
+        }
+
+        return ApplyReplacements(value, replacements);
+    }
+
+    private static string RedactGitHubTokens(string value)
+    {
+        string[] prefixes =
+        [
+            "ghp_",
+            "gho_",
+            "ghu_",
+            "ghs_",
+            "ghr_",
+            "github_pat_",
+        ];
+        var replacements = new List<Replacement>();
+        foreach (string prefix in prefixes)
+        {
+            int search = 0;
+            while ((search = value.IndexOf(prefix, search, StringComparison.Ordinal)) >= 0)
+            {
+                int end = search + prefix.Length;
+                while (end < value.Length
+                       && (char.IsAsciiLetterOrDigit(value[end]) || value[end] == '_'))
+                {
+                    end++;
+                }
+
+                if (end - search - prefix.Length >= 20)
+                {
+                    replacements.Add(new(search, end - search, Placeholder));
+                }
+
+                search = Math.Max(end, search + prefix.Length);
+            }
+        }
+
+        return ApplyReplacements(value, replacements);
+    }
+
+    private static string RedactJwtCandidates(string value)
+    {
+        var replacements = new List<Replacement>();
+        for (int start = 0; start < value.Length;)
+        {
+            if (!IsJwtCharacter(value[start]))
+            {
+                start++;
+                continue;
+            }
+
+            int end = start;
+            int dots = 0;
+            while (end < value.Length
+                   && (IsJwtCharacter(value[end]) || value[end] == '.'))
+            {
+                dots += value[end] == '.' ? 1 : 0;
+                end++;
+            }
+
+            if (dots == 2 && IsJwt(value[start..end]))
+            {
+                replacements.Add(new(start, end - start, Placeholder));
+            }
+
+            start = end;
+        }
+
+        return ApplyReplacements(value, replacements);
+
+        static bool IsJwtCharacter(char character)
+            => char.IsAsciiLetterOrDigit(character) || character is '_' or '-';
+    }
+
+    private static string RedactAuthorizationValues(string value)
+    {
+        var replacements = new List<Replacement>();
+        const string key = "authorization";
+        int search = 0;
+        while ((search = value.IndexOf(key, search, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            int index = search + key.Length;
+            while (index < value.Length && char.IsWhiteSpace(value[index]))
+            {
+                index++;
+            }
+
+            if (index < value.Length && value[index] is ':' or '=')
+            {
+                index++;
+                while (index < value.Length && char.IsWhiteSpace(value[index]))
+                {
+                    index++;
+                }
+            }
+
+            int end = index;
+            while (end < value.Length && value[end] is not ('\r' or '\n' or ',' or ';' or '}'))
+            {
+                end++;
+            }
+
+            if (end > index)
+            {
+                replacements.Add(new(index, end - index, Placeholder));
+            }
+
+            search = Math.Max(end, search + key.Length);
+        }
+
+        return ApplyReplacements(value, replacements);
+    }
 
     private static string RedactSecretAssignments(string input)
     {
@@ -237,7 +418,8 @@ public static partial class CliRedactor
                 valueEnd = index;
                 while (valueEnd < input.Length
                        && !char.IsWhiteSpace(input[valueEnd])
-                       && input[valueEnd] is not (',' or ';' or '}' or ']'))
+                       && input[valueEnd] is not (
+                           ',' or ';' or '}' or ']' or '&' or '#'))
                 {
                     valueEnd++;
                 }
@@ -421,33 +603,4 @@ public static partial class CliRedactor
 
     private readonly record struct Replacement(int Start, int Length, string Value);
 
-    [GeneratedRegex(
-        @"\b(?:gh[pousr]_[A-Za-z0-9_]{20,255}|github_pat_[A-Za-z0-9_]{20,255})\b",
-        RegexOptions.CultureInvariant,
-        RegexTimeoutMilliseconds)]
-    private static partial Regex GitHubTokenPattern();
-
-    [GeneratedRegex(
-        @"\b[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,1024}\b",
-        RegexOptions.CultureInvariant,
-        RegexTimeoutMilliseconds)]
-    private static partial Regex JwtPattern();
-
-    [GeneratedRegex(
-        @"\b(authorization\s*[:=]\s*(?:(?:bearer|basic|token)\s+)?)(?:\\?[""'][^""']{0,8192}\\?[""']|[^\s,;]{1,8192})",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
-        RegexTimeoutMilliseconds)]
-    private static partial Regex AuthorizationPattern();
-
-    [GeneratedRegex(
-        @"(https?://)[^/\s@]{1,8192}@",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
-        RegexTimeoutMilliseconds)]
-    private static partial Regex UriUserInfoPattern();
-
-    [GeneratedRegex(
-        @"([?&])(?<key>[^=\s&#]{1,1024})=(?<value>[^&\s#]{1,8192})",
-        RegexOptions.CultureInvariant,
-        RegexTimeoutMilliseconds)]
-    private static partial Regex QueryPairPattern();
 }

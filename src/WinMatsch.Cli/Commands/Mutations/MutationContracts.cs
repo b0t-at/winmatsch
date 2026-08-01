@@ -528,7 +528,15 @@ public sealed class EditorProcessRunner : IEditorProcessRunner
         {
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException) when (process.HasExited)
+                {
+                    // The editor exited between the state check and termination request.
+                }
+
                 await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
             }
 

@@ -229,6 +229,13 @@ internal static class MutationOutput
 
         writer.WriteLine(
             $"  remote outcome uncertain: {state.RemoteOutcomeUncertain.ToString().ToLowerInvariant()}");
+        writer.WriteLine(
+            $"  recovery required: {state.RecoveryRequired.ToString().ToLowerInvariant()}");
+        writer.WriteLine(
+            $"  last attempted operation: "
+            + (state.LastAttemptedOperation is { } operation
+                ? ToKebab(operation)
+                : "(none)"));
     }
 
     private static void WriteJson(
@@ -481,6 +488,14 @@ internal static class MutationOutput
         json.WriteBoolean("branchCreated", remote.RemoteState.BranchCreated);
         json.WriteBoolean("commitCreated", remote.RemoteState.CommitCreated);
         json.WriteBoolean("pullRequestCreated", remote.RemoteState.PullRequestCreated);
+        json.WriteBoolean("recoveryRequired", remote.RemoteState.RecoveryRequired);
+        CliJson.WriteNullableEnum(
+            json,
+            "lastAttemptedOperation",
+            remote.RemoteState.LastAttemptedOperation,
+            remote.RemoteState.LastAttemptedOperation is { } lastOperation
+                ? ToKebab(lastOperation)
+                : null);
         json.WriteBoolean("outcomeUncertain", remote.RemoteState.RemoteOutcomeUncertain);
         json.WriteEndObject();
         json.WriteStartArray("diagnostics");

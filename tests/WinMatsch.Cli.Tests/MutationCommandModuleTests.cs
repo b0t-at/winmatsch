@@ -613,7 +613,9 @@ public sealed class MutationCommandModuleTests
     {
         var workflow = new FakeMutationWorkflow
         {
-            Handler = Review,
+            Handler = request => request is SubmitOperationRequest
+                ? FakeMutationWorkflow.Result(request)
+                : Review(request),
         };
         CliHarness harness = CreateHarness(workflow);
         harness.Interaction.EnqueueConfirm(true);
@@ -929,6 +931,7 @@ public sealed class MutationCommandModuleTests
                     BranchName = "winmatsch/submissions/example",
                     BranchCreated = true,
                     LastAttemptedOperation = RemoteOperationKind.CreateCommit,
+                    RecoveryRequired = true,
                     RemoteOutcomeUncertain = true,
                 }),
         };
@@ -940,6 +943,11 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
         Assert.Single(submissions.Requests);
         Assert.Contains("\"outcomeUncertain\":true", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"recoveryRequired\":true", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains(
+            "\"lastAttemptedOperationCode\":\"createCommit\"",
+            result.StandardOutput,
+            StringComparison.Ordinal);
         Assert.Contains(
             "\"branch\":\"winmatsch/submissions/example\"",
             result.StandardOutput,

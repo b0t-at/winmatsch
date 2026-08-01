@@ -193,6 +193,48 @@ public sealed class SecretRedactionTests
         Assert.Contains(CliRedactor.Placeholder, result, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Overlength_credentials_are_redacted_through_their_delimiters()
+    {
+        string longSecret = new('x', 20 * 1024);
+        string jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            + longSecret
+            + ".signaturevalue";
+        string input = $"Authorization: Bearer {longSecret}; "
+            + $"https://example.test/file?token={longSecret}&page=2; {jwt}";
+
+        string result = CliRedactor.Redact(input);
+
+        Assert.DoesNotContain(longSecret, result, StringComparison.Ordinal);
+        Assert.DoesNotContain("signaturevalue", result, StringComparison.Ordinal);
+        Assert.Contains("page=2", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Overlength_url_userinfo_is_fully_redacted()
+    {
+        string secret = new('u', 20 * 1024);
+        string input = $"https://{secret}@example.test/file";
+
+        string result = CliRedactor.Redact(input);
+
+        Assert.DoesNotContain(secret, result, StringComparison.Ordinal);
+        Assert.Contains(CliRedactor.Placeholder + "@", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Query_scanning_handles_many_delimiters_in_one_forward_pass()
+    {
+        string input = "https://example.test/file?"
+            + new string('&', 1024 * 1024)
+            + "token=secret&page=2";
+
+        string result = CliRedactor.Redact(input);
+
+        Assert.DoesNotContain("token=secret", result, StringComparison.Ordinal);
+        Assert.Contains("page=2", result, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("Microsoft.VisualStudioCode.Insiders")]
     [InlineData("MongoDB.Compass.Community")]

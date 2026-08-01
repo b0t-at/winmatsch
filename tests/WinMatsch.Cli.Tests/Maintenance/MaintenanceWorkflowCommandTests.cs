@@ -703,6 +703,37 @@ public sealed class MaintenanceWorkflowCommandTests
     }
 
     [Fact]
+    public async Task Allowlisted_repair_preserves_replace_operation()
+    {
+        var workflow = new FakeMutationWorkflow();
+        GitHubSubmissionRequest? planned = null;
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule(async context =>
+        {
+            var planner = new AllowlistedApprovedRepairPlanner(
+                context,
+                new Dictionary<long, string> { [41] = "approved-directory" },
+                new FixedMutationWorkflowFactory(workflow),
+                new FakeManifestLoader());
+            PullRequestInfo pullRequest = MaintenancePullRequests.ToolOwned(41) with
+            {
+                Body = "<!-- winmatsch:package=Example.App;version=1.0 -->\n"
+                    + "Operation: Replace",
+            };
+            planned = await planner.PlanApprovedRepairAsync(
+                Assert.Single(MaintenancePullRequests.Observe(pullRequest)),
+                FeedbackClassification.HashMismatch,
+                context.CancellationToken);
+            return ExitCodes.Success;
+        }));
+
+        CliRunResult result = await harness.RunAsync(["probe"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(GitHubManifestOperation.Replace, planned!.Operation);
+    }
+
+    [Fact]
     public async Task Replay_cancellation_maps_to_130_and_preserves_pending_state()
     {
         FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");

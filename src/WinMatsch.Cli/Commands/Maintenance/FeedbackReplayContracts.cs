@@ -85,7 +85,8 @@ public sealed class AllowlistedApprovedRepairPlanner(
             return null;
         }
 
-        (PackageIdentifier identifier, PackageVersion version) = ParseAssociation(
+        (PackageIdentifier identifier, PackageVersion version, GitHubManifestOperation operation) =
+            ParseAssociation(
             pullRequest.PullRequest.Body);
         ImmutableArray<RawManifestDocument> documents = await loader.LoadAsync(
             directory,
@@ -120,7 +121,7 @@ public sealed class AllowlistedApprovedRepairPlanner(
             LocalPlan = local.Plan,
             UpstreamRepository = context.Configuration.Repository,
             ExecutionMode = WorkflowExecutionMode.Apply,
-            Operation = GitHubManifestOperation.Update,
+            Operation = operation,
             Policy = new()
             {
                 ForkConsent = ForkConsentPolicy.ExistingOnly,
@@ -132,7 +133,10 @@ public sealed class AllowlistedApprovedRepairPlanner(
         };
     }
 
-    private static (PackageIdentifier Identifier, PackageVersion Version) ParseAssociation(
+    private static (
+        PackageIdentifier Identifier,
+        PackageVersion Version,
+        GitHubManifestOperation Operation) ParseAssociation(
         string? body)
     {
         const string marker = "<!-- winmatsch:package=";
@@ -149,10 +153,26 @@ public sealed class AllowlistedApprovedRepairPlanner(
         string package = parts[0];
         string? version = parts.FirstOrDefault(static part =>
             part.StartsWith("version=", StringComparison.Ordinal))?["version=".Length..];
+        GitHubManifestOperation operation = GitHubManifestOperation.Update;
+        string? operationLine = body!.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n')
+            .FirstOrDefault(static line =>
+                line.StartsWith("Operation:", StringComparison.OrdinalIgnoreCase));
+        if (operationLine is not null
+            && !Enum.TryParse(
+                operationLine["Operation:".Length..].Trim(),
+                ignoreCase: true,
+                out operation))
+        {
+            throw new CliOperationException(
+                "Approved repair pull request contains an unknown operation.");
+        }
+
         return (
             new PackageIdentifier(package),
             new PackageVersion(version
                 ?? throw new CliOperationException(
-                    "Approved repair association marker is missing the version.")));
+                    "Approved repair association marker is missing the version.")),
+            operation);
     }
 }

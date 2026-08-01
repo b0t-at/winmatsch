@@ -525,6 +525,7 @@ public sealed class MutationCommandModule : ICommandModule
                 });
                 local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
                 if (approvedReviewFingerprint is not null
+                    && !local.Plan.Rules.Reviews.IsEmpty
                     && !string.Equals(
                         approvedReviewFingerprint,
                         ReviewFingerprint(local.Plan),
