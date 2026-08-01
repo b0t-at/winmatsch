@@ -277,6 +277,24 @@ public sealed class PackageVersionResolverTests
     }
 
     [Fact]
+    public void Self_extractor_pe_versions_are_not_trusted_without_independent_corroboration()
+    {
+        InstallerVersionTrustDecision decision = InstallerVersionTrustEvaluator.Evaluate(
+            new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.GenericInstallerExe,
+                ProductVersion = "19.00",
+                FileVersion = "19.00",
+                IsSelfExtractorStub = true,
+                Installers = [new Installer { Architecture = Architecture.X64, InstallerType = InstallerType.Exe }],
+            },
+            new InstallerVersionTrustPolicy());
+
+        Assert.False(decision.IsTrustworthy);
+        Assert.Contains("Self-extractor", decision.Diagnostic, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Explicit_file_version_source_can_override_valid_product_version()
     {
         PackageIdentifier package = new("Vendor.Product");

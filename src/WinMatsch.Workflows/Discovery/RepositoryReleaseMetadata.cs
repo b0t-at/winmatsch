@@ -109,6 +109,15 @@ public sealed class GitHubRepositoryReleaseMetadataSource(
                 "private-or-forbidden",
                 "GitHub repository metadata requires additional repository access.");
         }
+        catch (OperationCanceledException)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            return Unavailable(
+                repository,
+                RepositoryMetadataAvailability.Unavailable,
+                "error:OperationCanceledException",
+                "GitHub repository metadata timed out; explicit package metadata remains authoritative.");
+        }
         catch (Exception exception)
             when (exception is GitHubApiException
                 or HttpRequestException

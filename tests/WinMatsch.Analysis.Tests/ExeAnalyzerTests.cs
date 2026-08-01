@@ -109,6 +109,8 @@ public class ExeAnalyzerTests
     [Theory]
     [InlineData("FooInstaller.exe")]
     [InlineData("foo-SETUP.exe")]
+    [InlineData("7z.sfx")]
+    [InlineData("7zCon.sfx")]
     [InlineData("7zs.sfx")]
     [InlineData("7zSD.sfx")]
     public void Installer_keywords_in_original_filename_are_detected(string originalFilename)
@@ -119,6 +121,26 @@ public class ExeAnalyzerTests
         InstallerAnalysis analysis = _analyzer.Analyze(stream, "foo.exe");
 
         Assert.Equal(DetectedInstallerFormat.GenericInstallerExe, analysis.Format);
+    }
+
+    [Theory]
+    [InlineData("7z.sfx")]
+    [InlineData("7zCon.sfx")]
+    [InlineData("7zS.sfx")]
+    [InlineData("7zs.sfx")]
+    [InlineData("7zsd.sfx")]
+    [InlineData("7zS2.sfx")]
+    [InlineData("7zS2con.sfx")]
+    public void Seven_zip_self_extractors_are_marked_as_stub_version_sources(string originalFilename)
+    {
+        using MemoryStream stream = PeFixtures.BuildExeStream(version: new VersionStrings(
+            OriginalFilename: originalFilename,
+            ProductVersion: "24.09",
+            FileVersion: "24.09"));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "foo.exe");
+
+        Assert.True(analysis.IsSelfExtractorStub);
     }
 
     [Fact]

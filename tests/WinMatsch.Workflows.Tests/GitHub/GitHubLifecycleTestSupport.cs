@@ -59,6 +59,20 @@ internal static class GitHubLifecycleTestSupport
         };
     }
 
+    public static LocalOperationPlan SynchronizePreflight(LocalOperationPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return plan with
+        {
+            Preflight = plan.Preflight with
+            {
+                BeforeDocuments = plan.BeforeDocuments,
+                AfterDocuments = plan.AfterDocuments,
+                Changes = plan.FileChanges,
+            },
+        };
+    }
+
     public static GitHubSubmissionRequest Request(
         WorkflowExecutionMode mode = WorkflowExecutionMode.Apply,
         GitHubSubmissionPolicy? policy = null,
@@ -127,8 +141,10 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     private readonly Dictionary<RepositoryCoordinates, RepositoryInfo> _repositories = [];
     private readonly Dictionary<(RepositoryCoordinates Repository, string Branch), GitReference> _references = [];
     private readonly Dictionary<(RepositoryCoordinates Repository, string Path, string Reference), byte[]> _contents = [];
+    private readonly Dictionary<(RepositoryCoordinates Repository, string Treeish, bool Recursive), IReadOnlyList<RepositoryTreeEntry>> _trees = [];
     private readonly Dictionary<long, IReadOnlyList<PullRequestChangedFile>> _pullRequestFiles = [];
     private readonly List<PullRequestInfo> _pullRequests = [];
+    private ServerCommitRequest? _lastCommitRequest;
     private EventHandler<RateLimitInfo>? _rateLimitObserved;
 
     public FakeGitHubClient(bool includeFork = true)
@@ -169,9 +185,13 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public int ContentCalls { get; private set; }
 
+    public List<(RepositoryCoordinates Repository, string Path, string Reference)> ContentRequests { get; } = [];
+
     public int PullRequestHeadContentCalls { get; private set; }
 
     public int PullRequestFilesCalls { get; private set; }
+
+    public List<(RepositoryCoordinates Repository, string Treeish, bool Recursive)> TreeCalls { get; } = [];
 
     public bool PullRequestChangedFilesUnsupported { get; set; }
 
@@ -194,6 +214,12 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     public bool ForkAhead { get; set; }
 
     public bool BranchCreatedBeforeFailure { get; set; }
+
+    public bool CommitCreatedBeforeFailure { get; set; }
+
+    public Exception? TreeFailure { get; set; }
+
+    public bool AutoConfigureCanonicalPullRequestEvidence { get; set; } = true;
 
     public string PullRequestHeadSha { get; set; } = GitHubLifecycleTestSupport.CommitSha;
 
@@ -226,6 +252,19 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         }
 
         _pullRequests.Add(pullRequest);
+        if (AutoConfigureCanonicalPullRequestEvidence
+            && GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                pullRequest.Title,
+                new PackageIdentifier("Example.App"),
+                new PackageVersion("2.0.0"))
+            && pullRequest.HeadRepository is { } evidenceRepository)
+        {
+            WorkflowFileChange change = GitHubLifecycleTestSupport.Plan().FileChanges[0];
+            _contents[(evidenceRepository, change.RepositoryPath, pullRequest.HeadSha)] =
+                change.Content.ToArray();
+            _pullRequestFiles[pullRequest.Number] =
+                [new PullRequestChangedFile(change.RepositoryPath)];
+        }
     }
 
     public void UpdatePullRequest(long number, Func<PullRequestInfo, PullRequestInfo> update)
@@ -301,6 +340,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     {
         cancellationToken.ThrowIfCancellationRequested();
         ContentCalls++;
+        ContentRequests.Add((repository, path, reference));
         if (repository != GitHubLifecycleTestSupport.Upstream)
         {
             PullRequestHeadContentCalls++;
@@ -336,7 +376,18 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         string treeish,
         bool recursive = true,
         CancellationToken cancellationToken = default)
-        => Task.FromResult<IReadOnlyList<RepositoryTreeEntry>>([]);
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        TreeCalls.Add((repository, treeish, recursive));
+        if (TreeFailure is not null)
+        {
+            return Task.FromException<IReadOnlyList<RepositoryTreeEntry>>(TreeFailure);
+        }
+
+        return Task.FromResult(
+            _trees.GetValueOrDefault((repository, treeish, recursive))
+            ?? (IReadOnlyList<RepositoryTreeEntry>)[]);
+    }
 
     public Task<IReadOnlyList<ManifestFile>> GetManifestFilesAsync(
         RepositoryCoordinates repository,
@@ -443,6 +494,34 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         MutationRequest mutation,
         CancellationToken cancellationToken = default)
     {
+        if (CommitCreatedBeforeFailure && FailMutation == "commit")
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_references.TryGetValue((repository, request.BranchName), out GitReference? created)
+                || !string.Equals(created.Sha, request.ExpectedHeadSha, StringComparison.Ordinal))
+            {
+                return Task.FromException<ServerCommitResult>(new GitHubApiException(
+                    "expected head mismatch",
+                    HttpStatusCode.Conflict,
+                    null));
+            }
+
+            Mutations.Add("commit");
+            _lastCommitRequest = request;
+            _references[(repository, request.BranchName)] =
+                new(request.BranchName, GitHubLifecycleTestSupport.CommitSha);
+            foreach (CommitFileAddition addition in request.Additions)
+            {
+                _contents[(repository, addition.Path, GitHubLifecycleTestSupport.CommitSha)] =
+                    addition.Contents.ToArray();
+            }
+
+            throw new GitHubApiException(
+                "Synthetic commit response loss",
+                HttpStatusCode.ServiceUnavailable,
+                null);
+        }
+
         BeforeMutation("commit", cancellationToken);
         LastCommitMutationKey = mutation.IdempotencyKey;
         if (!_references.TryGetValue((repository, request.BranchName), out GitReference? current)
@@ -456,6 +535,12 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
         _references[(repository, request.BranchName)] =
             new(request.BranchName, GitHubLifecycleTestSupport.CommitSha);
+        _lastCommitRequest = request;
+        foreach (CommitFileAddition addition in request.Additions)
+        {
+            _contents[(repository, addition.Path, GitHubLifecycleTestSupport.CommitSha)] =
+                addition.Contents.ToArray();
+        }
         return Task.FromResult(new ServerCommitResult(
             GitHubLifecycleTestSupport.CommitSha,
             new Uri($"https://github.invalid/{repository}/commit/{GitHubLifecycleTestSupport.CommitSha}")));
@@ -579,8 +664,25 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
             request.BaseBranch,
             new Uri("https://github.invalid/upstream/repo/pull/42"),
             DateTimeOffset.UtcNow,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow)
+        {
+            HeadRepository = new RepositoryCoordinates(
+                request.HeadOwner,
+                GitHubLifecycleTestSupport.Upstream.Name),
+            BaseSha = GitHubLifecycleTestSupport.UpstreamSha,
+        };
         _pullRequests.Add(result);
+        if (_lastCommitRequest is not null)
+        {
+            _pullRequestFiles[result.Number] =
+            [
+                .. _lastCommitRequest.Additions.Select(static addition =>
+                    new PullRequestChangedFile(addition.Path)),
+                .. _lastCommitRequest.Deletions.Select(static path =>
+                    new PullRequestChangedFile(path)),
+            ];
+        }
+
         return Task.FromResult(result);
     }
 
@@ -657,6 +759,13 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         string reference,
         ReadOnlySpan<byte> content)
         => _contents[(repository, path, reference)] = content.ToArray();
+
+    public void SetTree(
+        RepositoryCoordinates repository,
+        string treeish,
+        bool recursive,
+        params RepositoryTreeEntry[] entries)
+        => _trees[(repository, treeish, recursive)] = entries;
 
     public void SetPullRequestChangedFiles(long number, params string[] paths)
         => _pullRequestFiles[number] = [.. paths.Select(static path => new PullRequestChangedFile(path))];
@@ -736,6 +845,21 @@ internal sealed class FakePreflight : IWorkflowPreflight
     }
 }
 
+internal sealed class FakeSubmissionProgressSink : ISubmissionProgressSink
+{
+    public List<SubmissionJournalState> States { get; } = [];
+
+    public Task RecordAsync(
+        RemoteMutationState remoteState,
+        SubmissionJournalState state,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        States.Add(state);
+        return Task.CompletedTask;
+    }
+}
+
 internal sealed class FakeArtifactRevalidator : IFinalArtifactRevalidator
 {
     public int Calls { get; private set; }
@@ -756,6 +880,8 @@ internal sealed class FakeArtifactRevalidator : IFinalArtifactRevalidator
 internal sealed class FakeRepositorySubmissionEvidenceProvider
     : IRepositorySubmissionEvidenceProvider
 {
+    public Exception? Failure { get; init; }
+
     public RepositorySubmissionEvidence Evidence { get; init; } =
         RepositorySubmissionEvidence.Empty;
 
@@ -768,6 +894,11 @@ internal sealed class FakeRepositorySubmissionEvidenceProvider
     {
         cancellationToken.ThrowIfCancellationRequested();
         Calls++;
+        if (Failure is not null)
+        {
+            return Task.FromException<RepositorySubmissionEvidence>(Failure);
+        }
+
         return Task.FromResult(Evidence);
     }
 }

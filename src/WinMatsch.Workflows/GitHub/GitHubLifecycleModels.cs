@@ -128,7 +128,7 @@ public sealed record GitHubSubmissionPolicy
 
     public PackageVersion? PreviousVersion { get; init; }
 
-    public TimeSpan MinimumReleaseFreshness { get; init; } = TimeSpan.FromHours(3);
+    public TimeSpan MinimumReleaseFreshness { get; init; } = TimeSpan.FromHours(4);
 
     public DuplicateHashPolicy DuplicateHashes { get; init; } = new();
 }

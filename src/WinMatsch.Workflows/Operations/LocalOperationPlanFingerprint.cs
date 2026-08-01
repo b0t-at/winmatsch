@@ -223,6 +223,21 @@ public static class LocalOperationPlanFingerprint
             }
         }
 
+        AddDocuments(writer, "preflight-before", request.BeforeDocuments);
+        AddDocuments(writer, "preflight-after", request.AfterDocuments);
+        writer.Add("preflight-change-count", request.Changes.Length);
+        foreach (WorkflowFileChange change in request.Changes
+                     .OrderBy(static change => change.RepositoryPath, StringComparer.Ordinal)
+                     .ThenBy(static change => change.Kind))
+        {
+            writer.Add("preflight-change-kind", change.Kind.ToString());
+            writer.Add("preflight-change-path", change.RepositoryPath);
+            writer.Add("preflight-change-expected-state", change.ExpectedState.ToString());
+            writer.Add("preflight-change-expected-sha256", change.ExpectedSha256);
+            writer.Add("preflight-change-provenance", change.Provenance.ToString());
+            writer.Add("preflight-change-content", change.Content.AsSpan());
+        }
+
         return writer.Finish();
     }
 

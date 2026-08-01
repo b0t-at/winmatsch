@@ -126,9 +126,9 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
     {
         if (pack.LearnedFields.IsDefaultOrEmpty
             || !ManifestSnapshot.TryCapture(previous, out ManifestSnapshot before)
-            || !ManifestSnapshot.TryCapture(
-                context.GeneratedInput ?? context.Manifests,
-                out ManifestSnapshot generated))
+            || !ManifestSnapshot.TryClone(context.Manifests, out PackageManifests? preOverride)
+            || preOverride is null
+            || !ManifestSnapshot.TryCapture(preOverride, out ManifestSnapshot generated))
         {
             return;
         }
@@ -151,7 +151,7 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
                 ApplyLearnedInstallerField(
                     context,
                     previous,
-                    context.GeneratedInput ?? context.Manifests,
+                    preOverride,
                     learned);
                 continue;
             }

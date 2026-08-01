@@ -100,6 +100,48 @@ public sealed class SubmissionRecoveryContractTests
     }
 
     [Fact]
+    public void Fingerprint_binds_preflight_documents_and_changes_to_exact_commit_bytes()
+    {
+        LocalOperationPlan baseline = Plan();
+        WorkflowFileChange change = baseline.FileChanges[0];
+        LocalOperationPlan documentChanged = baseline with
+        {
+            Preflight = baseline.Preflight with
+            {
+                AfterDocuments =
+                [
+                    new RawManifestDocument(change.RepositoryPath, "different document bytes"u8),
+                ],
+            },
+        };
+        LocalOperationPlan changeChanged = baseline with
+        {
+            Preflight = baseline.Preflight with
+            {
+                Changes =
+                [
+                    new WorkflowFileChange(
+                        change.Kind,
+                        change.RepositoryPath,
+                        "different commit bytes"u8,
+                        change.ExpectedState,
+                        change.ExpectedSha256,
+                        change.Provenance),
+                ],
+            },
+        };
+
+        Assert.NotEqual(
+            LocalOperationPlanFingerprint.CreatePreflightFingerprint(baseline.Preflight),
+            LocalOperationPlanFingerprint.CreatePreflightFingerprint(documentChanged.Preflight));
+        Assert.NotEqual(
+            LocalOperationPlanFingerprint.CreatePreflightFingerprint(baseline.Preflight),
+            LocalOperationPlanFingerprint.CreatePreflightFingerprint(changeChanged.Preflight));
+        Assert.NotEqual(baseline.Fingerprint, documentChanged.Fingerprint);
+        Assert.NotEqual(baseline.Fingerprint, changeChanged.Fingerprint);
+    }
+
+    [Fact]
     public async Task Verified_apply_rejects_a_plan_mutated_after_approval()
     {
         using var repository = new TemporaryDirectory();

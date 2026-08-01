@@ -25,8 +25,12 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
     ];
 
     // An EXE whose OriginalFilename or FileDescription contains one of these is treated as an
-    // installer; everything else is portable. "7zs.sfx"/"7zsd.sfx" are 7-Zip self-extractor stubs.
-    private static readonly string[] _installerKeywords = ["installer", "setup", "7zs.sfx", "7zsd.sfx"];
+    // installer; everything else is portable. The 7-Zip SFX module names are self-extractor stubs.
+    private static readonly string[] _sevenZipSfxModuleNames =
+        ["7z.sfx", "7zCon.sfx", "7zS.sfx", "7zSD.sfx", "7zS2.sfx", "7zS2con.sfx"];
+
+    private static readonly string[] _installerKeywords =
+        ["installer", "setup", .. _sevenZipSfxModuleNames];
 
     /// <summary>The explicit production probe order, exposed internally for registry tests.</summary>
     internal static IReadOnlyList<IExeFormatProbe> Probes => _probes;
@@ -56,6 +60,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
                     Publisher = probed.Publisher,
                     ProductVersion = probed.ProductVersion,
                     FileVersion = probed.FileVersion ?? version.FileVersion,
+                    IsSelfExtractorStub = probed.IsSelfExtractorStub,
                     Copyright = probed.Copyright,
                     Zip = probed.Zip,
                     Diagnostics = probed.Diagnostics,
@@ -65,6 +70,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
 
         bool isInstaller = ContainsInstallerKeyword(version.OriginalFilename)
             || ContainsInstallerKeyword(version.FileDescription);
+        bool isSelfExtractorStub = IsSelfExtractorStub(version);
 
         return new InstallerAnalysis
         {
@@ -74,6 +80,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
             Publisher = version.CompanyName,
             ProductVersion = version.ProductVersion,
             FileVersion = version.FileVersion,
+            IsSelfExtractorStub = isSelfExtractorStub,
             Copyright = version.LegalCopyright,
         };
     }
@@ -127,4 +134,12 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
 
         return false;
     }
+
+    private static bool IsSelfExtractorStub(VersionInfo version)
+        => IsSelfExtractorStubName(version.OriginalFilename)
+            || IsSelfExtractorStubName(version.FileDescription);
+
+    private static bool IsSelfExtractorStubName(string? value)
+        => !string.IsNullOrWhiteSpace(value)
+            && _sevenZipSfxModuleNames.Contains(value, StringComparer.OrdinalIgnoreCase);
 }

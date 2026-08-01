@@ -10,6 +10,7 @@ public enum GitHubApiErrorKind
     GraphQlUnavailable,
     ForkNotReady,
     RateLimited,
+    TreeTruncated,
 }
 
 /// <summary>An unsuccessful GitHub REST or GraphQL operation.</summary>

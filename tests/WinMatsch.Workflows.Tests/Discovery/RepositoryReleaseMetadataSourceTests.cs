@@ -116,6 +116,23 @@ public sealed class RepositoryReleaseMetadataSourceTests
     }
 
     [Fact]
+    public async Task Transport_timeout_is_unavailable_without_masking_caller_cancellation()
+    {
+        var client = new FakeGitHubClient
+        {
+            RepositoryMetadataFailure = new OperationCanceledException("timed out"),
+        };
+
+        RepositoryReleaseMetadata metadata =
+            await new GitHubRepositoryReleaseMetadataSource(client).GetAsync(
+                _repository,
+                CancellationToken.None);
+
+        Assert.Equal(RepositoryMetadataAvailability.Unavailable, metadata.Availability);
+        Assert.Contains("OperationCanceledException", metadata.Provenance, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Workflow_metadata_bounds_topics_and_release_notes_to_schema_limits()
     {
         var releaseUri = new Uri("https://github.com/example/app/releases/tag/v1");

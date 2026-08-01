@@ -320,7 +320,10 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         if (tree.Truncated)
         {
             throw new GitHubApiException(
-                $"GitHub truncated tree '{treeish}'. Query a narrower subtree.");
+                $"GitHub truncated tree '{treeish}'. Query a narrower subtree.",
+                statusCode: null,
+                requestId: null,
+                errorKind: GitHubApiErrorKind.TreeTruncated);
         }
 
         return tree.Tree.Select(static entry => new RepositoryTreeEntry(

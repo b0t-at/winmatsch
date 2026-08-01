@@ -134,6 +134,10 @@ public sealed class LinuxSecretServiceTokenStore : ITokenStore
 
         try
         {
+            Task<string> readStandardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            Task drainStandardError = process.StandardError.BaseStream.CopyToAsync(
+                Stream.Null,
+                cancellationToken);
             if (secretForStdin is not null)
             {
                 // The secret is written without a trailing newline so it round-trips byte-exact.
@@ -142,9 +146,11 @@ public sealed class LinuxSecretServiceTokenStore : ITokenStore
             }
 
             process.StandardInput.Close();
-            string output = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            return (process.ExitCode, output);
+            await Task.WhenAll(
+                readStandardOutput,
+                drainStandardError,
+                process.WaitForExitAsync(cancellationToken)).ConfigureAwait(false);
+            return (process.ExitCode, await readStandardOutput.ConfigureAwait(false));
         }
         catch (OperationCanceledException)
         {

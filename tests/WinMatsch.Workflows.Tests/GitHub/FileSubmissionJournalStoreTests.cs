@@ -100,6 +100,16 @@ public sealed class FileSubmissionJournalStoreTests
         Assert.True(
             request.LocalPlan.FileChanges[0].Content.AsSpan().SequenceEqual(
                 materialized.LocalPlan.FileChanges[0].Content.AsSpan()));
+        Assert.True(
+            materialized.LocalPlan.FileChanges[0].Content.AsSpan().SequenceEqual(
+                materialized.LocalPlan.Preflight.Changes[0].Content.AsSpan()));
+        Assert.True(
+            materialized.LocalPlan.AfterDocuments[0].Content.AsSpan().SequenceEqual(
+                materialized.LocalPlan.Preflight.AfterDocuments[0].Content.AsSpan()));
+        Assert.Equal(
+            LocalOperationPlanFingerprint.CreatePreflightFingerprint(
+                materialized.LocalPlan.Preflight),
+            entry.LocalPlan.PreflightEvidenceFingerprint);
 
         string path = LocalPath(materialized.LocalPlan);
         await File.AppendAllTextAsync(path, "tampered");

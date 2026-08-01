@@ -164,7 +164,7 @@ public sealed class ApplyOverridePackFieldsRuleTests
     }
 
     [Fact]
-    public void Generic_preservation_cannot_bypass_learned_bot_value_cas()
+    public void Generic_preservation_is_the_learned_cas_pre_override_state()
     {
         PackageManifests previous = Create("1.0.0");
         previous.DefaultLocale.PublisherUrl = "https://human.example.test";
@@ -196,13 +196,11 @@ public sealed class ApplyOverridePackFieldsRuleTests
             packs).Run(context);
 
         Assert.Equal("https://human.example.test", current.DefaultLocale.PublisherUrl);
-        Assert.Contains(
-            context.Findings,
-            finding => finding.Message.Contains("review it again", StringComparison.Ordinal));
+        Assert.Empty(context.Findings);
     }
 
     [Fact]
-    public void Earlier_production_preservation_cannot_bypass_learned_cas()
+    public void Learned_cas_uses_the_pre_override_manifest_state()
     {
         PackageManifests previous = Create("1.0.0");
         previous.DefaultLocale.Description = "human description";
@@ -236,9 +234,7 @@ public sealed class ApplyOverridePackFieldsRuleTests
             packs).Run(context);
 
         Assert.Equal("human description", current.DefaultLocale.Description);
-        Assert.Contains(
-            context.Findings,
-            finding => finding.Message.Contains("review it again", StringComparison.Ordinal));
+        Assert.Empty(context.Findings);
     }
 
     [Fact]
@@ -303,6 +299,7 @@ public sealed class ApplyOverridePackFieldsRuleTests
         PackageManifests previous = Create("1.0.0");
         previous.Installer.Installers![0].Architecture = Architecture.X86;
         previous.Installer.Installers[0].Scope = Scope.Machine;
+        previous.Installer.Installers[0].ProductCode = "first-installer";
         previous.Installer.Installers.Add(new Installer
         {
             Architecture = Architecture.X64,
@@ -310,17 +307,21 @@ public sealed class ApplyOverridePackFieldsRuleTests
             Scope = Scope.User,
             InstallerUrl = previous.Installer.Installers[0].InstallerUrl,
             InstallerSha256 = new Sha256Hash(new string('B', 64)),
+            ProductCode = "second-installer",
         });
         PackageManifests current = Create("2.0.0");
         current.Installer.Installers![0].Architecture = Architecture.X64;
         current.Installer.Installers[0].Scope = Scope.User;
+        current.Installer.Installers[0].InstallerSha256 = new Sha256Hash(new string('C', 64));
+        current.Installer.Installers[0].ProductCode = "first-installer";
         current.Installer.Installers.Add(new Installer
         {
             Architecture = Architecture.X64,
             InstallerType = InstallerType.Exe,
             Scope = Scope.User,
             InstallerUrl = current.Installer.Installers[0].InstallerUrl,
-            InstallerSha256 = new Sha256Hash(new string('B', 64)),
+            InstallerSha256 = new Sha256Hash(new string('D', 64)),
+            ProductCode = "second-installer",
         });
         string architectureSelector = LearnedInstallerSelector.Create(previous, 0, "Architecture");
         string scopeSelector = LearnedInstallerSelector.Create(previous, 0, "Scope");
@@ -352,6 +353,53 @@ public sealed class ApplyOverridePackFieldsRuleTests
         Assert.Equal(Architecture.X86, current.Installer.Installers![0].Architecture);
         Assert.Equal(Scope.Machine, current.Installer.Installers[0].Scope);
         Assert.Empty(context.Findings);
+    }
+
+    [Fact]
+    public void Ambiguous_duplicate_url_identity_is_rejected_before_a_learned_value_can_retarget()
+    {
+        PackageManifests previous = Create("1.0.0");
+        Installer firstPrevious = previous.Installer.Installers![0];
+        firstPrevious.Architecture = Architecture.X86;
+        previous.Installer.Installers.Add(new Installer
+        {
+            Architecture = Architecture.X64,
+            InstallerType = firstPrevious.InstallerType,
+            InstallerUrl = firstPrevious.InstallerUrl,
+            InstallerSha256 = firstPrevious.InstallerSha256,
+        });
+        PackageManifests current = Create("2.0.0");
+        Installer firstCurrent = current.Installer.Installers![0];
+        firstCurrent.Architecture = Architecture.X64;
+        current.Installer.Installers.Add(new Installer
+        {
+            Architecture = Architecture.X86,
+            InstallerType = firstCurrent.InstallerType,
+            InstallerUrl = firstCurrent.InstallerUrl,
+            InstallerSha256 = firstCurrent.InstallerSha256,
+        });
+        string selector = LearnedInstallerSelector.Create(previous, 0, "Architecture");
+        Assert.Equal(selector, LearnedInstallerSelector.Create(previous, 1, "Architecture"));
+        var pack = new OverridePack
+        {
+            PackageIdentifier = current.Version.PackageIdentifier!,
+            LearnedFields =
+            [
+                Learned(
+                    "Installers{installer:stable#0}.Architecture",
+                    "x86",
+                    "x64",
+                    selector),
+            ],
+        };
+        var context = new ManifestContext { Manifests = current, Previous = previous };
+
+        new ApplyOverridePackFieldsRule(new OverridePackSet([pack])).Apply(context);
+
+        Assert.Equal(Architecture.X64, current.Installer.Installers[0].Architecture);
+        Assert.Contains(
+            context.Findings,
+            finding => finding.Message.Contains("matched 2 previous installers", StringComparison.Ordinal));
     }
 
     private static LearnedFieldOverride Learned(

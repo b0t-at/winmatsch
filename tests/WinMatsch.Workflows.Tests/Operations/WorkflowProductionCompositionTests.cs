@@ -195,6 +195,37 @@ public sealed class WorkflowProductionCompositionTests
     }
 
     [Fact]
+    public async Task Composed_github_apply_uses_pinned_repository_submission_evidence()
+    {
+        var client = new FakeGitHubClient();
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            GitHubRepositorySubmissionEvidenceProvider.PolicyPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            Encoding.UTF8.GetBytes(
+                """{"retiredIdentifiers":["Example.App"]}"""));
+        var handler = new StubHttpMessageHandler(_ =>
+            throw new InvalidOperationException(
+                "Retired repository evidence must block before artifact network."));
+        using var downloader = new InstallerDownloader(handler);
+        GitHubLifecycleWorkflow workflow = WorkflowProductionComposition.CreateGitHubLifecycle(
+            client,
+            downloader);
+
+        GitHubLifecycleResult result = await workflow.ExecuteAsync(
+            GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.InvalidPlan, result.Code);
+        Assert.Contains(result.Diagnostics, static diagnostic => diagnostic.Code == "GH1013");
+        Assert.Empty(client.Mutations);
+        Assert.Empty(handler.Requests);
+        Assert.Contains(
+            client.ContentRequests,
+            request => request.Path == GitHubRepositorySubmissionEvidenceProvider.PolicyPath
+                && request.Reference == GitHubLifecycleTestSupport.UpstreamSha);
+    }
+
+    [Fact]
     public async Task Composed_github_apply_revalidates_deleted_local_artifacts_before_mutation()
     {
         byte[] executable = await File.ReadAllBytesAsync(

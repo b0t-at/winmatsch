@@ -743,34 +743,18 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
                     "downloads")
                 : null,
         });
-        GitHubSubmissionRequest request = await SubmissionJournalMaterializer.MaterializeAsync(
+        VerifiedSubmissionRecoveryRequest recovery =
+            await SubmissionJournalMaterializer.MaterializeVerifiedAsync(
             entry,
             gitHub,
             cancellationToken).ConfigureAwait(false);
         GitHubLifecycleWorkflow workflow =
             WorkflowProductionComposition.CreateGitHubLifecycle(gitHub, downloader);
         var progress = new JournalProgressSink(_journals, entry);
-        GitHubLifecycleResult result;
-        if (entry.RemoteState.RemoteOutcomeUncertain)
-        {
-            result = new()
-            {
-                Code = GitHubLifecycleResultCode.HumanEscalationRequired,
-                Plan = GitHubLifecycleWorkflow.Plan(request),
-                RemoteState = entry.RemoteState,
-                Diagnostics =
-                [
-                    new(
-                        "GH2035",
-                        "The previous remote mutation outcome is uncertain; automatic retry is forbidden."),
-                ],
-            };
-        }
-        else
-        {
-            result = await workflow.ExecuteAsync(request, progress, cancellationToken)
-                .ConfigureAwait(false);
-        }
+        GitHubLifecycleResult result = await workflow.ExecuteJournaledAsync(
+            recovery,
+            progress,
+            cancellationToken).ConfigureAwait(false);
 
         SubmissionJournalEntry current = progress.Current;
         if (result.Applied)

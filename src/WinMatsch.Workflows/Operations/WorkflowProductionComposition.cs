@@ -49,7 +49,10 @@ public static class WorkflowProductionComposition
             preflight,
             new DownloaderFinalArtifactRevalidator(downloader),
             new FileRemoteOperationLockProvider(lockOptions, clock),
-            clock: clock);
+            branchNames: null,
+            clock: clock,
+            repositoryEvidence: new GitHubRepositorySubmissionEvidenceProvider(gitHub),
+            pullRequestEvidence: new GitHubPullRequestManifestEvidenceProvider(gitHub));
     }
 
     public static GitHubMaintenanceWorkflow CreateGitHubMaintenance(

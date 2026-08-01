@@ -156,6 +156,16 @@ public sealed record SubmissionJournalRecoveryResult(
     ImmutableArray<SubmissionJournalEntry> Activated,
     ImmutableArray<string> Diagnostics);
 
+public sealed class VerifiedSubmissionRecoveryRequest
+{
+    internal VerifiedSubmissionRecoveryRequest(GitHubSubmissionRequest request)
+    {
+        Request = request ?? throw new ArgumentNullException(nameof(request));
+    }
+
+    internal GitHubSubmissionRequest Request { get; }
+}
+
 public sealed record SubmissionJournalOptions
 {
     public string RootDirectory { get; init; } = Path.Combine(

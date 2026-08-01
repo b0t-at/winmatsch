@@ -50,7 +50,7 @@ public static partial class InstallerVersionTrustEvaluator
             or DetectedInstallerFormat.PortableExe)
         {
             confidence = EvidenceConfidence.High;
-            enabled = policy.AllowPeVersionInfo;
+            enabled = policy.AllowPeVersionInfo && !analysis.IsSelfExtractorStub;
             productKind = InstallerVersionEvidenceKind.PeVersionInfoProductVersion;
             fileKind = InstallerVersionEvidenceKind.PeVersionInfoFileVersion;
         }
@@ -80,6 +80,8 @@ public static partial class InstallerVersionTrustEvaluator
                 confidence,
                 analysis.Format == DetectedInstallerFormat.Zip
                     ? "VERSION_BINARY_POLICY:ZIP version evidence requires exactly one analyzed nested installer and the configured confidence threshold."
+                    : analysis.IsSelfExtractorStub
+                        ? "VERSION_BINARY_POLICY:Self-extractor PE version resources describe the extraction engine and require independent release or product corroboration."
                     : $"VERSION_BINARY_POLICY:Binary version evidence from {analysis.Format} is disabled or below the configured confidence threshold.",
                 UsesProductVersion: true);
         }
@@ -124,7 +126,7 @@ public static partial class InstallerVersionTrustEvaluator
         {
             kind = InstallerVersionEvidenceKind.PeVersionInfoFileVersion;
             confidence = EvidenceConfidence.High;
-            enabled = policy.AllowPeVersionInfo;
+            enabled = policy.AllowPeVersionInfo && !analysis.IsSelfExtractorStub;
         }
         else if (analysis.Format == DetectedInstallerFormat.Zip)
         {
@@ -151,6 +153,8 @@ public static partial class InstallerVersionTrustEvaluator
                 confidence,
                 analysis.Format == DetectedInstallerFormat.Zip
                     ? "VERSION_FILE_POLICY:ZIP file-version evidence requires exactly one analyzed nested installer and the configured confidence threshold."
+                    : analysis.IsSelfExtractorStub
+                        ? "VERSION_FILE_POLICY:Self-extractor PE version resources describe the extraction engine and require independent release or product corroboration."
                     : $"VERSION_FILE_POLICY:FileVersion evidence from {analysis.Format} is disabled or below the configured confidence threshold.",
                 UsesProductVersion: false);
         }

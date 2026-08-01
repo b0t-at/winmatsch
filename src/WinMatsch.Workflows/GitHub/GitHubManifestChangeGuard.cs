@@ -32,6 +32,7 @@ public static class GitHubManifestChangeGuard
             return diagnostics.ToImmutable();
         }
 
+        ValidatePreflightBinding(plan, diagnostics);
         var changedVersionDirectories = new HashSet<string>(StringComparer.Ordinal);
         foreach (WorkflowFileChange change in plan.FileChanges)
         {
@@ -104,6 +105,55 @@ public static class GitHubManifestChangeGuard
 
         return diagnostics.ToImmutable();
     }
+
+    private static void ValidatePreflightBinding(
+        LocalOperationPlan plan,
+        ImmutableArray<GitHubLifecycleDiagnostic>.Builder diagnostics)
+    {
+        WorkflowPreflightRequest preflight = plan.Preflight;
+        if (!DocumentsEqual(plan.BeforeDocuments, preflight.BeforeDocuments))
+        {
+            diagnostics.Add(new(
+                "GH1019",
+                "Preflight before-documents do not exactly match the commit plan."));
+        }
+
+        if (!DocumentsEqual(plan.AfterDocuments, preflight.AfterDocuments))
+        {
+            diagnostics.Add(new(
+                "GH1020",
+                "Preflight after-documents do not exactly match the commit plan."));
+        }
+
+        if (!ChangesEqual(plan.FileChanges, preflight.Changes))
+        {
+            diagnostics.Add(new(
+                "GH1021",
+                "Preflight file changes do not exactly match the commit plan."));
+        }
+    }
+
+    private static bool DocumentsEqual(
+        ImmutableArray<RawManifestDocument> left,
+        ImmutableArray<RawManifestDocument> right)
+        => left.Length == right.Length
+            && left.Zip(right, static (first, second) =>
+                string.Equals(first.RepositoryPath, second.RepositoryPath, StringComparison.Ordinal)
+                && first.Content.AsSpan().SequenceEqual(second.Content.AsSpan()))
+                .All(static equal => equal);
+
+    private static bool ChangesEqual(
+        ImmutableArray<WorkflowFileChange> left,
+        ImmutableArray<WorkflowFileChange> right)
+        => left.Length == right.Length
+            && left.Zip(right, static (first, second) =>
+                first.Kind == second.Kind
+                && string.Equals(first.RepositoryPath, second.RepositoryPath, StringComparison.Ordinal)
+                && first.Content.AsSpan().SequenceEqual(second.Content.AsSpan())
+                && first.ExpectedState == second.ExpectedState
+                && string.Equals(first.ExpectedSha256, second.ExpectedSha256, StringComparison.Ordinal)
+                && first.Provenance == second.Provenance)
+                .All(static equal => equal);
 
     private static void ValidateDocumentAssociation(
         LocalOperationPlan plan,

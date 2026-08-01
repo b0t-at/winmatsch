@@ -4,8 +4,12 @@ using System.Collections.Immutable;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using WinMatsch.Core;
+using WinMatsch.Core.Yaml;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.Operations;
+using YamlDotNet.Core;
 
 namespace WinMatsch.Workflows.GitHub;
 
@@ -27,6 +31,426 @@ public sealed class EmptyRepositorySubmissionEvidenceProvider : IRepositorySubmi
     }
 }
 
+public sealed class GitHubRepositorySubmissionEvidenceProvider(
+    IGitHubRepositoryClient gitHub) : IRepositorySubmissionEvidenceProvider
+{
+    public const string PolicyPath = ".github/winmatsch/submission-evidence.json";
+    private const int MaximumSiblingDirectories = 128;
+    private const int MaximumInstallerFiles = 512;
+    private const int MaximumPolicyItems = 1_024;
+    private const long MaximumEvidenceFileBytes = 1_048_576;
+    private readonly IGitHubRepositoryClient _gitHub =
+        gitHub ?? throw new ArgumentNullException(nameof(gitHub));
+
+    public async Task<RepositorySubmissionEvidence> GetEvidenceAsync(
+        GitHubSubmissionRequest request,
+        string upstreamHeadSha,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(upstreamHeadSha);
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            RepositoryEvidencePolicy policy = await ReadPolicyAsync(
+                request.UpstreamRepository,
+                upstreamHeadSha,
+                cancellationToken).ConfigureAwait(false);
+            ImmutableArray<RepositoryInstallerEvidence> installerEvidence =
+                await ReadSiblingInstallerEvidenceAsync(
+                    request.UpstreamRepository,
+                    upstreamHeadSha,
+                    request.LocalPlan.PackageIdentifier,
+                    policy.RetiredIdentifiers,
+                    cancellationToken).ConfigureAwait(false);
+            var evidence = installerEvidence.ToBuilder();
+            foreach (PackageIdentifier retired in policy.RetiredIdentifiers
+                         .OrderBy(static identifier => identifier.Value, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!evidence.Any(item =>
+                        item.RetiredIdentifier
+                        && item.PackageIdentifier == retired))
+                {
+                    evidence.Add(new(
+                        retired,
+                        new PackageVersion("0"),
+                        "",
+                        PolicyPath,
+                        RetiredIdentifier: true));
+                }
+            }
+
+            policy.VanityAnnotations.TryGetValue(
+                request.LocalPlan.PackageIdentifier.Value,
+                out ImmutableArray<string> vanityAnnotations);
+            return new()
+            {
+                InstallerEvidence =
+                [
+                    .. evidence
+                        .OrderBy(static item => item.PackageIdentifier.Value, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(static item => item.PackageVersion.Value, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(static item => item.ManifestPath, StringComparer.Ordinal)
+                        .ThenBy(static item => item.InstallerSha256, StringComparer.OrdinalIgnoreCase),
+                ],
+                DuplicateHashes = new()
+                {
+                    DeniedSha256 = policy.DeniedSha256,
+                    AllowedSha256 = policy.AllowedSha256,
+                    OverrideAnnotation = policy.OverrideAnnotation,
+                },
+                VanityUrlAnnotations = vanityAnnotations.IsDefault ? [] : vanityAnnotations,
+            };
+        }
+        catch (GitHubApiException exception)
+            when (exception.ErrorKind == GitHubApiErrorKind.TreeTruncated)
+        {
+            throw new RepositorySubmissionEvidenceException(
+                "Pinned repository submission evidence tree was truncated and cannot be trusted.",
+                exception);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException
+                or JsonException
+                or YamlException
+                or ArgumentException)
+        {
+            throw new RepositorySubmissionEvidenceException(
+                "Pinned repository submission evidence is malformed or exceeds a safety limit.",
+                exception);
+        }
+    }
+
+    private async Task<ImmutableArray<RepositoryInstallerEvidence>> ReadSiblingInstallerEvidenceAsync(
+        RepositoryCoordinates repository,
+        string pinnedSha,
+        PackageIdentifier packageIdentifier,
+        ImmutableHashSet<PackageIdentifier> retiredIdentifiers,
+        CancellationToken cancellationToken)
+    {
+        string[] identifierSegments = packageIdentifier.Value.Split('.');
+        if (identifierSegments.Length < 2)
+        {
+            return [];
+        }
+
+        string[] parentSegments =
+        [
+            "manifests",
+            char.ToLowerInvariant(packageIdentifier.Value[0]).ToString(),
+            .. identifierSegments[..^1],
+        ];
+        string treeish = pinnedSha;
+        var resolvedParentSegments = new List<string>(parentSegments.Length);
+        foreach (string segment in parentSegments)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            IReadOnlyList<RepositoryTreeEntry> entries = await _gitHub.GetTreeAsync(
+                repository,
+                treeish,
+                recursive: false,
+                cancellationToken).ConfigureAwait(false);
+            RepositoryTreeEntry? next = FindTreeEntry(entries, segment);
+            if (next is null)
+            {
+                return [];
+            }
+
+            treeish = next.Sha;
+            resolvedParentSegments.Add(next.Path);
+        }
+
+        IReadOnlyList<RepositoryTreeEntry> siblings = await _gitHub.GetTreeAsync(
+            repository,
+            treeish,
+            recursive: false,
+            cancellationToken).ConfigureAwait(false);
+        RepositoryTreeEntry[] siblingDirectories =
+        [
+            .. siblings
+                .Where(static entry => entry.Type == RepositoryTreeEntryType.Tree)
+                .OrderBy(static entry => entry.Path, StringComparer.Ordinal),
+        ];
+        if (siblingDirectories.Length > MaximumSiblingDirectories)
+        {
+            throw new InvalidDataException(
+                $"Repository evidence sibling count exceeds {MaximumSiblingDirectories} at pinned commit {pinnedSha}.");
+        }
+
+        if (siblingDirectories
+                .Select(static entry => entry.Path)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count() != siblingDirectories.Length)
+        {
+            throw new InvalidDataException(
+                "Pinned repository evidence contains case-colliding sibling directories.");
+        }
+
+        var installerFiles = new List<(string Path, string Sha)>();
+        string parentPath = string.Join('/', resolvedParentSegments);
+        foreach (RepositoryTreeEntry sibling in siblingDirectories)
+        {
+            IReadOnlyList<RepositoryTreeEntry> tree = await _gitHub.GetTreeAsync(
+                repository,
+                sibling.Sha,
+                recursive: true,
+                cancellationToken).ConfigureAwait(false);
+            installerFiles.AddRange(tree
+                .Where(static entry =>
+                    entry.Type == RepositoryTreeEntryType.Blob
+                    && entry.Path.EndsWith(".installer.yaml", StringComparison.OrdinalIgnoreCase))
+                .Select(entry => (
+                    $"{parentPath}/{sibling.Path}/{entry.Path}",
+                    entry.Sha)));
+            if (installerFiles.Count > MaximumInstallerFiles)
+            {
+                throw new InvalidDataException(
+                    $"Repository evidence installer-file count exceeds {MaximumInstallerFiles} at pinned commit {pinnedSha}.");
+            }
+        }
+
+        var evidence = ImmutableArray.CreateBuilder<RepositoryInstallerEvidence>();
+        foreach ((string path, _) in installerFiles.OrderBy(static item => item.Path, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RepositoryContent content = await _gitHub.GetContentAsync(
+                repository,
+                path,
+                pinnedSha,
+                cancellationToken).ConfigureAwait(false);
+            if (content.Size > MaximumEvidenceFileBytes
+                || content.Bytes.Length > MaximumEvidenceFileBytes)
+            {
+                throw new InvalidDataException(
+                    $"Repository evidence manifest '{path}' exceeds {MaximumEvidenceFileBytes} bytes.");
+            }
+
+            string yaml = new UTF8Encoding(false, true).GetString(content.Bytes.Span);
+            InstallerManifest manifest = ManifestYamlReader.ReadInstaller(yaml);
+            PackageIdentifier identifier = manifest.PackageIdentifier
+                ?? throw new InvalidDataException($"Repository evidence manifest '{path}' has no package identifier.");
+            PackageVersion version = manifest.PackageVersion
+                ?? throw new InvalidDataException($"Repository evidence manifest '{path}' has no package version.");
+            bool retired = retiredIdentifiers.Contains(identifier);
+            foreach (Installer installer in manifest.Installers ?? [])
+            {
+                if (installer.InstallerSha256 is null)
+                {
+                    continue;
+                }
+
+                evidence.Add(new(
+                    identifier,
+                    version,
+                    installer.InstallerSha256.Value,
+                    path,
+                    retired));
+            }
+        }
+
+        return evidence.ToImmutable();
+    }
+
+    private static RepositoryTreeEntry? FindTreeEntry(
+        IReadOnlyList<RepositoryTreeEntry> entries,
+        string segment)
+    {
+        RepositoryTreeEntry[] matches =
+        [
+            .. entries.Where(entry =>
+                entry.Type == RepositoryTreeEntryType.Tree
+                && string.Equals(entry.Path, segment, StringComparison.OrdinalIgnoreCase)),
+        ];
+        return matches.Length switch
+        {
+            0 => null,
+            1 => matches[0],
+            _ => throw new InvalidDataException(
+                $"Pinned repository evidence contains case-colliding path segment '{segment}'."),
+        };
+    }
+
+    private async Task<RepositoryEvidencePolicy> ReadPolicyAsync(
+        RepositoryCoordinates repository,
+        string pinnedSha,
+        CancellationToken cancellationToken)
+    {
+        RepositoryContent content;
+        try
+        {
+            content = await _gitHub.GetContentAsync(
+                repository,
+                PolicyPath,
+                pinnedSha,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (GitHubApiException exception) when (exception.StatusCode == HttpStatusCode.NotFound)
+        {
+            return RepositoryEvidencePolicy.Empty;
+        }
+
+        if (content.Size > MaximumEvidenceFileBytes
+            || content.Bytes.Length > MaximumEvidenceFileBytes)
+        {
+            throw new InvalidDataException(
+                $"Repository evidence policy exceeds {MaximumEvidenceFileBytes} bytes.");
+        }
+
+        using JsonDocument document = JsonDocument.Parse(content.Bytes);
+        JsonElement root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException("Repository evidence policy must be a JSON object.");
+        }
+
+        ImmutableHashSet<PackageIdentifier> retired = ReadIdentifiers(root, "retiredIdentifiers");
+        ImmutableHashSet<string> denied = ImmutableHashSet<string>.Empty.WithComparer(
+            StringComparer.OrdinalIgnoreCase);
+        ImmutableHashSet<string> allowed = ImmutableHashSet<string>.Empty.WithComparer(
+            StringComparer.OrdinalIgnoreCase);
+        string? annotation = null;
+        if (root.TryGetProperty("duplicateHashes", out JsonElement duplicateHashes))
+        {
+            if (duplicateHashes.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("duplicateHashes must be a JSON object.");
+            }
+
+            denied = ReadHashes(duplicateHashes, "deniedSha256");
+            allowed = ReadHashes(duplicateHashes, "allowedSha256");
+            annotation = ReadOptionalString(duplicateHashes, "overrideAnnotation");
+        }
+
+        ImmutableDictionary<string, ImmutableArray<string>> vanity =
+            ReadVanityAnnotations(root);
+        return new(retired, denied, allowed, annotation, vanity);
+    }
+
+    private static ImmutableHashSet<PackageIdentifier> ReadIdentifiers(
+        JsonElement root,
+        string property)
+        => ReadStrings(root, property)
+            .Select(static value => new PackageIdentifier(value))
+            .ToImmutableHashSet();
+
+    private static ImmutableHashSet<string> ReadHashes(
+        JsonElement root,
+        string property)
+        => ReadStrings(root, property)
+            .Select(static value => new Sha256Hash(value).Normalized)
+            .ToImmutableHashSet(StringComparer.OrdinalIgnoreCase);
+
+    private static ImmutableArray<string> ReadStrings(
+        JsonElement root,
+        string property)
+    {
+        if (!root.TryGetProperty(property, out JsonElement values))
+        {
+            return [];
+        }
+
+        return ReadStringArray(values, property);
+    }
+
+    private static ImmutableArray<string> ReadStringArray(
+        JsonElement values,
+        string property)
+    {
+        if (values.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException($"{property} must be a JSON array.");
+        }
+
+        string[] result =
+        [
+            .. values.EnumerateArray().Select(item =>
+                item.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(item.GetString())
+                    ? item.GetString()!.Trim()
+                    : throw new InvalidDataException($"{property} entries must be non-empty strings.")),
+        ];
+        if (result.Length > MaximumPolicyItems)
+        {
+            throw new InvalidDataException(
+                $"{property} exceeds the {MaximumPolicyItems}-item repository evidence limit.");
+        }
+
+        return
+        [
+            .. result.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase),
+        ];
+    }
+
+    private static string? ReadOptionalString(JsonElement root, string property)
+    {
+        if (!root.TryGetProperty(property, out JsonElement value)
+            || value.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (value.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            throw new InvalidDataException($"{property} must be a non-empty string when present.");
+        }
+
+        return value.GetString()!.Trim();
+    }
+
+    private static ImmutableDictionary<string, ImmutableArray<string>> ReadVanityAnnotations(
+        JsonElement root)
+    {
+        if (!root.TryGetProperty("vanityUrlAnnotations", out JsonElement annotations))
+        {
+            return ImmutableDictionary<string, ImmutableArray<string>>.Empty
+                .WithComparers(StringComparer.OrdinalIgnoreCase);
+        }
+
+        if (annotations.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException("vanityUrlAnnotations must be a JSON object.");
+        }
+
+        var builder = ImmutableDictionary.CreateBuilder<string, ImmutableArray<string>>(
+            StringComparer.OrdinalIgnoreCase);
+        int count = 0;
+        foreach (JsonProperty entry in annotations.EnumerateObject())
+        {
+            PackageIdentifier identifier = new(entry.Name);
+            ImmutableArray<string> values = ReadStringArray(
+                entry.Value,
+                $"vanityUrlAnnotations.{entry.Name}");
+            count += values.Length + 1;
+            if (count > MaximumPolicyItems)
+            {
+                throw new InvalidDataException(
+                    $"vanityUrlAnnotations exceeds the {MaximumPolicyItems}-item repository evidence limit.");
+            }
+
+            builder.Add(identifier.Value, values);
+        }
+
+        return builder.ToImmutable();
+    }
+
+    private sealed record RepositoryEvidencePolicy(
+        ImmutableHashSet<PackageIdentifier> RetiredIdentifiers,
+        ImmutableHashSet<string> DeniedSha256,
+        ImmutableHashSet<string> AllowedSha256,
+        string? OverrideAnnotation,
+        ImmutableDictionary<string, ImmutableArray<string>> VanityAnnotations)
+    {
+        public static RepositoryEvidencePolicy Empty { get; } = new(
+            ImmutableHashSet<PackageIdentifier>.Empty,
+            ImmutableHashSet<string>.Empty.WithComparer(StringComparer.OrdinalIgnoreCase),
+            ImmutableHashSet<string>.Empty.WithComparer(StringComparer.OrdinalIgnoreCase),
+            null,
+            ImmutableDictionary<string, ImmutableArray<string>>.Empty
+                .WithComparers(StringComparer.OrdinalIgnoreCase));
+    }
+}
+
 public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryClient gitHub)
     : IPullRequestManifestEvidenceProvider
 {
@@ -34,20 +458,73 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         gitHub ?? throw new ArgumentNullException(nameof(gitHub));
     private readonly ConcurrentDictionary<EvidenceCacheKey, PullRequestManifestEvidence> _cache = [];
 
-    public Task<IReadOnlyList<PullRequestInfo>> GetCandidatesAsync(
+    public async Task<IReadOnlyList<PullRequestInfo>> GetCandidatesAsync(
         GitHubSubmissionPlan plan,
         IReadOnlyList<PullRequestInfo> openPullRequests,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(openPullRequests);
         cancellationToken.ThrowIfCancellationRequested();
-        PullRequestInfo[] candidates = [.. openPullRequests];
-        if (candidates.Length > PullRequestManifestEvidenceLimits.MaximumCandidates)
+        var plannedPaths = new HashSet<string>(
+            plan.Request.LocalPlan.FileChanges.Select(static change => change.RepositoryPath),
+            StringComparer.Ordinal);
+        var candidates = new List<PullRequestInfo>();
+        bool canVerifyEveryOpenPullRequest =
+            openPullRequests.Count <= PullRequestManifestEvidenceLimits.MaximumCandidates;
+        foreach (PullRequestInfo pullRequest in openPullRequests.OrderBy(static item => item.Number))
         {
-            throw new PullRequestEvidenceLimitException(
-                $"Manifest evidence candidate count {candidates.Length} exceeds the safe limit of {PullRequestManifestEvidenceLimits.MaximumCandidates}.");
+            cancellationToken.ThrowIfCancellationRequested();
+            IReadOnlyList<PullRequestChangedFile> changedFiles;
+            try
+            {
+                changedFiles = await _gitHub.GetPullRequestChangedFilesAsync(
+                    plan.Request.UpstreamRepository,
+                    pullRequest.Number,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (NotSupportedException exception)
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Pull request #{pullRequest.Number} changed-file evidence is unavailable: {exception.Message}");
+            }
+            catch (GitHubApiException exception) when (exception.StatusCode is null)
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Pull request #{pullRequest.Number} changed-file evidence failed a local transport safety bound: {exception.Message}");
+            }
+            if (changedFiles.Any(static file =>
+                    string.IsNullOrWhiteSpace(file.Path)
+                    || (file.PreviousPath is not null
+                        && string.IsNullOrWhiteSpace(file.PreviousPath))))
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Pull request #{pullRequest.Number} returned an invalid changed-file path.");
+            }
+
+            bool hasTargetPath = changedFiles.Any(file =>
+                plannedPaths.Contains(file.Path)
+                || (file.PreviousPath is not null && plannedPaths.Contains(file.PreviousPath)));
+            bool hasCanonicalTitleHint = GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                pullRequest.Title,
+                plan.Request.LocalPlan.PackageIdentifier,
+                plan.Request.LocalPlan.PackageVersion);
+            if (!canVerifyEveryOpenPullRequest
+                && !hasTargetPath
+                && !hasCanonicalTitleHint)
+            {
+                continue;
+            }
+
+            candidates.Add(pullRequest);
+            if (candidates.Count > PullRequestManifestEvidenceLimits.MaximumCandidates)
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Manifest evidence candidate count exceeds the safe limit of {PullRequestManifestEvidenceLimits.MaximumCandidates}.");
+            }
         }
 
-        return Task.FromResult<IReadOnlyList<PullRequestInfo>>(candidates);
+        return candidates;
     }
 
     public async Task<PullRequestManifestEvidence> GetEvidenceAsync(
@@ -388,3 +865,7 @@ internal static class RepositorySubmissionEvidenceMerger
 }
 
 public sealed class PullRequestEvidenceLimitException(string message) : Exception(message);
+
+public sealed class RepositorySubmissionEvidenceException(
+    string message,
+    Exception innerException) : Exception(message, innerException);

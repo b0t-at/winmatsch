@@ -132,10 +132,44 @@ public sealed class GitHubLifecycleWorkflow
         CancellationToken cancellationToken = default)
         => ExecuteAsync(request, progress: null, cancellationToken);
 
-    public async Task<GitHubLifecycleResult> ExecuteAsync(
+    public Task<GitHubLifecycleResult> ExecuteAsync(
         GitHubSubmissionRequest request,
         ISubmissionProgressSink? progress,
         CancellationToken cancellationToken = default)
+        => ExecuteCoreAsync(
+            request,
+            progress,
+            allowCommitResponseLossRecovery: false,
+            cancellationToken);
+
+    public Task<GitHubLifecycleResult> ExecuteJournaledAsync(
+        VerifiedSubmissionRecoveryRequest recovery,
+        ISubmissionProgressSink progress,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(recovery);
+        return ExecuteCoreAsync(
+            recovery.Request,
+            progress,
+            allowCommitResponseLossRecovery: true,
+            cancellationToken);
+    }
+
+    internal Task<GitHubLifecycleResult> ExecuteJournaledAsync(
+        GitHubSubmissionRequest request,
+        ISubmissionProgressSink progress,
+        CancellationToken cancellationToken = default)
+        => ExecuteCoreAsync(
+            request,
+            progress,
+            allowCommitResponseLossRecovery: true,
+            cancellationToken);
+
+    private async Task<GitHubLifecycleResult> ExecuteCoreAsync(
+        GitHubSubmissionRequest request,
+        ISubmissionProgressSink? progress,
+        bool allowCommitResponseLossRecovery,
+        CancellationToken cancellationToken)
     {
         GitHubSubmissionPlan plan = CreatePlan(request, _clock.UtcNow);
         if (!plan.CanApply)
@@ -151,7 +185,9 @@ public sealed class GitHubLifecycleWorkflow
         var audit = ImmutableArray.CreateBuilder<GitHubLifecycleAuditEntry>();
         var recoveryDiagnostics = ImmutableArray.CreateBuilder<GitHubLifecycleDiagnostic>();
         RemoteMutationState state = request.ResumeFrom ?? new();
-        if (state.RemoteOutcomeUncertain)
+        bool recoverCommitResponseLoss = allowCommitResponseLossRecovery
+            && IsRecoverableCommitResponseLoss(state);
+        if (state.RemoteOutcomeUncertain && !recoverCommitResponseLoss)
         {
             return Result(
                 GitHubLifecycleResultCode.HumanEscalationRequired,
@@ -333,6 +369,7 @@ public sealed class GitHubLifecycleWorkflow
 
             GitReference? branch = null;
             ServerCommitResult? commit = null;
+            bool recoveredCommit = false;
             ValidationReport finalPreflight = await _preflight.ExecuteAsync(
                 request.LocalPlan.Preflight,
                 async boundaryCancellation =>
@@ -403,6 +440,17 @@ public sealed class GitHubLifecycleWorkflow
                         return;
                     }
 
+                    if (recoverCommitResponseLoss
+                        && (state.Fork != targetRepository.Coordinates
+                            || !string.Equals(
+                                state.BranchHeadSha,
+                                upstreamDefault.HeadSha,
+                                StringComparison.Ordinal)))
+                    {
+                        throw new CommitRecoveryException(
+                            "The journaled in-flight commit is not bound to the current fork and upstream base.");
+                    }
+
                     for (int attempt = 0; attempt < MaximumBranchReservationAttempts; attempt++)
                     {
                         boundaryCancellation.ThrowIfCancellationRequested();
@@ -413,8 +461,55 @@ public sealed class GitHubLifecycleWorkflow
                             targetRepository.Coordinates,
                             candidateName,
                             boundaryCancellation).ConfigureAwait(false);
+                        bool isJournaledCommitRecovery =
+                            recoverCommitResponseLoss
+                            && attempt == 0
+                            && string.Equals(
+                                candidateName,
+                                state.BranchName,
+                                StringComparison.Ordinal);
                         if (existing is not null)
                         {
+                            if (isJournaledCommitRecovery)
+                            {
+                                if (string.Equals(
+                                        existing.Sha,
+                                        upstreamDefault.HeadSha,
+                                        StringComparison.Ordinal))
+                                {
+                                    throw new CommitRecoveryException(
+                                        "The journaled commit attempt did not produce a remotely verifiable commit.");
+                                }
+
+                                ServerCommitResult? recovered = await TryRecoverCommitAsync(
+                                    plan,
+                                    targetRepository,
+                                    existing,
+                                    upstreamDefault,
+                                    boundaryCancellation).ConfigureAwait(false);
+                                if (recovered is null)
+                                {
+                                    throw new CommitRecoveryException(
+                                        "The journaled commit attempt does not match the exact planned commit.");
+                                }
+
+                                branchName = candidateName;
+                                branch = existing;
+                                commit = recovered;
+                                recoveredCommit = true;
+                                state = state with
+                                {
+                                    BranchName = branchName,
+                                    BranchHeadSha = existing.Sha,
+                                    BranchAdopted = true,
+                                };
+                                Audit(
+                                    audit,
+                                    "GH2041",
+                                    $"Recovered exact planned commit '{existing.Sha}' on tool branch '{branchName}'.");
+                                break;
+                            }
+
                             if (string.Equals(
                                     existing.Sha,
                                     upstreamDefault.HeadSha,
@@ -436,6 +531,12 @@ public sealed class GitHubLifecycleWorkflow
                             }
 
                             continue;
+                        }
+
+                        if (isJournaledCommitRecovery)
+                        {
+                            throw new CommitRecoveryException(
+                                "The journaled commit branch no longer exists.");
                         }
 
                         attemptedMutation = RemoteOperationKind.CreateBranch;
@@ -512,28 +613,34 @@ public sealed class GitHubLifecycleWorkflow
                     if (!string.Equals(currentUpstream.Name, upstreamDefault.Name, StringComparison.Ordinal)
                         || !string.Equals(currentUpstream.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal)
                         || currentBranch is null
-                        || !string.Equals(currentBranch.Sha, branch.Sha, StringComparison.Ordinal))
+                        || !string.Equals(
+                            currentBranch.Sha,
+                            commit?.Sha ?? branch.Sha,
+                            StringComparison.Ordinal))
                     {
                         throw new RemoteStateConflictException(
                             "Upstream or the fresh branch moved before the server-side commit.");
                     }
 
-                    boundaryCancellation.ThrowIfCancellationRequested();
-                    attemptedMutation = RemoteOperationKind.CreateCommit;
-                    state = state with
+                    if (commit is null)
                     {
-                        LastAttemptedOperation = RemoteOperationKind.CreateCommit,
-                        RemoteOutcomeUncertain = true,
-                    };
-                    await RecordProgressAsync(
-                        progress,
-                        state,
-                        SubmissionJournalState.BranchCreated).ConfigureAwait(false);
-                    commit = await _gitHub.CreateCommitAsync(
-                        targetRepository.Coordinates,
-                        CreateCommit(plan, branchName, branch.Sha),
-                        Mutation($"{request.IdempotencyKey}:commit:{branchName}"),
-                        boundaryCancellation).ConfigureAwait(false);
+                        boundaryCancellation.ThrowIfCancellationRequested();
+                        attemptedMutation = RemoteOperationKind.CreateCommit;
+                        state = state with
+                        {
+                            LastAttemptedOperation = RemoteOperationKind.CreateCommit,
+                            RemoteOutcomeUncertain = true,
+                        };
+                        await RecordProgressAsync(
+                            progress,
+                            state,
+                            SubmissionJournalState.BranchCreated).ConfigureAwait(false);
+                        commit = await _gitHub.CreateCommitAsync(
+                            targetRepository.Coordinates,
+                            CreateCommit(plan, branchName, branch.Sha),
+                            Mutation($"{request.IdempotencyKey}:commit:{branchName}"),
+                            boundaryCancellation).ConfigureAwait(false);
+                    }
                 },
                 cancellationToken).ConfigureAwait(false);
 
@@ -557,7 +664,10 @@ public sealed class GitHubLifecycleWorkflow
                 LastAttemptedOperation = null,
                 RemoteOutcomeUncertain = false,
             };
-            Audit(audit, "GH2007", $"Created server-side commit '{commit.Sha}'.");
+            if (!recoveredCommit)
+            {
+                Audit(audit, "GH2007", $"Created server-side commit '{commit.Sha}'.");
+            }
             await RecordProgressAsync(
                 progress,
                 state,
@@ -714,6 +824,11 @@ public sealed class GitHubLifecycleWorkflow
                     [new("GH2021", "The pull request, branch, or upstream base moved before final verification.")]);
             }
 
+            associated =
+            [
+                freshPullRequest,
+                .. associated.Where(candidate => candidate.Number != freshPullRequest.Number),
+            ];
             PullRequestInfo[] others =
             [
                 .. associated.Where(candidate => candidate.Number != pullRequest.Number),
@@ -859,6 +974,24 @@ public sealed class GitHubLifecycleWorkflow
                 state,
                 audit,
                 [new("GH2034", exception.Message)]);
+        }
+        catch (RepositorySubmissionEvidenceException exception)
+        {
+            return Result(
+                GitHubLifecycleResultCode.HumanEscalationRequired,
+                plan,
+                state,
+                audit,
+                [new("GH2040", exception.Message)]);
+        }
+        catch (CommitRecoveryException exception)
+        {
+            return Result(
+                GitHubLifecycleResultCode.HumanEscalationRequired,
+                plan,
+                state,
+                audit,
+                [new("GH2042", exception.Message)]);
         }
         catch (ForkConsentException exception)
         {
@@ -1111,16 +1244,11 @@ public sealed class GitHubLifecycleWorkflow
             associationExcludedPullRequestNumbers.Add(superseded);
         }
 
-        var boundExcludedPullRequestNumbers =
-            new HashSet<long>(associationExcludedPullRequestNumbers);
         if (additionallyExcludedPullRequestNumber is { } additionallyExcluded)
         {
-            boundExcludedPullRequestNumbers.Add(additionallyExcluded);
+            associationExcludedPullRequestNumbers.Add(additionallyExcluded);
         }
 
-        int maximumSearchResults =
-            PullRequestManifestEvidenceLimits.MaximumCandidates
-            + boundExcludedPullRequestNumbers.Count;
         IReadOnlyList<PullRequestInfo> candidates;
         try
         {
@@ -1128,10 +1256,7 @@ public sealed class GitHubLifecycleWorkflow
                 request.UpstreamRepository,
                 new PullRequestSearch(
                     PullRequestState.Open,
-                    BaseBranch: expectedBaseBranch)
-                {
-                    MaximumResults = maximumSearchResults,
-                },
+                    BaseBranch: expectedBaseBranch),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (GitHubApiException exception) when (exception.StatusCode is null)
@@ -1141,50 +1266,21 @@ public sealed class GitHubLifecycleWorkflow
                 + exception.Message);
         }
 
-        PullRequestInfo[] boundedDiscoveryCandidates =
-        [
-            .. candidates.Where(pullRequest =>
-                !boundExcludedPullRequestNumbers.Contains(pullRequest.Number)),
-        ];
-        if (boundedDiscoveryCandidates.Length > PullRequestManifestEvidenceLimits.MaximumCandidates)
-        {
-            throw new PullRequestEvidenceLimitException(
-                $"Manifest evidence candidate count {boundedDiscoveryCandidates.Length} exceeds the safe limit of {PullRequestManifestEvidenceLimits.MaximumCandidates}.");
-        }
-
         PullRequestInfo[] associationCandidates =
         [
             .. candidates.Where(pullRequest =>
-                !associationExcludedPullRequestNumbers.Contains(pullRequest.Number)),
-        ];
-        var associated = new List<PullRequestInfo>();
-        PullRequestInfo[] unassociated =
-        [
-            .. associationCandidates.Where(pullRequest =>
-                pullRequest.State == PullRequestState.Open
+                !associationExcludedPullRequestNumbers.Contains(pullRequest.Number)
+                && pullRequest.State == PullRequestState.Open
                 && string.Equals(
                     pullRequest.BaseBranch,
                     expectedBaseBranch,
-                    StringComparison.Ordinal)
-                && !GitHubSubmissionFormatter.IsCanonicalTitleFor(
-                    pullRequest.Title,
-                    request.LocalPlan.PackageIdentifier,
-                    request.LocalPlan.PackageVersion)),
+                    StringComparison.Ordinal)),
         ];
-        associated.AddRange(associationCandidates.Where(pullRequest =>
-            pullRequest.State == PullRequestState.Open
-            && string.Equals(
-                pullRequest.BaseBranch,
-                expectedBaseBranch,
-                StringComparison.Ordinal)
-            && GitHubSubmissionFormatter.IsCanonicalTitleFor(
-                pullRequest.Title,
-                request.LocalPlan.PackageIdentifier,
-                request.LocalPlan.PackageVersion)));
+        var associated = new List<PullRequestInfo>();
         IReadOnlyList<PullRequestInfo> evidenceCandidates =
             await _pullRequestEvidence.GetCandidatesAsync(
                 plan,
-                unassociated,
+                associationCandidates,
                 cancellationToken).ConfigureAwait(false);
         HashSet<(
             long Number,
@@ -1194,7 +1290,7 @@ public sealed class GitHubLifecycleWorkflow
             string BaseBranch,
             string? BaseSha)> allowed =
         [
-            .. unassociated.Select(static pullRequest =>
+            .. associationCandidates.Select(static pullRequest =>
                 (
                     pullRequest.Number,
                     pullRequest.HeadOwner,
@@ -1260,19 +1356,150 @@ public sealed class GitHubLifecycleWorkflow
             return false;
         }
 
-        if (GitHubSubmissionFormatter.IsCanonicalTitleFor(
-                pullRequest.Title,
-                plan.Request.LocalPlan.PackageIdentifier,
-                plan.Request.LocalPlan.PackageVersion))
-        {
-            return true;
-        }
-
         PullRequestManifestEvidence evidence = await _pullRequestEvidence.GetEvidenceAsync(
             plan,
             pullRequest,
             cancellationToken).ConfigureAwait(false);
         return evidence.IsAssociated;
+    }
+
+    private async Task<ServerCommitResult?> TryRecoverCommitAsync(
+        GitHubSubmissionPlan plan,
+        RepositoryInfo targetRepository,
+        GitReference existing,
+        BranchState upstreamDefault,
+        CancellationToken cancellationToken)
+    {
+        CompareResult comparison = await _gitHub.CompareAsync(
+            plan.Request.UpstreamRepository,
+            upstreamDefault.HeadSha,
+            $"{targetRepository.Coordinates.Owner}:{existing.Name}",
+            cancellationToken).ConfigureAwait(false);
+        if (!string.Equals(comparison.Status, "ahead", StringComparison.OrdinalIgnoreCase)
+            || comparison.AheadBy != 1
+            || comparison.BehindBy != 0
+            || comparison.TotalCommits != 1)
+        {
+            return null;
+        }
+
+        IReadOnlyList<RepositoryTreeEntry> upstreamTree = await _gitHub.GetTreeAsync(
+            plan.Request.UpstreamRepository,
+            upstreamDefault.HeadSha,
+            recursive: true,
+            cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<RepositoryTreeEntry> candidateTree = await _gitHub.GetTreeAsync(
+            targetRepository.Coordinates,
+            existing.Sha,
+            recursive: true,
+            cancellationToken).ConfigureAwait(false);
+        if (!HasOnlyPlannedRepositoryEntryChanges(
+                plan.Request.LocalPlan.FileChanges,
+                upstreamTree,
+                candidateTree))
+        {
+            return null;
+        }
+
+        foreach (WorkflowFileChange change in plan.Request.LocalPlan.FileChanges)
+        {
+            RepositoryContent? content = await TryGetRepositoryContentAsync(
+                targetRepository.Coordinates,
+                change.RepositoryPath,
+                existing.Sha,
+                cancellationToken).ConfigureAwait(false);
+            if (change.Kind == PlannedChangeKind.Delete)
+            {
+                if (content is not null)
+                {
+                    return null;
+                }
+
+                continue;
+            }
+
+            if (content is null
+                || !content.Bytes.Span.SequenceEqual(change.Content.AsSpan()))
+            {
+                return null;
+            }
+        }
+
+        Uri commitUri = new(
+            targetRepository.WebUri.AbsoluteUri.TrimEnd('/') +
+            "/commit/" +
+            Uri.EscapeDataString(existing.Sha));
+        return new(existing.Sha, commitUri);
+    }
+
+    private static bool HasOnlyPlannedRepositoryEntryChanges(
+        ImmutableArray<WorkflowFileChange> changes,
+        IReadOnlyList<RepositoryTreeEntry> upstreamTree,
+        IReadOnlyList<RepositoryTreeEntry> candidateTree)
+    {
+        var expectedPaths = new HashSet<string>(
+            changes.Select(static change => change.RepositoryPath),
+            StringComparer.Ordinal);
+        Dictionary<string, RepositoryTreeEntry> upstreamEntries = ToNonStructuralEntryMap(upstreamTree);
+        Dictionary<string, RepositoryTreeEntry> candidateEntries = ToNonStructuralEntryMap(candidateTree);
+        foreach ((string path, RepositoryTreeEntry upstream) in upstreamEntries)
+        {
+            if (expectedPaths.Contains(path))
+            {
+                continue;
+            }
+
+            if (!candidateEntries.TryGetValue(path, out RepositoryTreeEntry? candidate)
+                || candidate.Type != upstream.Type
+                || !string.Equals(candidate.Sha, upstream.Sha, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return candidateEntries.Keys.All(path =>
+            expectedPaths.Contains(path) || upstreamEntries.ContainsKey(path));
+    }
+
+    private static Dictionary<string, RepositoryTreeEntry> ToNonStructuralEntryMap(
+        IReadOnlyList<RepositoryTreeEntry> entries)
+    {
+        var entriesByPath = new Dictionary<string, RepositoryTreeEntry>(StringComparer.Ordinal);
+        foreach (RepositoryTreeEntry entry in entries)
+        {
+            if (entry.Type == RepositoryTreeEntryType.Tree)
+            {
+                continue;
+            }
+
+            if (!entriesByPath.TryAdd(entry.Path, entry))
+            {
+                throw new RemoteStateConflictException(
+                    "Commit recovery tree evidence contains an invalid or duplicate non-tree path.");
+            }
+        }
+
+        return entriesByPath;
+    }
+
+    private async Task<RepositoryContent?> TryGetRepositoryContentAsync(
+        RepositoryCoordinates repository,
+        string path,
+        string reference,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _gitHub.GetContentAsync(
+                repository,
+                path,
+                reference,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (GitHubApiException exception) when (exception.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
     }
 
     private async Task VerifyRemoteFilePreconditionsAsync(
@@ -1592,6 +1819,18 @@ public sealed class GitHubLifecycleWorkflow
 
     private static MutationRequest Mutation(string key) => new(key);
 
+    private static bool IsRecoverableCommitResponseLoss(RemoteMutationState state)
+        => state.RemoteOutcomeUncertain
+            && state.LastAttemptedOperation == RemoteOperationKind.CreateCommit
+            && state.Fork is not null
+            && !string.IsNullOrWhiteSpace(state.BranchName)
+            && !string.IsNullOrWhiteSpace(state.BranchHeadSha)
+            && (state.BranchCreated || state.BranchAdopted)
+            && !state.CommitCreated
+            && !state.PullRequestCreated
+            && state.CommitSha is null
+            && state.PullRequestNumber is null;
+
     private static RemoteMutationState MarkUncertain(
         RemoteMutationState state,
         RemoteOperationKind? attemptedMutation)
@@ -1671,4 +1910,6 @@ public sealed class GitHubLifecycleWorkflow
     private sealed class RemoteStateConflictException(string message) : Exception(message);
 
     private sealed class ForkConsentException(string message) : Exception(message);
+
+    private sealed class CommitRecoveryException(string message) : Exception(message);
 }

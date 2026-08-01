@@ -20,17 +20,10 @@ internal static class LearnedInstallerSelector
             throw new InvalidOperationException("Learned installer selector references an unavailable installer.");
         }
 
-        Installer installer = installers[installerIndex];
         string version = root.PackageVersion?.Value ?? "";
-        string normalizedUrl = NormalizeUrl(installer.InstallerUrl, version);
-        int occurrence = installers
-            .Take(installerIndex + 1)
-            .Count(candidate => string.Equals(
-                NormalizeUrl(candidate.InstallerUrl, version),
-                normalizedUrl,
-                StringComparison.OrdinalIgnoreCase)) - 1;
+        string normalizedUrl = NormalizeUrl(installers[installerIndex].InstallerUrl, version);
         _ = correctedField;
-        string identity = $"{normalizedUrl}\u001f{occurrence}";
+        string identity = $"{normalizedUrl}\u001f{CreateStableIdentity(root, installers[installerIndex])}";
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
     }
 
@@ -60,4 +53,10 @@ internal static class LearnedInstallerSelector
             ? normalized
             : normalized.Replace(version, "{version}", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static string CreateStableIdentity(InstallerManifest root, Installer installer)
+        => string.Join(
+            '\u001f',
+            installer.ProductCode ?? root.ProductCode ?? "",
+            installer.PackageFamilyName ?? root.PackageFamilyName ?? "");
 }

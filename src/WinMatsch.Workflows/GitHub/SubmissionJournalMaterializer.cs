@@ -14,6 +14,12 @@ namespace WinMatsch.Workflows.GitHub;
 
 public static class SubmissionJournalMaterializer
 {
+    public static async Task<VerifiedSubmissionRecoveryRequest> MaterializeVerifiedAsync(
+        SubmissionJournalEntry entry,
+        IGitHubRepositoryClient gitHub,
+        CancellationToken cancellationToken)
+        => new(await MaterializeAsync(entry, gitHub, cancellationToken).ConfigureAwait(false));
+
     public static async Task<GitHubSubmissionRequest> MaterializeAsync(
         SubmissionJournalEntry entry,
         IGitHubRepositoryClient gitHub,
