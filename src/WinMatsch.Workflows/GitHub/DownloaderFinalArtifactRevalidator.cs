@@ -17,30 +17,46 @@ public sealed class DownloaderFinalArtifactRevalidator(InstallerDownloader downl
     {
         ArgumentNullException.ThrowIfNull(request);
         var diagnostics = ImmutableArray.CreateBuilder<GitHubLifecycleDiagnostic>();
-        foreach (InstallerArtifact artifact in request.LocalPlan.Preflight.InstallerArtifacts)
+        string scratchDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-final-revalidation-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratchDirectory);
+        try
         {
-            try
+            foreach (InstallerArtifact artifact in request.LocalPlan.Preflight.InstallerArtifacts)
             {
-                DownloadRevalidationResult result = await _downloader.RevalidateAsync(
-                    artifact.Download,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
-                if (result.Status == DownloadRevalidationStatus.ContentChanged)
+                string safeUrl = GitHubSubmissionFormatter.Redact(artifact.InstallerUrl);
+                try
+                {
+                    DownloadResult current = await _downloader.DownloadFreshAsync(
+                        artifact.Download.InitialUrl,
+                        scratchDirectory,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    if (current.ContentIdentity != artifact.Download.ContentIdentity)
+                    {
+                        diagnostics.Add(new(
+                            "GH1019",
+                            $"Installer content changed after planning: {safeUrl}"));
+                    }
+                }
+                catch (Exception exception) when (
+                    exception is DownloadException
+                        or HttpRequestException
+                        or IOException
+                        or UnauthorizedAccessException)
                 {
                     diagnostics.Add(new(
-                        "GH1019",
-                        $"Installer content changed after planning: {artifact.InstallerUrl}"));
+                        "GH1020",
+                        $"Installer revalidation failed for {safeUrl}: "
+                        + GitHubSubmissionFormatter.Redact(exception.Message)));
                 }
             }
-            catch (Exception exception) when (
-                exception is DownloadException
-                    or HttpRequestException
-                    or IOException
-                    or UnauthorizedAccessException)
+        }
+        finally
+        {
+            if (Directory.Exists(scratchDirectory))
             {
-                diagnostics.Add(new(
-                    "GH1020",
-                    $"Installer revalidation failed for {artifact.InstallerUrl}: "
-                    + GitHubSubmissionFormatter.Redact(exception.Message)));
+                Directory.Delete(scratchDirectory, recursive: true);
             }
         }
 

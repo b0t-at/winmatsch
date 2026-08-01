@@ -143,6 +143,39 @@ public sealed class GitHubLifecycleWorkflow
             BranchState upstreamDefault = await _gitHub.GetDefaultBranchAsync(
                 request.UpstreamRepository,
                 cancellationToken).ConfigureAwait(false);
+            ValidationReport preMutationValidation = await _preflight.ValidateAsync(
+                request.LocalPlan.Preflight,
+                cancellationToken).ConfigureAwait(false);
+            if (!preMutationValidation.CanProceed(request.LocalPlan.WarningPolicy))
+            {
+                return Result(
+                    GitHubLifecycleResultCode.ValidationFailed,
+                    plan,
+                    state,
+                    audit,
+                    [.. preMutationValidation.Findings.Select(static finding =>
+                        new GitHubLifecycleDiagnostic(finding.Code, finding.Message, finding.Path))]);
+            }
+
+            FinalArtifactRevalidationResult preMutationArtifacts =
+                await _artifactRevalidator.RevalidateAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!preMutationArtifacts.IsValid)
+            {
+                return Result(
+                    GitHubLifecycleResultCode.ValidationFailed,
+                    plan,
+                    state,
+                    audit,
+                    preMutationArtifacts.Diagnostics);
+            }
+
+            await VerifyLiveReleaseFreshnessAsync(request, cancellationToken).ConfigureAwait(false);
+            await VerifyRemoteFilePreconditionsAsync(
+                request,
+                upstreamDefault.HeadSha,
+                cancellationToken).ConfigureAwait(false);
+            Audit(audit, "GH2031", "Completed full non-mutating validation before any remote mutation.");
+
             attemptedMutation = RemoteOperationKind.EnsureFork;
             (RepositoryInfo targetRepository, bool forkCreated) = await EnsureTargetAsync(
                 request,

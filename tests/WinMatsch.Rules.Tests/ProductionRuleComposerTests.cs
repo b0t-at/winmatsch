@@ -23,10 +23,10 @@ public class ProductionRuleComposerTests
         RuleCatalogueIds.Scope2,
         RuleCatalogueIds.Scope3,
         RuleCatalogueIds.Scope4,
+        RuleCatalogueIds.Meta5,
         RuleCatalogueIds.Meta1,
         RuleCatalogueIds.Meta3,
         RuleCatalogueIds.Meta4,
-        RuleCatalogueIds.Meta5,
         RuleCatalogueIds.Dep1,
         RuleCatalogueIds.Pipe2,
         RuleCatalogueIds.Pipe4,
@@ -64,8 +64,21 @@ public class ProductionRuleComposerTests
         Assert.True(Index(ids, RuleIds.PreserveOnUpdate) < Index(ids, RuleIds.ApplyPackageQuirks));
         Assert.True(Index(ids, RuleCatalogueIds.Arp1) < Index(ids, RuleCatalogueIds.Arp2));
         Assert.True(Index(ids, RuleIds.PreserveOnUpdate) < Index(ids, RuleCatalogueIds.Meta5));
+        Assert.True(Index(ids, RuleCatalogueIds.Meta5) < Index(ids, RuleCatalogueIds.Meta1));
+        Assert.True(Index(ids, RuleCatalogueIds.Meta5) < Index(ids, RuleCatalogueIds.Meta3));
         Assert.Equal(Index(ids, RuleCatalogueIds.Pipe1), ids.Count - 4);
         Assert.All(ids.Skip(ids.Count - 3), static id => Assert.StartsWith("WM01", id, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Mutating_policy_rules_are_rejected_after_validation()
+    {
+        ArgumentException exception = Assert.Throws<ArgumentException>(() =>
+            RulePipeline.Create(
+                [new DisplayVersionConsistencyRule(), new Arp1VersionTemplateRule()],
+                new RuleRuntimeConfiguration()));
+
+        Assert.Contains("mutates manifests", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -115,6 +115,32 @@ public sealed class InstallerDownloader : IDisposable
     }
 
     /// <summary>
+    /// Downloads directly from the origin without reading or writing the persistent cache.
+    /// Submission boundaries use this to compare current bytes with a previously planned identity.
+    /// </summary>
+    public async Task<DownloadResult> DownloadFreshAsync(
+        string url,
+        string destinationDirectory,
+        IProgress<DownloadProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(url);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationDirectory);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        Uri initialUri = ValidateUrl(url);
+        CreateDestinationDirectory(destinationDirectory);
+        DownloadAttemptResult attempt = await DownloadFromOriginAsync(
+            url,
+            initialUri,
+            destinationDirectory,
+            progress,
+            null,
+            cancellationToken).ConfigureAwait(false);
+        return attempt.Result;
+    }
+
+    /// <summary>
     /// Verifies the local bytes and then conditionally revalidates the origin. Servers without a
     /// usable validator are re-downloaded and compared by stable SHA-256/size identity.
     /// </summary>

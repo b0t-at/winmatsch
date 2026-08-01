@@ -181,7 +181,7 @@ public sealed class GitHubLifecycleWorkflowTests
         Assert.Equal(["branch", "commit", "pull-request"], client.Mutations);
         Assert.True(result.RemoteState.PullRequestCreated);
         Assert.Equal(1, preflight.BoundaryCalls);
-        Assert.Equal(1, artifacts.Calls);
+        Assert.Equal(2, artifacts.Calls);
     }
 
     [Fact]
@@ -748,7 +748,7 @@ public sealed class GitHubLifecycleWorkflowTests
             Releases = [safeRelease],
             OnGetReleases = (fake, call) =>
             {
-                if (call == 3)
+                if (call == 4)
                 {
                     fake.Releases = [safeRelease with { UpdatedAt = clock.UtcNow }];
                 }
@@ -768,7 +768,7 @@ public sealed class GitHubLifecycleWorkflowTests
         Assert.Equal(GitHubLifecycleResultCode.ValidationFailed, result.Code);
         Assert.True(result.RemoteState.PullRequestCreated);
         Assert.True(result.RemoteState.PullRequestClosed);
-        Assert.Equal(3, client.GetReleasesCalls);
+        Assert.Equal(4, client.GetReleasesCalls);
         Assert.Equal(
             ["branch", "commit", "pull-request", "comment", "close"],
             client.Mutations);
@@ -796,7 +796,7 @@ public sealed class GitHubLifecycleWorkflowTests
             FailMutation = "close",
             OnGetReleases = (fake, call) =>
             {
-                if (call == 3)
+                if (call == 4)
                 {
                     fake.Releases = [safeRelease with { UpdatedAt = clock.UtcNow }];
                 }

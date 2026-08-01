@@ -326,6 +326,18 @@ public class InnoProbeTests
     }
 
     [Fact]
+    public void Corrupt_resource_style_loader_table_is_not_silently_treated_as_generic()
+    {
+        var options = new InnoFixtures.Options
+        {
+            WriteLegacyLoaderPointer = false,
+            CorruptLoaderChecksum = true,
+        };
+
+        Assert.Throws<InvalidDataException>(() => Inspect(InnoFixtures.BuildInstaller(options)));
+    }
+
+    [Fact]
     public void Privilege_override_preserves_scope_and_elevation_uncertainty()
     {
         var options = new InnoFixtures.Options

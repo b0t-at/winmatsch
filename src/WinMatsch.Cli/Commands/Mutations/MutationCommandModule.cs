@@ -1020,6 +1020,7 @@ public sealed class MutationCommandModule : ICommandModule
                 SkipPullRequestCheck = context.ParseResult.GetValue(options.SkipPullRequestCheck),
                 ReplacePreviousVersion = previousVersion is not null,
                 PreviousVersion = previousVersion,
+                MinimumReleaseFreshness = context.Configuration.FreshnessDelay,
             },
             CreatedWith = context.ParseResult.GetValue(options.CreatedWith) ?? "winmatsch",
             CustomTitle = context.ParseResult.GetValue(options.PullRequestTitle),

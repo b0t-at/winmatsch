@@ -43,7 +43,7 @@ public sealed class RulePipeline
                 throw new ArgumentException($"Duplicate rule id '{rule.Id}'.", nameof(rules));
             }
 
-            bool mutates = rule.Category is RuleCategory.Normalization or RuleCategory.Quirk;
+            bool mutates = rule.Category != RuleCategory.Validation;
             if (mutates && validationSeen)
             {
                 throw new ArgumentException($"Rule '{rule.Id}' mutates manifests but is ordered after a validation rule; mutating rules must run first.", nameof(rules));

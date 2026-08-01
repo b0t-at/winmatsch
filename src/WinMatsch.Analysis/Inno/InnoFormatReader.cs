@@ -106,20 +106,32 @@ internal static partial class InnoFormatReader
                     ? first
                     : Math.Min(first, second);
             int candidate = searchOffset + relative;
+            if (!IsPlausibleLoaderTable(scan.AsSpan(candidate)))
+            {
+                searchOffset = candidate + 1;
+                continue;
+            }
+
             try
             {
                 return ReadOffsetTable(stream, candidate);
             }
             catch (InvalidDataException)
             {
-                // The signatures can occur in payload bytes (including a single-file app that
-                // embeds this reader). Only a structurally valid table claims the executable.
-                searchOffset = candidate + 1;
+                // A structurally plausible loader table claims this executable. Surface its
+                // corruption instead of silently classifying a damaged Inno installer as generic.
+                throw;
             }
         }
 
         return null;
     }
+
+    private static bool IsPlausibleLoaderTable(ReadOnlySpan<byte> candidate)
+        => candidate.Length >= 44
+            && (candidate[..12].SequenceEqual(ModernLoaderMagic)
+                || candidate[..12].SequenceEqual(AlternateModernLoaderMagic))
+            && BinaryPrimitives.ReadUInt32LittleEndian(candidate[12..]) == 1;
 
     private static InnoLoaderOffsets ReadOffsetTable(Stream stream, long offset)
     {

@@ -86,6 +86,39 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task Submission_uses_the_resolved_release_freshness_delay()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var submission = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submission);
+        harness.EnvironmentVariables["WINMATSCH_FRESHNESS_DELAY"] = "00:42:00";
+
+        CliRunResult result = await harness.RunAsync(
+            [
+                "new",
+                "Example.App",
+                "--version",
+                "2.0",
+                "--urls",
+                "https://example.test/app.exe",
+                "--publisher",
+                "Example",
+                "--package-name",
+                "App",
+                "--license",
+                "MIT",
+                "--short-description",
+                "App",
+                "--dry-run",
+                "--submit",
+                "--yes",
+            ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(TimeSpan.FromMinutes(42), Assert.Single(submission.Requests).Policy.MinimumReleaseFreshness);
+    }
+
+    [Fact]
     public async Task Json_question_never_prompts_and_returns_missing_input()
     {
         var workflow = new FakeMutationWorkflow

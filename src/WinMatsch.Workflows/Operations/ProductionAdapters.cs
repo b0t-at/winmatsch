@@ -154,6 +154,13 @@ public sealed class InstallerWorkflowArtifactProcessor(
 
 public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
 {
+    private readonly IOriginalSubmissionStore _originalSubmissions;
+
+    public LocalManifestSnapshotSource(IOriginalSubmissionStore? originalSubmissions = null)
+    {
+        _originalSubmissions = originalSubmissions ?? new FileOriginalSubmissionStore();
+    }
+
     public Task<PackageSnapshot?> LoadAsync(
         string outputDirectory,
         PackageIdentifier packageIdentifier,
@@ -214,7 +221,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
         return Task.FromResult(snapshots.ToImmutable());
     }
 
-    private static PackageSnapshot? LoadCore(
+    private PackageSnapshot? LoadCore(
         string root,
         PackageIdentifier packageIdentifier,
         PackageVersion packageVersion,
@@ -246,6 +253,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
             PackageVersion = packageVersion,
             VersionDirectory = relativeDirectory,
             Manifests = manifests,
+            OriginalBotSubmission = _originalSubmissions.Load(root, packageIdentifier, packageVersion),
             Documents = documents,
         };
     }

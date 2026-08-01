@@ -15,13 +15,16 @@ public static class WorkflowProductionComposition
         IWorkflowClock? clock = null)
     {
         ArgumentNullException.ThrowIfNull(downloader);
+        var originalSubmissions = new FileOriginalSubmissionStore();
         var preflight = new PreflightGateWorkflowAdapter(
             new PreflightGate(new InstallerDownloaderPreflightNetwork(downloader)));
         return new(
-            new LocalManifestSnapshotSource(),
+            new LocalManifestSnapshotSource(originalSubmissions),
             new RulePipelineWorkflowRunner(ProductionRuleComposer.Compose),
             preflight,
-            new AtomicWorkflowFileTransaction(),
+            new ProvenanceWorkflowFileTransaction(
+                new AtomicWorkflowFileTransaction(),
+                originalSubmissions),
             releaseSource,
             new InstallerWorkflowArtifactProcessor(downloader),
             clock);
