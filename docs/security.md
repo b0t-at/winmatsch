@@ -43,15 +43,20 @@ instead. Secret buffers are zeroed after use where the platform allows it.
 
 ### Redaction
 
-Tokens are wrapped in a type whose string form is always `[REDACTED]`, and a
-sanitizer additionally scrubs all human- and machine-readable output
-(findings, traces, previews, error messages): GitHub token shapes (`ghp_…`,
-`github_pat_…`, …), bearer and basic authorization values, JWTs,
-credential-looking assignments (`password=…`, `--api-key …`), and URL
-user-info and query strings — including recursively percent- or
-backslash-escaped variants. Sensitive manifest field paths (for example
-installer switches, which can embed passwords) are redacted wholesale in
-audit output. Token equality checks are constant-time.
+Tokens are wrapped in a type whose string form is always `[REDACTED]`, so a
+token value cannot leak through logging, JSON serialization, or exception
+messages by construction; equality checks are constant-time. On top of that,
+a sanitizer scrubs the rule audit trail, manifest previews, and mutation JSON
+output: GitHub token shapes (`ghp_…`, `github_pat_…`, …), bearer and basic
+authorization values, JWTs, password- and API-key-style key/value
+assignments, and URL user-info and query strings — including recursively
+percent- or backslash-escaped variants. Sensitive manifest field paths (for
+example installer switches, which can embed passwords) are redacted wholesale
+in audit output.
+
+Redaction of free-form text is defense in depth, not an absolute guarantee:
+do not put secrets into installer URLs, manifest fields, or command
+arguments in the first place.
 
 ## Untrusted input bounds
 
@@ -59,9 +64,11 @@ audit output. Token equality checks are constant-time.
   counts, sizes, nesting depth, and section/resource/stream sizes; declared
   sizes are verified against actual bytes (zip-bomb defense). Installers are
   never executed. See the [analyzer guide](analyzers.md#limits-and-safety).
-- **YAML** (manifests, config, override packs) is parsed strictly: no
-  aliases/anchors abuse, single document, bounded size, depth, and node
-  count; unknown override-pack keys are rejected.
+- **Override packs** are parsed strictly: unknown keys rejected, no YAML
+  aliases, exactly one document, bounded size, depth, node count, and scalar
+  length. Manifests and the config file are parsed with a conventional YAML
+  reader and validated structurally afterwards; treat override packs and
+  config files as trusted local input.
 - **Downloads** are hash-verified; a payload that no longer matches its
   recorded hash is treated as changed upstream content and re-fetched, and
   byte changes behind a stable URL block submission unless explicitly
@@ -71,8 +78,10 @@ audit output. Token equality checks are constant-time.
 
 - `--dry-run` never mutates: no manifest writes (beyond the local download
   cache), no GitHub calls that change state.
-- Remote changes happen only with explicit `--submit`, and every destructive
-  or account-shaping step (fork creation, branch push, PR creation) requires
+- Manifest mutation commands change GitHub state only with explicit
+  `--submit`; maintenance commands (`sync`, `complete --apply-safe`) plan
+  first and mutate only after explicit confirmation. Every destructive or
+  account-shaping step (fork creation, branch push, PR creation) requires
   confirmation; confirmation never defaults to yes and must be given as
   `--yes` in non-interactive or JSON sessions.
 - Interrupted submissions report exactly which steps completed

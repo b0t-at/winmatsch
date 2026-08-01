@@ -22,12 +22,12 @@ License: MIT
 
 SharpCompress 1.0.0
 Source: https://github.com/adamhathcock/sharpcompress
-Copyright (c) 2025 Adam Hathcock
+Copyright (c) 2014 Adam Hathcock
 License: MIT
 
 Spectre.Console and Spectre.Console.Ansi 0.57.2
 Source: https://github.com/spectreconsole/spectre.console
-Copyright Patrik Svensson, Phil Scott, Nils Andresen, Cédric Luthi
+Copyright (c) 2020 Patrik Svensson, Phil Scott, Nils Andresen
 License: MIT
 
 System.CommandLine 2.0.10

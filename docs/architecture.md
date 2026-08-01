@@ -123,7 +123,7 @@ source, and version.
 | Layer | Location | Character |
 |---|---|---|
 | Unit/component | `tests/<Project>.Tests` | Hermetic, fast, per-project. |
-| Shared infrastructure | `tests/WinMatsch.Testing` (+ its own tests) | Fixture catalog, fakes, recordings. |
+| Shared infrastructure | `tests/WinMatsch.Testing` (+ its own tests) | Fixture catalogue, fakes, recordings. |
 | End-to-end | `tests/WinMatsch.E2E.Tests` | Runs the real executable as a process; hermetic by default (no network, token cleared, `NO_COLOR` forced); asserts safety contracts (no secrets, no stack traces, no ANSI in captured output). |
 
 Opt-in live E2E (excluded from CI):

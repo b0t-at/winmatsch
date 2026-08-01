@@ -24,9 +24,10 @@ official manifest schemas, and — only when you explicitly ask — submits it t
   every manifest the same way, with a full before/after audit trail
   (`--explain-rules`) and per-rule modes: apply, log-only, disabled.
 - **Safety first.** Every command plans before it mutates. `--dry-run` never
-  changes anything, remote mutations require explicit `--submit` plus
-  confirmation (`--yes` in non-interactive sessions), and secrets are
-  systematically redacted from all output.
+  changes anything, remote mutations require explicit opt-in (`--submit` for
+  manifest changes, confirmation — `--yes` in non-interactive sessions — for
+  every destructive step), and tokens are redacted by construction while the
+  audit trail passes a secret-scrubbing sanitizer.
 - **Automation friendly.** `--format json` writes exactly one stable JSON
   document to stdout, diagnostics go to stderr, and every invocation ends with
   a documented exit code.
@@ -36,8 +37,8 @@ official manifest schemas, and — only when you explicitly ask — submits it t
 | Guarantee | Detail |
 |---|---|
 | Plan first | `--dry-run` validates and shows what would change; it never writes to disk beyond the cache, and never touches GitHub. |
-| Explicit submission | Nothing is pushed to any repository unless you pass `--submit`; confirmation never defaults to yes. |
-| No secret echo | Tokens are validated, stored in the OS keyring, rendered as `[REDACTED]`, and scrubbed from logs, JSON, previews, and error messages. |
+| Explicit mutation | Manifest changes are pushed only with `--submit`; maintenance commands (`sync`, `complete --apply-safe`) plan first and apply only after confirmation. Confirmation never defaults to yes. |
+| No secret echo | Tokens are validated, stored in the OS keyring, and rendered as `[REDACTED]` by construction; the audit trail, previews, and JSON output pass a secret-scrubbing sanitizer. |
 | Bounded parsing | Untrusted installers and archives are parsed with hard limits (entry counts, sizes, nesting depth) to resist archive bombs. |
 | Human corrections win | When a human edited a previously submitted manifest, the tool detects it and requires review instead of silently reverting. |
 
@@ -123,8 +124,8 @@ winmatsch new MyPublisher.MyApp \
 ### Submit to WinGet (requires a GitHub token)
 
 ```bash
-# one-time token setup (recommended: piped via stdin into the OS keyring)
-echo "<your token>" | winmatsch token add --stdin
+# one-time token setup: pipe the token into the OS keyring, e.g. from gh
+gh auth token | winmatsch token add --stdin
 
 winmatsch update MyPublisher.MyApp 1.2.3 \
   --urls https://example.com/MyApp-1.2.3-x64.msi \

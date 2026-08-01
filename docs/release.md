@@ -26,8 +26,9 @@ Triggered by pushing a `v*` tag:
    warnings treated as errors and the tag version stamped in. Verifies the
    executable, `LICENSE`, and `THIRD-PARTY-NOTICES.txt` are present, smokes
    the binary on hosts whose architecture matches
-   (`--version` equals the tag, `--help`, `analyze --help`,
-   `completion bash`, `config path`), then packages `zip` (Windows) or
+   (`--version` must equal the tag version exactly, ignoring the `+<sha>`
+   suffix; `--help`, `analyze --help`, `completion bash`, `config path`),
+   then packages `zip` (Windows) or
    `tar.gz` (Linux/macOS) with deterministic names
    `winmatsch-<tag>-<rid>.<ext>`.
 3. **Release** (once): downloads all six archives, **fails if any expected

@@ -1,8 +1,8 @@
 # Command reference
 
 This reference matches the `--help` output of the built executable. When in
-doubt, `winmatsch <command> --help` is the source of truth; the CI help
-snapshots keep this document honest.
+doubt, `winmatsch <command> --help` is the source of truth; the CLI test
+suite exercises every command's help output to keep the surface stable.
 
 ```text
 winmatsch [command] [options]
@@ -57,7 +57,7 @@ what would be removed. Exit code 0 means the plan is valid.
 | `WINMATSCH_RULES_DISABLED` | Configuration: comma-separated rule IDs forced to *disabled*. |
 | `WINMATSCH_CACHE_ENABLED` | Configuration: `true`/`false`, enable the download cache. |
 | `WINMATSCH_CACHE_DIRECTORY` | Configuration: custom cache directory. |
-| `WINMATSCH_FRESHNESS_DELAY` | Configuration: `d.hh:mm:ss` minimum release age before submission. |
+| `WINMATSCH_FRESHNESS_DELAY` | Configuration: `d.hh:mm:ss` or `hh:mm:ss` minimum release age before submission. |
 | `WINMATSCH_OUTPUT_FORMAT` | Configuration: `text` or `json`. |
 | `WINMATSCH_OUTPUT_DIRECTORY` | Configuration: output directory. |
 | `WINMATSCH_INTERACTION` | Configuration: `auto`, `always`, or `never`. |
@@ -111,7 +111,7 @@ Mutation commands (`new`, `update`, `remove`, `submit`, `new-locale`,
   "packageVersion": "…",
   "result": "…",                      // kebab-case result state
   "applied": false,                   // true only when something was mutated
-  "warning": null,
+  "warning": "…",                     // present only when there is a warning
   "outputDirectory": "…",
   "requiresReview": false,            // true => human-correction review needed
   "changes":   [ { "kind": "…", "path": "…" } ],
@@ -126,7 +126,7 @@ Mutation commands (`new`, `update`, `remove`, `submit`, `new-locale`,
   "remote": {                          // null unless --submit
     "result": "…",
     "applied": true,
-    "operations": [ "…" ],
+    "operations": [ { "kind": "…", "target": "…", "description": "…" } ],
     "state": {
       "fork": "…", "branch": "…", "commitSha": "…",
       "pullRequestNumber": 123, "pullRequestUrl": "…",
@@ -139,9 +139,11 @@ Mutation commands (`new`, `update`, `remove`, `submit`, `new-locale`,
 }
 ```
 
-Secrets are redacted everywhere in the document (`[REDACTED]`): GitHub token
-shapes, bearer/basic authorization values, JWTs, credential-looking
-assignments, and URL user-info/query strings.
+Free-form values in the document (messages, previews, before/after values)
+pass a secret-scrubbing sanitizer that replaces recognizable secrets — GitHub
+token shapes, authorization header values, password- and API-key-style
+assignments, URL user-info and query strings — with `[REDACTED]`. This is
+defense in depth; do not put secrets into URLs or manifest fields.
 
 ### Approvals, review-required, and partial remote states
 
@@ -161,6 +163,22 @@ assignments, and URL user-info/query strings.
   are detected and not repeated blindly, and the duplicate-PR preflight
   prevents accidental double submissions (`--skip-pr-check` disables only
   that early check).
+
+## Non-interactive and CI behavior
+
+With `--interaction auto` (the default), prompting is disabled whenever a CI
+environment is detected (`CI`, `GITHUB_ACTIONS`, or `TF_BUILD` set to
+`1`/`true`/`yes`) or stdin/stderr is redirected; `--interaction never` and
+`--format json` disable prompting unconditionally. In a session that cannot
+prompt:
+
+- missing required input fails with exit code 4 instead of hanging;
+- confirmations must be given explicitly with `--yes` — they never default
+  to yes;
+- prompts would render on stderr anyway, so stdout stays parseable.
+
+See [interaction modes](configuration.md#interaction-modes) for the full
+decision rules.
 
 ## Read-only commands
 

@@ -55,7 +55,7 @@ The user configuration file is YAML, named `config.yaml`.
 | OS | Default path |
 |---|---|
 | Linux / macOS | `$XDG_CONFIG_HOME/winmatsch/config.yaml` if `XDG_CONFIG_HOME` is set, else `~/.config/winmatsch/config.yaml` |
-| Windows | `%USERPROFILE%\.config\winmatsch\config.yaml` |
+| Windows | `%XDG_CONFIG_HOME%\winmatsch\config.yaml` if `XDG_CONFIG_HOME` is set (it is honored on every platform), else `%USERPROFILE%\.config\winmatsch\config.yaml` |
 
 `--config <file>` selects an explicit file; unlike the default path, an
 explicit path **must exist** (otherwise the invocation fails). A missing

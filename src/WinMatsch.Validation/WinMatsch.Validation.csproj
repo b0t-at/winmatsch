@@ -23,6 +23,10 @@
           Link="THIRD-PARTY-NOTICES.txt"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\LICENSE"
+          Link="LICENSE"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

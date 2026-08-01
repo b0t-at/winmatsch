@@ -6,7 +6,7 @@ the expectations for changes.
 ## Local setup
 
 - Install the .NET SDK version pinned in [`global.json`](global.json)
-  (`rollForward: latestFeature`, so any newer feature band of the same major
+  (`rollForward: latestFeature`, so any newer 10.0.x feature band also
   works). If you keep the SDK in a user-local directory, prepend it to `PATH`
   in every shell.
 - No other tools are required; all dependencies are NuGet packages.

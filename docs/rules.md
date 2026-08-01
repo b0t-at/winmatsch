@@ -52,9 +52,10 @@ The IDs below are the complete set of implemented rules. IDs are stable and
 form the ownership boundary: a rule may only touch the manifest fields its
 catalogue entry describes.
 
-### Normalization rules (`WM00xx`)
+### Normalization and quirk rules
 
-Run first, in a fixed order, to produce a canonical manifest shape.
+Run first, in a fixed order, to produce a canonical manifest shape
+(IDs `WM00xx`, plus the quirk rule `WM0201`).
 
 | ID | Purpose |
 |---|---|
@@ -188,7 +189,7 @@ adding an override pack entry, or accepting the regenerated value explicitly.
 
 All rule output — findings, traces, change records, previews — passes through
 a sanitizer that redacts GitHub token shapes, bearer/basic authorization
-values, JWTs, credential-looking assignments (`password=…`, `--api-key …`),
+values, JWTs, password- and API-key-style key/value assignments,
 and URL user-info/query strings, including recursively percent- or
 backslash-escaped variants. Sensitive field paths (e.g. installer switches)
 are redacted wholesale. See the [security guide](security.md).
