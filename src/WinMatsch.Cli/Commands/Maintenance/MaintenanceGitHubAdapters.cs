@@ -113,17 +113,24 @@ public interface IInstallerUrlProber
 
 /// <summary>
 /// The production prober over <see cref="InstallerDownloader.ProbeAsync"/>. Only a confirmed
-/// absence status (404 or 410) counts as dead; authentication, authorization, redirect, and
-/// other rejections classify as blocked, and transient transport failures stay transient, so
-/// the removal workflow escalates instead of treating them as proof of death.
+/// absence counts as dead: a 404/410 seen by the probe (which HEADs first) is re-verified
+/// with an independent ranged GET before it is reported as missing, because some origins
+/// reject HEAD while serving GET. Authentication, authorization, redirect, and other
+/// rejections classify as blocked, and transient transport failures stay transient, so the
+/// removal workflow escalates instead of treating them as proof of death.
 /// </summary>
 public sealed class HttpInstallerUrlProber : IInstallerUrlProber
 {
     private readonly InstallerDownloader _downloader;
+    private readonly Func<HttpMessageHandler> _confirmationHandlerFactory;
 
-    public HttpInstallerUrlProber(InstallerDownloader? downloader = null)
+    public HttpInstallerUrlProber(
+        InstallerDownloader? downloader = null,
+        Func<HttpMessageHandler>? confirmationHandlerFactory = null)
     {
         _downloader = downloader ?? new InstallerDownloader();
+        _confirmationHandlerFactory = confirmationHandlerFactory
+            ?? (static () => new HttpClientHandler());
     }
 
     public async Task<DeadArtifactState> ProbeAsync(string url, CancellationToken cancellationToken)
@@ -133,6 +140,11 @@ public sealed class HttpInstallerUrlProber : IInstallerUrlProber
         {
             _ = await _downloader.ProbeAsync(url, cancellationToken).ConfigureAwait(false);
             return DeadArtifactState.Exists;
+        }
+        catch (DownloadHttpException exception)
+            when (exception.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+        {
+            return await ConfirmMissingAsync(url, cancellationToken).ConfigureAwait(false);
         }
         catch (DownloadException exception)
         {
@@ -158,6 +170,35 @@ public sealed class HttpInstallerUrlProber : IInstallerUrlProber
         return exception.FailureKind == DownloadFailureKind.TransientNetwork
             ? DeadArtifactState.TransientFailure
             : DeadArtifactState.NetworkBlocked;
+    }
+
+    /// <summary>
+    /// Double-checks an absence status with a ranged GET; only a second 404/410 counts as
+    /// missing, anything indeterminate escalates.
+    /// </summary>
+    private async Task<DeadArtifactState> ConfirmMissingAsync(string url, CancellationToken cancellationToken)
+    {
+        using var client = new HttpClient(_confirmationHandlerFactory(), disposeHandler: true);
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
+        try
+        {
+            using HttpResponseMessage response = await client
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                .ConfigureAwait(false);
+            if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+            {
+                return DeadArtifactState.PermanentlyMissing;
+            }
+
+            return response.IsSuccessStatusCode
+                ? DeadArtifactState.Exists
+                : DeadArtifactState.NetworkBlocked;
+        }
+        catch (HttpRequestException)
+        {
+            return DeadArtifactState.TransientFailure;
+        }
     }
 }
 

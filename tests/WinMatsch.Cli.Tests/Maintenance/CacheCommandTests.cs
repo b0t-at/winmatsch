@@ -293,6 +293,25 @@ public sealed class CacheCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Urls_with_username_only_credentials_are_redacted()
+    {
+        const string tokenUrl = "https://ghp_bareTokenUser@example.invalid/app.exe";
+        await StoreEntryAsync(tokenUrl, "token-bytes");
+        CliHarness harness = CreateHarness();
+
+        CliRunResult list = await harness.RunAsync(["cache", "list"]);
+        CliRunResult json = await harness.RunAsync(["cache", "list", "--format", "json"]);
+
+        foreach (CliRunResult result in new[] { list, json })
+        {
+            Assert.DoesNotContain("ghp_bareTokenUser", result.StandardOutput, StringComparison.Ordinal);
+            Assert.DoesNotContain("ghp_bareTokenUser", result.StandardError, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("[REDACTED]@example.invalid", list.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Cache_commands_reject_empty_urls()
     {
         CliHarness harness = CreateHarness();

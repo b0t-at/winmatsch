@@ -4,6 +4,7 @@ using WinMatsch.Cli.Commands.Maintenance;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
+using WinMatsch.Testing.Infrastructure;
 using WinMatsch.Workflows.GitHub;
 using Xunit;
 
@@ -42,6 +43,60 @@ public sealed class MaintenanceAdapterTests
 
         Assert.Equal(DeadArtifactState.NetworkBlocked, HttpInstallerUrlProber.Classify(redirect));
         Assert.Equal(DeadArtifactState.TransientFailure, HttpInstallerUrlProber.Classify(transient));
+    }
+
+    [Fact]
+    public async Task Head_absence_is_confirmed_with_a_ranged_get_before_counting_as_dead()
+    {
+        var origin = new StubHttpMessageHandler(request =>
+            request.Method == HttpMethod.Head
+                ? new HttpResponseMessage(HttpStatusCode.NotFound)
+                : new HttpResponseMessage(HttpStatusCode.PartialContent)
+                {
+                    Content = new ByteArrayContent([0]),
+                });
+        var prober = new HttpInstallerUrlProber(
+            new InstallerDownloader(origin),
+            () => new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.PartialContent)
+            {
+                Content = new ByteArrayContent([0]),
+            }));
+
+        DeadArtifactState state = await prober.ProbeAsync(
+            "https://example.invalid/app.exe",
+            CancellationToken.None);
+
+        Assert.Equal(DeadArtifactState.Exists, state);
+    }
+
+    [Fact]
+    public async Task Absence_confirmed_by_both_head_and_get_counts_as_dead()
+    {
+        var origin = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        var prober = new HttpInstallerUrlProber(
+            new InstallerDownloader(origin),
+            () => new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.Gone)));
+
+        DeadArtifactState state = await prober.ProbeAsync(
+            "https://example.invalid/app.exe",
+            CancellationToken.None);
+
+        Assert.Equal(DeadArtifactState.PermanentlyMissing, state);
+    }
+
+    [Fact]
+    public async Task Indeterminate_absence_confirmation_escalates()
+    {
+        var origin = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        var prober = new HttpInstallerUrlProber(
+            new InstallerDownloader(origin),
+            () => new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.Forbidden)));
+
+        DeadArtifactState state = await prober.ProbeAsync(
+            "https://example.invalid/app.exe",
+            CancellationToken.None);
+
+        Assert.Equal(DeadArtifactState.NetworkBlocked, state);
     }
 
     [Fact]

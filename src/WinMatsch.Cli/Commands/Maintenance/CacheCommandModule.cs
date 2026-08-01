@@ -414,11 +414,22 @@ public sealed class CacheCommandModule : ICommandModule
             : "unknown size";
 
     /// <summary>
-    /// The display form of an entry's URL: credentials in userinfo and query values are
-    /// redacted, since signed installer URLs routinely embed secrets. Commands still address
-    /// entries by the exact original URL the caller already knows.
+    /// The display form of an entry's URL: the entire userinfo component (username-only forms
+    /// included) and all query values are redacted, since signed installer URLs routinely
+    /// embed secrets. Commands still address entries by the exact original URL the caller
+    /// already knows.
     /// </summary>
-    private static string RedactUrl(string url) => MaintenanceCommandHelpers.Redact(url);
+    private static string RedactUrl(string url)
+    {
+        string display = url;
+        if (Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) && uri.UserInfo.Length > 0)
+        {
+            // Uri.Authority never contains userinfo, so this drops it structurally.
+            display = $"{uri.Scheme}{Uri.SchemeDelimiter}[REDACTED]@{uri.Authority}{uri.PathAndQuery}{uri.Fragment}";
+        }
+
+        return MaintenanceCommandHelpers.Redact(display);
+    }
 
     private static string FormatUrl(DownloadCacheEntryInfo entry)
         => entry.Url.Length > 0 ? RedactUrl(entry.Url) : $"(unreadable metadata; key {entry.CacheKey})";
