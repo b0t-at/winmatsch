@@ -849,19 +849,26 @@ internal static class DirectoryPin
         out FileAttributeTagInformation fileInformation,
         uint bufferSize);
 
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     private struct ByHandleFileInformation
     {
         public uint FileAttributes;
-        public long CreationTime;
-        public long LastAccessTime;
-        public long LastWriteTime;
+        public NativeFileTime CreationTime;
+        public NativeFileTime LastAccessTime;
+        public NativeFileTime LastWriteTime;
         public uint VolumeSerialNumber;
         public uint FileSizeHigh;
         public uint FileSizeLow;
         public uint NumberOfLinks;
         public uint FileIndexHigh;
         public uint FileIndexLow;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct NativeFileTime
+    {
+        public uint LowDateTime;
+        public uint HighDateTime;
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
