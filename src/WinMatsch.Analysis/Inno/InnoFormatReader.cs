@@ -1021,13 +1021,13 @@ internal sealed class InnoBinaryReader
     {
         _data = data;
         _options = options;
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         if (unicode)
         {
             _encoding = Encoding.Unicode;
         }
         else
         {
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             try
             {
                 _encoding = Encoding.GetEncoding(

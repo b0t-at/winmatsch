@@ -14,6 +14,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\WinMatsch.Cli\WinMatsch.Cli.csproj" />
     <ProjectReference Include="..\..\src\WinMatsch.Workflows\WinMatsch.Workflows.csproj" />
+    <ProjectReference Include="..\WinMatsch.Analysis.Tests\WinMatsch.Analysis.Tests.csproj" />
+    <ProjectReference Include="..\WinMatsch.Testing\WinMatsch.Testing.csproj" />
+    <ProjectReference Include="..\WinMatsch.Workflows.Tests\WinMatsch.Workflows.Tests.csproj" />
   </ItemGroup>
 
 </Project>

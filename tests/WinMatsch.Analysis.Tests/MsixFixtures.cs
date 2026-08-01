@@ -65,6 +65,7 @@ internal static class MsixFixtures
                 }
 
                 ZipArchiveEntry entry = archive.CreateEntry(name);
+                entry.LastWriteTime = new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
                 using Stream entryStream = entry.Open();
                 entryStream.Write(content);
             }
