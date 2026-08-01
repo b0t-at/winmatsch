@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
@@ -24,7 +25,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
           repository(owner: $owner, name: $name) {
             id nameWithOwner url isPrivate isFork
             parent { nameWithOwner }
-            defaultBranchRef { name target { ... on Commit { oid } } }
+            defaultBranchRef { name }
           }
           rateLimit { limit remaining used resetAt }
         }
@@ -43,17 +44,37 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
 
     private readonly GitHubHttpTransport _transport;
     private readonly HttpClient _httpClient;
+    private readonly bool _disposeHttpClient;
     private readonly GitHubClientOptions _options;
     private readonly ConcurrentDictionary<string, MutationEntry> _mutations =
         new(StringComparer.Ordinal);
     private RateLimitInfo? _lastRateLimit;
+    private int _disposed;
 
+    /// <summary>Creates a client that owns and disposes its internally-created HTTP client.</summary>
+    public GitHubRepositoryClient(
+        string accessToken,
+        GitHubClientOptions? options = null)
+        : this(
+            CreateDefaultHttpClient(options),
+            accessToken,
+            options,
+            disposeHttpClient: true)
+    {
+    }
+
+    /// <summary>
+    /// Creates a client using a caller-supplied HTTP client. The caller retains ownership unless
+    /// <paramref name="disposeHttpClient"/> is explicitly set.
+    /// </summary>
     public GitHubRepositoryClient(
         HttpClient httpClient,
         string accessToken,
-        GitHubClientOptions? options = null)
+        GitHubClientOptions? options = null,
+        bool disposeHttpClient = false)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _disposeHttpClient = disposeHttpClient;
         _options = options ?? new GitHubClientOptions();
         _transport = new GitHubHttpTransport(_httpClient, accessToken, _options);
         _transport.RateLimitObserved += OnRateLimitObserved;
@@ -61,12 +82,23 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
 
     public RateLimitInfo? LastRateLimit => Volatile.Read(ref _lastRateLimit);
 
+    public IReadOnlyList<string> LastOAuthScopes => _transport.LastOAuthScopes;
+
     public event EventHandler<RateLimitInfo>? RateLimitObserved;
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         _transport.RateLimitObserved -= OnRateLimitObserved;
-        _httpClient.Dispose();
+        if (_disposeHttpClient)
+        {
+            _httpClient.Dispose();
+        }
+
         GC.SuppressFinalize(this);
     }
 
@@ -138,7 +170,11 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                     HttpStatusCode.NotFound,
                     requestId: null);
             GraphQlBranchDto branch = dto.DefaultBranchRef ??
-                throw InvalidGraphQlResponse("default branch");
+                throw new GitHubApiException(
+                    "GitHub repository is not ready yet.",
+                    statusCode: null,
+                    requestId: null,
+                    errorKind: GitHubApiErrorKind.ForkNotReady);
             RestBranchDto branchState = await GetBranchAsync(
                 repository,
                 branch.Name,
@@ -494,13 +530,17 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             $"{Escape(baseReference)}...{Escape(head)}?per_page=100");
         RestCompareDto? comparison = null;
         var commits = new List<RestComparedCommitDto>();
+        var visited = new HashSet<Uri>();
+        int pageCount = 0;
         while (next is not null)
         {
+            ValidatePaginationPage(next, visited, pageCount++);
             TransportResponse<RestCompareDto> page = await _transport.GetPageAsync(
-            next,
-            GitHubJsonContext.Default.RestCompareDto,
-            cancellationToken).ConfigureAwait(false);
+                next,
+                GitHubJsonContext.Default.RestCompareDto,
+                cancellationToken).ConfigureAwait(false);
             comparison ??= page.Value;
+            ValidatePaginationItemCount(commits.Count, page.Value.Commits.Count);
             commits.AddRange(page.Value.Commits);
             next = page.NextUri;
         }
@@ -624,6 +664,15 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     {
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentNullException.ThrowIfNull(search);
+        bool hasHeadOwner = !string.IsNullOrWhiteSpace(search.HeadOwner);
+        bool hasHeadBranch = !string.IsNullOrWhiteSpace(search.HeadBranch);
+        if (hasHeadBranch && !hasHeadOwner)
+        {
+            throw new ArgumentException(
+                "A pull-request head branch filter requires a head owner.",
+                nameof(search));
+        }
+
         var query = new StringBuilder(
             $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/pulls?per_page=100");
         query.Append("&state=");
@@ -634,11 +683,9 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             PullRequestState.All => "all",
             _ => throw new ArgumentOutOfRangeException(nameof(search)),
         });
-        if (!string.IsNullOrWhiteSpace(search.HeadBranch))
+        if (hasHeadBranch)
         {
-            string head = string.IsNullOrWhiteSpace(search.HeadOwner)
-                ? search.HeadBranch
-                : $"{search.HeadOwner}:{search.HeadBranch}";
+            string head = $"{search.HeadOwner}:{search.HeadBranch}";
             query.Append("&head=");
             query.Append(Escape(head));
         }
@@ -654,14 +701,32 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             first,
             GitHubJsonContext.Default.ListRestPullRequestDto,
             cancellationToken).ConfigureAwait(false);
-        IEnumerable<RestPullRequestDto> filtered = pullRequests;
+        IEnumerable<PullRequestInfo> filtered = pullRequests.Select(MapPullRequest);
+        if (hasHeadOwner)
+        {
+            filtered = filtered.Where(pullRequest =>
+                string.Equals(
+                    pullRequest.HeadOwner,
+                    search.HeadOwner,
+                    StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (hasHeadBranch)
+        {
+            filtered = filtered.Where(pullRequest =>
+                string.Equals(
+                    pullRequest.HeadBranch,
+                    search.HeadBranch,
+                    StringComparison.Ordinal));
+        }
+
         if (!string.IsNullOrWhiteSpace(search.ExactTitleToken))
         {
             filtered = filtered.Where(pullRequest =>
                 ContainsExactToken(pullRequest.Title, search.ExactTitleToken));
         }
 
-        return filtered.Select(MapPullRequest).ToArray();
+        return filtered.ToArray();
     }
 
     public Task<PullRequestInfo> CreatePullRequestAsync(
@@ -673,9 +738,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         ArgumentNullException.ThrowIfNull(repository);
         ValidatePullRequest(request);
         ArgumentNullException.ThrowIfNull(mutation);
-        string fingerprint =
-            $"create-pr|{repository}|{request.HeadOwner}|{request.HeadBranch}|" +
-            $"{request.BaseBranch}|{request.Title}|{request.Body}|{request.Draft}";
+        string fingerprint = GetPullRequestFingerprint(repository, request);
         return ExecuteMutationAsync(
             mutation,
             fingerprint,
@@ -974,12 +1037,16 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     {
         var results = new List<T>();
         Uri? next = first;
+        var visited = new HashSet<Uri>();
+        int pageCount = 0;
         while (next is not null)
         {
+            ValidatePaginationPage(next, visited, pageCount++);
             TransportResponse<List<T>> page = await _transport.GetPageAsync(
                 next,
                 responseType,
                 cancellationToken).ConfigureAwait(false);
+            ValidatePaginationItemCount(results.Count, page.Value.Count);
             results.AddRange(page.Value);
             next = page.NextUri;
         }
@@ -1100,8 +1167,14 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             status = HttpStatusCode.NotFound;
         }
         else if (errors.Any(static error =>
-                     error.Message.Contains("expectedHeadOid", StringComparison.OrdinalIgnoreCase) ||
-                     error.Message.Contains("head oid", StringComparison.OrdinalIgnoreCase)))
+                     string.Equals(
+                         error.Type,
+                         "UNPROCESSABLE",
+                         StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(
+                         error.Type,
+                         "CONFLICT",
+                         StringComparison.OrdinalIgnoreCase)))
         {
             status = HttpStatusCode.Conflict;
         }
@@ -1114,20 +1187,19 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             errors[0].Message,
             status,
             requestId: null,
-            errors.Select(static error => error.Message).ToArray());
+            errors.Select(static error => error.Message).ToArray(),
+            errorKind: status == HttpStatusCode.NotFound
+                ? GitHubApiErrorKind.ResourceNotFound
+                : status is HttpStatusCode.Conflict or HttpStatusCode.UnprocessableEntity
+                    ? GitHubApiErrorKind.Conflict
+                    : GitHubApiErrorKind.Unknown);
     }
 
     private static GitHubApiException InvalidGraphQlResponse(string expected)
         => new($"GitHub GraphQL response did not contain {expected}.");
 
     private static bool IsGraphQlUnavailable(GitHubApiException exception)
-        => exception.StatusCode is HttpStatusCode.MethodNotAllowed
-            or HttpStatusCode.NotImplemented ||
-            (exception.StatusCode == HttpStatusCode.NotFound &&
-             exception.Errors.Count == 0 &&
-             !exception.Message.StartsWith(
-                 "GitHub repository '",
-                 StringComparison.Ordinal));
+        => exception.ErrorKind == GitHubApiErrorKind.GraphQlUnavailable;
 
     private static RepositoryTreeEntryType ParseTreeEntryType(string type)
         => type switch
@@ -1178,8 +1250,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     }
 
     private static bool IsForkNotReady(GitHubApiException exception)
-        => exception.StatusCode == HttpStatusCode.NotFound ||
-            exception.Message.Contains("default branch", StringComparison.OrdinalIgnoreCase);
+        => exception.ErrorKind is GitHubApiErrorKind.ResourceNotFound
+            or GitHubApiErrorKind.ForkNotReady;
 
     private static PullRequestState ParsePullRequestState(string state)
         => state switch
@@ -1285,13 +1357,15 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         AppendHash(hash, request.BranchName);
         AppendHash(hash, request.ExpectedHeadSha);
         AppendHash(hash, request.Headline);
-        AppendHash(hash, request.Body ?? "");
+        AppendHash(hash, request.Body);
+        AppendHash(hash, request.Additions.Count);
         foreach (CommitFileAddition addition in request.Additions)
         {
             AppendHash(hash, addition.Path);
-            hash.AppendData(addition.Contents.Span);
+            AppendHash(hash, addition.Contents.Span);
         }
 
+        AppendHash(hash, request.Deletions.Count);
         foreach (string deletion in request.Deletions)
         {
             AppendHash(hash, deletion);
@@ -1300,10 +1374,44 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         return "create-commit|" + Convert.ToHexString(hash.GetHashAndReset());
     }
 
-    private static void AppendHash(IncrementalHash hash, string value)
+    private static string GetPullRequestFingerprint(
+        RepositoryCoordinates repository,
+        CreatePullRequestRequest request)
     {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendHash(hash, repository.ToString());
+        AppendHash(hash, request.HeadOwner);
+        AppendHash(hash, request.HeadBranch);
+        AppendHash(hash, request.BaseBranch);
+        AppendHash(hash, request.Title);
+        AppendHash(hash, request.Body);
+        AppendHash(hash, request.Draft ? "true" : "false");
+        return "create-pr|" + Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private static void AppendHash(IncrementalHash hash, string? value)
+    {
+        if (value is null)
+        {
+            AppendHash(hash, -1);
+            return;
+        }
+
+        AppendHash(hash, Encoding.UTF8.GetByteCount(value));
         hash.AppendData(Encoding.UTF8.GetBytes(value));
-        hash.AppendData([0]);
+    }
+
+    private static void AppendHash(IncrementalHash hash, ReadOnlySpan<byte> value)
+    {
+        AppendHash(hash, value.Length);
+        hash.AppendData(value);
+    }
+
+    private static void AppendHash(IncrementalHash hash, int value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(buffer, value);
+        hash.AppendData(buffer);
     }
 
     private static string Escape(string value)
@@ -1332,6 +1440,36 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         }
 
         return uri;
+    }
+
+    private void ValidatePaginationPage(Uri page, HashSet<Uri> visited, int pageCount)
+    {
+        if (pageCount >= _options.MaxPaginationPages)
+        {
+            throw new GitHubApiException(
+                $"GitHub pagination exceeded the configured limit of {_options.MaxPaginationPages} pages.");
+        }
+
+        if (!visited.Add(page))
+        {
+            throw new GitHubApiException(
+                "GitHub returned a pagination link that loops to an already visited page.");
+        }
+    }
+
+    private void ValidatePaginationItemCount(int currentCount, int pageCount)
+    {
+        if (pageCount > _options.MaxPaginationItems - currentCount)
+        {
+            throw new GitHubApiException(
+                $"GitHub pagination exceeded the configured limit of {_options.MaxPaginationItems} items.");
+        }
+    }
+
+    private static HttpClient CreateDefaultHttpClient(GitHubClientOptions? options)
+    {
+        (options ?? new GitHubClientOptions()).Validate();
+        return new HttpClient();
     }
 
     private sealed record MutationEntry(

@@ -14,6 +14,7 @@ internal sealed class GitHubHttpTransport
     private readonly HttpClient _httpClient;
     private readonly string _accessToken;
     private readonly GitHubClientOptions _options;
+    private string[] _lastOAuthScopes = [];
 
     public GitHubHttpTransport(
         HttpClient httpClient,
@@ -31,6 +32,8 @@ internal sealed class GitHubHttpTransport
     }
 
     public event EventHandler<RateLimitInfo>? RateLimitObserved;
+
+    public IReadOnlyList<string> LastOAuthScopes => Volatile.Read(ref _lastOAuthScopes);
 
     public async Task<TResponse> GetAsync<TResponse>(
         string relativePath,
@@ -102,10 +105,13 @@ internal sealed class GitHubHttpTransport
             request,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
-        ObserveRateLimit(response);
+        ObserveResponseHeaders(response);
         if (!response.IsSuccessStatusCode)
         {
-            throw await CreateExceptionAsync(response, cancellationToken).ConfigureAwait(false);
+            throw await CreateExceptionAsync(
+                response,
+                GitHubApiErrorKind.Unknown,
+                cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -116,7 +122,7 @@ internal sealed class GitHubHttpTransport
         CancellationToken cancellationToken)
         => SendValueAsync(
             HttpMethod.Post,
-            _options.GraphQlUri,
+            _options.ResolvedGraphQlUri,
             Serialize(request, requestType),
             responseType,
             allowRetry: true,
@@ -129,7 +135,7 @@ internal sealed class GitHubHttpTransport
         CancellationToken cancellationToken)
         => SendValueAsync(
             HttpMethod.Post,
-            _options.GraphQlUri,
+            _options.ResolvedGraphQlUri,
             Serialize(request, requestType),
             responseType,
             allowRetry: false,
@@ -188,7 +194,7 @@ internal sealed class GitHubHttpTransport
 
             using (response)
             {
-                ObserveRateLimit(response);
+                ObserveResponseHeaders(response);
                 if (!response.IsSuccessStatusCode)
                 {
                     if (allowRetry &&
@@ -205,7 +211,17 @@ internal sealed class GitHubHttpTransport
                         continue;
                     }
 
-                    throw await CreateExceptionAsync(response, cancellationToken).ConfigureAwait(false);
+                    GitHubApiErrorKind errorKind =
+                        IsGraphQlEndpoint(uri) &&
+                        response.StatusCode is HttpStatusCode.NotFound
+                            or HttpStatusCode.MethodNotAllowed
+                            or HttpStatusCode.NotImplemented
+                            ? GitHubApiErrorKind.GraphQlUnavailable
+                            : GitHubApiErrorKind.Unknown;
+                    throw await CreateExceptionAsync(
+                        response,
+                        errorKind,
+                        cancellationToken).ConfigureAwait(false);
                 }
 
                 await using Stream stream = await response.Content
@@ -256,17 +272,34 @@ internal sealed class GitHubHttpTransport
         RetryConditionHeaderValue? retryAfter,
         CancellationToken cancellationToken)
     {
-        bool serverSpecifiedDelay = retryAfter is not null;
         TimeSpan delay = retryAfter?.Delta ??
             (retryAfter?.Date is DateTimeOffset date
                 ? date - DateTimeOffset.UtcNow
                 : _options.RetryBaseDelay * Math.Pow(2, attempt));
-        delay = serverSpecifiedDelay
-            ? TimeSpan.FromMilliseconds(Math.Max(delay.TotalMilliseconds, 0))
-            : TimeSpan.FromMilliseconds(Math.Clamp(delay.TotalMilliseconds, 0, 30_000));
+        delay = TimeSpan.FromMilliseconds(Math.Clamp(
+            delay.TotalMilliseconds,
+            0,
+            _options.MaxRetryDelay.TotalMilliseconds));
         if (delay > TimeSpan.Zero)
         {
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private void ObserveResponseHeaders(HttpResponseMessage response)
+    {
+        ObserveRateLimit(response);
+        if (response.Headers.TryGetValues(
+                "X-OAuth-Scopes",
+                out IEnumerable<string>? scopeHeaders))
+        {
+            string[] scopes = scopeHeaders
+                .SelectMany(static value => value.Split(','))
+                .Select(static value => value.Trim())
+                .Where(static value => value.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            Volatile.Write(ref _lastOAuthScopes, scopes);
         }
     }
 
@@ -326,6 +359,7 @@ internal sealed class GitHubHttpTransport
 
     private static async Task<GitHubApiException> CreateExceptionAsync(
         HttpResponseMessage response,
+        GitHubApiErrorKind errorKind,
         CancellationToken cancellationToken)
     {
         string body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -350,7 +384,8 @@ internal sealed class GitHubHttpTransport
             message,
             response.StatusCode,
             GetRequestId(response),
-            details);
+            details,
+            errorKind: errorKind);
     }
 
     private static Uri? TryGetNextUri(HttpResponseHeaders headers)
@@ -401,6 +436,9 @@ internal sealed class GitHubHttpTransport
                 "GitHub returned a pagination link outside the configured API origin.");
         }
     }
+
+    private bool IsGraphQlEndpoint(Uri uri)
+        => uri == _options.ResolvedGraphQlUri;
 
     private static string? GetRequestId(HttpResponseMessage response)
         => TryGetHeader(response.Headers, "X-GitHub-Request-Id");

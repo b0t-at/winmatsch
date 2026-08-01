@@ -10,6 +10,9 @@ public interface IGitHubRepositoryClient : IDisposable
 
     public RateLimitInfo? LastRateLimit { get; }
 
+    /// <summary>OAuth scopes from the most recent GitHub response that reported them.</summary>
+    public IReadOnlyList<string> LastOAuthScopes => [];
+
     public event EventHandler<RateLimitInfo>? RateLimitObserved;
 
     public Task<GitHubUser> GetAuthenticatedUserAsync(CancellationToken cancellationToken = default);

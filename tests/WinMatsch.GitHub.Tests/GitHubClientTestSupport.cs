@@ -11,6 +11,8 @@ internal sealed class ScriptedHttpMessageHandler : HttpMessageHandler
 
     public int RemainingSteps => _steps.Count;
 
+    public bool IsDisposed { get; private set; }
+
     public void Add(Func<RecordedRequest, HttpResponseMessage> step)
     {
         ArgumentNullException.ThrowIfNull(step);
@@ -45,6 +47,12 @@ internal sealed class ScriptedHttpMessageHandler : HttpMessageHandler
 
         return _steps.Dequeue()(recorded, cancellationToken);
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        IsDisposed = true;
+        base.Dispose(disposing);
+    }
 }
 
 internal sealed record RecordedRequest(
@@ -71,19 +79,29 @@ internal sealed class TestContext
 internal static class GitHubClientTestSupport
 {
     public static GitHubRepositoryClient CreateClient(ScriptedHttpMessageHandler handler)
+        => CreateClient(handler, CreateOptions());
+
+    public static GitHubRepositoryClient CreateClient(
+        ScriptedHttpMessageHandler handler,
+        GitHubClientOptions options,
+        bool disposeHttpClient = false)
         => new(
             new HttpClient(handler),
             "synthetic-token",
-            new GitHubClientOptions
-            {
-                ApiBaseUri = new Uri("https://github.invalid/api/"),
-                GraphQlUri = new Uri("https://github.invalid/graphql"),
-                UserAgent = "winmatsch-tests",
-                RetryBaseDelay = TimeSpan.Zero,
-                MaxTransientRetries = 2,
-                ForkAvailabilityBaseDelay = TimeSpan.Zero,
-                ForkAvailabilityMaxAttempts = 3,
-            });
+            options,
+            disposeHttpClient);
+
+    public static GitHubClientOptions CreateOptions()
+        => new()
+        {
+            ApiBaseUri = new Uri("https://github.invalid/api/"),
+            GraphQlUri = new Uri("https://github.invalid/graphql"),
+            UserAgent = "winmatsch-tests",
+            RetryBaseDelay = TimeSpan.Zero,
+            MaxTransientRetries = 2,
+            ForkAvailabilityBaseDelay = TimeSpan.Zero,
+            ForkAvailabilityMaxAttempts = 3,
+        };
 
     public static HttpResponseMessage Json(
         string json,

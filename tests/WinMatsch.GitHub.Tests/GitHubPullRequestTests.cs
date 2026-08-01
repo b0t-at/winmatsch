@@ -41,6 +41,43 @@ public sealed class GitHubPullRequestTests
     }
 
     [Fact]
+    public async Task Pull_request_head_branch_without_owner_is_rejected_before_transport()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+
+        ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(
+            () => GitHubClientTestSupport.CreateClient(handler).SearchPullRequestsAsync(
+                _repository,
+                new PullRequestSearch(HeadBranch: "update"),
+                TestContext.Current.CancellationToken));
+
+        Assert.Contains("head owner", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_owner_only_filter_is_enforced_client_side()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(request =>
+        {
+            Assert.DoesNotContain("head=", request.Uri.Query, StringComparison.Ordinal);
+            return GitHubClientTestSupport.Json(
+                $"[{GitHubClientTestSupport.PullRequestJson(1, "One", headOwner: "other")}," +
+                $"{GitHubClientTestSupport.PullRequestJson(2, "Two", headOwner: "contributor")}]");
+        });
+
+        IReadOnlyList<PullRequestInfo> pullRequests = await GitHubClientTestSupport
+            .CreateClient(handler)
+            .SearchPullRequestsAsync(
+                _repository,
+                new PullRequestSearch(HeadOwner: "contributor"),
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, Assert.Single(pullRequests).Number);
+    }
+
+    [Fact]
     public async Task Pull_request_from_deleted_fork_uses_head_user()
     {
         var handler = new ScriptedHttpMessageHandler();
@@ -136,6 +173,108 @@ public sealed class GitHubPullRequestTests
                 TestContext.Current.CancellationToken);
 
         Assert.Equal(8, result.Number);
+    }
+
+    [Fact]
+    public async Task Pull_request_fingerprint_is_not_ambiguous_when_fields_contain_pipes()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $"[{GitHubClientTestSupport.PullRequestJson(8, "Update Contoso.App", headOwner: "a|b", headBranch: "c")}]"));
+        GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
+        var mutation = new MutationRequest("pr-pipe-fingerprint");
+        await client.CreatePullRequestAsync(
+            _repository,
+            new CreatePullRequestRequest(
+                "Update Contoso.App",
+                null,
+                "a|b",
+                "c",
+                "main"),
+            mutation,
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.CreatePullRequestAsync(
+                _repository,
+                new CreatePullRequestRequest(
+                    "Update Contoso.App",
+                    null,
+                    "a",
+                    "b|c",
+                    "main"),
+                mutation,
+                TestContext.Current.CancellationToken));
+
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_fingerprint_distinguishes_null_and_empty_body()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $"[{GitHubClientTestSupport.PullRequestJson(8, "Update Contoso.App")}]"));
+        GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
+        var mutation = new MutationRequest("pr-null-body-fingerprint");
+        await client.CreatePullRequestAsync(
+            _repository,
+            new CreatePullRequestRequest(
+                "Update Contoso.App",
+                null,
+                "contributor",
+                "update",
+                "main"),
+            mutation,
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.CreatePullRequestAsync(
+                _repository,
+                new CreatePullRequestRequest(
+                    "Update Contoso.App",
+                    "",
+                    "contributor",
+                    "update",
+                    "main"),
+                mutation,
+                TestContext.Current.CancellationToken));
+
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_fingerprint_is_not_ambiguous_when_fields_contain_nulls()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $"[{GitHubClientTestSupport.PullRequestJson(8, "Update Contoso.App", headOwner: "a\\u0000b", headBranch: "c")}]"));
+        GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
+        var mutation = new MutationRequest("pr-null-character-fingerprint");
+        await client.CreatePullRequestAsync(
+            _repository,
+            new CreatePullRequestRequest(
+                "Update Contoso.App",
+                null,
+                "a\u0000b",
+                "c",
+                "main"),
+            mutation,
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.CreatePullRequestAsync(
+                _repository,
+                new CreatePullRequestRequest(
+                    "Update Contoso.App",
+                    null,
+                    "a",
+                    "b\u0000c",
+                    "main"),
+                mutation,
+                TestContext.Current.CancellationToken));
+
+        Assert.Single(handler.Requests);
     }
 
     [Fact]

@@ -286,7 +286,9 @@ public sealed class GitHubMutationOperationsTests
         });
         handler.Add(request =>
         {
-            Assert.Contains("\"base_tree\":\"tree-parent\"", request.Body, StringComparison.Ordinal);
+            Assert.Equal(
+                """{"base_tree":"tree-parent","tree":[{"path":"manifest.yaml","mode":"100644","type":"blob","sha":"blob-new"},{"path":"obsolete.yaml","mode":"100644","type":"blob","sha":null}]}""",
+                request.Body);
             return GitHubClientTestSupport.Json("""{"sha":"tree-new"}""");
         });
         handler.Add(request =>
@@ -324,6 +326,49 @@ public sealed class GitHubMutationOperationsTests
 
         Assert.Equal(OtherSha, result.Sha);
         Assert.Equal(6, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Remove_commit_rest_fallback_serializes_explicit_null_sha()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """{"message":"GraphQL unavailable"}""",
+            HttpStatusCode.NotImplemented));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $"{{\"sha\":\"{HeadSha}\",\"tree\":{{\"sha\":\"tree-parent\"}}}}"));
+        handler.Add(request =>
+        {
+            Assert.Equal(
+                """{"base_tree":"tree-parent","tree":[{"path":"obsolete.yaml","mode":"100644","type":"blob","sha":null}]}""",
+                request.Body);
+            return GitHubClientTestSupport.Json("""{"sha":"tree-new"}""");
+        });
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $$"""
+            {
+              "sha": "{{OtherSha}}",
+              "html_url": "https://github.invalid/upstream/repo/commit/{{OtherSha}}"
+            }
+            """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $"{{\"ref\":\"refs/heads/update\",\"object\":{{\"sha\":\"{OtherSha}\"}}}}"));
+
+        ServerCommitResult result = await GitHubClientTestSupport.CreateClient(handler)
+            .CreateCommitAsync(
+                _repository,
+                new ServerCommitRequest(
+                    "update",
+                    HeadSha,
+                    "Remove manifest",
+                    null,
+                    [],
+                    ["obsolete.yaml"]),
+                new MutationRequest("commit-rest-remove"),
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal(OtherSha, result.Sha);
+        Assert.Equal(5, handler.Requests.Count);
     }
 
     [Fact]
@@ -483,6 +528,94 @@ public sealed class GitHubMutationOperationsTests
         Assert.False(fork.AlreadyExisted);
         Assert.Equal(new RepositoryCoordinates("contributor", "repo"), fork.Repository.Coordinates);
         Assert.True(fork.Repository.DefaultBranch.IsProtected);
+    }
+
+    [Fact]
+    public async Task Fork_poll_uses_structured_not_ready_classification()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "data": { "repository": null },
+              "errors": [{ "type": "NOT_FOUND", "message": "missing" }]
+            }
+            """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "data": {
+                "viewer": {
+                  "login": "contributor",
+                  "avatarUrl": "https://github.invalid/avatar.png"
+                }
+              }
+            }
+            """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "node_id": "R_fork",
+              "full_name": "contributor/repo",
+              "html_url": "https://github.invalid/contributor/repo",
+              "fork": true,
+              "private": false,
+              "default_branch": "main",
+              "owner": { "login": "contributor" },
+              "parent": { "full_name": "upstream/repo" }
+            }
+            """,
+            HttpStatusCode.Accepted));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "data": {
+                "repository": {
+                  "id": "R_fork",
+                  "nameWithOwner": "contributor/repo",
+                  "url": "https://github.invalid/contributor/repo",
+                  "isPrivate": false,
+                  "isFork": true,
+                  "parent": { "nameWithOwner": "upstream/repo" },
+                  "defaultBranchRef": null
+                }
+              }
+            }
+            """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $$"""
+            {
+              "data": {
+                "repository": {
+                  "id": "R_fork",
+                  "nameWithOwner": "contributor/repo",
+                  "url": "https://github.invalid/contributor/repo",
+                  "isPrivate": false,
+                  "isFork": true,
+                  "parent": { "nameWithOwner": "upstream/repo" },
+                  "defaultBranchRef": { "name": "main" }
+                }
+              }
+            }
+            """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $$"""
+            {
+              "name": "main",
+              "commit": { "sha": "{{HeadSha}}" },
+              "protected": false
+            }
+            """));
+
+        ForkResult result = await GitHubClientTestSupport.CreateClient(handler)
+            .EnsureForkAsync(
+                _repository,
+                "contributor",
+                new MutationRequest("fork-structured-not-ready"),
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal("contributor", result.Repository.Coordinates.Owner);
+        Assert.Equal(6, handler.Requests.Count);
     }
 
     [Fact]

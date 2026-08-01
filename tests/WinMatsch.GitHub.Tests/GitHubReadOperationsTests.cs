@@ -49,11 +49,37 @@ public sealed class GitHubReadOperationsTests
     }
 
     [Fact]
+    public async Task OAuth_scopes_are_exposed_when_response_headers_report_them()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "data": {
+                "viewer": {
+                  "login": "octocat",
+                  "avatarUrl": "https://github.invalid/avatar.png"
+                }
+              }
+            }
+            """,
+            headers: [("X-OAuth-Scopes", "repo, read:org, repo")]));
+        GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
+
+        await client.GetAuthenticatedUserAsync(TestContext.Current.CancellationToken);
+
+        Assert.Collection(
+            client.LastOAuthScopes,
+            scope => Assert.Equal("repo", scope),
+            scope => Assert.Equal("read:org", scope));
+    }
+
+    [Fact]
     public async Task Authenticated_user_falls_back_to_rest_when_graphql_is_unavailable()
     {
         var handler = new ScriptedHttpMessageHandler();
         handler.Add(_ => GitHubClientTestSupport.Json(
-            """{"message":"Not Found"}""",
+            """{"message":"GitHub repository 'decoy' was not found."}""",
             HttpStatusCode.NotFound));
         handler.Add(request =>
         {
@@ -80,8 +106,12 @@ public sealed class GitHubReadOperationsTests
     public async Task Repository_discovery_returns_default_branch_state()
     {
         var handler = new ScriptedHttpMessageHandler();
-        handler.Add(_ => GitHubClientTestSupport.Json(
-            GitHubClientTestSupport.RepositoryGraphQlJson()));
+        handler.Add(request =>
+        {
+            Assert.DoesNotContain("oid", request.Body, StringComparison.OrdinalIgnoreCase);
+            return GitHubClientTestSupport.Json(
+                GitHubClientTestSupport.RepositoryGraphQlJson());
+        });
         handler.Add(request =>
         {
             Assert.EndsWith("/repos/upstream/repo/branches/main", request.Uri.AbsolutePath);

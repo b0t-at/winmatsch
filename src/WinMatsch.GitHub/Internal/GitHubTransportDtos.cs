@@ -365,6 +365,7 @@ internal sealed class CreateTreeEntryDto
 
     public string Type { get; set; } = "blob";
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     public string? Sha { get; set; }
 }
 
@@ -480,13 +481,6 @@ internal sealed class GraphQlRepositorySummaryDto
 internal sealed class GraphQlBranchDto
 {
     public string Name { get; set; } = "";
-
-    public GraphQlCommitTargetDto? Target { get; set; }
-}
-
-internal sealed class GraphQlCommitTargetDto
-{
-    public string Oid { get; set; } = "";
 }
 
 internal sealed class GraphQlRateLimitDto
