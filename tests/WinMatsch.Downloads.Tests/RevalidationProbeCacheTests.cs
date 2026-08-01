@@ -673,7 +673,9 @@ public sealed class RevalidationProbeCacheTests : IDisposable
         await downloader.Cache.ClearAsync();
 
         Assert.Equal(DownloadCacheEntryState.Corrupt, Assert.Single(inspection).State);
-        Assert.Empty(Directory.EnumerateFiles(cacheDirectory));
+        Assert.Equal(
+            [Path.Combine(cacheDirectory, ".winmatsch-cache.lock")],
+            Directory.EnumerateFiles(cacheDirectory).Order(StringComparer.Ordinal));
     }
 
     [Fact]
@@ -735,6 +737,68 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task Cache_ProcessLockPersistsBetweenOperationsAndClearExcludesIt()
+    {
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        using StubHttpMessageHandler handler = new((request, _) => Ok(request, Payload(100)));
+        using InstallerDownloader downloader = CreateCachedDownloader(handler, cacheDirectory);
+        await downloader.DownloadAsync("https://example.com/setup.exe", Path.Combine(_tempDir, "first"));
+        string lockPath = Path.Combine(cacheDirectory, ".winmatsch-cache.lock");
+
+        _ = await downloader.Cache!.InspectAsync();
+        Assert.True(File.Exists(lockPath));
+
+        await downloader.Cache.ClearAsync();
+
+        Assert.True(File.Exists(lockPath));
+        Assert.Equal(
+            [lockPath],
+            Directory.EnumerateFiles(cacheDirectory).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task Cache_InspectOfEmptyExistingDirectoryDoesNotCreateLockState()
+    {
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        Directory.CreateDirectory(cacheDirectory);
+        var cache = new DownloadCache(cacheDirectory);
+
+        IReadOnlyList<DownloadCacheEntryInfo> entries = await cache.InspectAsync();
+
+        Assert.Empty(entries);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(cacheDirectory));
+    }
+
+    [Fact]
+    public async Task Cache_ClearWaitsForPersistedCrossProcessLockWithoutFileFinalizationRace()
+    {
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        using StubHttpMessageHandler handler = new((request, _) => Ok(request, Payload(100)));
+        using InstallerDownloader downloader = CreateCachedDownloader(handler, cacheDirectory);
+        await downloader.DownloadAsync("https://example.com/setup.exe", Path.Combine(_tempDir, "first"));
+        string lockPath = Path.Combine(cacheDirectory, ".winmatsch-cache.lock");
+        await using var blocker = new FileStream(
+            lockPath,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            bufferSize: 1,
+            FileOptions.Asynchronous);
+
+        Task clear = downloader.Cache!.ClearAsync();
+        await Task.Yield();
+        Assert.False(clear.IsCompleted);
+
+        await blocker.DisposeAsync();
+        await clear.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(File.Exists(lockPath));
+        Assert.Equal(
+            [lockPath],
+            Directory.EnumerateFiles(cacheDirectory).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task Cache_EvictsLeastRecentlyUsedEntriesToConfiguredBound()
     {
         string cacheDirectory = Path.Combine(_tempDir, "cache");
@@ -747,7 +811,10 @@ public sealed class RevalidationProbeCacheTests : IDisposable
 
         Assert.Single(entries);
         Assert.Equal("https://example.com/second.exe", entries[0].Url);
-        Assert.Equal(2, Directory.EnumerateFiles(cacheDirectory).Count());
+        Assert.Equal(
+            2,
+            Directory.EnumerateFiles(cacheDirectory).Count(path =>
+                Path.GetExtension(path) is ".json" or ".payload"));
     }
 
     [Fact]

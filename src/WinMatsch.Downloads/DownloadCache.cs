@@ -188,6 +188,23 @@ public sealed class DownloadCache
     /// <summary>Returns all entries with current expiry and payload-integrity state.</summary>
     public async Task<IReadOnlyList<DownloadCacheEntryInfo>> InspectAsync(CancellationToken cancellationToken = default)
     {
+        if (!Directory.Exists(_directory))
+        {
+            return [];
+        }
+
+        try
+        {
+            if (!Directory.EnumerateFiles(_directory, "*" + MetadataSuffix).Any())
+            {
+                return [];
+            }
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return [];
+        }
+
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -661,7 +678,7 @@ public sealed class DownloadCache
                     FileAccess.ReadWrite,
                     FileShare.None,
                     bufferSize: 1,
-                    FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+                    FileOptions.Asynchronous);
             }
             catch (IOException) when (File.Exists(lockPath))
             {
