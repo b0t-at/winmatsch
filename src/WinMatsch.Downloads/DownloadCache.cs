@@ -17,6 +17,7 @@ public sealed class DownloadCache
     private const string TempSuffix = ".tmp";
     private const string LockFileName = ".winmatsch-cache.lock";
     private const int CopyBufferSize = 81920;
+    private static readonly TimeSpan _processLockPollInterval = TimeSpan.FromMilliseconds(25);
 
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _cacheGates = new(StringComparer.OrdinalIgnoreCase);
 
@@ -54,6 +55,7 @@ public sealed class DownloadCache
         try
         {
             await using FileStream processLock = await AcquireProcessLockAsync(cancellationToken).ConfigureAwait(false);
+            SweepAbandonedTemporaryFiles();
             string key = CreateKey(url);
             CacheMetadata? metadata = await ReadMetadataAsync(key, cancellationToken).ConfigureAwait(false);
             if (metadata is null)
@@ -127,6 +129,7 @@ public sealed class DownloadCache
         try
         {
             await using FileStream processLock = await AcquireProcessLockAsync(cancellationToken).ConfigureAwait(false);
+            SweepAbandonedTemporaryFiles();
             Directory.CreateDirectory(_directory);
             string key = CreateKey(result.InitialUrl);
             if (!result.MayBeStored)
@@ -209,6 +212,11 @@ public sealed class DownloadCache
             {
                 await using FileStream? processLock =
                     await AcquireExistingProcessLockAsync(cancellationToken).ConfigureAwait(false);
+                if (processLock is not null)
+                {
+                    SweepAbandonedTemporaryFiles();
+                }
+
                 IReadOnlyList<DownloadCacheEntryInfo> entries =
                     await InspectCoreAsync(
                         allowConcurrentMutation: processLock is null,
@@ -333,6 +341,7 @@ public sealed class DownloadCache
         try
         {
             await using FileStream processLock = await AcquireProcessLockAsync(cancellationToken).ConfigureAwait(false);
+            SweepAbandonedTemporaryFiles();
             if (!Directory.Exists(_directory))
             {
                 return;
@@ -362,6 +371,7 @@ public sealed class DownloadCache
 
     private async Task EnforceBoundsAsync(CancellationToken cancellationToken)
     {
+        SweepAbandonedTemporaryFiles();
         var entries = new List<CacheMetadata>();
         foreach (string path in Directory.EnumerateFiles(_directory, "*" + MetadataSuffix))
         {
@@ -735,54 +745,228 @@ public sealed class DownloadCache
     {
         Directory.CreateDirectory(_directory);
         string lockPath = Path.Combine(_directory, LockFileName);
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                return new FileStream(
-                    lockPath,
-                    FileMode.OpenOrCreate,
-                    FileAccess.ReadWrite,
-                    FileShare.None,
-                    bufferSize: 1,
-                    FileOptions.Asynchronous);
-            }
-            catch (IOException) when (File.Exists(lockPath))
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken).ConfigureAwait(false);
-            }
-        }
+        return await AcquireProcessLockCoreAsync(
+            lockPath,
+            FileMode.OpenOrCreate,
+            returnNullWhenMissing: false,
+            cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("A creating cache lock acquisition cannot return null.");
     }
 
     private async Task<FileStream?> AcquireExistingProcessLockAsync(CancellationToken cancellationToken)
     {
         string lockPath = Path.Combine(_directory, LockFileName);
+        return await AcquireProcessLockCoreAsync(
+            lockPath,
+            FileMode.Open,
+            returnNullWhenMissing: true,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<FileStream?> AcquireProcessLockCoreAsync(
+        string lockPath,
+        FileMode mode,
+        bool returnNullWhenMissing,
+        CancellationToken cancellationToken)
+    {
+        long startedAt = _timeProvider.GetTimestamp();
+        IOException? lastContention = null;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                return new FileStream(
+                FileStream processLock = OpenAndLock(lockPath, mode);
+                bool returnLock = false;
+                try
+                {
+                    if (_options.AfterProcessLockAcquiredAsync is { } afterAcquired)
+                    {
+                        await afterAcquired(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    returnLock = true;
+                    return processLock;
+                }
+                finally
+                {
+                    if (!returnLock)
+                    {
+                        await processLock.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
+            }
+            catch (FileNotFoundException) when (returnNullWhenMissing)
+            {
+                return null;
+            }
+            catch (DirectoryNotFoundException) when (returnNullWhenMissing)
+            {
+                return null;
+            }
+            catch (IOException exception)
+            {
+                lastContention = exception;
+            }
+
+            TimeSpan remaining = _options.ProcessLockTimeout - _timeProvider.GetElapsedTime(startedAt);
+            if (remaining <= TimeSpan.Zero)
+            {
+                throw new DownloadCacheLockTimeoutException(
                     lockPath,
-                    FileMode.Open,
-                    FileAccess.ReadWrite,
-                    FileShare.None,
-                    bufferSize: 1,
-                    FileOptions.Asynchronous);
+                    _options.ProcessLockTimeout,
+                    lastContention);
             }
-            catch (FileNotFoundException)
+
+            TimeSpan delay = remaining < _processLockPollInterval
+                ? remaining
+                : _processLockPollInterval;
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static FileStream OpenAndLock(string lockPath, FileMode mode)
+    {
+        bool usesExplicitByteRangeLock = !OperatingSystem.IsMacOS();
+        bool usesExclusiveOpenFileLock = !OperatingSystem.IsWindows();
+        var stream = new FileStream(
+            lockPath,
+            mode,
+            FileAccess.ReadWrite,
+            usesExclusiveOpenFileLock
+                ? FileShare.None
+                : FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 1,
+            FileOptions.None);
+        bool locked = false;
+        try
+        {
+            if (usesExplicitByteRangeLock)
             {
-                return null;
+                stream.Lock(0, 1);
             }
-            catch (DirectoryNotFoundException)
+
+            locked = true;
+            return stream;
+        }
+        finally
+        {
+            if (!locked)
             {
-                return null;
+                stream.Dispose();
             }
-            catch (IOException) when (File.Exists(lockPath))
+        }
+    }
+
+    private void SweepAbandonedTemporaryFiles()
+    {
+        if (!Directory.Exists(_directory))
+        {
+            return;
+        }
+
+        DateTimeOffset now = _timeProvider.GetUtcNow();
+        foreach (string path in Directory.EnumerateFiles(_directory))
+        {
+            string fileName = Path.GetFileName(path);
+            if (!IsOwnedTemporaryFileName(fileName))
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken).ConfigureAwait(false);
+                continue;
             }
+
+            DateTimeOffset lastWrite = File.GetLastWriteTimeUtc(path);
+            if (lastWrite > now || now - lastWrite < _options.AbandonedTemporaryFileAge)
+            {
+                continue;
+            }
+
+            TryDeleteInactiveTemporaryFile(path);
+        }
+    }
+
+    private static bool IsOwnedTemporaryFileName(string fileName)
+    {
+        ReadOnlySpan<char> name = fileName.AsSpan();
+        const int CacheKeyLength = 64;
+        const int GuidLength = 32;
+        const string MetadataMarker = ".json.tmp.";
+        const string PayloadMarker = ".payload.tmp.";
+
+        if (name.Length == CacheKeyLength + MetadataMarker.Length + GuidLength
+            && IsLowerHex(name[..CacheKeyLength])
+            && name.Slice(CacheKeyLength, MetadataMarker.Length).SequenceEqual(MetadataMarker)
+            && IsLowerHex(name[^GuidLength..]))
+        {
+            return true;
+        }
+
+        int generationStart = CacheKeyLength + 1;
+        int payloadMarkerStart = generationStart + GuidLength;
+        return name.Length == payloadMarkerStart + PayloadMarker.Length + GuidLength
+            && IsLowerHex(name[..CacheKeyLength])
+            && name[CacheKeyLength] == '.'
+            && IsLowerHex(name.Slice(generationStart, GuidLength))
+            && name.Slice(payloadMarkerStart, PayloadMarker.Length).SequenceEqual(PayloadMarker)
+            && IsLowerHex(name[^GuidLength..]);
+    }
+
+    private static bool IsLowerHex(ReadOnlySpan<char> value)
+    {
+        foreach (char character in value)
+        {
+            if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void TryDeleteInactiveTemporaryFile(string path)
+    {
+        try
+        {
+            using var probe = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                bufferSize: 1,
+                FileOptions.None);
+        }
+        catch (FileNotFoundException)
+        {
+            return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return;
+        }
+        catch (IOException)
+        {
+            return;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(path);
+        }
+        catch (FileNotFoundException)
+        {
+        }
+        catch (DirectoryNotFoundException)
+        {
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 
@@ -883,6 +1067,16 @@ public sealed class DownloadCache
         if (options.MaxBytes < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Cache byte capacity must be at least one.");
+        }
+
+        if (options.ProcessLockTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Cache process lock timeout must be positive.");
+        }
+
+        if (options.AbandonedTemporaryFileAge <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Abandoned cache temp file age must be positive.");
         }
 
         ArgumentNullException.ThrowIfNull(options.TimeProvider);

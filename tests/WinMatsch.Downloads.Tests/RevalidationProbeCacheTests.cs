@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -757,6 +758,148 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task Cache_MaintenanceSweepsOnlyOldOwnedInactiveTemporaryFiles()
+    {
+        DateTimeOffset now = new(2026, 8, 1, 12, 0, 0, TimeSpan.Zero);
+        var timeProvider = new ManualTimeProvider(now);
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        Directory.CreateDirectory(cacheDirectory);
+        string key = new('a', 64);
+        string oldMetadata = Path.Combine(
+            cacheDirectory,
+            key + ".json.tmp." + Guid.NewGuid().ToString("N"));
+        string oldPayload = Path.Combine(
+            cacheDirectory,
+            key + "." + Guid.NewGuid().ToString("N") + ".payload.tmp." + Guid.NewGuid().ToString("N"));
+        string activeTemporary = Path.Combine(
+            cacheDirectory,
+            key + ".json.tmp." + Guid.NewGuid().ToString("N"));
+        string youngTemporary = Path.Combine(
+            cacheDirectory,
+            key + ".json.tmp." + Guid.NewGuid().ToString("N"));
+        string arbitraryUserFile = Path.Combine(
+            cacheDirectory,
+            "notes.tmp." + Guid.NewGuid().ToString("N"));
+        foreach (string path in new[] { oldMetadata, oldPayload, activeTemporary, youngTemporary, arbitraryUserFile })
+        {
+            await File.WriteAllTextAsync(path, "partial");
+        }
+
+        DateTime oldTimestamp = now.UtcDateTime - TimeSpan.FromHours(2);
+        File.SetLastWriteTimeUtc(oldMetadata, oldTimestamp);
+        File.SetLastWriteTimeUtc(oldPayload, oldTimestamp);
+        File.SetLastWriteTimeUtc(activeTemporary, oldTimestamp);
+        File.SetLastWriteTimeUtc(arbitraryUserFile, oldTimestamp);
+        await using var activeWriter = new FileStream(
+            activeTemporary,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            bufferSize: 1,
+            FileOptions.Asynchronous);
+        var cache = new DownloadCache(cacheDirectory, new DownloadCacheOptions
+        {
+            TimeProvider = timeProvider,
+            AbandonedTemporaryFileAge = TimeSpan.FromHours(1),
+        });
+
+        _ = await cache.TryRestoreAsync(
+            "https://example.com/missing.exe",
+            Path.Combine(_tempDir, "restore"));
+
+        Assert.False(File.Exists(oldMetadata));
+        Assert.False(File.Exists(oldPayload));
+        Assert.True(File.Exists(activeTemporary));
+        Assert.True(File.Exists(youngTemporary));
+        Assert.True(File.Exists(arbitraryUserFile));
+
+        await activeWriter.DisposeAsync();
+        await cache.ClearAsync("https://example.com/missing.exe");
+
+        Assert.False(File.Exists(activeTemporary));
+        Assert.True(File.Exists(youngTemporary));
+        Assert.True(File.Exists(arbitraryUserFile));
+    }
+
+    [Fact]
+    public async Task Cache_ProcessLockHasCrossProcessDeadlineCancellationAndRecovery()
+    {
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        string lockPath = Path.Combine(cacheDirectory, ".winmatsch-cache.lock");
+        using Process lockHolder = StartLockHolder(lockPath);
+        string? ready = await lockHolder.StandardOutput.ReadLineAsync()
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("LOCKED", ready);
+        var cache = new DownloadCache(cacheDirectory, new DownloadCacheOptions
+        {
+            ProcessLockTimeout = TimeSpan.FromMilliseconds(150),
+        });
+
+        DownloadCacheLockTimeoutException timeout =
+            await Assert.ThrowsAsync<DownloadCacheLockTimeoutException>(() => cache.ClearAsync());
+
+        Assert.Equal(lockPath, timeout.LockFilePath);
+        Assert.Equal(TimeSpan.FromMilliseconds(150), timeout.Timeout);
+        Assert.IsType<IOException>(timeout.InnerException);
+
+        var cancellationCache = new DownloadCache(cacheDirectory, new DownloadCacheOptions
+        {
+            ProcessLockTimeout = TimeSpan.FromSeconds(5),
+        });
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        OperationCanceledException canceled = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => cancellationCache.ClearAsync(cancellationToken: cancellation.Token));
+        Assert.Equal(cancellation.Token, canceled.CancellationToken);
+
+        await lockHolder.StandardInput.WriteLineAsync();
+        await lockHolder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(0, lockHolder.ExitCode);
+        await cache.ClearAsync();
+        Assert.True(File.Exists(lockPath));
+    }
+
+    [Fact]
+    public async Task Cache_LinuxSymlinkAliasCannotBypassSameProcessLock()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        string aliasDirectory = Path.Combine(_tempDir, "cache-alias");
+        Directory.CreateDirectory(cacheDirectory);
+        Directory.CreateSymbolicLink(aliasDirectory, cacheDirectory);
+        var lockAcquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseLock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var originalCache = new DownloadCache(cacheDirectory, new DownloadCacheOptions
+        {
+            AfterProcessLockAcquiredAsync = async cancellationToken =>
+            {
+                lockAcquired.TrySetResult();
+                await releaseLock.Task.WaitAsync(cancellationToken);
+            },
+        });
+        var aliasCache = new DownloadCache(aliasDirectory, new DownloadCacheOptions
+        {
+            ProcessLockTimeout = TimeSpan.FromMilliseconds(150),
+        });
+        Task originalOperation = originalCache.ClearAsync();
+        await lockAcquired.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            _ = await Assert.ThrowsAsync<DownloadCacheLockTimeoutException>(
+                () => aliasCache.ClearAsync());
+        }
+        finally
+        {
+            releaseLock.TrySetResult();
+            await originalOperation.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
     public async Task Cache_InspectOfEmptyExistingDirectoryDoesNotCreateLockState()
     {
         string cacheDirectory = Path.Combine(_tempDir, "cache");
@@ -1040,5 +1183,29 @@ public sealed class RevalidationProbeCacheTests : IDisposable
         }
 
         return payload;
+    }
+
+    private static Process StartLockHolder(string lockPath)
+    {
+        string testAssemblyName = typeof(RevalidationProbeCacheTests).Assembly.GetName().Name!;
+        string runtimeConfig = Path.Combine(AppContext.BaseDirectory, testAssemblyName + ".runtimeconfig.json");
+        string lockHost = Path.Combine(AppContext.BaseDirectory, "WinMatsch.Downloads.LockHost.dll");
+        Assert.True(File.Exists(runtimeConfig), $"Missing test runtime config '{runtimeConfig}'.");
+        Assert.True(File.Exists(lockHost), $"Missing lock host '{lockHost}'.");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add("--runtimeconfig");
+        startInfo.ArgumentList.Add(runtimeConfig);
+        startInfo.ArgumentList.Add(lockHost);
+        startInfo.ArgumentList.Add(lockPath);
+        return Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Failed to start the cache lock test process.");
     }
 }

@@ -93,6 +93,29 @@ public sealed class DownloadCacheCorruptionException : DownloadException
     public string CachePath { get; }
 }
 
+/// <summary>Another process held the persistent cache lock beyond the configured deadline.</summary>
+public sealed class DownloadCacheLockTimeoutException : DownloadException
+{
+    public DownloadCacheLockTimeoutException(
+        string lockFilePath,
+        TimeSpan timeout,
+        IOException? innerException = null)
+        : base(
+            $"Timed out after {timeout} waiting for the download cache lock '{lockFilePath}'.",
+            DownloadFailureKind.LocalFile,
+            innerException)
+    {
+        LockFilePath = lockFilePath;
+        Timeout = timeout;
+    }
+
+    /// <summary>The persistent lock file whose byte range remained held.</summary>
+    public string LockFilePath { get; }
+
+    /// <summary>The configured acquisition deadline.</summary>
+    public TimeSpan Timeout { get; }
+}
+
 /// <summary>A local filesystem operation failed independently of the network transport.</summary>
 public sealed class DownloadFileException : DownloadException
 {

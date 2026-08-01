@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\WinMatsch.Downloads\WinMatsch.Downloads.csproj" />
+    <ProjectReference Include="..\WinMatsch.Downloads.LockHost\WinMatsch.Downloads.LockHost.csproj" />
   </ItemGroup>
 
 </Project>
