@@ -17,7 +17,7 @@ public class ConfigurationResolverTests
         Assert.Empty(configuration.DisabledRules);
         Assert.True(configuration.CacheEnabled);
         Assert.Null(configuration.CacheDirectory);
-        Assert.Equal(TimeSpan.Zero, configuration.FreshnessDelay);
+        Assert.Equal(TimeSpan.FromHours(3), configuration.FreshnessDelay);
         Assert.Equal(OutputFormat.Text, configuration.OutputFormat);
         Assert.Null(configuration.OutputDirectory);
         Assert.Equal(InteractionMode.Auto, configuration.Interaction);

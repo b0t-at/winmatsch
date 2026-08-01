@@ -159,6 +159,24 @@ public sealed record FeedbackRetryMetadata(
     DateTimeOffset RetryAfter,
     string? LearnedOverrideSignal);
 
+public enum FeedbackWorkState
+{
+    AwaitingApprovedRepair,
+    RetryScheduled,
+    Completed,
+    Escalated,
+}
+
+public sealed record FeedbackWorkItem(
+    string Repository,
+    long PullRequestNumber,
+    FeedbackClassification Classification,
+    FeedbackWorkState State,
+    DateTimeOffset RecordedAt,
+    DateTimeOffset? RetryAfter,
+    string? LearnedOverrideSignal,
+    string Reason);
+
 public sealed record FeedbackRemoteState(
     long PullRequestNumber,
     RemoteMutationState State);
@@ -179,6 +197,19 @@ public interface IApprovedRepairPlanner
         PullRequestObservation pullRequest,
         FeedbackClassification classification,
         CancellationToken cancellationToken);
+}
+
+public interface IFeedbackStateStore
+{
+    public Task PersistAsync(
+        FeedbackWorkItem item,
+        CancellationToken cancellationToken);
+
+    public Task<ImmutableArray<FeedbackWorkItem>> GetPendingAsync(
+        string repository,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+        => Task.FromResult(ImmutableArray<FeedbackWorkItem>.Empty);
 }
 
 public interface IPullRequestFeedbackSource

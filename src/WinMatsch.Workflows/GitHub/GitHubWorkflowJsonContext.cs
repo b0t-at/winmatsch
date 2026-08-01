@@ -11,5 +11,6 @@ namespace WinMatsch.Workflows.GitHub;
 [JsonSerializable(typeof(GitHubMaintenanceResult))]
 [JsonSerializable(typeof(GitHubCompleteResult))]
 [JsonSerializable(typeof(FeedbackResult))]
+[JsonSerializable(typeof(FeedbackWorkItem))]
 [JsonSerializable(typeof(ImmutableArray<RemoveDeadVersionPlan>))]
 public sealed partial class GitHubWorkflowJsonContext : JsonSerializerContext;

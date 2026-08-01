@@ -242,6 +242,7 @@ public sealed class WorkflowProductionCompositionTests
                 UpstreamRepository = GitHubLifecycleTestSupport.Upstream,
                 TargetRepository = GitHubLifecycleTestSupport.Fork,
                 ExecutionMode = WorkflowExecutionMode.Apply,
+                Policy = new() { MinimumReleaseFreshness = TimeSpan.Zero },
                 IdempotencyKey = "production-deleted-artifact",
             });
 

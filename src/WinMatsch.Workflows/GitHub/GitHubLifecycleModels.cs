@@ -83,6 +83,10 @@ public sealed record RemoteMutationState
 
     public bool BranchCreated { get; init; }
 
+    public bool BranchAdopted { get; init; }
+
+    public bool RecoveryRequired { get; init; }
+
     public bool CommitCreated { get; init; }
 
     public bool PullRequestCreated { get; init; }
@@ -124,7 +128,7 @@ public sealed record GitHubSubmissionPolicy
 
     public PackageVersion? PreviousVersion { get; init; }
 
-    public TimeSpan MinimumReleaseFreshness { get; init; }
+    public TimeSpan MinimumReleaseFreshness { get; init; } = TimeSpan.FromHours(3);
 
     public DuplicateHashPolicy DuplicateHashes { get; init; } = new();
 }
@@ -227,16 +231,84 @@ public sealed record FinalArtifactRevalidationResult(
     public static FinalArtifactRevalidationResult Valid { get; } = new(true, []);
 }
 
+public sealed record RepositorySubmissionEvidence
+{
+    public ImmutableArray<RepositoryInstallerEvidence> InstallerEvidence { get; init; } = [];
+
+    public DuplicateHashPolicy DuplicateHashes { get; init; } = new();
+
+    public ImmutableArray<string> VanityUrlAnnotations { get; init; } = [];
+
+    public static RepositorySubmissionEvidence Empty { get; } = new();
+}
+
+public sealed record PullRequestManifestEvidence(
+    bool HasManifestPath,
+    bool HasMatchingContent)
+{
+    public bool IsAssociated => HasManifestPath || HasMatchingContent;
+
+    public static PullRequestManifestEvidence None { get; } = new(false, false);
+}
+
 public sealed record RemoteOperationLockOptions
 {
-    public string RootDirectory { get; init; } =
-        Path.Combine(Path.GetTempPath(), "winmatsch-remote-operation-locks");
+    private TimeSpan _unusedFileRetention = TimeSpan.FromDays(7);
 
-    public TimeSpan StaleAfter { get; init; } = TimeSpan.FromHours(2);
+    public string RootDirectory { get; init; } =
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "WinMatsch",
+            "remote-operation-locks");
+
+    public TimeSpan UnusedFileRetention
+    {
+        get => _unusedFileRetention;
+        init => _unusedFileRetention = value;
+    }
+
+    [Obsolete("Use UnusedFileRetention. Lock metadata no longer drives stale-owner recovery.")]
+    public TimeSpan StaleAfter
+    {
+        get => _unusedFileRetention;
+        init => _unusedFileRetention = value;
+    }
 }
 
 public sealed record GitHubBranchNameContext(
     PackageIdentifier PackageIdentifier,
     PackageVersion PackageVersion,
     GitHubManifestOperation Operation,
-    long? SupersedesPullRequestNumber);
+    long? SupersedesPullRequestNumber,
+    string? BaseBranch,
+    string? BaseSha,
+    string? IdempotencyKey)
+{
+    public GitHubBranchNameContext(
+        PackageIdentifier PackageIdentifier,
+        PackageVersion PackageVersion,
+        GitHubManifestOperation Operation,
+        long? SupersedesPullRequestNumber)
+        : this(
+            PackageIdentifier,
+            PackageVersion,
+            Operation,
+            SupersedesPullRequestNumber,
+            null,
+            null,
+            null)
+    {
+    }
+
+    public void Deconstruct(
+        out PackageIdentifier packageIdentifier,
+        out PackageVersion packageVersion,
+        out GitHubManifestOperation operation,
+        out long? supersedesPullRequestNumber)
+    {
+        packageIdentifier = PackageIdentifier;
+        packageVersion = PackageVersion;
+        operation = Operation;
+        supersedesPullRequestNumber = SupersedesPullRequestNumber;
+    }
+}

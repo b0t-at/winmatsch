@@ -22,7 +22,11 @@ public sealed class GitHubLifecycleE2ETests
     {
         var successful = new FakeGitHubClient(includeFork: false);
         GitHubSubmissionRequest createFork = GitHubLifecycleTestSupport.Request(
-            policy: new GitHubSubmissionPolicy { ForkConsent = ForkConsentPolicy.AllowCreate });
+            policy: new GitHubSubmissionPolicy
+            {
+                ForkConsent = ForkConsentPolicy.AllowCreate,
+                MinimumReleaseFreshness = TimeSpan.Zero,
+            });
         GitHubLifecycleResult success = await GitHubLifecycleTestSupport.Workflow(successful)
             .ExecuteAsync(createFork);
         Assert.Equal(GitHubLifecycleResultCode.Succeeded, success.Code);
@@ -212,14 +216,11 @@ public sealed class GitHubLifecycleE2ETests
             TargetRepository = coordinates,
             ExecutionMode = WorkflowExecutionMode.Apply,
             Operation = GitHubManifestOperation.New,
+            Policy = new() { MinimumReleaseFreshness = TimeSpan.Zero },
             IdempotencyKey = $"live-e2e-{Guid.NewGuid():N}",
             CreatedWith = "winmatsch live E2E",
         };
-        string branchName = new DefaultGitHubBranchNameGenerator().Create(new(
-            package,
-            version,
-            GitHubManifestOperation.New,
-            null));
+        string? branchName = null;
         using var client = new GitHubRepositoryClient(new HttpClient(), token);
         var workflow = new GitHubLifecycleWorkflow(
             client,
@@ -232,6 +233,7 @@ public sealed class GitHubLifecycleE2ETests
         try
         {
             result = await workflow.ExecuteAsync(request);
+            branchName = result.RemoteState.BranchName;
             Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
             Assert.True(result.RemoteState.PullRequestCreated);
         }
@@ -265,10 +267,13 @@ public sealed class GitHubLifecycleE2ETests
 
             try
             {
-                await client.DeleteReferenceAsync(
-                    coordinates,
-                    branchName,
-                    new MutationRequest($"{request.IdempotencyKey}:cleanup-branch"));
+                if (branchName is not null)
+                {
+                    await client.DeleteReferenceAsync(
+                        coordinates,
+                        branchName,
+                        new MutationRequest($"{request.IdempotencyKey}:cleanup-branch"));
+                }
             }
             catch (Exception exception)
             {

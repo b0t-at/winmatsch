@@ -1,4 +1,5 @@
 using WinMatsch.Core;
+using WinMatsch.GitHub;
 using WinMatsch.Workflows.Operations;
 
 namespace WinMatsch.Workflows.GitHub;
@@ -18,6 +19,45 @@ public interface IRemoteOperationLockProvider
         CancellationToken cancellationToken);
 }
 
+public interface IRemoteLockIdentityResolver
+{
+    public string Resolve(string repository);
+}
+
+public interface IRepositorySubmissionEvidenceProvider
+{
+    public Task<RepositorySubmissionEvidence> GetEvidenceAsync(
+        GitHubSubmissionRequest request,
+        string upstreamHeadSha,
+        CancellationToken cancellationToken);
+}
+
+public interface IPullRequestManifestEvidenceProvider
+{
+    public Task<IReadOnlyList<PullRequestInfo>> GetCandidatesAsync(
+        GitHubSubmissionPlan plan,
+        IReadOnlyList<PullRequestInfo> openPullRequests,
+        CancellationToken cancellationToken)
+        => Task.FromResult(openPullRequests);
+
+    public Task<PullRequestManifestEvidence> GetEvidenceAsync(
+        GitHubSubmissionPlan plan,
+        PullRequestInfo pullRequest,
+        CancellationToken cancellationToken);
+}
+
+public static class PullRequestManifestEvidenceLimits
+{
+    public const int MaximumCandidates = 64;
+}
+
+public interface IRevalidationScratchSpace
+{
+    public string Create();
+
+    public void Delete(string path);
+}
+
 public interface IGitHubBranchNameGenerator
 {
     public string Create(GitHubBranchNameContext context);
@@ -33,7 +73,29 @@ public sealed class DefaultGitHubBranchNameGenerator : IGitHubBranchNameGenerato
         string replacement = context.SupersedesPullRequestNumber is { } number
             ? $"/replacement-{number}"
             : "";
-        return $"winmatsch/submissions/{package}/{version}{replacement}";
+        string reservation = CreateReservationToken(context);
+        return $"winmatsch/submissions/{context.Operation.ToString().ToLowerInvariant()}/{package}/{version}{replacement}{reservation}";
+    }
+
+    private static string CreateReservationToken(GitHubBranchNameContext context)
+    {
+        if (string.IsNullOrWhiteSpace(context.BaseBranch)
+            || string.IsNullOrWhiteSpace(context.BaseSha)
+            || string.IsNullOrWhiteSpace(context.IdempotencyKey))
+        {
+            return "";
+        }
+
+        string identity = string.Join(
+            '\n',
+            context.BaseBranch,
+            context.BaseSha,
+            context.IdempotencyKey);
+        string token = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(identity)))[..16]
+            .ToLowerInvariant();
+        return $"/reservation-{token}";
     }
 
     private static string NormalizeSegment(string value)

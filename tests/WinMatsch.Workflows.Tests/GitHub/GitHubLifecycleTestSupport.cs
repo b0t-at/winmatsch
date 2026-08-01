@@ -70,7 +70,10 @@ internal static class GitHubLifecycleTestSupport
             TargetRepository = target ?? Fork,
             ExecutionMode = mode,
             Operation = GitHubManifestOperation.Update,
-            Policy = policy ?? new GitHubSubmissionPolicy(),
+            Policy = policy ?? new GitHubSubmissionPolicy
+            {
+                MinimumReleaseFreshness = TimeSpan.Zero,
+            },
             IdempotencyKey = "operation-1",
             CreatedWith = "winmatsch tests",
         };
@@ -79,14 +82,18 @@ internal static class GitHubLifecycleTestSupport
         FakeGitHubClient client,
         FakePreflight? preflight = null,
         FakeArtifactRevalidator? artifacts = null,
-        IRemoteOperationLockProvider? locks = null)
+        IRemoteOperationLockProvider? locks = null,
+        IRepositorySubmissionEvidenceProvider? repositoryEvidence = null,
+        IPullRequestManifestEvidenceProvider? pullRequestEvidence = null)
         => new(
             client,
             preflight ?? new FakePreflight(),
             artifacts ?? new FakeArtifactRevalidator(),
             locks ?? new FakeLockProvider(),
             new FixedBranchNameGenerator(),
-            new FakeClock());
+            new FakeClock(),
+            repositoryEvidence ?? EmptyRepositorySubmissionEvidenceProvider.Instance,
+            pullRequestEvidence ?? new GitHubPullRequestManifestEvidenceProvider(client));
 
     public static PullRequestInfo PullRequest(
         long number,
@@ -96,8 +103,9 @@ internal static class GitHubLifecycleTestSupport
         => new(
             number,
             $"PR_{number}",
-            "Update: Example.App version 2.0.0",
+            "Update version: Example.App version 2.0.0",
             "<!-- winmatsch:package=Example.App;version=2.0.0 -->\n" +
+            "Operation: Update\n" +
             "Manifest path: `manifests/e/Example/App/2.0.0`",
             state,
             false,
@@ -150,9 +158,17 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public int SearchCalls { get; private set; }
 
+    public int ContentCalls { get; private set; }
+
+    public int PullRequestHeadContentCalls { get; private set; }
+
+    public int FailNextPullRequestContentCalls { get; set; }
+
     public Action<FakeGitHubClient, int>? OnSearch { get; set; }
 
     public Action<FakeGitHubClient, long>? OnGetPullRequest { get; set; }
+
+    public long? FailPullRequestReadNumber { get; set; }
 
     public Action<FakeGitHubClient, int>? OnGetReleases { get; set; }
 
@@ -171,6 +187,12 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     public IReadOnlyList<GitHubRelease> Releases { get; set; } = [];
 
     public int GetReleasesCalls { get; private set; }
+
+    public string? LastCommitMutationKey { get; private set; }
+
+    public string? LastBranchMutationKey { get; private set; }
+
+    public string? LastPullRequestMutationKey { get; private set; }
 
     public IReadOnlyList<PullRequestInfo> PullRequests => _pullRequests;
 
@@ -226,6 +248,20 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        ContentCalls++;
+        if (repository != GitHubLifecycleTestSupport.Upstream)
+        {
+            PullRequestHeadContentCalls++;
+            if (FailNextPullRequestContentCalls > 0)
+            {
+                FailNextPullRequestContentCalls--;
+                return Task.FromException<RepositoryContent>(new GitHubApiException(
+                    "transient content failure",
+                    HttpStatusCode.ServiceUnavailable,
+                    null));
+            }
+        }
+
         if (!_contents.TryGetValue((repository, path, reference), out byte[]? bytes))
         {
             return Task.FromException<RepositoryContent>(new GitHubApiException(
@@ -315,6 +351,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         MutationRequest mutation,
         CancellationToken cancellationToken = default)
     {
+        LastBranchMutationKey = mutation.IdempotencyKey;
         if (_references.ContainsKey((repository, branchName)))
         {
             return Task.FromException<GitReference>(new GitHubApiException(
@@ -355,6 +392,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
     {
         BeforeMutation("commit", cancellationToken);
+        LastCommitMutationKey = mutation.IdempotencyKey;
         if (!_references.TryGetValue((repository, request.BranchName), out GitReference? current)
             || !string.Equals(current.Sha, request.ExpectedHeadSha, StringComparison.Ordinal))
         {
@@ -452,6 +490,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
     {
         BeforeMutation("pull-request", cancellationToken);
+        LastPullRequestMutationKey = mutation.IdempotencyKey;
         PullRequestInfo result = new(
             42,
             "PR_42",
@@ -477,6 +516,14 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     {
         cancellationToken.ThrowIfCancellationRequested();
         OnGetPullRequest?.Invoke(this, number);
+        if (FailPullRequestReadNumber == number)
+        {
+            return Task.FromException<PullRequestInfo>(new GitHubApiException(
+                "Synthetic pull request read failure",
+                HttpStatusCode.ServiceUnavailable,
+                null));
+        }
+
         return Task.FromResult(_pullRequests.Single(pr => pr.Number == number));
     }
 
@@ -602,6 +649,39 @@ internal sealed class FakeArtifactRevalidator : IFinalArtifactRevalidator
         cancellationToken.ThrowIfCancellationRequested();
         Calls++;
         return Task.FromResult(Result);
+    }
+}
+
+internal sealed class FakeRepositorySubmissionEvidenceProvider
+    : IRepositorySubmissionEvidenceProvider
+{
+    public RepositorySubmissionEvidence Evidence { get; init; } =
+        RepositorySubmissionEvidence.Empty;
+
+    public int Calls { get; private set; }
+
+    public Task<RepositorySubmissionEvidence> GetEvidenceAsync(
+        GitHubSubmissionRequest request,
+        string upstreamHeadSha,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Calls++;
+        return Task.FromResult(Evidence);
+    }
+}
+
+internal sealed class FakePullRequestManifestEvidenceProvider(
+    PullRequestManifestEvidence evidence)
+    : IPullRequestManifestEvidenceProvider
+{
+    public Task<PullRequestManifestEvidence> GetEvidenceAsync(
+        GitHubSubmissionPlan plan,
+        PullRequestInfo pullRequest,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(evidence);
     }
 }
 

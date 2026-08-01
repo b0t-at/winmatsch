@@ -5,11 +5,23 @@ using WinMatsch.Validation;
 namespace WinMatsch.Workflows.GitHub;
 
 /// <summary>Revalidates every acquired installer immediately before the remote mutation boundary.</summary>
-public sealed class DownloaderFinalArtifactRevalidator(InstallerDownloader downloader)
-    : IFinalArtifactRevalidator
+public sealed class DownloaderFinalArtifactRevalidator : IFinalArtifactRevalidator
 {
-    private readonly InstallerDownloader _downloader =
-        downloader ?? throw new ArgumentNullException(nameof(downloader));
+    private readonly InstallerDownloader _downloader;
+    private readonly IRevalidationScratchSpace _scratchSpace;
+
+    public DownloaderFinalArtifactRevalidator(InstallerDownloader downloader)
+        : this(downloader, new FileRevalidationScratchSpace())
+    {
+    }
+
+    public DownloaderFinalArtifactRevalidator(
+        InstallerDownloader downloader,
+        IRevalidationScratchSpace scratchSpace)
+    {
+        _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+        _scratchSpace = scratchSpace ?? throw new ArgumentNullException(nameof(scratchSpace));
+    }
 
     public async Task<FinalArtifactRevalidationResult> RevalidateAsync(
         GitHubSubmissionRequest request,
@@ -17,11 +29,9 @@ public sealed class DownloaderFinalArtifactRevalidator(InstallerDownloader downl
     {
         ArgumentNullException.ThrowIfNull(request);
         var diagnostics = ImmutableArray.CreateBuilder<GitHubLifecycleDiagnostic>();
-        string scratchDirectory = Path.Combine(
-            Path.GetTempPath(),
-            $"winmatsch-final-revalidation-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(scratchDirectory);
+        string scratchDirectory = _scratchSpace.Create();
         Exception? cleanupFailure = null;
+        bool safetyValidated = false;
         try
         {
             foreach (InstallerArtifact artifact in request.LocalPlan.Preflight.InstallerArtifacts)
@@ -52,15 +62,14 @@ public sealed class DownloaderFinalArtifactRevalidator(InstallerDownloader downl
                         + GitHubSubmissionFormatter.Redact(exception.Message)));
                 }
             }
+
+            safetyValidated = diagnostics.Count == 0;
         }
         finally
         {
             try
             {
-                if (Directory.Exists(scratchDirectory))
-                {
-                    Directory.Delete(scratchDirectory, recursive: true);
-                }
+                _scratchSpace.Delete(scratchDirectory);
             }
             catch (Exception exception) when (
                 exception is IOException or UnauthorizedAccessException)
@@ -79,6 +88,26 @@ public sealed class DownloaderFinalArtifactRevalidator(InstallerDownloader downl
 
         return diagnostics.Count == 0
             ? FinalArtifactRevalidationResult.Valid
-            : new(false, diagnostics.ToImmutable());
+            : new(safetyValidated, diagnostics.ToImmutable());
+    }
+}
+
+public sealed class FileRevalidationScratchSpace : IRevalidationScratchSpace
+{
+    public string Create()
+    {
+        string path = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-final-revalidation-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(path);
+        return path;
+    }
+
+    public void Delete(string path)
+    {
+        if (Directory.Exists(path))
+        {
+            Directory.Delete(path, recursive: true);
+        }
     }
 }

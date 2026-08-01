@@ -15,10 +15,42 @@ public static partial class GitHubSubmissionFormatter
         PackageVersion packageVersion,
         string? customTitle = null)
     {
-        string canonical = $"{operation}: {packageIdentifier.Value} version {packageVersion.Value}";
+        string canonical =
+            $"{GetCanonicalPrefix(operation)} {packageIdentifier.Value} version {packageVersion.Value}";
         return string.IsNullOrWhiteSpace(customTitle)
             ? canonical
             : $"{canonical} - {Redact(customTitle.Trim())}";
+    }
+
+    public static bool IsCanonicalTitleFor(
+        string title,
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion)
+    {
+        ArgumentNullException.ThrowIfNull(title);
+        foreach (GitHubManifestOperation operation in Enum.GetValues<GitHubManifestOperation>())
+        {
+            string canonical = CreateTitle(operation, packageIdentifier, packageVersion);
+            if (string.Equals(title, canonical, StringComparison.OrdinalIgnoreCase)
+                || title.StartsWith(canonical + " - ", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static bool IsCanonicalTitleFor(
+        GitHubManifestOperation operation,
+        string title,
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion)
+    {
+        ArgumentNullException.ThrowIfNull(title);
+        string canonical = CreateTitle(operation, packageIdentifier, packageVersion);
+        return string.Equals(title, canonical, StringComparison.OrdinalIgnoreCase)
+            || title.StartsWith(canonical + " - ", StringComparison.OrdinalIgnoreCase);
     }
 
     public static string CreateBody(GitHubSubmissionRequest request, string versionDirectory)
@@ -82,6 +114,16 @@ public static partial class GitHubSubmissionFormatter
         redacted = UriUserInfoRegex().Replace(redacted, "$1[REDACTED]@");
         return QueryValueRegex().Replace(redacted, "$1=[REDACTED]");
     }
+
+    private static string GetCanonicalPrefix(GitHubManifestOperation operation)
+        => operation switch
+        {
+            GitHubManifestOperation.New => "New version:",
+            GitHubManifestOperation.Update or GitHubManifestOperation.Replace => "Update version:",
+            GitHubManifestOperation.Add => "Add version:",
+            GitHubManifestOperation.Remove => "Remove version:",
+            _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, null),
+        };
 
     private static void AppendValidation(StringBuilder builder, ValidationReport validation)
     {

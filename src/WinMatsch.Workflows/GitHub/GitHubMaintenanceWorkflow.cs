@@ -123,34 +123,61 @@ public sealed class GitHubMaintenanceWorkflow
             request.Upstream,
             new PullRequestSearch(PullRequestState.All, HeadOwner: request.Fork.Owner),
             cancellationToken).ConfigureAwait(false);
-        var candidates = new List<(BranchState Branch, PullRequestInfo PullRequest)>();
+        BranchState upstreamDefault = await _gitHub.GetDefaultBranchAsync(
+            request.Upstream,
+            cancellationToken).ConfigureAwait(false);
+        BranchState forkDefault = await _gitHub.GetDefaultBranchAsync(
+            request.Fork,
+            cancellationToken).ConfigureAwait(false);
+        bool defaultBranchesAreFresh = string.Equals(
+            upstreamDefault.HeadSha,
+            forkDefault.HeadSha,
+            StringComparison.Ordinal);
+        var operations = new List<PlannedRemoteOperation>();
         foreach (BranchState branch in branches.Where(branch =>
                      branch.Name.StartsWith(request.ToolBranchPrefix, StringComparison.Ordinal)))
         {
-            PullRequestInfo? pullRequest = pullRequests.SingleOrDefault(pr =>
-                string.Equals(pr.HeadOwner, request.Fork.Owner, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(pr.HeadBranch, branch.Name, StringComparison.Ordinal)
-                && pr.Body?.Contains("<!-- winmatsch:package=", StringComparison.Ordinal) == true);
-            if (pullRequest is not null
+            PullRequestInfo[] branchPullRequests =
+            [
+                .. pullRequests.Where(pr =>
+                    string.Equals(pr.HeadOwner, request.Fork.Owner, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(pr.HeadBranch, branch.Name, StringComparison.Ordinal)),
+            ];
+            PullRequestInfo[] associated =
+            [
+                .. branchPullRequests.Where(pr =>
+                    pr.Body?.Contains("<!-- winmatsch:package=", StringComparison.Ordinal) == true),
+            ];
+            if (associated is [PullRequestInfo pullRequest]
+                && branchPullRequests.Length == 1
                 && pullRequest.State == PullRequestState.Closed
                 && string.Equals(pullRequest.HeadSha, branch.HeadSha, StringComparison.Ordinal))
             {
-                candidates.Add((branch, pullRequest));
+                operations.Add(new(
+                    RemoteOperationKind.DeleteBranch,
+                    $"{request.Fork}:{branch.Name}",
+                    $"Manually delete the tool-owned branch associated with closed PR #{pullRequest.Number}; GitHub offers no atomic expected-SHA delete."));
+                continue;
+            }
+
+            if (branchPullRequests.Length == 0
+                && defaultBranchesAreFresh
+                && IsReservationBranchName(branch.Name)
+                && string.Equals(branch.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal))
+            {
+                operations.Add(new(
+                    RemoteOperationKind.DeleteBranch,
+                    $"{request.Fork}:{branch.Name}",
+                    "Manually delete the PR-less tool reservation after rechecking its exact fresh upstream SHA; GitHub offers no atomic expected-SHA delete."));
             }
         }
 
         GitHubMaintenancePlan plan = new()
         {
             Operation = "cleanup",
-            Operations =
-            [
-                .. candidates.Select(candidate => new PlannedRemoteOperation(
-                    RemoteOperationKind.DeleteBranch,
-                    $"{request.Fork}:{candidate.Branch.Name}",
-                    $"Manually delete the tool-owned branch associated with closed PR #{candidate.PullRequest.Number}; GitHub offers no atomic expected-SHA delete.")),
-            ],
+            Operations = [.. operations],
         };
-        if (candidates.Count == 0)
+        if (operations.Count == 0)
         {
             return new() { Code = GitHubLifecycleResultCode.NoAction, Plan = plan };
         }
@@ -351,6 +378,36 @@ public sealed class GitHubMaintenanceWorkflow
             .FirstOrDefault(static line => line.StartsWith(
                 "<!-- winmatsch:package=",
                 StringComparison.Ordinal));
+
+    private static bool IsReservationBranchName(string branchName)
+    {
+        const string marker = "/reservation-";
+        int markerIndex = branchName.LastIndexOf(marker, StringComparison.Ordinal);
+        if (!branchName.StartsWith("winmatsch/submissions/", StringComparison.Ordinal)
+            || markerIndex < 0)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<char> suffix = branchName.AsSpan(markerIndex + marker.Length);
+        int separator = suffix.IndexOf('-');
+        ReadOnlySpan<char> token = separator < 0 ? suffix : suffix[..separator];
+        if (token.Length != 16)
+        {
+            return false;
+        }
+
+        foreach (char character in token)
+        {
+            if (!Uri.IsHexDigit(character))
+            {
+                return false;
+            }
+        }
+
+        return separator < 0
+            || int.TryParse(suffix[(separator + 1)..], out int attempt) && attempt is >= 2 and <= 8;
+    }
 
     private static GitHubMaintenanceResult PartialMaintenanceFailure(
         GitHubMaintenancePlan plan,
