@@ -245,6 +245,23 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Local_snapshot_read_does_not_create_repository_lock_files()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        WritePackage(temporary.Path, package);
+
+        PackageSnapshot? snapshot = await new LocalManifestSnapshotSource().LoadAsync(
+                temporary.Path,
+                package.Version.PackageIdentifier!,
+                package.Version.PackageVersion!,
+                CancellationToken.None);
+
+        Assert.NotNull(snapshot);
+        Assert.False(Directory.Exists(Path.Combine(temporary.Path, ".winmatsch-locks")));
+    }
+
+    [Fact]
     public async Task Atomic_transaction_rolls_back_after_partial_install_failure()
     {
         using var temporary = new TemporaryDirectory();

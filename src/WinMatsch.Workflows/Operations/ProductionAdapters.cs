@@ -699,14 +699,16 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
 
         public static RepositoryOperationLock Acquire(string root, string key)
         {
-            string lockDirectory = Path.Combine(root, ".winmatsch-locks");
             SecurePath.RejectReparsePoints(root, root);
             IDisposable rootPin = DirectoryPin.Acquire(root);
+            string lockDirectory = Path.Combine(
+                Path.GetTempPath(),
+                "winmatsch-operation-locks",
+                DirectoryPin.GetIdentity(root));
             IDisposable? lockDirectoryPin = null;
             try
             {
                 Directory.CreateDirectory(lockDirectory);
-                SecurePath.RejectReparsePoints(root, lockDirectory);
                 lockDirectoryPin = DirectoryPin.Acquire(lockDirectory);
                 string lockPath = Path.Combine(
                     lockDirectory,
@@ -759,12 +761,27 @@ internal static class DirectoryPin
     private const uint FileFlagBackupSemantics = 0x02000000;
 
     public static IDisposable Acquire(string path)
+        => OperatingSystem.IsWindows() ? OpenAndValidate(path) : NoopDisposable.Instance;
+
+    public static string GetIdentity(string path)
     {
         if (!OperatingSystem.IsWindows())
         {
-            return NoopDisposable.Instance;
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(path))));
         }
 
+        using SafeFileHandle handle = OpenAndValidate(path);
+        if (!GetFileInformationByHandle(handle, out ByHandleFileInformation information))
+        {
+            int error = Marshal.GetLastPInvokeError();
+            throw new IOException($"Unable to identify directory '{path}' (Win32 error {error}).");
+        }
+
+        return $"{information.VolumeSerialNumber:X8}-{information.FileIndexHigh:X8}{information.FileIndexLow:X8}";
+    }
+
+    private static SafeFileHandle OpenAndValidate(string path)
+    {
         SafeFileHandle handle = CreateFile(
             path,
             FileListDirectory,
@@ -831,6 +848,27 @@ internal static class DirectoryPin
         int fileInformationClass,
         out FileAttributeTagInformation fileInformation,
         uint bufferSize);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public long CreationTime;
+        public long LastAccessTime;
+        public long LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle file,
+        out ByHandleFileInformation fileInformation);
 #pragma warning restore SYSLIB1054
 
     private sealed class NoopDisposable : IDisposable
