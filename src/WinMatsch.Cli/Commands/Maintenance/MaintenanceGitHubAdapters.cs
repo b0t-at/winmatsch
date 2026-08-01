@@ -97,17 +97,33 @@ public sealed class ToolPullRequestObservationSource : IPullRequestFeedbackSourc
         foreach (PullRequestInfo pullRequest in pullRequests.Where(pullRequest =>
                      pullRequest.HeadOwner.Equals(_forkOwner, StringComparison.OrdinalIgnoreCase)))
         {
-            PullRequestMetadata metadata = _metadata is null || !IsToolOwned(pullRequest)
+            AuthoritativePullRequestChanges evidence = IsToolOwned(pullRequest)
+                ? await ReadAuthoritativeChangesAsync(
+                    upstream,
+                    pullRequest,
+                    cancellationToken).ConfigureAwait(false)
+                : new(pullRequest, [], null, null);
+            bool toolOwned = IsToolOwned(evidence.PullRequest)
+                && evidence.PullRequest.HeadOwner.Equals(
+                    _forkOwner,
+                    StringComparison.OrdinalIgnoreCase);
+            PullRequestMetadata metadata = _metadata is null || !toolOwned
                 ? PullRequestMetadata.Empty
-                : await _metadata.GetAsync(upstream, pullRequest.Number, cancellationToken)
+                : await _metadata.GetAsync(
+                    upstream,
+                    evidence.PullRequest.Number,
+                    cancellationToken)
                     .ConfigureAwait(false);
             observations.Add(new PullRequestObservation
             {
-                PullRequest = pullRequest,
-                Author = pullRequest.HeadOwner,
-                ToolOwned = IsToolOwned(pullRequest),
+                PullRequest = evidence.PullRequest,
+                Author = evidence.PullRequest.HeadOwner,
+                ToolOwned = toolOwned,
                 Labels = metadata.Labels,
                 Comments = metadata.Comments,
+                ChangedFiles = evidence.ChangedFiles,
+                EvidenceHeadSha = evidence.HeadSha,
+                EvidenceBaseSha = evidence.BaseSha,
             });
         }
 
@@ -122,11 +138,86 @@ public sealed class ToolPullRequestObservationSource : IPullRequestFeedbackSourc
             && pullRequest.Body?.Contains(AssociationMarker, StringComparison.Ordinal) == true;
     }
 
+    private async Task<AuthoritativePullRequestChanges> ReadAuthoritativeChangesAsync(
+        RepositoryCoordinates upstream,
+        PullRequestInfo candidate,
+        CancellationToken cancellationToken)
+    {
+        PullRequestInfo before;
+        IReadOnlyList<PullRequestChangedFile> changedFiles;
+        try
+        {
+            before = await _gitHub.GetPullRequestAsync(
+                upstream,
+                candidate.Number,
+                cancellationToken).ConfigureAwait(false);
+            changedFiles = await _gitHub.GetPullRequestChangedFilesAsync(
+                upstream,
+                candidate.Number,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (NotSupportedException)
+        {
+            return new(candidate, [], null, null);
+        }
+
+        if (changedFiles.Any(static file =>
+                string.IsNullOrWhiteSpace(file.Path)
+                || file.PreviousPath is not null
+                && string.IsNullOrWhiteSpace(file.PreviousPath)))
+        {
+            throw new GitHubApiException(
+                $"Pull request #{candidate.Number} returned an invalid changed-file path.");
+        }
+
+        PullRequestInfo after = await _gitHub.GetPullRequestAsync(
+            upstream,
+            candidate.Number,
+            cancellationToken).ConfigureAwait(false);
+        if (!HasStableChangeIdentity(before, after))
+        {
+            throw new GitHubApiException(
+                $"Pull request #{candidate.Number} head or base identity changed while "
+                + "reading authoritative changed-file evidence.");
+        }
+
+        if (before.State != PullRequestState.Open
+            || before.HeadRepository is null
+            || before.BaseSha is null)
+        {
+            return new(before, [], null, null);
+        }
+
+        return new(
+            before,
+            [.. changedFiles],
+            before.HeadSha,
+            before.BaseSha);
+    }
+
+    private static bool HasStableChangeIdentity(
+        PullRequestInfo before,
+        PullRequestInfo after)
+        => before.Number == after.Number
+            && before.State == after.State
+            && before.HeadRepository == after.HeadRepository
+            && string.Equals(before.HeadOwner, after.HeadOwner, StringComparison.Ordinal)
+            && string.Equals(before.HeadBranch, after.HeadBranch, StringComparison.Ordinal)
+            && string.Equals(before.HeadSha, after.HeadSha, StringComparison.Ordinal)
+            && string.Equals(before.BaseBranch, after.BaseBranch, StringComparison.Ordinal)
+            && string.Equals(before.BaseSha, after.BaseSha, StringComparison.Ordinal);
+
     public void Dispose()
     {
         _metadata?.Dispose();
         GC.SuppressFinalize(this);
     }
+
+    private sealed record AuthoritativePullRequestChanges(
+        PullRequestInfo PullRequest,
+        ImmutableArray<PullRequestChangedFile> ChangedFiles,
+        string? HeadSha,
+        string? BaseSha);
 }
 
 public sealed record PullRequestMetadata(

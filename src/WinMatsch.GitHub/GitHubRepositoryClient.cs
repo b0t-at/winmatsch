@@ -893,8 +893,25 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             maximumResults: MaximumPullRequestFiles,
             maximumPages: MaximumPullRequestFilePages).ConfigureAwait(false);
         return files.Select(static file =>
-            new PullRequestChangedFile(file.Filename, file.PreviousFilename)).ToArray();
+            new PullRequestChangedFile(
+                file.Filename,
+                file.PreviousFilename,
+                ParsePullRequestFileStatus(file.Status))).ToArray();
     }
+
+    private static PullRequestFileStatus ParsePullRequestFileStatus(string status)
+        => status.ToLowerInvariant() switch
+        {
+            "added" => PullRequestFileStatus.Added,
+            "modified" => PullRequestFileStatus.Modified,
+            "removed" => PullRequestFileStatus.Removed,
+            "renamed" => PullRequestFileStatus.Renamed,
+            "copied" => PullRequestFileStatus.Copied,
+            "changed" => PullRequestFileStatus.Changed,
+            "unchanged" => PullRequestFileStatus.Unchanged,
+            _ => throw new GitHubApiException(
+                $"GitHub returned unsupported pull request file status '{status}'."),
+        };
 
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,

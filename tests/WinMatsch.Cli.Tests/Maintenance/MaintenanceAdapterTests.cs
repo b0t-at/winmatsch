@@ -41,6 +41,12 @@ public sealed class MaintenanceAdapterTests
         var client = new FakeMaintenanceGitHubClient { IgnoreHeadOwnerFilter = true };
         client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41, headOwner: "octocat"));
         client.PullRequests.Add(MaintenancePullRequests.ToolOwned(42, headOwner: "attacker"));
+        client.PullRequestFiles[41] =
+        [
+            new(
+                "manifests/c/Contoso/App/0.9.0/Contoso.App.yaml",
+                Status: PullRequestFileStatus.Removed),
+        ];
         var metadata = new FakePullRequestMetadataSource();
         using var source = new ToolPullRequestObservationSource(client, "octocat", metadata);
 
@@ -51,6 +57,8 @@ public sealed class MaintenanceAdapterTests
 
         PullRequestObservation observation = Assert.Single(observations);
         Assert.Equal(41, observation.PullRequest.Number);
+        Assert.True(observation.HasAuthoritativeChangeEvidence);
+        Assert.Equal(PullRequestFileStatus.Removed, Assert.Single(observation.ChangedFiles).Status);
         Assert.Collection(
             observation.Labels,
             label => Assert.Equal("infra-failure", label));

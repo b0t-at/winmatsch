@@ -588,14 +588,23 @@ public sealed class GitHubFeedbackWorkflow
             return false;
         }
 
-        ImmutableHashSet<string> originalDeletions = GetOriginalChangePaths(
-            observation.PullRequest.Body,
-            PlannedChangeKind.Delete);
         ImmutableHashSet<string> repairDeletions =
         [
             .. repair.LocalPlan.FileChanges
                 .Where(static change => change.Kind == PlannedChangeKind.Delete)
                 .Select(static change => change.RepositoryPath),
+        ];
+        if ((!repairDeletions.IsEmpty || repair.Operation == GitHubManifestOperation.Replace)
+            && !observation.HasAuthoritativeChangeEvidence)
+        {
+            return false;
+        }
+
+        ImmutableHashSet<string> originalDeletions =
+        [
+            .. observation.ChangedFiles
+                .Where(static file => file.Status == PullRequestFileStatus.Removed)
+                .Select(static file => file.Path),
         ];
         if (!originalDeletions.SetEquals(repairDeletions))
         {
@@ -663,20 +672,6 @@ public sealed class GitHubFeedbackWorkflow
                 operationLine[operationPrefix.Length..].Trim(),
                 ignoreCase: true,
                 out operation);
-    }
-
-    private static ImmutableHashSet<string> GetOriginalChangePaths(
-        string? body,
-        PlannedChangeKind kind)
-    {
-        string prefix = $"- {kind}: `";
-        return
-        [
-            .. (body ?? "").Split('\n', StringSplitOptions.TrimEntries)
-                .Where(line => line.StartsWith(prefix, StringComparison.Ordinal)
-                    && line.EndsWith('`'))
-                .Select(line => line[prefix.Length..^1]),
-        ];
     }
 
     private async Task<SupersessionResult> CloseSupersededAsync(

@@ -735,6 +735,12 @@ public sealed class GitHubFeedbackWorkflowTests
                     .Replace("Operation: Update", "Operation: Replace", StringComparison.Ordinal)
                     + $"\n- Delete: `{originalPath}`",
             },
+            ChangedFiles =
+            [
+                new(originalPath, Status: PullRequestFileStatus.Removed),
+            ],
+            EvidenceHeadSha = GitHubLifecycleTestSupport.CommitSha,
+            EvidenceBaseSha = GitHubLifecycleTestSupport.UpstreamSha,
         };
         LocalOperationPlan basePlan = GitHubLifecycleTestSupport.Plan();
         LocalOperationPlan repairPlan = GitHubLifecycleTestSupport.Plan(

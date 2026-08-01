@@ -25,6 +25,8 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
 
     public List<PullRequestInfo> PullRequests { get; } = [];
 
+    public Dictionary<long, IReadOnlyList<PullRequestChangedFile>> PullRequestFiles { get; } = [];
+
     public bool IgnoreHeadOwnerFilter { get; set; }
 
     public CompareResult Comparison { get; set; } = new("identical", 0, 0, 0, []);
@@ -145,7 +147,9 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         RepositoryCoordinates repository,
         long number,
         CancellationToken cancellationToken = default)
-        => throw new NotSupportedException();
+        => PullRequestFiles.TryGetValue(number, out IReadOnlyList<PullRequestChangedFile>? files)
+            ? Task.FromResult(files)
+            : throw new NotSupportedException();
 
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,
@@ -349,7 +353,11 @@ internal static class MaintenancePullRequests
             "master",
             new Uri($"https://example.invalid/pr/{number}"),
             DateTimeOffset.UnixEpoch,
-            DateTimeOffset.UnixEpoch);
+            DateTimeOffset.UnixEpoch)
+        {
+            HeadRepository = new RepositoryCoordinates(headOwner, "winget-pkgs"),
+            BaseSha = "sha-upstream",
+        };
 
     public static PullRequestInfo UserOwned(long number, string headOwner = "octocat")
         => new(

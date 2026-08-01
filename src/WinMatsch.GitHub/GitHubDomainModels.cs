@@ -163,9 +163,21 @@ public sealed record PullRequestInfo(
     public string? BaseSha { get; init; }
 }
 
+public enum PullRequestFileStatus
+{
+    Added,
+    Modified,
+    Removed,
+    Renamed,
+    Copied,
+    Changed,
+    Unchanged,
+}
+
 public sealed record PullRequestChangedFile(
     string Path,
-    string? PreviousPath = null);
+    string? PreviousPath = null,
+    PullRequestFileStatus Status = PullRequestFileStatus.Modified);
 
 public sealed record CreatePullRequestRequest(
     string Title,

@@ -297,6 +297,8 @@ internal sealed class RestPullRequestChangedFileDto
 {
     public string Filename { get; set; } = "";
 
+    public string Status { get; set; } = "modified";
+
     [JsonPropertyName("previous_filename")]
     public string? PreviousFilename { get; set; }
 }

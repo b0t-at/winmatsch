@@ -145,6 +145,7 @@ public sealed class GitHubPullRequestTests
             """
             [{
               "filename": "manifests/e/Example/App/2.0.0/Renamed.yaml",
+              "status": "renamed",
               "previous_filename": "manifests/e/Example/App/2.0.0/Example.App.yaml"
             }]
             """));
@@ -160,6 +161,7 @@ public sealed class GitHubPullRequestTests
         Assert.Equal(
             "manifests/e/Example/App/2.0.0/Example.App.yaml",
             file.PreviousPath);
+        Assert.Equal(PullRequestFileStatus.Renamed, file.Status);
     }
 
     [Fact]

@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using WinMatsch.Cli.Commands.Mutations;
 using WinMatsch.Cli.Hosting;
 using WinMatsch.Core;
+using WinMatsch.GitHub;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
@@ -87,8 +88,7 @@ public sealed class AllowlistedApprovedRepairPlanner(
             return null;
         }
 
-        RepairAssociation association = ParseAssociation(
-            pullRequest.PullRequest.Body);
+        RepairAssociation association = ParseAssociation(pullRequest);
         ImmutableArray<RawManifestDocument> documents = await loader.LoadAsync(
             directory,
             context.Configuration.OutputDirectory ?? Environment.CurrentDirectory,
@@ -175,8 +175,9 @@ public sealed class AllowlistedApprovedRepairPlanner(
     }
 
     private static RepairAssociation ParseAssociation(
-        string? body)
+        PullRequestObservation observation)
     {
+        string? body = observation.PullRequest.Body;
         const string marker = "<!-- winmatsch:package=";
         int start = body?.IndexOf(marker, StringComparison.Ordinal) ?? -1;
         int end = start < 0 ? -1 : body!.IndexOf(" -->", start, StringComparison.Ordinal);
@@ -206,24 +207,9 @@ public sealed class AllowlistedApprovedRepairPlanner(
                 "Approved repair pull request contains an unknown operation.");
         }
 
-        ImmutableArray<string> deletions =
-        [
-            .. body.Split('\n')
-                .Select(static line => line.TrimEnd('\r'))
-                .Where(static line => line.StartsWith(
-                    "- Delete: `",
-                    StringComparison.Ordinal))
-                .Select(static line =>
-                {
-                    const string prefix = "- Delete: `";
-                    int end = line.IndexOf('`', prefix.Length);
-                    return end > prefix.Length
-                        ? line[prefix.Length..end]
-                        : "";
-                })
-                .Where(static path => path.Length > 0)
-                .Distinct(StringComparer.Ordinal),
-        ];
+        ImmutableArray<string> deletions = operation == GitHubManifestOperation.Replace
+            ? GetAuthoritativeDeletions(observation)
+            : [];
         PackageVersion? previousVersion = operation == GitHubManifestOperation.Replace
             ? InferPreviousVersion(new PackageIdentifier(package), deletions)
             : null;
@@ -235,6 +221,25 @@ public sealed class AllowlistedApprovedRepairPlanner(
             operation,
             previousVersion,
             deletions);
+    }
+
+    private static ImmutableArray<string> GetAuthoritativeDeletions(
+        PullRequestObservation observation)
+    {
+        if (!observation.HasAuthoritativeChangeEvidence)
+        {
+            throw new CliOperationException(
+                "Approved replacement repair requires head-bound authoritative changed-file "
+                + "evidence for the superseded pull request.");
+        }
+
+        return
+        [
+            .. observation.ChangedFiles
+                .Where(static file => file.Status == PullRequestFileStatus.Removed)
+                .Select(static file => file.Path)
+                .Distinct(StringComparer.Ordinal),
+        ];
     }
 
     private static PackageVersion InferPreviousVersion(

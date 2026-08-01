@@ -760,10 +760,20 @@ public sealed class MaintenanceWorkflowCommandTests
                 Body = "<!-- winmatsch:package=Example.App;version=1.0 -->\n"
                     + "Operation: Replace\n"
                     + "## Changes\n"
-                    + $"- Delete: `{deletionPath}`",
+                    + "- Delete: `manifests/a/Attacker/App/9.9/Attacker.App.yaml`",
             };
+            PullRequestObservation observation =
+                Assert.Single(MaintenancePullRequests.Observe(pullRequest)) with
+                {
+                    ChangedFiles =
+                    [
+                        new(deletionPath, Status: PullRequestFileStatus.Removed),
+                    ],
+                    EvidenceHeadSha = pullRequest.HeadSha,
+                    EvidenceBaseSha = pullRequest.BaseSha,
+                };
             planned = await planner.PlanApprovedRepairAsync(
-                Assert.Single(MaintenancePullRequests.Observe(pullRequest)),
+                observation,
                 FeedbackClassification.HashMismatch,
                 context.CancellationToken);
             return ExitCodes.Success;
@@ -787,6 +797,41 @@ public sealed class MaintenanceWorkflowCommandTests
         {
             Directory.Delete(output, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task Replacement_repair_rejects_body_deletions_without_head_bound_evidence()
+    {
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule(async context =>
+        {
+            using var planner = new AllowlistedApprovedRepairPlanner(
+                context,
+                new Dictionary<long, string> { [41] = "approved-directory" },
+                new FixedMutationWorkflowFactory(new FakeMutationWorkflow()),
+                new FakeManifestLoader());
+            PullRequestInfo pullRequest = MaintenancePullRequests.ToolOwned(41) with
+            {
+                Body = "<!-- winmatsch:package=Example.App;version=1.0 -->\n"
+                    + "Operation: Replace\n"
+                    + "- Delete: `manifests/e/Example/App/0.9/Example.App.yaml`",
+            };
+
+            CliOperationException exception = await Assert.ThrowsAsync<CliOperationException>(
+                () => planner.PlanApprovedRepairAsync(
+                    Assert.Single(MaintenancePullRequests.Observe(pullRequest)),
+                    FeedbackClassification.HashMismatch,
+                    context.CancellationToken));
+            Assert.Contains(
+                "authoritative changed-file evidence",
+                exception.Message,
+                StringComparison.Ordinal);
+            return ExitCodes.Success;
+        }));
+
+        CliRunResult result = await harness.RunAsync(["probe"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
     }
 
     [Fact]

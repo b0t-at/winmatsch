@@ -51,9 +51,21 @@ public sealed record PullRequestObservation
 
     public ImmutableArray<PullRequestCommentObservation> Comments { get; init; } = [];
 
+    public ImmutableArray<PullRequestChangedFile> ChangedFiles { get; init; } = [];
+
+    public string? EvidenceHeadSha { get; init; }
+
+    public string? EvidenceBaseSha { get; init; }
+
     public bool IsMerged { get; init; }
 
     public bool ToolOwned { get; init; }
+
+    public bool HasAuthoritativeChangeEvidence =>
+        PullRequest.HeadRepository is not null
+        && PullRequest.BaseSha is not null
+        && string.Equals(EvidenceHeadSha, PullRequest.HeadSha, StringComparison.Ordinal)
+        && string.Equals(EvidenceBaseSha, PullRequest.BaseSha, StringComparison.Ordinal);
 }
 
 public sealed record PullRequestCommentObservation(
