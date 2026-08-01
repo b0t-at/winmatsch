@@ -274,6 +274,8 @@ public sealed record NewOperationRequest : WorkflowOperationRequest
     public bool AllowSharedContentAcrossUrls { get; init; }
 
     public string? ArtifactDirectory { get; init; }
+
+    public ImmutableArray<InstallerArtifact> InstallerArtifacts { get; init; } = [];
 }
 
 public sealed record UpdateOperationRequest : WorkflowOperationRequest
@@ -299,6 +301,8 @@ public sealed record UpdateOperationRequest : WorkflowOperationRequest
     public bool AllowSharedContentAcrossUrls { get; init; }
 
     public string? ArtifactDirectory { get; init; }
+
+    public ImmutableArray<InstallerArtifact> InstallerArtifacts { get; init; } = [];
 }
 
 public sealed record RemoveOperationRequest : WorkflowOperationRequest

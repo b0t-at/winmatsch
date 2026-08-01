@@ -142,11 +142,13 @@ public sealed class LocalWorkflowEngine
             parsed.Version,
             cancellationToken).ConfigureAwait(false);
         ImmutableArray<ExistingVersionSnapshot> existingVersions = CreateExistingVersions(
-            await _manifests.ListVersionsAsync(
-                request.OutputDirectory,
-                parsed.Identifier,
-                cancellationToken).ConfigureAwait(false),
-            parsed.Version);
+            RetainedVersions(
+                await _manifests.ListVersionsAsync(
+                    request.OutputDirectory,
+                    parsed.Identifier,
+                    cancellationToken).ConfigureAwait(false),
+                parsed.Version,
+                update: null));
         PackageManifests candidate = parsed.Manifests;
         RuleRunSummary ruleSummary = RuleRunSummary.Empty;
         ImmutableArray<RawManifestDocument> after = request.Documents;
@@ -267,6 +269,8 @@ public sealed class LocalWorkflowEngine
             operationRequest.ExecutionMode,
             create?.ArtifactDirectory ?? update?.ArtifactDirectory);
         var artifactSnapshots = ImmutableArray.CreateBuilder<ArtifactSnapshot>();
+        var installerArtifacts = ImmutableArray.CreateBuilder<InstallerArtifact>();
+        installerArtifacts.AddRange(create?.InstallerArtifacts ?? update!.InstallerArtifacts);
         var enrichedAssets = ImmutableArray.CreateBuilder<DiscoveredAsset>();
         foreach (DiscoveredAsset asset in assets.OrderBy(static item => item.DownloadUri.AbsoluteUri, StringComparer.Ordinal))
         {
@@ -274,6 +278,23 @@ public sealed class LocalWorkflowEngine
             if (asset.Content is not null && asset.Analysis is not null)
             {
                 enrichedAssets.Add(asset);
+                bool hasArtifact = installerArtifacts.Any(artifact =>
+                    string.Equals(
+                        artifact.InstallerUrl,
+                        asset.DownloadUri.AbsoluteUri,
+                        StringComparison.Ordinal));
+                if (operationRequest.ExecutionMode == WorkflowExecutionMode.Apply
+                    && !hasArtifact
+                    && _artifacts is not null)
+                {
+                    ArtifactSnapshot revalidated = await _artifacts.AcquireAsync(
+                        asset,
+                        artifactDirectory.Path,
+                        cancellationToken).ConfigureAwait(false);
+                    artifactSnapshots.Add(revalidated);
+                    installerArtifacts.Add(new(asset.DownloadUri.AbsoluteUri, revalidated.Download));
+                }
+
                 continue;
             }
 
@@ -290,6 +311,7 @@ public sealed class LocalWorkflowEngine
                 artifactDirectory.Path,
                 cancellationToken).ConfigureAwait(false);
             artifactSnapshots.Add(snapshot);
+            installerArtifacts.Add(new(snapshot.Asset.DownloadUri.AbsoluteUri, snapshot.Download));
             enrichedAssets.Add(snapshot.Asset);
         }
 
@@ -402,7 +424,7 @@ public sealed class LocalWorkflowEngine
             operationRequest.PolicyEvidence,
             artifactSnapshots,
             enrichedAssets,
-            packageVersions);
+            RetainedVersions(packageVersions, newVersion, update));
         WorkflowRuleResult rules = RunRules(
             operationRequest,
             candidate,
@@ -433,18 +455,20 @@ public sealed class LocalWorkflowEngine
         {
             return NoChangeResult("update", operationRequest, identifier, newVersion, beforeDocuments);
         }
+        ImmutableArray<PackageSnapshot> retainedVersions = RetainedVersions(
+            packageVersions,
+            newVersion,
+            update);
+        ImmutableArray<ExistingVersionSnapshot> existingVersionEvidence =
+            CreateExistingVersions(retainedVersions);
 
         ValidationReport validation = await ValidateAsync(
             operationRequest,
             beforeDocuments,
             after,
             changes,
-            [
-                .. artifactSnapshots.Select(static snapshot => new InstallerArtifact(
-                    snapshot.Asset.DownloadUri.AbsoluteUri,
-                    snapshot.Download)),
-            ],
-            CreateExistingVersions(packageVersions, newVersion),
+            installerArtifacts.ToImmutable(),
+            existingVersionEvidence,
             cancellationToken).ConfigureAwait(false);
         validation = MergeRuleFindings(validation, rules.Summary);
         ImmutableArray<WorkflowAuditEntry> audit =
@@ -472,12 +496,8 @@ public sealed class LocalWorkflowEngine
             rules.Summary,
             [],
             audit,
-            [
-                .. artifactSnapshots.Select(static snapshot => new InstallerArtifact(
-                    snapshot.Asset.DownloadUri.AbsoluteUri,
-                    snapshot.Download)),
-            ],
-            CreateExistingVersions(packageVersions, newVersion));
+            installerArtifacts.ToImmutable(),
+            existingVersionEvidence);
         return await CompleteAsync(operationRequest, plan, cancellationToken).ConfigureAwait(false);
     }
 
@@ -516,11 +536,13 @@ public sealed class LocalWorkflowEngine
             return MissingResult(update ? "update-locale" : "new-locale", operationRequest, identifier, version);
         }
         ImmutableArray<ExistingVersionSnapshot> existingVersions = CreateExistingVersions(
-            await _manifests.ListVersionsAsync(
-                operationRequest.OutputDirectory,
-                identifier,
-                cancellationToken).ConfigureAwait(false),
-            version);
+            RetainedVersions(
+                await _manifests.ListVersionsAsync(
+                    operationRequest.OutputDirectory,
+                    identifier,
+                    cancellationToken).ConfigureAwait(false),
+                version,
+                update: null));
 
         LanguageTag defaultLocale = snapshot.Manifests.Version.DefaultLocale!;
         if (metadata.PackageLocale == defaultLocale)
@@ -918,8 +940,15 @@ public sealed class LocalWorkflowEngine
         DefaultLocaleManifest? defaultLocale = null;
         VersionManifest? version = null;
         var locales = new List<LocaleManifest>();
+        var paths = new HashSet<string>(StringComparer.Ordinal);
         foreach (RawManifestDocument document in documents.OrderBy(static item => item.RepositoryPath, StringComparer.Ordinal))
         {
+            if (!paths.Add(document.RepositoryPath))
+            {
+                throw new InvalidDataException(
+                    $"Manifest set contains duplicate repository path '{document.RepositoryPath}'.");
+            }
+
             string yaml = StrictUtf8.Decode(document.Content.AsSpan());
             switch (ManifestYamlReader.TryDetectType(yaml))
             {
@@ -948,6 +977,16 @@ public sealed class LocalWorkflowEngine
             Locales = locales,
         };
         PackageManifestIO.Validate(manifests);
+        foreach (Installer item in manifests.Installer.Installers ?? [])
+        {
+            if (!Uri.TryCreate(item.InstallerUrl, UriKind.Absolute, out Uri? uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new InvalidDataException(
+                    $"Installer URL '{item.InstallerUrl}' must be an absolute HTTP or HTTPS URL.");
+            }
+        }
+
         return new(manifests.Version.PackageIdentifier!, manifests.Version.PackageVersion!, manifests);
     }
 
@@ -1040,13 +1079,23 @@ public sealed class LocalWorkflowEngine
         };
     }
 
-    private static ImmutableArray<ExistingVersionSnapshot> CreateExistingVersions(
+    private static ImmutableArray<PackageSnapshot> RetainedVersions(
         ImmutableArray<PackageSnapshot> versions,
-        PackageVersion excludedVersion)
+        PackageVersion targetVersion,
+        UpdateOperationRequest? update)
+        =>
+        [
+            .. versions.Where(snapshot =>
+                !snapshot.PackageVersion.Equals(targetVersion)
+                && (update?.ReplacePreviousVersion != true
+                    || !snapshot.PackageVersion.Equals(update.PreviousVersion))),
+        ];
+
+    private static ImmutableArray<ExistingVersionSnapshot> CreateExistingVersions(
+        ImmutableArray<PackageSnapshot> versions)
         =>
         [
             .. versions
-                .Where(snapshot => !snapshot.PackageVersion.Equals(excludedVersion))
                 .OrderBy(static snapshot => snapshot.PackageVersion.Value, StringComparer.Ordinal)
                 .Select(static snapshot => new ExistingVersionSnapshot(
                     snapshot.PackageVersion.Value,
@@ -1228,7 +1277,7 @@ public sealed class LocalWorkflowEngine
                 new ValidationReport(),
                 RuleRunSummary.Empty,
                 [],
-                [new("UPDATE_UNCHANGED_HASHES", "All selected installer URL and hash identities are unchanged.")]),
+                [new("UPDATE_NO_CHANGES", "The complete generated manifest set is byte-identical to the existing set.")]),
         };
 
     private static WorkflowOperationResult QuestionResult(

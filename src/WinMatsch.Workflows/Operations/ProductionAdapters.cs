@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 using WinMatsch.Analysis;
 using WinMatsch.Analysis.Dependencies;
 using WinMatsch.Core;
@@ -129,6 +131,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
     {
         cancellationToken.ThrowIfCancellationRequested();
         string root = Path.GetFullPath(outputDirectory);
+        AtomicWorkflowFileTransaction.RecoverPending(root, packageIdentifier.Value);
         if (!Directory.Exists(root))
         {
             return Task.FromResult<PackageSnapshot?>(null);
@@ -170,6 +173,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
         CancellationToken cancellationToken)
     {
         string root = Path.GetFullPath(outputDirectory);
+        AtomicWorkflowFileTransaction.RecoverPending(root, packageIdentifier.Value);
         if (!Directory.Exists(root))
         {
             return [];
@@ -226,13 +230,7 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         }
 
         string root = Path.GetFullPath(outputDirectory);
-        string canonicalRoot = Path.TrimEndingDirectorySeparator(root);
-        if (OperatingSystem.IsWindows())
-        {
-            canonicalRoot = canonicalRoot.ToUpperInvariant();
-        }
-
-        string normalizedLockKey = $"{canonicalRoot}\u001f{operationLockKey.ToUpperInvariant()}";
+        string normalizedLockKey = $"{root}\u001f{operationLockKey.ToUpperInvariant()}";
         SemaphoreSlim gate = _locks.GetOrAdd(normalizedLockKey, static _ => new SemaphoreSlim(1, 1));
         if (!await gate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
         {
@@ -243,10 +241,12 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
 
         string token = Guid.NewGuid().ToString("N");
         string transactionPrefix =
-            $".winmatsch-transaction-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalizedLockKey)))[..16]}";
+            $".winmatsch-transaction-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(operationLockKey.ToUpperInvariant())))[..16]}";
         string transactionRoot = Path.Combine(root, $"{transactionPrefix}-{token}");
         var installed = new List<TransactionEntry>(changes.Length);
-        CrossProcessOperationLock? processLock = null;
+        var directoryPins = new List<IDisposable>();
+        var pinnedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        RepositoryOperationLock? processLock = null;
         bool cleanupAllowed = false;
         bool committed = false;
         Exception? committedCleanupFailure = null;
@@ -277,11 +277,11 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 installed.Add(new(change, destination, stage, backup));
             }
 
-            // Named Mutex ownership is thread-affine, so acquire only after the final await.
-            processLock = CrossProcessOperationLock.Acquire(normalizedLockKey);
+            processLock = RepositoryOperationLock.Acquire(root, operationLockKey);
             RecoverAbandonedTransactions(root, transactionPrefix, transactionRoot);
             foreach (TransactionEntry entry in installed)
             {
+                PinExistingParent(root, entry.Destination, directoryPins, pinnedDirectories);
                 VerifyPrecondition(entry);
             }
 
@@ -295,17 +295,24 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                     Directory.CreateDirectory(Path.GetDirectoryName(entry.Backup)!);
                     File.Move(entry.Destination, entry.Backup);
                     entry.BackupCreated = true;
+                    VerifyCapturedBackup(entry);
                 }
 
                 if (entry.Change.Kind != PlannedChangeKind.Delete)
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(entry.Destination)!);
                     SecurePath.RejectReparsePoints(root, Path.GetDirectoryName(entry.Destination)!);
+                    PinDirectory(
+                        Path.GetDirectoryName(entry.Destination)!,
+                        directoryPins,
+                        pinnedDirectories);
                     File.Move(entry.Stage, entry.Destination);
                     entry.DestinationInstalled = true;
+                    FlushFile(entry.Destination);
                 }
             }
 
+            DisposePins(directoryPins);
             DeleteEmptyManifestDirectories(root, installed);
             WriteJournal(transactionRoot, "committed", installed);
             committed = true;
@@ -348,6 +355,8 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             }
             finally
             {
+                DisposePins(directoryPins);
+
                 processLock?.Dispose();
                 gate.Release();
             }
@@ -402,7 +411,16 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 $"Destination '{entry.Change.RepositoryPath}' was removed after planning.");
         }
 
-        using FileStream stream = File.OpenRead(entry.Destination);
+    }
+
+    private static void VerifyCapturedBackup(TransactionEntry entry)
+    {
+        if (entry.Change.ExpectedState != ExpectedFileState.Present)
+        {
+            return;
+        }
+
+        using FileStream stream = File.OpenRead(entry.Backup);
         string actual = Convert.ToHexString(SHA256.HashData(stream));
         if (!string.Equals(actual, entry.Change.ExpectedSha256, StringComparison.Ordinal))
         {
@@ -410,6 +428,82 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 WorkflowResultCode.Conflict,
                 $"Destination '{entry.Change.RepositoryPath}' changed after planning.");
         }
+    }
+
+    private static void FlushFile(string path)
+    {
+        using FileStream stream = new(
+            path,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.Read,
+            bufferSize: 1,
+            FileOptions.WriteThrough);
+        stream.Flush(flushToDisk: true);
+    }
+
+    private static void DisposePins(List<IDisposable> pins)
+    {
+        foreach (IDisposable pin in pins)
+        {
+            pin.Dispose();
+        }
+
+        pins.Clear();
+    }
+
+    private static void PinExistingParent(
+        string root,
+        string destination,
+        ICollection<IDisposable> pins,
+        ISet<string> pinnedDirectories)
+    {
+        string? current = Path.GetDirectoryName(destination);
+        while (current is not null && !Directory.Exists(current))
+        {
+            current = Path.GetDirectoryName(current);
+        }
+
+        current ??= root;
+        string relative = Path.GetRelativePath(root, current);
+        if (Path.IsPathRooted(relative)
+            || relative.Equals("..", StringComparison.Ordinal)
+            || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Destination parent escapes the output root.");
+        }
+
+        PinDirectory(current, pins, pinnedDirectories);
+    }
+
+    private static void PinDirectory(
+        string path,
+        ICollection<IDisposable> pins,
+        ISet<string> pinnedDirectories)
+    {
+        string fullPath = Path.GetFullPath(path);
+        if (pinnedDirectories.Add(fullPath))
+        {
+            pins.Add(DirectoryPin.Acquire(fullPath));
+        }
+    }
+
+    internal static void RecoverPending(string root, string operationLockKey)
+    {
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        string transactionPrefix =
+            $".winmatsch-transaction-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(operationLockKey.ToUpperInvariant())))[..16]}";
+        if (!Directory.EnumerateDirectories(root, $"{transactionPrefix}-*").Any())
+        {
+            return;
+        }
+
+        using RepositoryOperationLock operationLock = RepositoryOperationLock.Acquire(root, operationLockKey);
+        RecoverAbandonedTransactions(root, transactionPrefix, currentTransaction: "");
     }
 
     private static void WriteJournal(
@@ -536,51 +630,129 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         public bool DestinationInstalled { get; set; }
     }
 
-    private sealed class CrossProcessOperationLock : IDisposable
+    private sealed class RepositoryOperationLock : IDisposable
     {
-        private readonly Mutex _mutex;
-        private bool _ownsMutex;
+        private readonly FileStream _stream;
+        private readonly IDisposable _rootPin;
+        private readonly IDisposable _lockDirectoryPin;
 
-        private CrossProcessOperationLock(Mutex mutex, bool ownsMutex)
+        private RepositoryOperationLock(
+            FileStream stream,
+            IDisposable rootPin,
+            IDisposable lockDirectoryPin)
         {
-            _mutex = mutex;
-            _ownsMutex = ownsMutex;
+            _stream = stream;
+            _rootPin = rootPin;
+            _lockDirectoryPin = lockDirectoryPin;
         }
 
-        public static CrossProcessOperationLock Acquire(string key)
+        public static RepositoryOperationLock Acquire(string root, string key)
         {
-            string name = $"WinMatsch.Workflow.{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)))}";
-            var mutex = new Mutex(initiallyOwned: false, name);
-            bool acquired;
+            string lockDirectory = Path.Combine(root, ".winmatsch-locks");
+            SecurePath.RejectReparsePoints(root, root);
+            IDisposable rootPin = DirectoryPin.Acquire(root);
+            IDisposable? lockDirectoryPin = null;
             try
             {
-                acquired = mutex.WaitOne(0);
+                Directory.CreateDirectory(lockDirectory);
+                SecurePath.RejectReparsePoints(root, lockDirectory);
+                lockDirectoryPin = DirectoryPin.Acquire(lockDirectory);
+                string lockPath = Path.Combine(
+                    lockDirectory,
+                    $"{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key.ToUpperInvariant())))}.lock");
+                return new RepositoryOperationLock(
+                    new FileStream(
+                        lockPath,
+                        FileMode.OpenOrCreate,
+                        FileAccess.ReadWrite,
+                        FileShare.None,
+                        bufferSize: 1,
+                        FileOptions.WriteThrough),
+                    rootPin,
+                    lockDirectoryPin);
             }
-            catch (AbandonedMutexException)
+            catch (IOException exception)
             {
-                acquired = true;
-            }
-
-            if (!acquired)
-            {
-                mutex.Dispose();
+                lockDirectoryPin?.Dispose();
+                rootPin.Dispose();
                 throw new WorkflowOperationException(
                     WorkflowResultCode.Conflict,
-                    "Another process is already running a local operation for this package.");
+                    "Another process is already running a local operation for this package.",
+                    exception);
             }
-
-            return new(mutex, ownsMutex: true);
+            catch
+            {
+                lockDirectoryPin?.Dispose();
+                rootPin.Dispose();
+                throw;
+            }
         }
 
         public void Dispose()
         {
-            if (_ownsMutex)
-            {
-                _mutex.ReleaseMutex();
-                _ownsMutex = false;
-            }
+            _stream.Dispose();
+            _lockDirectoryPin.Dispose();
+            _rootPin.Dispose();
+        }
+    }
+}
 
-            _mutex.Dispose();
+internal static class DirectoryPin
+{
+    private const uint FileListDirectory = 0x0001;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint OpenExisting = 3;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const uint FileFlagBackupSemantics = 0x02000000;
+
+    public static IDisposable Acquire(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return NoopDisposable.Instance;
+        }
+
+        SafeFileHandle handle = CreateFile(
+            path,
+            FileListDirectory,
+            FileShareRead | FileShareWrite,
+            0,
+            OpenExisting,
+            FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+            0);
+        if (handle.IsInvalid)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            throw new IOException($"Unable to pin directory '{path}' against replacement (Win32 error {error}).");
+        }
+
+        return handle;
+    }
+
+#pragma warning disable SYSLIB1054 // Source-generated interop would require enabling unsafe blocks project-wide.
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "CreateFileW",
+        SetLastError = true,
+        CharSet = CharSet.Unicode)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        nint securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        nint templateFile);
+#pragma warning restore SYSLIB1054
+
+    private sealed class NoopDisposable : IDisposable
+    {
+        public static NoopDisposable Instance { get; } = new();
+
+        public void Dispose()
+        {
         }
     }
 }

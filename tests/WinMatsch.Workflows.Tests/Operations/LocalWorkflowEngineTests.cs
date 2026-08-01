@@ -418,6 +418,68 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Local_snapshot_recovers_an_interrupted_transaction_before_reading()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        WritePackage(temporary.Path, package);
+        string repositoryPath =
+            $"{ManifestPaths.GetVersionDirectory(package.Version.PackageIdentifier!, package.Version.PackageVersion!)}/{ManifestPaths.GetInstallerFileName(package.Version.PackageIdentifier!)}";
+        string destination = Path.Combine(
+            temporary.Path,
+            repositoryPath.Replace('/', Path.DirectorySeparatorChar));
+        string packageKey = package.Version.PackageIdentifier!.Value.ToUpperInvariant();
+        string prefix =
+            $".winmatsch-transaction-{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(packageKey)))[..16]}";
+        string transaction = Path.Combine(temporary.Path, $"{prefix}-crash");
+        string backup = Path.Combine(
+            transaction,
+            "backup",
+            repositoryPath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
+        File.Move(destination, backup);
+        string encodedPath = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(repositoryPath));
+        await File.WriteAllTextAsync(
+            Path.Combine(transaction, "journal"),
+            $"prepared{Environment.NewLine}{PlannedChangeKind.Update}|1|{encodedPath}{Environment.NewLine}");
+
+        PackageSnapshot? recovered = await new LocalManifestSnapshotSource().LoadAsync(
+            temporary.Path,
+            package.Version.PackageIdentifier!,
+            package.Version.PackageVersion!,
+            CancellationToken.None);
+
+        Assert.NotNull(recovered);
+        Assert.True(File.Exists(destination));
+        Assert.False(Directory.Exists(transaction));
+    }
+
+    [Fact]
+    public async Task Pre_enriched_asset_with_supplied_artifact_passes_production_preflight()
+    {
+        using var temporary = new TemporaryDirectory();
+        DownloadResult download = Download("A", temporary.Path);
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new PassThroughRuleRunner(),
+            new PreflightGateWorkflowAdapter(new PreflightGate(new StablePreflightNetwork(download))),
+            new AtomicWorkflowFileTransaction(),
+            clock: new FixedClock());
+        NewOperationRequest request = NewRequest(temporary.Path, WorkflowExecutionMode.Apply) with
+        {
+            NetworkValidationMode = NetworkValidationMode.Online,
+            InstallerArtifacts =
+            [
+                new InstallerArtifact("https://example.test/app-x64.exe", download),
+            ],
+        };
+
+        WorkflowOperationResult result = await engine.NewAsync(request);
+
+        Assert.True(result.Applied, result.Plan.Validation.ToText());
+    }
+
+    [Fact]
     public async Task Malformed_raw_submit_returns_a_stable_invalid_result()
     {
         using var temporary = new TemporaryDirectory();
