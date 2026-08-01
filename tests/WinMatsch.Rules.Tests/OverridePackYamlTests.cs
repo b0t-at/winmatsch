@@ -165,7 +165,7 @@ public class OverridePackYamlTests
 
         Assert.NotNull(chrome);
         Assert.Equal("Comments", chrome.Quirks.DisplayVersionFromEvidenceProperty);
-        Assert.Contains(chrome.Policies, annotation => annotation.Id == RuleCatalogueIds.Arp1);
+        Assert.DoesNotContain(chrome.Policies, annotation => annotation.Id == RuleCatalogueIds.Arp1);
     }
 
     [Fact]

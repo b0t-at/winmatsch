@@ -114,10 +114,10 @@ Parallelizable: P2 ∥ P3 after P1; P4 ∥ P5 ∥ P6 mostly independent after P3
 - ExeAnalyzer._probes = [BurnProbe]; PeFixtures refactored: WriteResourceSection extracted/public for BurnFixtures raw PEBuilder stub (gotcha: PEBuilder.GetDirectories() override must be `protected`, NOT `protected internal`; fixture serializes twice b/c stubSize known only after serialization)
 - 36 tests added → 378 total green, 0 warnings, format clean
 
-### Session 2026-07-20 (later): P5 Rules DONE on branch worktree-agent-ab229cf96766f2dd1 (commit 1fdb2c5, based on db2796a — MERGE INTO MAIN PENDING after P4 lands)
+### Session 2026-07-20 (later): P5 Rules baseline DONE (commit 1fdb2c5, subsequently integrated)
 - src/WinMatsch.Rules + tests/WinMatsch.Rules.Tests (97 tests) + schemas/ (all 4 pinned winget 1.10.0 JSON schemas downloaded)
 - Pipeline order (ctor-enforced mutating-before-validation, dup ids rejected): WM0007 PreserveOnUpdate → WM0201 quirks → WM0002 PushDownRoot → WM0004 ScrubEmpty → WM0006 NormalizeProductCodes → WM0003 DedupeArpVsLocale → WM0005 RemoveDupInstallers → WM0001 Hoist → WM0101 DisplayVersionConsistency → WM0102 DupEntries → WM0103 TypeConsistency
-- Key design: 35 hand-written InstallerFieldsBase accessors (Get/Set/deep-Equals/deep-Clone delegates, zero reflection in src; reflection-based TEST guards table vs new model props); EffectiveInstallerValues resolves installer??root so rules work pre/post hoist; InstallerEvidence {InstallerUrl, InstallerAnalysis?, Properties bag} lives in Rules (Chrome quirk keys off Properties["Comments"]); schema validation NOT implemented — IManifestSchemaValidator seam only (AOT vetting of JSON-schema pkgs pending)
+- Key design: hand-written InstallerFieldsBase accessors (Get/Set/deep-Equals/deep-Clone delegates, zero reflection in src; reflection-based test guards table vs new model props); EffectiveInstallerValues resolves installer/root fields so rules work pre/post hoist; InstallerEvidence lives in Rules. The former schema-validation seam was superseded by the AOT-vetted WinMatsch.Validation project with embedded WinGet 1.12 schemas.
 - Gotchas: CA1861 in tests (no inline new[] in assertions); IDE1006 wants _camelCase on private static readonly in tests too; Guid.ToString("B").ToUpperInvariant() dodges CA1305/CA1308
 - Worktree note: agent fast-forwarded its branch to db2796a before starting
 
@@ -126,10 +126,11 @@ Parallelizable: P2 ∥ P3 after P1; P4 ∥ P5 ∥ P6 mostly independent after P3
 - NSIS 3 official-release assumption; NSIS 2 ANSI escape codes 252-255 NOT interpreted (literal ARP strings still fine). Opcodes: EW_WRITEREG=51 (NOT 62=EW_WRITEUNINSTALLER!), REG_SZ filter, roots HKLM/HKCU/SHCTX; EW_SETFLAG=13 parm0=12 alter_reg_view parm1→256=KEY_WOW64_64KEY→SetRegView 64. Arch: x86 stub promoted X64 on $PROGRAMFILES64/$COMMONFILES64/SetRegView64; ARM64 not detectable. Scope from $INSTDIR default. Compressors: deflate+LZMA1 (SharpCompress 1.0.0 LzmaStream) both modes; NSIS-bzip2 + BCJ-LZMA detected→InvalidDataException
 - Lcid.cs extracted as shared LCID map (MsiAnalyzer delegates). SharpCompress 1.0.0 gotcha: DataErrorException internal → catch SharpCompressException. 35 tests added → 413 green, format clean
 
-### NEXT UP (P4 remainder):
-- Inno (in progress) → AdvancedInstaller (7z SFX) + Squirrel (nupkg); wire IExeFormatProbe chain
-- Then merge P5 rules branch into main
-- Remember: any new project needs <IsTestProject> handling or IsAotCompatible applies
+### Session 2026-08-01: P4 remainder through P8 implemented
+- Added Inno, Advanced Installer, and Squirrel analyzers and wired the complete EXE probe chain.
+- Added schema/preflight validation, deterministic mapping, rule runtime/policy catalogue, learned-correction detection, secure GitHub client/lifecycle, local workflows, full CLI command surface, cache/config/token management, and release engineering.
+- Added hermetic E2E/regression coverage, six-RID trimmed publishing, documentation, licensing, and third-party notices.
+- Post-hoc audit findings are tracked in audit-report.md and require remediation before merge.
 
 
 ### Session 2026-08-01: H1 release-docs DONE

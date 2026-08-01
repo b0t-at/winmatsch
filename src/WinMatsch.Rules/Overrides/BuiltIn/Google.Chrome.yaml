@@ -1,8 +1,5 @@
 formatVersion: 1
 packageIdentifier: "Google.Chrome"
 manualOnly: false
-policies:
-  - id: "ARP-1"
-    annotation: "Chrome MSI ProductVersion is an internal build; use summary Comments for marketing DisplayVersion."
 quirks:
   displayVersionFromEvidenceProperty: "Comments"

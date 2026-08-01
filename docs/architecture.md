@@ -2,8 +2,8 @@
 
 ## Project graph
 
-Nine production projects with a strict, acyclic dependency direction —
-foundations never depend on orchestration:
+Eight production projects, plus one shared test-infrastructure project, with a
+strict, acyclic dependency direction — foundations never depend on orchestration:
 
 ```mermaid
 graph BT
