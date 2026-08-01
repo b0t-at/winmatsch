@@ -400,8 +400,8 @@ internal static partial class MutationOutput
             return null;
         }
 
-        string redacted = GitHubTokenPattern().Replace(value, "<redacted>");
-        return SecretAssignmentPattern().Replace(redacted, "${key}=<redacted>");
+        string redacted = GitHubTokenPattern().Replace(value, "[REDACTED]");
+        return GitHubSubmissionFormatter.Redact(redacted);
     }
 
     private static string ToKebab<T>(T value)
@@ -412,8 +412,4 @@ internal static partial class MutationOutput
     [GeneratedRegex(@"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")]
     private static partial Regex GitHubTokenPattern();
 
-    [GeneratedRegex(
-        @"(?<key>(?:token|password|secret|authorization))\s*[:=]\s*[^\s,;]+",
-        RegexOptions.IgnoreCase)]
-    private static partial Regex SecretAssignmentPattern();
 }

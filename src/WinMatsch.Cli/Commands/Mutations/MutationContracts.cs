@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Text;
+using WinMatsch.Cli.Hosting;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.Workflows.GitHub;
@@ -15,10 +16,24 @@ public interface IMutationWorkflow
         CancellationToken cancellationToken = default);
 }
 
+public interface IMutationWorkflowFactory
+{
+    public Task<IMutationWorkflow> CreateAsync(
+        CommandContext context,
+        CancellationToken cancellationToken = default);
+}
+
 public interface ISubmissionWorkflow
 {
     public Task<GitHubLifecycleResult> ExecuteAsync(
         GitHubSubmissionRequest request,
+        CancellationToken cancellationToken = default);
+}
+
+public interface ISubmissionWorkflowFactory
+{
+    public Task<ISubmissionWorkflow> CreateAsync(
+        CommandContext context,
         CancellationToken cancellationToken = default);
 }
 
@@ -50,10 +65,45 @@ public interface IUrlLauncher
     public Task OpenAsync(Uri uri, CancellationToken cancellationToken = default);
 }
 
+public enum EditorResultCode
+{
+    Accepted,
+    Cancelled,
+    MissingConfiguration,
+    InvalidConfiguration,
+    Failed,
+}
+
 public sealed record EditorResult(
-    bool Accepted,
+    EditorResultCode Code,
     ImmutableArray<RawManifestDocument> Documents,
-    string? ErrorMessage = null);
+    string? ErrorMessage = null)
+{
+    public bool Accepted => Code == EditorResultCode.Accepted;
+}
+
+public sealed class FixedMutationWorkflowFactory(IMutationWorkflow workflow) : IMutationWorkflowFactory
+{
+    private readonly IMutationWorkflow _workflow =
+        workflow ?? throw new ArgumentNullException(nameof(workflow));
+
+    public Task<IMutationWorkflow> CreateAsync(
+        CommandContext context,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(_workflow);
+}
+
+public sealed class FixedSubmissionWorkflowFactory(ISubmissionWorkflow workflow)
+    : ISubmissionWorkflowFactory
+{
+    private readonly ISubmissionWorkflow _workflow =
+        workflow ?? throw new ArgumentNullException(nameof(workflow));
+
+    public Task<ISubmissionWorkflow> CreateAsync(
+        CommandContext context,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(_workflow);
+}
 
 public sealed class LocalMutationWorkflow(LocalWorkflowEngine engine) : IMutationWorkflow
 {
@@ -227,7 +277,10 @@ public sealed class ProcessEditorRunner : IEditorRunner
         string? command = _environment("VISUAL") ?? _environment("EDITOR");
         if (string.IsNullOrWhiteSpace(command))
         {
-            return new(false, documents, "Set VISUAL or EDITOR to enable manifest editing.");
+            return new(
+                EditorResultCode.MissingConfiguration,
+                documents,
+                "Set VISUAL or EDITOR to enable manifest editing.");
         }
 
         IReadOnlyList<string> commandParts;
@@ -237,7 +290,7 @@ public sealed class ProcessEditorRunner : IEditorRunner
         }
         catch (FormatException exception)
         {
-            return new(false, documents, exception.Message);
+            return new(EditorResultCode.InvalidConfiguration, documents, exception.Message);
         }
 
         string temporaryRoot = Path.Combine(
@@ -255,7 +308,10 @@ public sealed class ProcessEditorRunner : IEditorRunner
                         temporaryRoot + Path.DirectorySeparatorChar,
                         StringComparison.OrdinalIgnoreCase))
                 {
-                    return new(false, documents, "Manifest path escaped the isolated editor directory.");
+                    return new(
+                        EditorResultCode.Failed,
+                        documents,
+                        "Manifest path escaped the isolated editor directory.");
                 }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -272,7 +328,10 @@ public sealed class ProcessEditorRunner : IEditorRunner
                 cancellationToken).ConfigureAwait(false);
             if (exitCode != 0)
             {
-                return new(false, documents, $"The configured editor exited with code {exitCode}.");
+                return new(
+                    EditorResultCode.Failed,
+                    documents,
+                    $"The configured editor exited with code {exitCode}.");
             }
 
             var edited = ImmutableArray.CreateBuilder<RawManifestDocument>(documents.Length);
@@ -283,7 +342,7 @@ public sealed class ProcessEditorRunner : IEditorRunner
                 edited.Add(new(documents[index].RepositoryPath, content));
             }
 
-            return new(true, edited.ToImmutable());
+            return new(EditorResultCode.Accepted, edited.ToImmutable());
         }
         finally
         {

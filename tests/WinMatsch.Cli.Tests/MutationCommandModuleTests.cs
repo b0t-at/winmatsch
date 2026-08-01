@@ -6,6 +6,7 @@ using WinMatsch.Cli.Tests.Harness;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
+using WinMatsch.GitHub.Auth;
 using WinMatsch.Rules;
 using WinMatsch.Validation;
 using WinMatsch.Workflows;
@@ -180,6 +181,23 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task Interactive_submit_approval_includes_fork_creation_consent()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var submissions = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submissions);
+        harness.Interaction.EnqueueConfirm(true);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--submit"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(
+            ForkConsentPolicy.AllowCreate,
+            Assert.Single(submissions.Requests).Policy.ForkConsent);
+    }
+
+    [Fact]
     public async Task Editor_result_is_revalidated_as_raw_submit_before_apply()
     {
         var workflow = new FakeMutationWorkflow();
@@ -197,6 +215,35 @@ public sealed class MutationCommandModuleTests
             Encoding.UTF8.GetString(edited.Documents[0].Content.AsSpan()),
             StringComparison.Ordinal);
         Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[2].ExecutionMode);
+    }
+
+    [Fact]
+    public async Task Locale_editor_receives_only_target_locale_and_preserves_other_manifests()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => request is NewLocaleOperationRequest
+                ? LocaleResult(request)
+                : FakeMutationWorkflow.Result(request),
+        };
+        var editor = new FakeEditorRunner();
+        CliHarness harness = CreateHarness(workflow, editor: editor);
+
+        CliRunResult result = await harness.RunAsync(
+            ["new-locale", "Example.App", "1.0", "de-DE", "--edit"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        ImmutableArray<RawManifestDocument> editorInput = Assert.Single(editor.Inputs);
+        Assert.Single(editorInput);
+        Assert.EndsWith(".locale.de-DE.yaml", editorInput[0].RepositoryPath, StringComparison.Ordinal);
+        SubmitOperationRequest submit = Assert.IsType<SubmitOperationRequest>(workflow.Requests[1]);
+        Assert.Equal(3, submit.Documents.Length);
+        Assert.Contains(
+            submit.Documents,
+            document => document.RepositoryPath.EndsWith(
+                ".installer.yaml",
+                StringComparison.Ordinal)
+                && Encoding.UTF8.GetString(document.Content.AsSpan()) == "installer: unchanged\n");
     }
 
     [Fact]
@@ -338,6 +385,158 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task Download_failure_is_an_operation_failure()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = _ => throw new DownloadHttpException(
+                System.Net.HttpStatusCode.NotFound,
+                "https://example.test/missing.exe"),
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(["update", "Example.App", "1.0"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains("Local mutation failed", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Replace_version_must_match_update_source_before_any_mutation()
+    {
+        var workflow = new FakeMutationWorkflow();
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--replace", "0.9", "--yes"]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Empty(workflow.Requests);
+        Assert.Contains("must match", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Replacement_uses_one_authoritative_previous_version_locally_and_remotely()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var submissions = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submissions);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--replace", "1.0", "--submit", "--yes"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.All(
+            workflow.Requests.OfType<UpdateOperationRequest>(),
+            request =>
+            {
+                Assert.True(request.ReplacePreviousVersion);
+                Assert.Equal("1.0", request.PreviousVersion.Value);
+            });
+        GitHubSubmissionRequest remote = Assert.Single(submissions.Requests);
+        Assert.True(remote.Policy.ReplacePreviousVersion);
+        Assert.Equal("1.0", remote.Policy.PreviousVersion?.Value);
+    }
+
+    [Fact]
+    public async Task Remote_cancelled_result_renders_partial_state_and_returns_130()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var submissions = new FakeSubmissionWorkflow
+        {
+            Handler = request => Remote(
+                request,
+                GitHubLifecycleResultCode.Cancelled,
+                new RemoteMutationState
+                {
+                    BranchName = "winmatsch/submissions/example",
+                    BranchCreated = true,
+                }),
+        };
+        CliHarness harness = CreateHarness(workflow, submissions);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--submit", "--yes", "--format", "json"]);
+
+        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
+        Assert.Contains(
+            "\"branch\":\"winmatsch/submissions/example\"",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Browser_failure_after_created_pr_is_diagnostic_only()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var submissions = new FakeSubmissionWorkflow();
+        var launcher = new FakeUrlLauncher
+        {
+            Failure = new InvalidOperationException("no browser"),
+        };
+        var harness = new CliHarness();
+        harness.Modules.Add(new MutationCommandModule(
+            workflow,
+            submissions,
+            new FakeEditorRunner(),
+            new FakeManifestLoader(),
+            launcher));
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--submit", "--yes", "--open-pr"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("pull request URL", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("browser could not be opened", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Invocation_factory_observes_token_precedence_and_concurrency()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var factory = new CapturingMutationWorkflowFactory(workflow);
+        var harness = new CliHarness();
+        harness.EnvironmentVariables["GITHUB_TOKEN"] = "environment-token";
+        harness.Modules.Add(new MutationCommandModule(
+            factory,
+            editor: new FakeEditorRunner(),
+            manifestLoader: new FakeManifestLoader(),
+            urlLauncher: new FakeUrlLauncher()));
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "update",
+            "Example.App",
+            "1.0",
+            "--token",
+            "command-token",
+            "--concurrent-downloads",
+            "7",
+            "--dry-run",
+        ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(TokenSource.ExplicitOption, factory.TokenSource);
+        Assert.Equal(7, factory.ConcurrentDownloads);
+    }
+
+    [Fact]
+    public async Task Missing_editor_configuration_returns_missing_input_not_cancellation()
+    {
+        var editor = new FakeEditorRunner
+        {
+            Accept = false,
+            RejectionCode = EditorResultCode.MissingConfiguration,
+        };
+        CliHarness harness = CreateHarness(new FakeMutationWorkflow(), editor: editor);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--edit"]);
+
+        Assert.Equal(ExitCodes.MissingInput, result.ExitCode);
+    }
+
+    [Fact]
     public async Task Url_overrides_rule_modes_and_locale_metadata_bind_without_guessing()
     {
         var workflow = new FakeMutationWorkflow();
@@ -389,7 +588,9 @@ public sealed class MutationCommandModuleTests
                 [
                     new("SECRET", ValidationSeverity.Warning, $"token={token}"),
                 ]),
-                content: $"value: {token}\n"),
+                content: $"value: {token}\n"
+                    + "InstallerUrl: https://user:password@example.test/app.exe?sig=secret"
+                    + "&X-Amz-Signature=signature\n"),
         };
         CliHarness harness = CreateHarness(workflow);
 
@@ -398,7 +599,9 @@ public sealed class MutationCommandModuleTests
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.DoesNotContain(token, result.StandardOutput, StringComparison.Ordinal);
-        Assert.Contains("<redacted>", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("password", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("signature", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", result.StandardOutput, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -479,6 +682,47 @@ public sealed class MutationCommandModuleTests
             [
                 new("manifest.yaml", "Publisher", "bot", "human", "bot"),
             ]);
+
+    private static WorkflowOperationResult LocaleResult(WorkflowOperationRequest request)
+    {
+        var identifier = new PackageIdentifier("Example.App");
+        var version = new PackageVersion("1.0");
+        string directory = ManifestPaths.GetVersionDirectory(identifier, version);
+        ImmutableArray<RawManifestDocument> documents =
+        [
+            new($"{directory}/Example.App.installer.yaml", Encoding.UTF8.GetBytes("installer: unchanged\n")),
+            new($"{directory}/Example.App.yaml", Encoding.UTF8.GetBytes("version: unchanged\n")),
+            new($"{directory}/Example.App.locale.de-DE.yaml", Encoding.UTF8.GetBytes("locale: original\n")),
+        ];
+        RawManifestDocument locale = documents[2];
+        var change = new WorkflowFileChange(
+            PlannedChangeKind.Add,
+            locale.RepositoryPath,
+            locale.Content.AsSpan());
+        var plan = new LocalOperationPlan
+        {
+            Operation = "new-locale",
+            PackageIdentifier = identifier,
+            PackageVersion = version,
+            OutputDirectory = request.OutputDirectory,
+            FileChanges = [change],
+            BeforeDocuments = [],
+            AfterDocuments = documents,
+            Validation = new(),
+            Preflight = new()
+            {
+                BeforeDocuments = [],
+                AfterDocuments = documents,
+                Changes = [change],
+            },
+            Rules = RuleRunSummary.Empty,
+        };
+        return new()
+        {
+            Code = WorkflowResultCode.Succeeded,
+            Plan = plan,
+        };
+    }
 
     private static GitHubLifecycleResult Remote(
         GitHubSubmissionRequest request,
@@ -629,6 +873,8 @@ internal sealed class FakeEditorRunner : IEditorRunner
 {
     public bool Accept { get; init; } = true;
 
+    public EditorResultCode RejectionCode { get; init; } = EditorResultCode.Cancelled;
+
     public List<ImmutableArray<RawManifestDocument>> Inputs { get; } = [];
 
     public Task<EditorResult> EditAsync(
@@ -638,11 +884,14 @@ internal sealed class FakeEditorRunner : IEditorRunner
         Inputs.Add(documents);
         if (!Accept)
         {
-            return Task.FromResult(new EditorResult(false, documents, "cancelled"));
+            return Task.FromResult(new EditorResult(
+                RejectionCode,
+                documents,
+                "cancelled"));
         }
 
         return Task.FromResult(new EditorResult(
-            true,
+            EditorResultCode.Accepted,
             [
                 new(
                     documents[0].RepositoryPath,
@@ -655,10 +904,35 @@ internal sealed class FakeUrlLauncher : IUrlLauncher
 {
     public List<Uri> Opened { get; } = [];
 
+    public Exception? Failure { get; init; }
+
     public Task OpenAsync(Uri uri, CancellationToken cancellationToken = default)
     {
+        if (Failure is not null)
+        {
+            return Task.FromException(Failure);
+        }
+
         Opened.Add(uri);
         return Task.CompletedTask;
+    }
+}
+
+internal sealed class CapturingMutationWorkflowFactory(IMutationWorkflow workflow)
+    : IMutationWorkflowFactory
+{
+    public TokenSource? TokenSource { get; private set; }
+
+    public int? ConcurrentDownloads { get; private set; }
+
+    public async Task<IMutationWorkflow> CreateAsync(
+        WinMatsch.Cli.Hosting.CommandContext context,
+        CancellationToken cancellationToken = default)
+    {
+        ResolvedToken token = await context.Tokens.RequireAsync(cancellationToken);
+        TokenSource = token.Source;
+        ConcurrentDownloads = context.Configuration.ConcurrentDownloads;
+        return workflow;
     }
 }
 

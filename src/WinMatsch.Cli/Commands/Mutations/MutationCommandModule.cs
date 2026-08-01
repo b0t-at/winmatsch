@@ -3,6 +3,7 @@ using System.CommandLine;
 using System.CommandLine.Parsing;
 using WinMatsch.Cli.Hosting;
 using WinMatsch.Core;
+using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.Rules;
 using WinMatsch.Rules.OverridePacks;
@@ -29,12 +30,25 @@ public static class MutationCommandModuleFactory
             editor,
             manifestLoader,
             urlLauncher);
+
+    public static ICommandModule Create(
+        IMutationWorkflowFactory localWorkflows,
+        ISubmissionWorkflowFactory? submissionWorkflows = null,
+        IEditorRunner? editor = null,
+        IRawManifestSetLoader? manifestLoader = null,
+        IUrlLauncher? urlLauncher = null)
+        => new MutationCommandModule(
+            localWorkflows,
+            submissionWorkflows,
+            editor,
+            manifestLoader,
+            urlLauncher);
 }
 
 public sealed class MutationCommandModule : ICommandModule
 {
-    private readonly IMutationWorkflow _workflow;
-    private readonly ISubmissionWorkflow? _submissions;
+    private readonly IMutationWorkflowFactory _workflowFactory;
+    private readonly ISubmissionWorkflowFactory? _submissionFactory;
     private readonly IEditorRunner _editor;
     private readonly IRawManifestSetLoader _manifestLoader;
     private readonly IUrlLauncher _urlLauncher;
@@ -46,8 +60,26 @@ public sealed class MutationCommandModule : ICommandModule
         IRawManifestSetLoader? manifestLoader = null,
         IUrlLauncher? urlLauncher = null)
     {
-        _workflow = workflow ?? throw new ArgumentNullException(nameof(workflow));
-        _submissions = submissions;
+        ArgumentNullException.ThrowIfNull(workflow);
+        _workflowFactory = new FixedMutationWorkflowFactory(workflow);
+        _submissionFactory = submissions is null
+            ? null
+            : new FixedSubmissionWorkflowFactory(submissions);
+        _editor = editor ?? new ProcessEditorRunner();
+        _manifestLoader = manifestLoader ?? new FileSystemRawManifestSetLoader();
+        _urlLauncher = urlLauncher ?? new ProcessUrlLauncher();
+    }
+
+    public MutationCommandModule(
+        IMutationWorkflowFactory workflowFactory,
+        ISubmissionWorkflowFactory? submissionFactory = null,
+        IEditorRunner? editor = null,
+        IRawManifestSetLoader? manifestLoader = null,
+        IUrlLauncher? urlLauncher = null)
+    {
+        _workflowFactory = workflowFactory
+            ?? throw new ArgumentNullException(nameof(workflowFactory));
+        _submissionFactory = submissionFactory;
         _editor = editor ?? new ProcessEditorRunner();
         _manifestLoader = manifestLoader ?? new FileSystemRawManifestSetLoader();
         _urlLauncher = urlLauncher ?? new ProcessUrlLauncher();
@@ -69,7 +101,10 @@ public sealed class MutationCommandModule : ICommandModule
     private void RegisterNew(ICommandRegistry registry)
     {
         var package = PackageArgument();
-        var options = new MutationOptions(includeRelease: true, includeMetadata: true);
+        var options = new MutationOptions(
+            includeRelease: true,
+            includeMetadata: true,
+            includeReplace: false);
         var command = new Command("new", "Create and validate a new package version.")
         {
             Arguments = { package },
@@ -97,7 +132,10 @@ public sealed class MutationCommandModule : ICommandModule
     {
         var package = PackageArgument();
         var previousVersion = VersionArgument();
-        var options = new MutationOptions(includeRelease: true, includeMetadata: false);
+        var options = new MutationOptions(
+            includeRelease: true,
+            includeMetadata: false,
+            includeReplace: true);
         var command = new Command("update", "Update an existing exact package version.")
         {
             Arguments = { package, previousVersion },
@@ -130,7 +168,10 @@ public sealed class MutationCommandModule : ICommandModule
     {
         var package = PackageArgument();
         var version = VersionArgument();
-        var options = new MutationOptions(includeRelease: false, includeMetadata: false);
+        var options = new MutationOptions(
+            includeRelease: false,
+            includeMetadata: false,
+            includeReplace: false);
         var command = new Command("remove", "Remove one exact package version.")
         {
             Arguments = { package, version },
@@ -156,7 +197,10 @@ public sealed class MutationCommandModule : ICommandModule
             Description = "Existing raw manifest file or directory.",
             Arity = ArgumentArity.ZeroOrOne,
         };
-        var options = new MutationOptions(includeRelease: false, includeMetadata: false);
+        var options = new MutationOptions(
+            includeRelease: false,
+            includeMetadata: false,
+            includeReplace: false);
         var normalize = new Option<bool>("--normalize")
         {
             Description = "Explicitly normalize the raw manifest set before submission.",
@@ -207,7 +251,10 @@ public sealed class MutationCommandModule : ICommandModule
             Description = "Exact BCP-47 locale casing.",
             Arity = ArgumentArity.ZeroOrOne,
         };
-        var options = new MutationOptions(includeRelease: false, includeMetadata: true);
+        var options = new MutationOptions(
+            includeRelease: false,
+            includeMetadata: true,
+            includeReplace: false);
         string name = update ? "update-locale" : "new-locale";
         var command = new Command(
             name,
@@ -258,14 +305,25 @@ public sealed class MutationCommandModule : ICommandModule
         try
         {
             request = ApplyCommon(context, options, requestFactory());
+            ValidateReplace(context.ParseResult, options, request);
+            if (context.ParseResult.GetValue(options.OpenPullRequest)
+                && !context.ParseResult.GetValue(options.Submit))
+            {
+                throw new CliUsageException("--open-pr requires --submit.");
+            }
         }
         catch (Exception exception) when (exception is ArgumentException or FormatException)
         {
             throw new CliUsageException(exception.Message, exception);
         }
 
-        WorkflowOperationResult local = await RunLocalAsync(request, context).ConfigureAwait(false);
-        (local, request) = await ResolveQuestionsAsync(local, request, context).ConfigureAwait(false);
+        IMutationWorkflow workflow = await _workflowFactory.CreateAsync(
+            context,
+            context.CancellationToken).ConfigureAwait(false);
+        WorkflowOperationResult local = await RunLocalAsync(workflow, request, context)
+            .ConfigureAwait(false);
+        (local, request) = await ResolveQuestionsAsync(workflow, local, request, context)
+            .ConfigureAwait(false);
         if (local.Plan.RequiresReview)
         {
             ReportApprovalContext(context, local.Plan, "Review approval required");
@@ -281,7 +339,7 @@ public sealed class MutationCommandModule : ICommandModule
             }
 
             request = ApproveReview(request);
-            local = await RunLocalAsync(request, context).ConfigureAwait(false);
+            local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
         }
 
         if (local.Code != WorkflowResultCode.Succeeded)
@@ -303,22 +361,66 @@ public sealed class MutationCommandModule : ICommandModule
                 throw new CliUsageException("--edit cannot be combined with --replace.");
             }
 
-            EditorResult edited = await _editor.EditAsync(
-                local.Plan.AfterDocuments,
-                context.CancellationToken).ConfigureAwait(false);
+            ImmutableArray<RawManifestDocument> editableDocuments =
+                operation is GitHubManifestOperation.Add or GitHubManifestOperation.Update
+                && request is NewLocaleOperationRequest or UpdateLocaleOperationRequest
+                    ?
+                    [
+                        .. local.Plan.AfterDocuments.Where(document =>
+                            local.Plan.FileChanges.Any(change =>
+                                string.Equals(
+                                    change.RepositoryPath,
+                                    document.RepositoryPath,
+                                    StringComparison.Ordinal))),
+                    ]
+                    : local.Plan.AfterDocuments;
+            EditorResult edited;
+            try
+            {
+                edited = await _editor.EditAsync(
+                    editableDocuments,
+                    context.CancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException
+                    or InvalidOperationException)
+            {
+                throw new CliOperationException(
+                    $"Manifest editing failed: {exception.Message}",
+                    exception);
+            }
             if (!edited.Accepted)
             {
-                throw new OperationCanceledException(
-                    edited.ErrorMessage ?? "Manifest editing was cancelled.",
-                    context.CancellationToken);
+                throw edited.Code switch
+                {
+                    EditorResultCode.Cancelled => new OperationCanceledException(
+                        edited.ErrorMessage ?? "Manifest editing was cancelled.",
+                        context.CancellationToken),
+                    EditorResultCode.MissingConfiguration => new MissingInputException(
+                        edited.ErrorMessage ?? "An editor must be configured."),
+                    EditorResultCode.InvalidConfiguration => new FormatException(
+                        edited.ErrorMessage ?? "The editor configuration is invalid."),
+                    EditorResultCode.Failed => new CliOperationException(
+                        edited.ErrorMessage ?? "Manifest editing failed."),
+                    _ => new CliOperationException("Manifest editing failed."),
+                };
             }
 
+            ImmutableArray<RawManifestDocument> editedDocuments = MergeEditedDocuments(
+                local.Plan.AfterDocuments,
+                editableDocuments,
+                edited.Documents);
             request = ApplyCommon(context, options, new SubmitOperationRequest
             {
                 OutputDirectory = request.OutputDirectory,
-                Documents = edited.Documents,
+                Documents = editedDocuments,
             });
-            local = await RunLocalAsync(request, context).ConfigureAwait(false);
+            local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
             if (local.Code != WorkflowResultCode.Succeeded)
             {
                 MutationOutput.Write(context, local, remote: null);
@@ -348,7 +450,7 @@ public sealed class MutationCommandModule : ICommandModule
         if (!context.IsDryRun)
         {
             request = WithExecutionMode(request, WorkflowExecutionMode.Apply);
-            local = await RunLocalAsync(request, context).ConfigureAwait(false);
+            local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
             if (!local.Applied)
             {
                 MutationOutput.Write(context, local, remote: null);
@@ -357,23 +459,25 @@ public sealed class MutationCommandModule : ICommandModule
         }
 
         GitHubLifecycleResult? remote = null;
+        bool outputWritten = false;
         bool submit = context.ParseResult.GetValue(options.Submit);
         if (submit)
         {
-            if (_submissions is null)
+            if (_submissionFactory is null)
             {
                 throw new CliOperationException(
                     "Remote submission is unavailable because no submission workflow was composed.");
             }
 
-            if (!context.IsDryRun && !context.ParseResult.GetValue(options.Yes))
+            bool submissionConsent = context.ParseResult.GetValue(options.Yes);
+            if (!context.IsDryRun && !submissionConsent)
             {
                 ReportApprovalContext(context, local.Plan, "Remote submission approval required");
                 EnsurePrompting(
                     context,
                     "Remote submission requires --yes in non-interactive mode.");
                 bool approved = await context.Interaction.ConfirmAsync(
-                    "Submit the validated manifest changes to GitHub?",
+                    "Submit the validated manifest changes to GitHub, creating a fork if needed?",
                     defaultValue: false,
                     context.CancellationToken).ConfigureAwait(false);
                 if (!approved)
@@ -381,11 +485,25 @@ public sealed class MutationCommandModule : ICommandModule
                     MutationOutput.Write(context, local, remote: null);
                     return ExitCodes.OperationFailed;
                 }
+
+                submissionConsent = true;
             }
 
+            ISubmissionWorkflow submission = await _submissionFactory.CreateAsync(
+                context,
+                context.CancellationToken).ConfigureAwait(false);
             remote = await RunRemoteAsync(
-                CreateSubmissionRequest(context, options, operation, request, local.Plan),
+                submission,
+                CreateSubmissionRequest(
+                    context,
+                    options,
+                    operation,
+                    request,
+                    local.Plan,
+                    submissionConsent),
                 context).ConfigureAwait(false);
+            MutationOutput.Write(context, local, remote);
+            outputWritten = true;
             if (remote.Applied
                 && context.ParseResult.GetValue(options.OpenPullRequest)
                 && remote.RemoteState.PullRequestUri is Uri pullRequestUri)
@@ -397,21 +515,32 @@ public sealed class MutationCommandModule : ICommandModule
                 }
                 catch (OperationCanceledException)
                 {
-                    throw;
+                    context.Output.WriteDiagnostic(
+                        $"Pull request #{remote.RemoteState.PullRequestNumber} was created, "
+                        + "but opening it was cancelled.");
                 }
                 catch (Exception exception) when (
                     exception is InvalidOperationException
                         or IOException
                         or UnauthorizedAccessException)
                 {
-                    throw new CliOperationException(
-                        $"Pull request launch failed: {exception.Message}",
-                        exception);
+                    context.Output.WriteDiagnostic(
+                        $"Pull request #{remote.RemoteState.PullRequestNumber} was created, "
+                        + $"but the browser could not be opened: {exception.Message}");
                 }
             }
         }
 
-        MutationOutput.Write(context, local, remote);
+        if (!outputWritten)
+        {
+            MutationOutput.Write(context, local, remote);
+        }
+
+        if (remote?.Code == GitHubLifecycleResultCode.Cancelled)
+        {
+            return ExitCodes.Cancelled;
+        }
+
         if (context.IsDryRun)
         {
             return local.Code == WorkflowResultCode.Succeeded
@@ -425,8 +554,9 @@ public sealed class MutationCommandModule : ICommandModule
             : ExitCodes.OperationFailed;
     }
 
-    private async Task<(WorkflowOperationResult Result, WorkflowOperationRequest Request)>
+    private static async Task<(WorkflowOperationResult Result, WorkflowOperationRequest Request)>
         ResolveQuestionsAsync(
+        IMutationWorkflow workflow,
         WorkflowOperationResult result,
         WorkflowOperationRequest request,
         CommandContext context)
@@ -439,6 +569,12 @@ public sealed class MutationCommandModule : ICommandModule
             WorkflowOperationRequest updated = request;
             foreach (WorkflowQuestion question in result.Plan.Questions)
             {
+                if (!CanApplyQuestion(updated, question))
+                {
+                    throw new MissingInputException(
+                        $"Workflow question '{question.Code}' requires an explicit command option or override pack.");
+                }
+
                 string answer = question.Options.IsEmpty
                     ? await context.Interaction.AskAsync(
                         question.Prompt,
@@ -451,19 +587,20 @@ public sealed class MutationCommandModule : ICommandModule
             }
 
             request = updated;
-            result = await RunLocalAsync(updated, context).ConfigureAwait(false);
+            result = await RunLocalAsync(workflow, updated, context).ConfigureAwait(false);
         }
 
         return (result, request);
     }
 
-    private async Task<WorkflowOperationResult> RunLocalAsync(
+    private static async Task<WorkflowOperationResult> RunLocalAsync(
+        IMutationWorkflow workflow,
         WorkflowOperationRequest request,
         CommandContext context)
     {
         try
         {
-            return await _workflow.ExecuteAsync(request, context.CancellationToken).ConfigureAwait(false);
+            return await workflow.ExecuteAsync(request, context.CancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -473,19 +610,22 @@ public sealed class MutationCommandModule : ICommandModule
             exception is FormatException
                 or IOException
                 or UnauthorizedAccessException
-                or HttpRequestException)
+                or HttpRequestException
+                or DownloadException
+                or WorkflowOperationException)
         {
             throw new CliOperationException($"Local mutation failed: {exception.Message}", exception);
         }
     }
 
-    private async Task<GitHubLifecycleResult> RunRemoteAsync(
+    private static async Task<GitHubLifecycleResult> RunRemoteAsync(
+        ISubmissionWorkflow submissions,
         GitHubSubmissionRequest request,
         CommandContext context)
     {
         try
         {
-            return await _submissions!.ExecuteAsync(request, context.CancellationToken)
+            return await submissions.ExecuteAsync(request, context.CancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -621,8 +761,83 @@ public sealed class MutationCommandModule : ICommandModule
             };
         }
 
+        if (answer.Equals("approve", StringComparison.OrdinalIgnoreCase))
+        {
+            return (request, question.Code) switch
+            {
+                (UpdateOperationRequest value, "MAP_STRUCTURAL_REWRITE") => value with
+                {
+                    AllowStructuralRewrite = true,
+                },
+                (UpdateOperationRequest value, "CONTENT_CHANGED_AT_STABLE_URL") => value with
+                {
+                    AllowStableUrlContentChange = true,
+                },
+                (NewOperationRequest value, "CONTENT_SHARED_ACROSS_URLS") => value with
+                {
+                    AllowSharedContentAcrossUrls = true,
+                },
+                (UpdateOperationRequest value, "CONTENT_SHARED_ACROSS_URLS") => value with
+                {
+                    AllowSharedContentAcrossUrls = true,
+                },
+                _ => throw new CliOperationException(
+                    $"Workflow approval '{question.Code}' cannot be mapped to this request."),
+            };
+        }
+
         throw new CliOperationException(
             $"Workflow question '{question.Code}' requires an explicit command option.");
+    }
+
+    private static bool CanApplyQuestion(
+        WorkflowOperationRequest request,
+        WorkflowQuestion question)
+        => question.Code.StartsWith("METADATA_", StringComparison.Ordinal)
+            || (question.Path is not null
+                && question.Options.Any(option => TryParseArchitecture(option, out _)))
+            || (question.Code == "MAP_STRUCTURAL_REWRITE"
+                && request is UpdateOperationRequest
+                && question.Options.Contains("approve", StringComparer.OrdinalIgnoreCase))
+            || (question.Code == "CONTENT_CHANGED_AT_STABLE_URL"
+                && request is UpdateOperationRequest
+                && question.Options.Contains("approve", StringComparer.OrdinalIgnoreCase))
+            || (question.Code == "CONTENT_SHARED_ACROSS_URLS"
+                && request is NewOperationRequest or UpdateOperationRequest
+                && question.Options.Contains("approve", StringComparer.OrdinalIgnoreCase));
+
+    private static ImmutableArray<RawManifestDocument> MergeEditedDocuments(
+        ImmutableArray<RawManifestDocument> completeSet,
+        ImmutableArray<RawManifestDocument> editableSet,
+        ImmutableArray<RawManifestDocument> editedSet)
+    {
+        string[] expectedPaths =
+        [
+            .. editableSet.Select(static document => document.RepositoryPath)
+                .Order(StringComparer.Ordinal),
+        ];
+        string[] actualPaths =
+        [
+            .. editedSet.Select(static document => document.RepositoryPath)
+                .Order(StringComparer.Ordinal),
+        ];
+        if (!expectedPaths.SequenceEqual(actualPaths, StringComparer.Ordinal)
+            || actualPaths.Distinct(StringComparer.Ordinal).Count() != actualPaths.Length)
+        {
+            throw new CliOperationException(
+                "The editor result changed the manifest file set; only file contents may be edited.");
+        }
+
+        Dictionary<string, RawManifestDocument> replacements = editedSet.ToDictionary(
+            static document => document.RepositoryPath,
+            StringComparer.Ordinal);
+        return
+        [
+            .. completeSet.Select(document =>
+                replacements.TryGetValue(document.RepositoryPath, out RawManifestDocument? edited)
+                    ? edited
+                    : document),
+        ];
     }
 
     private static PackageLocaleMetadata ApplyMetadata(
@@ -638,6 +853,34 @@ public sealed class MutationCommandModule : ICommandModule
             _ => throw new CliOperationException(
                 $"Workflow metadata question '{code}' is not supported by this CLI."),
         };
+
+    private static void ValidateReplace(
+        ParseResult result,
+        MutationOptions options,
+        WorkflowOperationRequest request)
+    {
+        if (result.GetResult(options.Replace) is null)
+        {
+            return;
+        }
+
+        if (request is not UpdateOperationRequest update)
+        {
+            throw new CliUsageException("--replace is supported only by the update command.");
+        }
+
+        string? explicitVersion = result.GetValue(options.Replace);
+        if (!string.IsNullOrWhiteSpace(explicitVersion)
+            && !string.Equals(
+                ParseVersion(explicitVersion).Value,
+                update.PreviousVersion.Value,
+                StringComparison.Ordinal))
+        {
+            throw new CliUsageException(
+                $"--replace version '{explicitVersion}' must match the update source version "
+                + $"'{update.PreviousVersion.Value}'.");
+        }
+    }
 
     private static WorkflowOperationRequest ApproveReview(WorkflowOperationRequest request)
         => request switch
@@ -670,7 +913,8 @@ public sealed class MutationCommandModule : ICommandModule
         MutationOptions options,
         GitHubManifestOperation operation,
         WorkflowOperationRequest localRequest,
-        LocalOperationPlan plan)
+        LocalOperationPlan plan,
+        bool submissionConsent)
     {
         string? replaceValue = context.ParseResult.GetValue(options.Replace);
         PackageVersion? previousVersion = null;
@@ -697,7 +941,7 @@ public sealed class MutationCommandModule : ICommandModule
             Operation = previousVersion is null ? operation : GitHubManifestOperation.Replace,
             Policy = new()
             {
-                ForkConsent = context.ParseResult.GetValue(options.Yes)
+                ForkConsent = submissionConsent
                     ? ForkConsentPolicy.AllowCreate
                     : ForkConsentPolicy.ExistingOnly,
                 SkipPullRequestCheck = context.ParseResult.GetValue(options.SkipPullRequestCheck),
@@ -906,15 +1150,18 @@ public sealed class MutationCommandModule : ICommandModule
 
     private sealed class MutationOptions
     {
-        public MutationOptions(bool includeRelease, bool includeMetadata)
+        public MutationOptions(bool includeRelease, bool includeMetadata, bool includeReplace)
         {
             IncludeRelease = includeRelease;
             IncludeMetadata = includeMetadata;
+            IncludeReplace = includeReplace;
         }
 
         public bool IncludeRelease { get; }
 
         public bool IncludeMetadata { get; }
+
+        public bool IncludeReplace { get; }
 
         public Option<string?> Version { get; } = new("--version")
         {
@@ -1069,7 +1316,10 @@ public sealed class MutationCommandModule : ICommandModule
             command.Options.Add(CreatedWith);
             command.Options.Add(CreatedWithUrl);
             command.Options.Add(SkipPullRequestCheck);
-            command.Options.Add(Replace);
+            if (IncludeReplace)
+            {
+                command.Options.Add(Replace);
+            }
             command.Options.Add(PullRequestTitle);
             command.Options.Add(Yes);
             command.Options.Add(Edit);
