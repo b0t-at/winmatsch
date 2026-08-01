@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.CommandLine;
 using System.CommandLine.Parsing;
+using System.ComponentModel;
 using WinMatsch.Cli.Hosting;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
@@ -13,6 +14,7 @@ using WinMatsch.Workflows.Configuration;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.Operations;
+using YamlDotNet.Core;
 
 namespace WinMatsch.Cli.Commands.Mutations;
 
@@ -224,7 +226,11 @@ public sealed class MutationCommandModule : ICommandModule
                     context.CancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (
-                exception is IOException or UnauthorizedAccessException or FormatException)
+                exception is IOException
+                    or UnauthorizedAccessException
+                    or FormatException
+                    or ArgumentException
+                    or YamlException)
             {
                 throw new CliOperationException($"Manifest input failed: {exception.Message}", exception);
             }
@@ -306,6 +312,12 @@ public sealed class MutationCommandModule : ICommandModule
         {
             request = ApplyCommon(context, options, requestFactory());
             ValidateReplace(context.ParseResult, options, request);
+            if (request is RemoveOperationRequest
+                && context.ParseResult.GetValue(options.Edit))
+            {
+                throw new CliUsageException("--edit is not supported by the remove command.");
+            }
+
             if (context.ParseResult.GetValue(options.OpenPullRequest)
                 && !context.ParseResult.GetValue(options.Submit))
             {
@@ -317,9 +329,7 @@ public sealed class MutationCommandModule : ICommandModule
             throw new CliUsageException(exception.Message, exception);
         }
 
-        IMutationWorkflow workflow = await _workflowFactory.CreateAsync(
-            context,
-            context.CancellationToken).ConfigureAwait(false);
+        IMutationWorkflow workflow = await CreateMutationWorkflowAsync(context).ConfigureAwait(false);
         WorkflowOperationResult local = await RunLocalAsync(workflow, request, context)
             .ConfigureAwait(false);
         (local, request) = await ResolveQuestionsAsync(workflow, local, request, context)
@@ -381,14 +391,21 @@ public sealed class MutationCommandModule : ICommandModule
                     editableDocuments,
                     context.CancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
             {
                 throw;
+            }
+            catch (OperationCanceledException exception)
+            {
+                throw new CliOperationException(
+                    $"Manifest editor timed out: {exception.Message}",
+                    exception);
             }
             catch (Exception exception) when (
                 exception is IOException
                     or UnauthorizedAccessException
-                    or InvalidOperationException)
+                    or InvalidOperationException
+                    or Win32Exception)
             {
                 throw new CliOperationException(
                     $"Manifest editing failed: {exception.Message}",
@@ -447,20 +464,11 @@ public sealed class MutationCommandModule : ICommandModule
             }
         }
 
-        if (!context.IsDryRun)
-        {
-            request = WithExecutionMode(request, WorkflowExecutionMode.Apply);
-            local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
-            if (!local.Applied)
-            {
-                MutationOutput.Write(context, local, remote: null);
-                return ExitCodes.OperationFailed;
-            }
-        }
-
         GitHubLifecycleResult? remote = null;
         bool outputWritten = false;
         bool submit = context.ParseResult.GetValue(options.Submit);
+        bool submissionConsent = context.ParseResult.GetValue(options.Yes);
+        ISubmissionWorkflow? submission = null;
         if (submit)
         {
             if (_submissionFactory is null)
@@ -469,7 +477,6 @@ public sealed class MutationCommandModule : ICommandModule
                     "Remote submission is unavailable because no submission workflow was composed.");
             }
 
-            bool submissionConsent = context.ParseResult.GetValue(options.Yes);
             if (!context.IsDryRun && !submissionConsent)
             {
                 ReportApprovalContext(context, local.Plan, "Remote submission approval required");
@@ -489,11 +496,24 @@ public sealed class MutationCommandModule : ICommandModule
                 submissionConsent = true;
             }
 
-            ISubmissionWorkflow submission = await _submissionFactory.CreateAsync(
-                context,
-                context.CancellationToken).ConfigureAwait(false);
+            submission = await CreateSubmissionWorkflowAsync(context).ConfigureAwait(false);
+        }
+
+        if (!context.IsDryRun)
+        {
+            request = WithExecutionMode(request, WorkflowExecutionMode.Apply);
+            local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
+            if (!local.Applied)
+            {
+                MutationOutput.Write(context, local, remote: null);
+                return ExitCodes.OperationFailed;
+            }
+        }
+
+        if (submit)
+        {
             remote = await RunRemoteAsync(
-                submission,
+                submission!,
                 CreateSubmissionRequest(
                     context,
                     options,
@@ -522,7 +542,8 @@ public sealed class MutationCommandModule : ICommandModule
                 catch (Exception exception) when (
                     exception is InvalidOperationException
                         or IOException
-                        or UnauthorizedAccessException)
+                        or UnauthorizedAccessException
+                        or Win32Exception)
                 {
                     context.Output.WriteDiagnostic(
                         $"Pull request #{remote.RemoteState.PullRequestNumber} was created, "
@@ -538,7 +559,9 @@ public sealed class MutationCommandModule : ICommandModule
 
         if (remote?.Code == GitHubLifecycleResultCode.Cancelled)
         {
-            return ExitCodes.Cancelled;
+            return context.CancellationToken.IsCancellationRequested
+                ? ExitCodes.Cancelled
+                : ExitCodes.OperationFailed;
         }
 
         if (context.IsDryRun)
@@ -602,9 +625,15 @@ public sealed class MutationCommandModule : ICommandModule
         {
             return await workflow.ExecuteAsync(request, context.CancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException exception)
+        {
+            throw new CliOperationException(
+                $"Local mutation timed out: {exception.Message}",
+                exception);
         }
         catch (Exception exception) when (
             exception is FormatException
@@ -628,9 +657,15 @@ public sealed class MutationCommandModule : ICommandModule
             return await submissions.ExecuteAsync(request, context.CancellationToken)
                 .ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException exception)
+        {
+            throw new CliOperationException(
+                $"Remote submission timed out: {exception.Message}",
+                exception);
         }
         catch (Exception exception) when (
             exception is FormatException
@@ -639,6 +674,44 @@ public sealed class MutationCommandModule : ICommandModule
                 or HttpRequestException)
         {
             throw new CliOperationException($"Remote submission failed: {exception.Message}", exception);
+        }
+    }
+
+    private async Task<IMutationWorkflow> CreateMutationWorkflowAsync(CommandContext context)
+    {
+        try
+        {
+            return await _workflowFactory.CreateAsync(context, context.CancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException exception)
+        {
+            throw new CliOperationException(
+                $"Mutation workflow setup timed out: {exception.Message}",
+                exception);
+        }
+    }
+
+    private async Task<ISubmissionWorkflow> CreateSubmissionWorkflowAsync(CommandContext context)
+    {
+        try
+        {
+            return await _submissionFactory!.CreateAsync(context, context.CancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException exception)
+        {
+            throw new CliOperationException(
+                $"Submission workflow setup timed out: {exception.Message}",
+                exception);
         }
     }
 
@@ -1016,15 +1089,29 @@ public sealed class MutationCommandModule : ICommandModule
             return OverridePackSet.BuiltIn;
         }
 
-        var packs = OverridePackSet.BuiltIn.Packs.ToDictionary(
-            static pack => pack.PackageIdentifier.Value,
-            StringComparer.OrdinalIgnoreCase);
-        foreach (OverridePack pack in paths.Select(OverridePackYaml.ReadFile))
+        try
         {
-            packs[pack.PackageIdentifier.Value] = pack;
-        }
+            var packs = OverridePackSet.BuiltIn.Packs.ToDictionary(
+                static pack => pack.PackageIdentifier.Value,
+                StringComparer.OrdinalIgnoreCase);
+            foreach (OverridePack pack in paths.Select(OverridePackYaml.ReadFile))
+            {
+                packs[pack.PackageIdentifier.Value] = pack;
+            }
 
-        return new(packs.Values);
+            return new(packs.Values);
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or FormatException
+                or ArgumentException
+                or YamlException)
+        {
+            throw new CliUsageException(
+                $"Override-pack input failed: {exception.Message}",
+                exception);
+        }
     }
 
     private static RuleRuntimeConfiguration ParseRuleRuntime(

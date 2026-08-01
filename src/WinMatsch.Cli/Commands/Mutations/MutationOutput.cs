@@ -401,7 +401,10 @@ internal static partial class MutationOutput
         }
 
         string redacted = GitHubTokenPattern().Replace(value, "[REDACTED]");
-        return GitHubSubmissionFormatter.Redact(redacted);
+        redacted = SecretAssignmentPattern().Replace(redacted, "$1$2[REDACTED]");
+        redacted = AuthorizationPattern().Replace(redacted, "$1[REDACTED]");
+        redacted = UriUserInfoPattern().Replace(redacted, "$1[REDACTED]@");
+        return QueryValuePattern().Replace(redacted, "$1=[REDACTED]");
     }
 
     private static string ToKebab<T>(T value)
@@ -412,4 +415,17 @@ internal static partial class MutationOutput
     [GeneratedRegex(@"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")]
     private static partial Regex GitHubTokenPattern();
 
+    [GeneratedRegex(
+        @"(?i)\b(password|token|secret|api[-_]?key|signature|sig|credential)(\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\s,;]+)")]
+    private static partial Regex SecretAssignmentPattern();
+
+    [GeneratedRegex(
+        @"(?i)\b(authorization\s*[:=]\s*(?:(?:bearer|basic|token)\s+)?)(?:""[^""]*""|'[^']*'|[^\s,;]+)")]
+    private static partial Regex AuthorizationPattern();
+
+    [GeneratedRegex(@"(?i)(https?://)[^/\s:@]+:[^/\s@]+@")]
+    private static partial Regex UriUserInfoPattern();
+
+    [GeneratedRegex(@"([?&][^=\s&#]+)=[^&\s#]+")]
+    private static partial Regex QueryValuePattern();
 }

@@ -439,7 +439,7 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
-    public async Task Remote_cancelled_result_renders_partial_state_and_returns_130()
+    public async Task Remote_timeout_result_without_cancelled_token_is_operation_failure()
     {
         var workflow = new FakeMutationWorkflow();
         var submissions = new FakeSubmissionWorkflow
@@ -458,7 +458,7 @@ public sealed class MutationCommandModuleTests
         CliRunResult result = await harness.RunAsync(
             ["update", "Example.App", "1.0", "--submit", "--yes", "--format", "json"]);
 
-        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
         Assert.Contains(
             "\"branch\":\"winmatsch/submissions/example\"",
             result.StandardOutput,
@@ -472,7 +472,7 @@ public sealed class MutationCommandModuleTests
         var submissions = new FakeSubmissionWorkflow();
         var launcher = new FakeUrlLauncher
         {
-            Failure = new InvalidOperationException("no browser"),
+            Failure = new System.ComponentModel.Win32Exception("no browser"),
         };
         var harness = new CliHarness();
         harness.Modules.Add(new MutationCommandModule(
@@ -518,6 +518,39 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.Equal(TokenSource.ExplicitOption, factory.TokenSource);
         Assert.Equal(7, factory.ConcurrentDownloads);
+    }
+
+    [Fact]
+    public async Task Submission_factory_failure_occurs_before_local_apply()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var submissions = new FailingSubmissionWorkflowFactory();
+        var harness = new CliHarness();
+        harness.Modules.Add(new MutationCommandModule(
+            new FixedMutationWorkflowFactory(workflow),
+            submissions,
+            new FakeEditorRunner(),
+            new FakeManifestLoader(),
+            new FakeUrlLauncher()));
+
+        CliRunResult result = await harness.RunAsync(
+            ["remove", "Example.App", "1.0", "--submit", "--yes"]);
+
+        Assert.Equal(ExitCodes.MissingInput, result.ExitCode);
+        Assert.Single(workflow.Requests);
+        Assert.Equal(WorkflowExecutionMode.Plan, workflow.Requests[0].ExecutionMode);
+    }
+
+    [Fact]
+    public async Task Missing_override_pack_is_a_usage_error_not_unexpected()
+    {
+        CliHarness harness = CreateHarness(new FakeMutationWorkflow());
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--override-pack", "missing-pack.yaml"]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains("Override-pack input failed", result.StandardError, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -586,7 +619,10 @@ public sealed class MutationCommandModuleTests
                 request,
                 validation: new ValidationReport(
                 [
-                    new("SECRET", ValidationSeverity.Warning, $"token={token}"),
+                    new(
+                        "SECRET",
+                        ValidationSeverity.Warning,
+                        $"token={token}; password: hunter2; Authorization: Bearer bearer-secret"),
                 ]),
                 content: $"value: {token}\n"
                     + "InstallerUrl: https://user:password@example.test/app.exe?sig=secret"
@@ -599,7 +635,9 @@ public sealed class MutationCommandModuleTests
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.DoesNotContain(token, result.StandardOutput, StringComparison.Ordinal);
-        Assert.DoesNotContain("password", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("user:password@", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("hunter2", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("bearer-secret", result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("signature", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("[REDACTED]", result.StandardOutput, StringComparison.Ordinal);
     }
@@ -934,6 +972,15 @@ internal sealed class CapturingMutationWorkflowFactory(IMutationWorkflow workflo
         ConcurrentDownloads = context.Configuration.ConcurrentDownloads;
         return workflow;
     }
+}
+
+internal sealed class FailingSubmissionWorkflowFactory : ISubmissionWorkflowFactory
+{
+    public Task<ISubmissionWorkflow> CreateAsync(
+        WinMatsch.Cli.Hosting.CommandContext context,
+        CancellationToken cancellationToken = default)
+        => Task.FromException<ISubmissionWorkflow>(
+            new MissingInputException("A GitHub token is required."));
 }
 
 internal sealed class FakeEditorProcessRunner : IEditorProcessRunner
