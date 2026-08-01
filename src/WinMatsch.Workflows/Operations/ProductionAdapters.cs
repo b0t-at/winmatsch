@@ -131,17 +131,69 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
     {
         cancellationToken.ThrowIfCancellationRequested();
         string root = Path.GetFullPath(outputDirectory);
-        AtomicWorkflowFileTransaction.RecoverPending(root, packageIdentifier.Value);
         if (!Directory.Exists(root))
         {
             return Task.FromResult<PackageSnapshot?>(null);
         }
 
+        using IDisposable operationLock =
+            AtomicWorkflowFileTransaction.AcquirePackageLock(root, packageIdentifier.Value);
+        AtomicWorkflowFileTransaction.RecoverPendingUnderLock(root, packageIdentifier.Value);
+        return Task.FromResult(LoadCore(root, packageIdentifier, packageVersion, cancellationToken));
+    }
+
+    public Task<ImmutableArray<PackageSnapshot>> ListVersionsAsync(
+        string outputDirectory,
+        PackageIdentifier packageIdentifier,
+        CancellationToken cancellationToken)
+    {
+        string root = Path.GetFullPath(outputDirectory);
+        if (!Directory.Exists(root))
+        {
+            return Task.FromResult(ImmutableArray<PackageSnapshot>.Empty);
+        }
+
+        using IDisposable operationLock =
+            AtomicWorkflowFileTransaction.AcquirePackageLock(root, packageIdentifier.Value);
+        AtomicWorkflowFileTransaction.RecoverPendingUnderLock(root, packageIdentifier.Value);
+        string packageDirectory = ManifestPaths.GetPackageDirectory(packageIdentifier);
+        string? fullPackageDirectory = SecurePath.ResolveExactExistingDirectory(root, packageDirectory);
+        if (fullPackageDirectory is null)
+        {
+            return Task.FromResult(ImmutableArray<PackageSnapshot>.Empty);
+        }
+
+        var snapshots = ImmutableArray.CreateBuilder<PackageSnapshot>();
+        foreach (string versionDirectory in Directory.EnumerateDirectories(fullPackageDirectory)
+                     .OrderBy(static path => Path.GetFileName(path), StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!PackageVersion.TryCreate(Path.GetFileName(versionDirectory), out PackageVersion? version))
+            {
+                continue;
+            }
+
+            PackageSnapshot? snapshot = LoadCore(root, packageIdentifier, version!, cancellationToken);
+            if (snapshot is not null)
+            {
+                snapshots.Add(snapshot);
+            }
+        }
+
+        return Task.FromResult(snapshots.ToImmutable());
+    }
+
+    private static PackageSnapshot? LoadCore(
+        string root,
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion,
+        CancellationToken cancellationToken)
+    {
         string relativeDirectory = ManifestPaths.GetVersionDirectory(packageIdentifier, packageVersion);
         string? versionDirectory = SecurePath.ResolveExactExistingDirectory(root, relativeDirectory);
         if (versionDirectory is null)
         {
-            return Task.FromResult<PackageSnapshot?>(null);
+            return null;
         }
 
         SecurePath.RejectReparsePoints(root, versionDirectory);
@@ -157,57 +209,14 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
                     $"{relativeDirectory}/{Path.GetFileName(path)}",
                     File.ReadAllBytes(path))),
         ];
-        return Task.FromResult<PackageSnapshot?>(new PackageSnapshot
+        return new PackageSnapshot
         {
             PackageIdentifier = packageIdentifier,
             PackageVersion = packageVersion,
             VersionDirectory = relativeDirectory,
             Manifests = manifests,
             Documents = documents,
-        });
-    }
-
-    public async Task<ImmutableArray<PackageSnapshot>> ListVersionsAsync(
-        string outputDirectory,
-        PackageIdentifier packageIdentifier,
-        CancellationToken cancellationToken)
-    {
-        string root = Path.GetFullPath(outputDirectory);
-        AtomicWorkflowFileTransaction.RecoverPending(root, packageIdentifier.Value);
-        if (!Directory.Exists(root))
-        {
-            return [];
-        }
-
-        string packageDirectory = ManifestPaths.GetPackageDirectory(packageIdentifier);
-        string? fullPackageDirectory = SecurePath.ResolveExactExistingDirectory(root, packageDirectory);
-        if (fullPackageDirectory is null)
-        {
-            return [];
-        }
-
-        var snapshots = ImmutableArray.CreateBuilder<PackageSnapshot>();
-        foreach (string versionDirectory in Directory.EnumerateDirectories(fullPackageDirectory)
-                     .OrderBy(static path => Path.GetFileName(path), StringComparer.Ordinal))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!PackageVersion.TryCreate(Path.GetFileName(versionDirectory), out PackageVersion? version))
-            {
-                continue;
-            }
-
-            PackageSnapshot? snapshot = await LoadAsync(
-                outputDirectory,
-                packageIdentifier,
-                version!,
-                cancellationToken).ConfigureAwait(false);
-            if (snapshot is not null)
-            {
-                snapshots.Add(snapshot);
-            }
-        }
-
-        return snapshots.ToImmutable();
+        };
     }
 }
 
@@ -254,6 +263,8 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         {
             SecurePath.ValidateOutputRoot(root);
             Directory.CreateDirectory(root);
+            processLock = RepositoryOperationLock.Acquire(root, operationLockKey);
+            RecoverAbandonedTransactions(root, transactionPrefix, currentTransaction: "");
             Directory.CreateDirectory(transactionRoot);
             string stageRoot = Path.Combine(transactionRoot, "stage");
             string backupRoot = Path.Combine(transactionRoot, "backup");
@@ -277,11 +288,9 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 installed.Add(new(change, destination, stage, backup));
             }
 
-            processLock = RepositoryOperationLock.Acquire(root, operationLockKey);
-            RecoverAbandonedTransactions(root, transactionPrefix, transactionRoot);
             foreach (TransactionEntry entry in installed)
             {
-                PinExistingParent(root, entry.Destination, directoryPins, pinnedDirectories);
+                PinExistingDirectoryChain(root, entry.Destination, directoryPins, pinnedDirectories);
                 VerifyPrecondition(entry);
             }
 
@@ -302,7 +311,8 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(entry.Destination)!);
                     SecurePath.RejectReparsePoints(root, Path.GetDirectoryName(entry.Destination)!);
-                    PinDirectory(
+                    PinDirectoryChain(
+                        root,
                         Path.GetDirectoryName(entry.Destination)!,
                         directoryPins,
                         pinnedDirectories);
@@ -452,7 +462,7 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         pins.Clear();
     }
 
-    private static void PinExistingParent(
+    private static void PinExistingDirectoryChain(
         string root,
         string destination,
         ICollection<IDisposable> pins,
@@ -473,28 +483,54 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             throw new InvalidDataException("Destination parent escapes the output root.");
         }
 
-        PinDirectory(current, pins, pinnedDirectories);
+        PinDirectoryChain(root, current, pins, pinnedDirectories);
     }
 
-    private static void PinDirectory(
+    private static void PinDirectoryChain(
+        string root,
         string path,
         ICollection<IDisposable> pins,
         ISet<string> pinnedDirectories)
     {
+        string fullRoot = Path.GetFullPath(root);
         string fullPath = Path.GetFullPath(path);
-        if (pinnedDirectories.Add(fullPath))
+        string relative = Path.GetRelativePath(fullRoot, fullPath);
+        if (Path.IsPathRooted(relative)
+            || relative.Equals("..", StringComparison.Ordinal)
+            || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
         {
-            pins.Add(DirectoryPin.Acquire(fullPath));
+            throw new InvalidDataException("Pinned directory escapes the output root.");
+        }
+
+        PinOne(fullRoot);
+        string current = fullRoot;
+        foreach (string segment in relative.Split(
+                     Path.DirectorySeparatorChar,
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (!Directory.Exists(current))
+            {
+                break;
+            }
+
+            PinOne(current);
+        }
+
+        void PinOne(string directory)
+        {
+            if (pinnedDirectories.Add(directory))
+            {
+                pins.Add(DirectoryPin.Acquire(directory));
+            }
         }
     }
 
-    internal static void RecoverPending(string root, string operationLockKey)
-    {
-        if (!Directory.Exists(root))
-        {
-            return;
-        }
+    internal static IDisposable AcquirePackageLock(string root, string operationLockKey)
+        => RepositoryOperationLock.Acquire(root, operationLockKey);
 
+    internal static void RecoverPendingUnderLock(string root, string operationLockKey)
+    {
         string transactionPrefix =
             $".winmatsch-transaction-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(operationLockKey.ToUpperInvariant())))[..16]}";
         if (!Directory.EnumerateDirectories(root, $"{transactionPrefix}-*").Any())
@@ -502,7 +538,6 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             return;
         }
 
-        using RepositoryOperationLock operationLock = RepositoryOperationLock.Acquire(root, operationLockKey);
         RecoverAbandonedTransactions(root, transactionPrefix, currentTransaction: "");
     }
 
@@ -548,9 +583,13 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                      .Where(path => !string.Equals(path, currentTransaction, StringComparison.OrdinalIgnoreCase))
                      .Order(StringComparer.Ordinal))
         {
+            var pins = new List<IDisposable>();
+            var pinnedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            PinDirectoryChain(root, transaction, pins, pinnedDirectories);
             string journalPath = Path.Combine(transaction, "journal");
             if (!File.Exists(journalPath))
             {
+                DisposePins(pins);
                 Directory.Delete(transaction, recursive: true);
                 continue;
             }
@@ -575,6 +614,12 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                         Path.Combine(transaction, "backup"),
                         repositoryPath,
                         requireExistingLeaf: false);
+                    PinExistingDirectoryChain(root, destination, pins, pinnedDirectories);
+                    PinDirectoryChain(
+                        root,
+                        Path.GetDirectoryName(backup)!,
+                        pins,
+                        pinnedDirectories);
                     if (hadDestination && File.Exists(backup))
                     {
                         if (File.Exists(destination))
@@ -583,6 +628,11 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                         }
 
                         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                        PinDirectoryChain(
+                            root,
+                            Path.GetDirectoryName(destination)!,
+                            pins,
+                            pinnedDirectories);
                         File.Move(backup, destination);
                     }
                     else if (!hadDestination && kind != PlannedChangeKind.Delete && File.Exists(destination))
@@ -592,6 +642,7 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 }
             }
 
+            DisposePins(pins);
             Directory.Delete(transaction, recursive: true);
         }
     }
@@ -700,6 +751,7 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
 internal static class DirectoryPin
 {
     private const uint FileListDirectory = 0x0001;
+    private const uint FileAttributeReparsePoint = 0x00000400;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
     private const uint OpenExisting = 3;
@@ -728,6 +780,23 @@ internal static class DirectoryPin
             throw new IOException($"Unable to pin directory '{path}' against replacement (Win32 error {error}).");
         }
 
+        if (!GetFileInformationByHandleEx(
+                handle,
+                FileAttributeTagInfo,
+                out FileAttributeTagInformation information,
+                (uint)Marshal.SizeOf<FileAttributeTagInformation>()))
+        {
+            int error = Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            throw new IOException($"Unable to inspect pinned directory '{path}' (Win32 error {error}).");
+        }
+
+        if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
+        {
+            handle.Dispose();
+            throw new InvalidDataException($"Pinned directory '{path}' is a reparse point.");
+        }
+
         return handle;
     }
 
@@ -745,6 +814,23 @@ internal static class DirectoryPin
         uint creationDisposition,
         uint flagsAndAttributes,
         nint templateFile);
+
+    private const int FileAttributeTagInfo = 9;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileAttributeTagInformation
+    {
+        public uint FileAttributes;
+        public uint ReparseTag;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandleEx(
+        SafeFileHandle file,
+        int fileInformationClass,
+        out FileAttributeTagInformation fileInformation,
+        uint bufferSize);
 #pragma warning restore SYSLIB1054
 
     private sealed class NoopDisposable : IDisposable
