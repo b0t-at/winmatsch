@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text;
 using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Workflows.GitHub;
@@ -101,6 +102,73 @@ public sealed class FileSubmissionJournalStoreTests
         await File.AppendAllTextAsync(path, "tampered");
         await Assert.ThrowsAsync<SubmissionJournalConflictException>(() =>
             SubmissionJournalMaterializer.MaterializeAsync(entry, gitHub, default));
+    }
+
+    [Fact]
+    public async Task Materializer_restores_case_insensitive_hash_policy()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        GitHubSubmissionRequest source = Request(repository.Path);
+        GitHubSubmissionRequest request = source with
+        {
+            Policy = source.Policy with
+            {
+                DuplicateHashes = new DuplicateHashPolicy
+                {
+                    DeniedSha256 =
+                        ImmutableHashSet.Create(StringComparer.OrdinalIgnoreCase, new string('a', 64)),
+                },
+            },
+        };
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        SubmissionJournalEntry entry = await store.ActivateAsync(handle, default);
+
+        GitHubSubmissionRequest materialized = await SubmissionJournalMaterializer.MaterializeAsync(
+            entry,
+            new FakeGitHubClient(),
+            default);
+
+        Assert.Contains(
+            new string('A', 64),
+            materialized.Policy.DuplicateHashes.DeniedSha256);
+    }
+
+    [Fact]
+    public async Task Active_journal_reuse_requires_the_complete_remote_request()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        GitHubSubmissionRequest request = Request(repository.Path);
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        _ = await store.ActivateAsync(handle, default);
+
+        await Assert.ThrowsAsync<SubmissionJournalConflictException>(() =>
+            store.PrepareAsync(
+                request with { CustomTitle = "Different approved title" },
+                default));
+    }
+
+    [Fact]
+    public async Task Journal_rejects_tokens_in_free_text()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        GitHubSubmissionRequest request = Request(repository.Path) with
+        {
+            CustomTitle = "release " + "ghp_" + new string('A', 30),
+        };
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            store.PrepareAsync(request, default));
     }
 
     [Fact]

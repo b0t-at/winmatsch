@@ -47,6 +47,17 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         SubmissionRepositoryIdentity repository = CreateRepositoryIdentity(
             request.LocalPlan.OutputDirectory);
         RecoverPreparedIntentsUnderLock(repository, cancellationToken);
+        GitHubSubmissionPlan remotePlan = GitHubLifecycleWorkflow.Plan(request);
+        if (!remotePlan.CanApply)
+        {
+            throw new ArgumentException(
+                "The GitHub submission plan is not commit-ready.",
+                nameof(request));
+        }
+
+        SubmissionJournalRemoteRequest remoteRequest = Snapshot(request, remotePlan);
+        ValidateSecretFree(remoteRequest);
+        string remoteRequestFingerprint = SubmissionRequestFingerprint.Create(remoteRequest);
         SubmissionJournalEntry? existing = ReadAllEntries("*.journal")
             .Concat(ReadAllIntents())
             .FirstOrDefault(entry =>
@@ -67,6 +78,10 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
                 || !string.Equals(
                     existing.RemoteRequest.IdempotencyKey,
                     request.IdempotencyKey,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    existing.RemoteRequestFingerprint,
+                    remoteRequestFingerprint,
                     StringComparison.Ordinal))
             {
                 throw new SubmissionJournalConflictException(
@@ -78,20 +93,13 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
 
         string id = Guid.NewGuid().ToString("N");
         DateTimeOffset now = _clock.UtcNow;
-        GitHubSubmissionPlan remotePlan = GitHubLifecycleWorkflow.Plan(request);
-        if (!remotePlan.CanApply)
-        {
-            throw new ArgumentException(
-                "The GitHub submission plan is not commit-ready.",
-                nameof(request));
-        }
-
         var entry = new SubmissionJournalEntry
         {
             Id = id,
             Repository = repository,
             LocalPlan = Snapshot(request.LocalPlan),
-            RemoteRequest = Snapshot(request, remotePlan),
+            RemoteRequest = remoteRequest,
+            RemoteRequestFingerprint = remoteRequestFingerprint,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -912,7 +920,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
 
     private static void ValidateSecretFree(GitHubSubmissionRequest request)
     {
-        IEnumerable<string?> storedText =
+        ValidateSecretFree(
         [
             request.ForkOwner,
             request.CreatedWith,
@@ -921,9 +929,41 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             request.IdempotencyKey,
             request.Policy.DuplicateHashes.OverrideAnnotation,
             .. request.VanityUrlAnnotations,
-        ];
+        ]);
+    }
+
+    private static void ValidateSecretFree(SubmissionJournalRemoteRequest request)
+    {
+        ValidateSecretFree(
+        [
+            request.ForkOwner,
+            request.CreatedWith,
+            request.CustomTitle,
+            request.Resolves,
+            request.IdempotencyKey,
+            request.Policy.DuplicateHashes.OverrideAnnotation,
+            request.Presentation.CommitTitle,
+            request.Presentation.PullRequestTitle,
+            request.Presentation.PullRequestBody,
+            .. request.VanityUrlAnnotations,
+        ]);
+    }
+
+    private static void ValidateSecretFree(IEnumerable<string?> storedText)
+    {
         foreach (string value in storedText.Where(static value => value is not null)!)
         {
+            if (SecretValueRegex().IsMatch(value!)
+                || !string.Equals(
+                    GitHubSubmissionFormatter.Redact(value!),
+                    value,
+                    StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "Submission journal fields must not contain tokens, credentials, or unredacted secret values.",
+                    nameof(storedText));
+            }
+
             foreach (Match match in UrlRegex().Matches(value!))
             {
                 if (Uri.TryCreate(match.Value.TrimEnd('.', ',', ')', ']'), UriKind.Absolute, out Uri? uri)
@@ -932,7 +972,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
                 {
                     throw new ArgumentException(
                         "Submission journal fields must not contain credential-bearing or query-string URLs.",
-                        nameof(request));
+                        nameof(storedText));
                 }
             }
         }
@@ -979,4 +1019,13 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
 
     [GeneratedRegex(@"https?://[^\s<>""']+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex UrlRegex();
+
+    [GeneratedRegex(
+        @"(?ix)
+        \bgh[pousr]_[A-Za-z0-9_]{20,}\b
+        |\bgithub_pat_[A-Za-z0-9_]{20,}\b
+        |\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{12,}
+        |\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex SecretValueRegex();
 }

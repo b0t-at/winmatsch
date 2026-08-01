@@ -26,7 +26,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
     private readonly Func<IGitHubRepositoryClient, string, IPullRequestFeedbackSource> _sourceFactory;
     private readonly Func<IGitHubRepositoryClient, GitHubFeedbackWorkflow> _feedbackFactory;
     private readonly IWorkflowClock _clock;
-    private readonly ISubmissionJournalStore _submissionJournals;
+    private readonly ISubmissionJournalStore? _submissionJournals;
 
     public MaintenanceCommandModule(
         Func<string, IGitHubRepositoryClient>? clientFactory = null,
@@ -44,7 +44,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
             ?? ((client, forkOwner) => new ToolPullRequestObservationSource(client, forkOwner));
         _clock = clock ?? new SystemWorkflowClock();
         _feedbackFactory = feedbackFactory ?? CreateDefaultFeedbackWorkflow;
-        _submissionJournals = submissionJournals ?? new FileSubmissionJournalStore();
+        _submissionJournals = submissionJournals;
     }
 
     public string Name => "maintenance";
@@ -70,7 +70,15 @@ public sealed class MaintenanceCommandModule : ICommandModule
             ImmutableArray<SubmissionJournalEntry> entries;
             try
             {
-                entries = await _submissionJournals.ListPendingAsync(context.CancellationToken)
+                ISubmissionJournalStore journals = _submissionJournals
+                    ?? WorkflowProductionComposition.CreateSubmissionJournal(
+                        context.Configuration.OverrideStoreDirectory is null
+                            ? null
+                            : new OverridePackStoreOptions
+                            {
+                                RootDirectory = context.Configuration.OverrideStoreDirectory,
+                            });
+                entries = await journals.ListPendingAsync(context.CancellationToken)
                     .ConfigureAwait(false);
             }
             catch (Exception exception) when (

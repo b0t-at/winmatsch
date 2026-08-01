@@ -133,6 +133,8 @@ public sealed record SubmissionJournalEntry
 
     public required SubmissionJournalRemoteRequest RemoteRequest { get; init; }
 
+    public required string RemoteRequestFingerprint { get; init; }
+
     public SubmissionJournalState State { get; init; } = SubmissionJournalState.Pending;
 
     public RemoteMutationState RemoteState { get; init; } = new();

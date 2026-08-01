@@ -362,6 +362,26 @@ public sealed class MutationCommandModule : ICommandModule
             && submitRequested
             && !context.IsDryRun)
         {
+            if (!context.ParseResult.GetValue(options.Yes))
+            {
+                ReportApprovalContext(
+                    context,
+                    local.Plan,
+                    "Pending remote submission approval required");
+                EnsurePrompting(
+                    context,
+                    "Resuming a pending remote submission requires --yes in non-interactive mode.");
+                bool approved = await context.Interaction.ConfirmAsync(
+                    "Resume the previously journaled GitHub submission?",
+                    defaultValue: false,
+                    context.CancellationToken).ConfigureAwait(false);
+                if (!approved)
+                {
+                    MutationOutput.Write(context, local, remote: null);
+                    return ExitCodes.OperationFailed;
+                }
+            }
+
             if (_submissionFactory is null)
             {
                 throw new CliOperationException(

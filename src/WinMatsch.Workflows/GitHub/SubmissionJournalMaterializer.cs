@@ -97,7 +97,7 @@ public static class SubmissionJournalMaterializer
             ForkOwner = remote.ForkOwner,
             ExecutionMode = WorkflowExecutionMode.Apply,
             Operation = remote.Operation,
-            Policy = remote.Policy,
+            Policy = NormalizePolicy(remote.Policy),
             CreatedWith = remote.CreatedWith,
             CustomTitle = remote.CustomTitle,
             Resolves = remote.Resolves,
@@ -307,4 +307,16 @@ public static class SubmissionJournalMaterializer
 
     private static string HashText(string value)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    private static GitHubSubmissionPolicy NormalizePolicy(GitHubSubmissionPolicy policy)
+        => policy with
+        {
+            DuplicateHashes = policy.DuplicateHashes with
+            {
+                DeniedSha256 = policy.DuplicateHashes.DeniedSha256.ToImmutableHashSet(
+                    StringComparer.OrdinalIgnoreCase),
+                AllowedSha256 = policy.DuplicateHashes.AllowedSha256.ToImmutableHashSet(
+                    StringComparer.OrdinalIgnoreCase),
+            },
+        };
 }

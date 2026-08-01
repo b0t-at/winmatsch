@@ -289,6 +289,26 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task No_changes_resume_requires_remote_submission_consent()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => FakeMutationWorkflow.Result(
+                request,
+                WorkflowResultCode.NoChanges),
+        };
+        var submission = new FakeJournaledSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submission);
+        harness.IsInputRedirected = true;
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--submit"]);
+
+        Assert.Equal(ExitCodes.MissingInput, result.ExitCode);
+        Assert.Equal(0, submission.ResumeCalls);
+    }
+
+    [Fact]
     public async Task Json_question_never_prompts_and_returns_missing_input()
     {
         var workflow = new FakeMutationWorkflow
@@ -955,7 +975,7 @@ public sealed class MutationCommandModuleTests
 
     private static CliHarness CreateHarness(
         FakeMutationWorkflow workflow,
-        FakeSubmissionWorkflow? submissions = null,
+        ISubmissionWorkflow? submissions = null,
         FakeEditorRunner? editor = null)
     {
         var harness = new CliHarness();
@@ -1228,6 +1248,47 @@ internal sealed class FakeSubmissionWorkflow : ISubmissionWorkflow
                 },
         });
     }
+}
+
+internal sealed class FakeJournaledSubmissionWorkflow : IJournaledSubmissionWorkflow
+{
+    public int ResumeCalls { get; private set; }
+
+    public Task<GitHubLifecycleResult> ExecuteAsync(
+        GitHubSubmissionRequest request,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException();
+
+    public Task<SubmissionJournalHandle> PrepareAsync(
+        GitHubSubmissionRequest request,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException();
+
+    public Task<GitHubLifecycleResult> ExecutePreparedAsync(
+        SubmissionJournalHandle handle,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException();
+
+    public Task<GitHubLifecycleResult?> ResumePendingAsync(
+        string outputDirectory,
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion,
+        RepositoryCoordinates upstreamRepository,
+        CancellationToken cancellationToken = default)
+    {
+        ResumeCalls++;
+        return Task.FromResult<GitHubLifecycleResult?>(null);
+    }
+
+    public Task<ImmutableArray<SubmissionJournalEntry>> ListPendingAsync(
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(ImmutableArray<SubmissionJournalEntry>.Empty);
+
+    public Task CancelAsync(
+        string id,
+        long expectedRevision,
+        CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
 }
 
 internal sealed class FakeManifestLoader : IRawManifestSetLoader
