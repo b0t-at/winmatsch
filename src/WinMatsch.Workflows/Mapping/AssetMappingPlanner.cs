@@ -49,6 +49,7 @@ public static class AssetMappingPlanner
         var usedByPosition = new Dictionary<int, Candidate>();
         var positionsByPhysicalAsset = new Dictionary<string, List<PreviousInstallerEntry>>(StringComparer.Ordinal);
         var assignedCandidates = new HashSet<Candidate>();
+        Dictionary<string, Candidate[]> preservedSharedGroups = BuildPreservedSharedGroups(request, candidates);
         foreach (PreviousInstallerEntry previous in request.PreviousInstallers.OrderBy(static entry => entry.Position))
         {
             Candidate[] availableCandidates = request.AllowStructuralRewrite
@@ -74,9 +75,25 @@ public static class AssetMappingPlanner
                     : exactByUrl.Length > 1
                         ? exactByUrl
                         : [];
-            Candidate[] matches = exact.Length > 0
-                ? exact
-                : availableCandidates.Where(candidate => IsCompatible(previous, candidate)).ToArray();
+            Candidate[] matches;
+            if (preservedSharedGroups.TryGetValue(
+                    previous.Url.AbsoluteUri,
+                    out Candidate[]? sharedGroupCandidates))
+            {
+                Candidate[] compatibleShared = sharedGroupCandidates
+                    .Where(candidate => IsCompatible(previous, candidate))
+                    .ToArray();
+                matches = compatibleShared.Length > 0
+                    ? compatibleShared
+                    : sharedGroupCandidates;
+            }
+            else
+            {
+                matches = exact.Length > 0
+                    ? exact
+                    : availableCandidates.Where(candidate => IsCompatible(previous, candidate)).ToArray();
+            }
+
             if (matches.Length == 0
                 && availableCandidates.Length == 1
                 && request.PreviousInstallers.Length == 1)
@@ -87,9 +104,12 @@ public static class AssetMappingPlanner
             if (matches.Length != 1)
             {
                 string code = matches.Length == 0 ? "MAP_REMOVED" : "MAP_AMBIGUOUS";
+                Candidate[] entryTargetedCandidates = availableCandidates
+                    .Where(static candidate => candidate.Entry is not null)
+                    .ToArray();
                 bool retiredByEntryOverride = matches.Length == 0
-                    && exactByUrl.Length > 0
-                    && exactByUrl.All(candidate =>
+                    && entryTargetedCandidates.Length > 0
+                    && entryTargetedCandidates.All(candidate =>
                         candidate.Entry is not null && !EntryMatches(previous, candidate.Entry));
                 bool approvedRemoval = matches.Length == 0
                     && (request.AllowStructuralRewrite || retiredByEntryOverride);
@@ -1145,6 +1165,45 @@ public static class AssetMappingPlanner
 
     private static string GetPhysicalAssetKey(DiscoveredAsset asset)
         => $"{asset.DownloadUri.AbsoluteUri}|{asset.Content?.Identity.Sha256}|{asset.Content?.Identity.SizeInBytes}";
+
+    private static Dictionary<string, Candidate[]> BuildPreservedSharedGroups(
+        AssetMappingRequest request,
+        Candidate[] candidates)
+    {
+        var result = new Dictionary<string, Candidate[]>(StringComparer.Ordinal);
+        if (request.AllowStructuralRewrite)
+        {
+            return result;
+        }
+
+        foreach (IGrouping<string, PreviousInstallerEntry> group in request.PreviousInstallers
+                     .GroupBy(static previous => previous.Url.AbsoluteUri, StringComparer.Ordinal)
+                     .Where(static group => group.Count() > 1))
+        {
+            PreviousInstallerEntry[] previousEntries = [.. group];
+            Candidate[] compatibleCandidates = candidates
+                .Where(static candidate => candidate.Entry is null)
+                .Where(candidate => previousEntries.Any(previous => IsCompatible(previous, candidate)))
+                .ToArray();
+            IGrouping<string, Candidate>[] physicalAssets = compatibleCandidates
+                .GroupBy(candidate => GetPhysicalAssetKey(candidate.Asset), StringComparer.Ordinal)
+                .ToArray();
+            if (physicalAssets.Length == 1)
+            {
+                result.Add(
+                    group.Key,
+                    [
+                        .. physicalAssets[0]
+                            .OrderBy(static candidate => candidate.Architecture)
+                            .ThenBy(static candidate => candidate.Type)
+                            .ThenBy(static candidate => candidate.Scope)
+                            .ThenBy(static candidate => candidate.Asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal),
+                    ]);
+            }
+        }
+
+        return result;
+    }
 
     private static string FormatNestedInstaller(PlannedInstaller? installer)
         => installer is null

@@ -343,9 +343,10 @@ public sealed class AssetMappingPlannerTests
         AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset]));
 
         Assert.True(plan.CanApply);
-        Assert.Equal(
-            new[] { Architecture.X86, Architecture.X64 },
-            plan.Decisions.Select(static decision => decision.Installer!.Architecture).Order().ToArray());
+        Assert.Collection(
+            plan.Decisions.Select(static decision => decision.Installer!.Architecture).Order(),
+            architecture => Assert.Equal(Architecture.X86, architecture),
+            architecture => Assert.Equal(Architecture.X64, architecture));
     }
 
     [Fact]
@@ -646,10 +647,33 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
+    public void Shared_url_architecture_layout_is_preserved_across_versioned_url_change()
+    {
+        Uri oldShared = new("https://example.test/1.0.0/tool-x64.exe");
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            Previous(0, oldShared.AbsoluteUri, Architecture.X86, InstallerType.Exe),
+            Previous(1, oldShared.AbsoluteUri, Architecture.X64, InstallerType.Exe),
+        ];
+        DiscoveredAsset asset = Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], previous));
+
+        Assert.True(plan.CanApply);
+        Assert.Collection(
+            plan.Decisions.Select(static decision => decision.Installer!.Architecture).Order(),
+            architecture => Assert.Equal(Architecture.X86, architecture),
+            architecture => Assert.Equal(Architecture.X64, architecture));
+        Assert.All(
+            plan.Decisions,
+            decision => Assert.Equal(asset.DownloadUri, decision.Installer!.Url));
+    }
+
+    [Fact]
     public void Entry_targeted_override_retires_other_shared_url_entry()
     {
         PackageIdentifier package = new("Vendor.Product");
-        Uri shared = new("https://example.test/2.0.0/tool-x64.exe");
+        Uri shared = new("https://example.test/1.0.0/tool-x64.exe");
         ImmutableArray<PreviousInstallerEntry> previous =
         [
             Previous(0, shared.AbsoluteUri, Architecture.X86, InstallerType.Exe),
@@ -678,7 +702,6 @@ public sealed class AssetMappingPlannerTests
         {
             PackageIdentifier = package,
             OverridePacks = packs,
-            AllowStableUrlContentChange = true,
         });
 
         Assert.True(plan.CanApply);
