@@ -104,6 +104,65 @@ values inferred from downloads, which rank above defaults; human corrections
 detected in the merged upstream manifest outrank all regeneration and force
 review instead of being overwritten.
 
+## Durable journals
+
+Three independent journal families make interrupted work recoverable. They are
+separate on purpose: each one is retired only when the state it guards is
+provably final, and none of them can silently complete work another one owns.
+
+| Family | Guards | Lives in | Statuses |
+|---|---|---|---|
+| Local manifest / provenance transaction | staged manifest writes and provenance capture in the repository checkout | `.winmatsch-transaction-*` next to the target, inside the repository | `prepared` → `manifests-committed` → `committed` |
+| Learned override store | an approved human correction on its way to becoming a learned override pack | the override store (`--override-store`, default `winmatsch/overrides` under local application data) | `prepared` → `manifest-committed` → `activated` |
+| Local-to-remote submission | the fork → branch → commit → pull-request sequence | the submission-journal directory outside the repository | `Pending`, `BranchCreated`, `CommitCreated`, `PullRequestCreated`, `EscalationRequired`, `Cancelled` |
+
+The first two recover automatically on the next Apply-mode run for the same
+package — plan runs (`--dry-run`) never write, so they leave pending state
+untouched; the learned-override journal is described under
+[learned corrections](rules.md#learned-corrections-approved-once-reapplied-later).
+Pending submission journals are listed by `winmatsch submissions`, which reports
+each entry's CAS revision, lifecycle state, pull-request number when known, and
+whether the last remote outcome is uncertain.
+
+### Local writes, transactions, and recovery journals
+
+Manifest writes to a local repository checkout are transactional, not
+file-by-file. Each mutating run:
+
+1. creates a scratch directory next to the target,
+   `.winmatsch-transaction-<key hash>-<token>`, where `<key hash>` derives
+   from the operation lock key — the **package identifier**, so all versions
+   of one package share a lock and a transaction prefix;
+2. stages every planned change there and writes a **journal** file recording
+   the transaction status (`prepared` → `manifests-committed` → `committed`)
+   plus one line per change (kind, whether a destination file already existed,
+   and the base64-encoded repository path). The journal is flushed to disk
+   (`FileOptions.WriteThrough` + `Flush(flushToDisk: true)`) and renamed into
+   place, so it is never observed half-written;
+3. applies the changes, then deletes the transaction directory.
+
+If the process is killed mid-write, the directory survives. The next
+**Apply-mode** run for the same package — any version of it — against that
+repository root recovers it first: under the repository operation lock, before
+staging anything new, in deterministic ordinal order. Plan runs (`--dry-run`)
+never recover, because they never write. The transaction prefix embeds the
+package identifier, so recovery never touches another package's in-flight work.
+
+| Journal status | Recovery |
+|---|---|
+| missing | Nothing was journaled, so no destination was ever changed; the directory and anything staged inside it are deleted. |
+| `manifests-committed` | Rolled **forward**: manifests are already on disk, so provenance capture is completed from the journal's committed paths. |
+| `committed` | Nothing to do; the directory is removed. |
+| `prepared`, or any other value | Treated as uncommitted and rolled **back**: staged changes are undone in reverse order, restoring or removing each destination. |
+
+Recovery never guesses at a damaged journal: an entry whose structure or
+change-kind cannot be parsed fails with `InvalidDataException`, and corrupt
+base64 path data surfaces as a `FormatException`. Either way the run stops
+rather than replaying a half-understood journal. The directories are hidden
+(`.`-prefixed) and never contain secrets. Deleting one by hand is safe only
+when you accept losing whatever it staged; on doubt let the next apply run
+recover it.
+
 ## Extending
 
 ### Adding an analyzer

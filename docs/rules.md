@@ -100,6 +100,28 @@ Further catalogue IDs (`ARCH-*`, `MAP-*`, `DUP-*`, `HASH-*`, `VER-*`,
 `WORK-*`, `META-2`) are reserved in the catalogue but not yet implemented as
 standalone rules; do not reference them in overrides.
 
+### Line endings and file shape
+
+Every manifest winmatsch writes uses **LF** line endings, no BOM, and exactly
+one trailing newline; `PIPE-1` asserts this on the emitted bytes. The writer
+is a canonicalizing emitter, not a general-purpose YAML round-tripper: it
+imposes its own field order, indentation, scalar styles, and schema header,
+and it always writes LF. So line endings — and formatting generally — are
+*normalized*, not preserved:
+
+- A version whose upstream files are already in winmatsch's canonical shape
+  (LF, canonical ordering and quoting — the common case for manifests this
+  tool generated) round-trips byte-for-byte, so an update diff shows only the
+  fields that actually changed.
+- A hand-written upstream manifest with different ordering, quoting, comments
+  or blank-line layout is rewritten into the canonical shape even when only
+  one field changed, and a CRLF file additionally shows every line as
+  modified. Every manifest field the schema defines survives — but comments,
+  field ordering, quoting style, and blank-line layout do not: they are
+  replaced by the canonical form, not preserved. Review the diff before
+  submitting, and prefer `--dry-run` first on packages known to be
+  hand-maintained or to carry CRLF manifests.
+
 ### Validation rules (`WM01xx`)
 
 Run last; they never mutate, they only report findings.
@@ -154,6 +176,50 @@ quirks:
   displayVersionFromEvidenceProperty: "Comments"
 ```
 
+### Field selectors and layout keys
+
+`preservedFields`, `droppedFields`, `metadataUrlReplacements`, and
+`scopeLayout` are applied by rule `WM0202` in that order, so an explicit drop
+always wins over a preservation of the same field.
+
+`preservedFields` and `droppedFields` take **field selectors**, not globs. A
+selector is one of:
+
+| Selector form | Applies to |
+|---|---|
+| `DefaultLocale.<field>` | the default-locale manifest |
+| `Locales[*].<field>` | every additional locale, matched by `PackageLocale` |
+| `Installer.<field>` | the installer manifest root |
+| `Installers[*].<field>` | every installer, matched to its previous counterpart |
+| `<field>` | shorthand, resolved against the known locale and installer fields |
+
+Field names are matched **case-sensitively** against the schema field sets, and
+an unknown selector fails the pack — it is never silently ignored. `[*]` is the
+only supported wildcard; `*.Url` or `Release*` are rejected.
+
+- **`preservedFields`** copies the previously merged value forward when the
+  current run would leave the field empty. It needs a previous merged manifest;
+  on a `new` package it does nothing. It never overwrites a value the current
+  run produced.
+- **`droppedFields`** clears the named field outright.
+- **`metadataUrlReplacements`** rewrites metadata URLs by **exact, ordinal
+  string match** — no patterns, no prefix matching, no case folding. It scans
+  the default locale and every additional locale: `PublisherUrl`,
+  `PublisherSupportUrl`, `PrivacyUrl`, `PackageUrl`, `LicenseUrl`,
+  `CopyrightUrl`, `ReleaseNotesUrl`, `PurchaseUrl`, and the URLs inside
+  `Documentations`, `Agreements`, and `Icons`. Sources may be HTTP or HTTPS;
+  **targets must be HTTPS**, and neither side may carry credentials, a query
+  string, or a fragment.
+- **`scopeLayout`** decides where installer scope lives:
+
+| Value | Effect |
+|---|---|
+| `Preserve` | Mirror the previously merged manifest's layout. Fails with an error finding when there is no previous manifest. |
+| `Root` | Hoist scope to the installer-manifest root and clear it per installer. Fails with an error finding unless every installer resolves to the same explicit scope. |
+| `PerInstaller` | Push the root scope down onto each installer and clear the root. |
+
+Omitting the key leaves the layout untouched.
+
 Parsing is strict and defensive: unknown keys are rejected, YAML aliases are
 forbidden, exactly one document is allowed, and hard limits apply (file at
 most 1,048,576 characters, nesting depth 32, 10,000 nodes, 65,536 characters
@@ -198,6 +264,71 @@ generator still emits the fingerprinted bot value, and compose that learned
 layer beneath explicit `--override-pack` files. Unsupported, stale, or
 ambiguous corrections remain review-visible instead of being learned with
 false confidence. Checked-in built-in packs are never modified at runtime.
+
+### Learned corrections: approved once, reapplied later
+
+Approving a review on a terminal is durable. Apply mode writes the approved
+human value into a per-user **learned override pack** in the override store
+(`--override-store`, `overrideStore`, or `WINMATSCH_OVERRIDE_STORE_DIRECTORY`;
+default `winmatsch/overrides` under the platform's local application data).
+The store holds one canonical `<PACKAGEIDENTIFIER>.yaml` per package and, when
+an existing canonical pack is replaced, a `.bak` of the prior verified content.
+Plan mode (`--dry-run`) never writes.
+
+The value is stored **literally** — the exact string the human wrote — next to
+the hashes that identify the correction it resolves: the correction
+fingerprint, the approved value's hash, the hash of the bot value it replaces,
+and, for installer fields, a version-independent installer selector derived
+from the installer URL.
+
+Activation is two-phase, so an approval can never outlive the manifest write it
+belongs to:
+
+1. the pack is staged as `<name>.yaml.pending` together with a `.transaction`
+   journal whose status starts at `prepared`;
+2. once the manifest files are on disk the journal moves to
+   `manifest-committed`;
+3. the pending pack is promoted to the canonical file and the journal and
+   pending file are removed (`activated`).
+
+A crash at any point is resolved on the next **Apply-mode** run for that
+package — plan runs never recover, because they never write — under the store's
+per-package `.lock`:
+
+| Situation on recovery | Outcome |
+|---|---|
+| No journal | A stray `.pending` is deleted; nothing was approved. |
+| Journal present, manifests not committed | Pending pack and journal are discarded — the approval is abandoned with the write. |
+| Journal present, manifests committed | The pending pack is verified against the journal's hash and activated. |
+| Manifests in a mixed state, or the canonical file changed underneath | The journal is **retained** and the run reports a recovery error rather than guessing. |
+| Canonical file unreadable but the backup is valid | The damaged file is quarantined as `.corrupt` and the backup is restored. |
+
+Writes are compare-and-swap: staging carries the content hash and format
+version the reviewer saw, and a mismatch fails with `Override pack '<id>'
+changed after review; reload and review the merged corrections again.`
+
+Later runs apply a learned value only while the generator still emits the
+fingerprinted bot value and the installer identity still resolves
+unambiguously. Otherwise the tool emits a warning finding and the correction
+stays review-visible instead of being reapplied with false confidence. Learned
+packs compose **beneath** explicit `--override-pack` files and above the
+checked-in built-in packs, which are never modified at runtime.
+
+Approval is interactive-only — see
+[approvals and review-required](commands.md#approvals-review-required-and-partial-remote-states).
+To encode a decision up front, without waiting for a review, use an override
+pack you pass with `--override-pack`:
+
+| Human correction | Durable encoding |
+|---|---|
+| Keep the human's literal value for a field | `preservedFields` |
+| Different architecture than the tool derives | `forcedArchitectures` |
+| Different asset → installer entry mapping | `assetMappings` |
+| Different version than the release tag implies | `versionSource` |
+| A field the human deliberately deleted | `droppedFields` |
+| A URL that redirects per release | `vanityUrls` |
+| A package that must never be automated | `manualOnly: true` |
+| A rule that is simply wrong for this package | `rules: { RULE-ID: log-only }` |
 
 ## Security and redaction
 

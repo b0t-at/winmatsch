@@ -69,8 +69,33 @@ run stops on purpose. Options:
 - change the responsible rule's mode (`--rule-mode RULE_ID=log-only`), or
 - decide the regenerated value is right and re-run with the review resolved.
 
-Non-interactive and JSON invocations never auto-approve a review. Use
-`--override-store` (or `overrideStore`) to relocate the learned-pack store.
+Non-interactive and JSON invocations never auto-approve a review: they exit 4
+with `Review approval is required; rerun interactively.` and print no JSON
+envelope, so re-run the same command on a terminal to see the conflicts.
+`--yes` does not cover this gate. Use `--override-store` (or `overrideStore`)
+to relocate the learned-pack store.
+
+## Interrupted local writes
+
+A crash, power loss, or `kill` during a local write leaves a hidden
+`.winmatsch-transaction-*` directory in the output/repository root. This is
+expected and self-healing: the next apply run for the same package recovers it —
+rolling the staged changes back, or forward when the manifests were already
+committed — before it stages anything new. A plan run (`--dry-run`) never
+recovers, because it never writes. See
+[recovery journals](architecture.md#local-writes-transactions-and-recovery-journals).
+
+- `Invalid transaction journal '<path>'` (or an unhandled `FormatException`
+  from corrupt path data in it) means recovery refused to guess. Inspect the
+  directory, restore what you need from its `backup/` folder, then remove the
+  directory to unblock the next apply run.
+- `Another local operation is already running for this package.` (exit 5,
+  `Conflict`) means a second process holds the operation lock — which is
+  per *package*, not per version — not a stale transaction.
+- A retained learned-override journal in the override store is reported
+  separately; re-running the apply for the same package finishes or discards
+  the activation. See
+  [learned corrections](rules.md#learned-corrections-approved-once-reapplied-later).
 
 ## Cache problems
 
@@ -93,6 +118,23 @@ fields from evidence, supply them explicitly (`--url url`, optionally followed
 by `|arch`, `|scope`, and `|displayVersion`) or add `forcedArchitectures` /
 `assetMappings` in an override pack. See
 [known non-goals](analyzers.md#known-unsupported-variants-and-non-goals).
+
+## Explicitly unsupported (not bugs)
+
+These are current, deliberate boundaries — reporting them as defects will get
+the issue closed as by-design:
+
+| Not supported | Detail |
+|---|---|
+| GitHub Enterprise Server / custom API hosts | The CLI exposes no host option; `--repo` picks the repository, not the host. The library accepts a GHES root, the executable does not. See [GitHub endpoints](commands.md#github-endpoints-and-github-enterprise). |
+| Anonymous repository reads | `show` and `list-versions` require a token even for public repositories (exit 4 without one). |
+| `DRY_RUN` (or any) environment variable for plan mode | `--dry-run` is a flag only. |
+| Approving a human-correction review non-interactively | `--yes` does not cover review gates; see above. Approvals given interactively *are* persisted. |
+| CRLF manifests round-tripped verbatim | The emitter always writes LF; see [line endings](rules.md#line-endings-and-file-shape). |
+| Branch deletion during `cleanup` | GitHub has no atomic expected-SHA branch delete, so candidates are reported for manual action. |
+| `remove-dead-versions` submitting pull requests | The hidden command plans and reports only. |
+| Running installers, even sandboxed | Static analysis only; see [analyzer non-goals](analyzers.md#known-unsupported-variants-and-non-goals). |
+| Signature/certificate validation | Out of scope; integrity is hash-based. |
 
 ## CI, non-interactive, and editor behavior
 

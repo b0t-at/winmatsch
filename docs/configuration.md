@@ -13,6 +13,12 @@ the layer it came from.
 **Tokens are never configuration.** There is no config key for the GitHub
 token; see the [security guide](security.md).
 
+**Endpoints are never configuration.** There is no key for the GitHub API
+host: `repository` selects the repository, and the shipped CLI always talks to
+`github.com`. The `WinMatsch.GitHub` library does accept a GitHub Enterprise
+Server root, but the executable does not expose it — see
+[GitHub endpoints and GitHub Enterprise](commands.md#github-endpoints-and-github-enterprise).
+
 ## Keys
 
 | Key | Type | Allowed values | Default | CLI option | Environment variable |
@@ -47,7 +53,15 @@ token; see the [security guide](security.md).
 - **`freshnessDelay`** — how long a release must remain unchanged before a
   remote submission is allowed. `1.12:00:00` means 1 day 12 hours. Guards
   against submitting a release the publisher is still re-uploading. The
-  default is four hours; set `00:00:00` to opt out explicitly.
+  shipped default is four hours; set `00:00:00` to opt out explicitly:
+
+  ```bash
+  winmatsch config set freshnessDelay 00:00:00
+  ```
+
+  Independently of this delay, installer bytes are re-hashed immediately
+  before submission, so a changed payload is detected even with the guard
+  disabled — the delay only avoids opening a doomed pull request.
 - **`output.format`** — default result format on stdout.
 - **`output.directory`** — where generated manifests and reports are written.
 - **`interaction`** — prompting policy; see

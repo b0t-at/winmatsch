@@ -43,7 +43,44 @@ Never point live mutation tests at `microsoft/winget-pkgs`.
 - **Dependencies.** New runtime packages need a matching entry in
   [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) with verified license,
   source, and version, and central version management in
-  `Directory.Packages.props`.
+  `Directory.Packages.props`. See [dependency policy](#dependency-policy).
+
+## Dependency policy
+
+Runtime dependencies are deliberately few, and each one is a licensing and
+trimming decision as much as a technical one.
+
+- **License.** Only permissive licenses are acceptable for shipped packages:
+  MIT, BSD, Apache-2.0, or a file-level copyleft we can comply with by
+  attribution and source pointer (MPL-2.0 — currently only OpenMcdf). Verify
+  the license of the **exact package version** (`.nuspec` `license`
+  element), not just the project's README: json-everything, for example,
+  publishes MIT source but ships `OSMFEULA.txt` — a maintenance-fee EULA — in
+  its 9.x binaries. Anything beyond permissive terms needs an explicit,
+  recorded decision, never a silent upgrade.
+- **Transitives count.** Check the whole closure with
+  `dotnet list package --include-transitive`; a permissive direct package can
+  drag a non-permissive transitive in.
+- **Trim/AOT.** Shipped projects are `IsAotCompatible`, warnings are errors,
+  and reflection-based serialization is banned. A package that emits `IL2026`
+  / `IL3050` cannot be used on a hot path.
+- **Currency.** Prefer the latest stable version. Any hold-back must carry a
+  comment in `Directory.Packages.props` naming the concrete blocker and the
+  condition that would let us move — "AOT" or "risky" alone is not a reason.
+- **Notices.** Update `THIRD-PARTY-NOTICES.txt` in the same commit as the
+  version change, including the pinned source commit for MPL-2.0 components.
+  `LicenseNoticeTests` cross-checks the notice against
+  `Directory.Packages.props` and fails when the two drift, and it also fails
+  when a new pin is neither noticed nor declared test-only.
+
+```bash
+dotnet list package --include-transitive        # full closure, incl. licenses to verify
+dotnet list package --outdated                  # currency check before a release
+```
+
+Upgrades are validated with a full build + test run and, when a shipped
+package changes, a trimmed publish for all six release RIDs (see
+[docs/release.md](docs/release.md)).
 
 ## Making changes
 

@@ -72,6 +72,28 @@ Empty or whitespace-only `WINMATSCH_*` values are treated as unset. A
 malformed value (for example a non-numeric `WINMATSCH_CONCURRENT_DOWNLOADS`)
 fails the invocation with exit code 3.
 
+There is deliberately **no `DRY_RUN` environment variable**: plan mode is the
+`--dry-run` flag only, so a stray exported variable can never silently turn a
+submission into a no-op (or the reverse). The same applies to the approval
+flags — they have no environment equivalents.
+
+## GitHub endpoints and GitHub Enterprise
+
+The CLI talks to `https://api.github.com/` and offers **no option,
+configuration key, or environment variable to change the host**, so the
+shipped executable targets `github.com` only. `--repo` selects the
+*repository*, never the host.
+
+The `WinMatsch.GitHub` library is not limited that way: embedders can set
+`GitHubClientOptions.ApiBaseUri` to a GitHub Enterprise Server root (normally
+`https://host/api/v3`). The GraphQL endpoint is then **derived** from it — a
+path ending in `/api/v3` becomes `/api/graphql`, and any other base path gets
+`/graphql` appended (so `https://host/custom` derives
+`https://host/custom/graphql`) — which keeps the token on the configured host.
+An explicit `GraphQlUri` is validated to share the API origin and end in
+`/graphql`; both URIs must be absolute HTTP(S) without user info, query, or
+fragment.
+
 ## Exit codes
 
 The exit code contract is deterministic; scripts can branch on the category
@@ -98,10 +120,14 @@ The stream contract is stable and scripts may rely on it:
 
 JSON documents are compact (not indented), UTF-8 with non-ASCII preserved,
 byte-stable for identical inputs, and terminated by a single trailing newline.
-There is currently **no explicit version field** inside the JSON envelope;
-the shape below is the contract for the 0.x series, and any breaking change
-to it is treated as a breaking release. Fields may be *added* in minor
-releases; consumers should ignore unknown fields.
+The envelope carries **no `schemaVersion` (or any other version) key**, by
+design: the shape below is the contract for the whole 0.x series, and any
+breaking change to it is a breaking release, so consumers pin on the tool
+version from `winmatsch --version` rather than on an in-document field. Fields
+may be *added* in minor releases; consumers must ignore unknown fields. Do not
+confuse this with the WinGet *manifest* schema version (`ManifestVersion`,
+currently `1.12.0`), which is a property of generated manifests, not of the
+JSON output.
 
 Mutation commands (`new`, `update`, `remove`, `submit`, `new-locale`,
 `update-locale`) emit this envelope:
@@ -154,10 +180,23 @@ defense in depth; do not put secrets into URLs or manifest fields.
   interactive terminal you are prompted; otherwise pass the specific approval
   flag (`--yes`, `--allow-structural-rewrite`, `--allow-stable-url-change`,
   `--allow-shared-content`). Confirmation never defaults to yes.
+  `--allow-structural-rewrite` and `--allow-stable-url-change` compare against
+  the previously merged version, so they take effect on `update` only; `new`
+  accepts them for symmetry and ignores them.
 - **Review required.** When the tool detects that a human edited a previously
   merged manifest in a way a new run would revert, it sets
   `requiresReview: true` and lists the conflicts under `rules.reviews`
   instead of silently overwriting the human's work.
+  **Review approval is interactive-only.** `--yes` does *not* approve
+  reviews: the run asks a dedicated confirmation question, so in a session
+  that cannot prompt (`--interaction never`, CI, or `--format json`) the run
+  fails with exit code 4 and the message
+  `Review approval is required; rerun interactively.` — the JSON envelope is
+  not written in that case. An approval given on a terminal *is* remembered:
+  apply mode records it as a learned override pack in the
+  [override store](configuration.md#keys), so later versions of the package
+  reapply the human value instead of asking again. See
+  [learned corrections](rules.md#learned-corrections-approved-once-reapplied-later).
 - **Partial remote state.** Remote submission is a sequence (fork → branch →
   commit → pull request). If it is interrupted, the `remote.state` object
   reports exactly which steps completed and `outcomeUncertain: true` when the
@@ -186,6 +225,11 @@ decision rules.
 
 These commands never write to any repository. `analyze` and `validate` may
 download installers into the local cache.
+
+`show` and `list-versions` read from the GitHub API and **always require a
+token**, even though `microsoft/winget-pkgs` is public: anonymous reads are
+not implemented, so without `--token`, `GITHUB_TOKEN`, or a keyring entry they
+fail with exit code 4. `analyze` and `validate` need no token.
 
 ### analyze
 
@@ -415,6 +459,18 @@ List pending local-to-GitHub submission journals, including CAS revision,
 package/version, lifecycle state, PR number when known, and whether the last
 remote outcome is uncertain. This command is read-only and never exposes
 tokens, credential-bearing URLs, or raw installer URLs.
+
+Pipeline feedback is durable: every pull request whose feedback is
+*actionable* is persisted as a work item under the per-user feedback state
+directory, keyed by repository and pull-request number, so retry schedules and
+terminal outcomes survive across runs. Feedback that needs no action is only
+reported, never stored. A work item that has already reached `Completed` or
+`Escalated` is never replaced; otherwise a newer observation replaces it, and
+an incoming terminal outcome takes precedence regardless of its timestamp. Only
+items in `AwaitingApprovedRepair` or `RetryScheduled` whose retry time has
+elapsed are handed back as pending work. Applying a response still requires
+`--apply-safe` and confirmation: classification is remembered, but no repair is
+ever posted on its own.
 
 ### remove-dead-versions (hidden)
 

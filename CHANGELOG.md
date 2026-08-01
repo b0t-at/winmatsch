@@ -29,4 +29,22 @@ Initial development toward a first release. Implemented so far:
 - CI across Windows/Linux/macOS and a six-RID release pipeline producing
   self-contained, trimmed single-file executables.
 
+### Changed
+
+- Updated YamlDotNet to 18.1.0 (from 16.3.0) and OpenMcdf to 3.2.0 (from
+  3.1.4). YamlDotNet 18.x adds a default YAML recursion ceiling of 130 —
+  well above winmatsch's own manifest depth budgets (64 for manifests, 32 for
+  override packs), so parser behavior is unchanged for valid input while
+  hostile deeply nested input now fails earlier.
+
+### Documentation
+
+- Documented the dependency policy (license, transitives, trim/AOT,
+  currency) and why JsonSchema.Net stays on the MIT-licensed 8.x line.
+- Documented previously implicit behavior: LF line-ending normalization,
+  local write transactions and their recovery journals, the token requirement
+  for `show`/`list-versions`, the learned-override store behind approved
+  human-correction reviews, the durable local-to-remote submission journals,
+  and the override-pack field selectors and scope-layout semantics.
+
 [Unreleased]: https://github.com/b0t-at/winmatsch/commits/main

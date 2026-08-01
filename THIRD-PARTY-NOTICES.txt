@@ -15,7 +15,7 @@ Source: https://github.com/Humanizr/Humanizer
 Copyright (c) .NET Foundation and Contributors
 License: MIT
 
-YamlDotNet 16.3.0
+YamlDotNet 18.1.0
 Source: https://github.com/aaubry/YamlDotNet
 Copyright (c) 2008-2014 Antoine Aubry and contributors
 License: MIT
@@ -25,7 +25,7 @@ Source: https://github.com/adamhathcock/sharpcompress
 Copyright (c) 2014 Adam Hathcock
 License: MIT
 
-Spectre.Console and Spectre.Console.Ansi 0.57.2
+Spectre.Console 0.57.2 and Spectre.Console.Ansi 0.57.2
 Source: https://github.com/spectreconsole/spectre.console
 Copyright (c) 2020 Patrik Svensson, Phil Scott, Nils Andresen
 License: MIT
@@ -35,8 +35,8 @@ Source: https://github.com/dotnet/command-line-api
 Copyright (c) Microsoft Corporation. All rights reserved.
 License: MIT
 
-OpenMcdf 3.1.4
-Source: https://github.com/openmcdf/openmcdf/tree/11ffb7cafff6eea99639df6b2b249dcf6bcca3ef
+OpenMcdf 3.2.0
+Source: https://github.com/openmcdf/openmcdf/tree/6514d7b9955c555c96a307252a19dcdb85cf9332
 Copyright (c) 2010-2026 Federico Blaseotto, Jeremy Powell
 License: Mozilla Public License 2.0
 License text: https://www.mozilla.org/MPL/2.0/

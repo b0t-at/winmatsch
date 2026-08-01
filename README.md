@@ -27,7 +27,9 @@ official manifest schemas, and — only when you explicitly ask — submits it t
   changes anything, remote mutations require explicit opt-in (`--submit` for
   manifest changes, confirmation — `--yes` in non-interactive sessions — for
   every destructive step), and tokens are redacted by construction while the
-  audit trail passes a secret-scrubbing sanitizer.
+  audit trail passes a secret-scrubbing sanitizer. Human-correction reviews
+  are the one gate `--yes` does not cover: they are approved interactively, or
+  encoded up front in an [override pack](docs/rules.md#override-packs).
 - **Automation friendly.** `--format json` writes exactly one stable JSON
   document to stdout, diagnostics go to stderr, and every invocation ends with
   a documented exit code.
@@ -40,7 +42,7 @@ official manifest schemas, and — only when you explicitly ask — submits it t
 | Explicit mutation | Manifest changes are pushed only with `--submit`; maintenance commands (`sync`, `complete --apply-safe`) plan first and apply only after confirmation. Confirmation never defaults to yes. |
 | No secret echo | Tokens are validated, stored in the OS keyring, and rendered as `[REDACTED]` by construction; the audit trail, previews, and JSON output pass a secret-scrubbing sanitizer. |
 | Bounded parsing | Untrusted installers and archives are parsed with hard limits (entry counts, sizes, nesting depth) to resist archive bombs. |
-| Human corrections win | When a human edited a previously submitted manifest, the tool detects it and requires review instead of silently reverting. |
+| Human corrections win | When a human edited a previously submitted manifest, the tool detects it and requires review instead of silently reverting. Approving a review is interactive-only; an approval is then remembered as a learned override pack and reapplied while the correction still matches. |
 
 Details: [security guide](docs/security.md).
 
