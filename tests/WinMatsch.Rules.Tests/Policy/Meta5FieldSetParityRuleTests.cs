@@ -173,6 +173,28 @@ public class Meta5FieldSetParityRuleTests
     }
 
     [Fact]
+    public void Ambiguous_layout_changes_with_previous_switches_are_reported()
+    {
+        // Two previous same-architecture twins (user/machine) with switches, collapsed into
+        // one scope-free entry of a different type: no unique match exists, but the drop must
+        // still be reported instead of silently skipped.
+        PackageManifests current = TestManifests.Create(
+            TestManifests.CreateInstaller(installerType: InstallerType.Exe, url: "https://example.com/new.exe"));
+        Installer userTwin = TestManifests.CreateInstaller(url: "https://example.com/old.msi", scope: Scope.User);
+        userTwin.InstallerSwitches = new InstallerSwitches { Custom = "/CURRENTUSER" };
+        Installer machineTwin = TestManifests.CreateInstaller(url: "https://example.com/old.msi", scope: Scope.Machine);
+        machineTwin.InstallerSwitches = new InstallerSwitches { Custom = "ALLUSERS=1" };
+        PackageManifests previous = PolicyTestSupport.CreatePrevious("1.0.0", userTwin, machineTwin);
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        new Meta5FieldSetParityRule().Apply(context);
+
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Contains("layout changed too much", finding.Message, StringComparison.Ordinal);
+        Assert.Contains("InstallerSwitches", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void New_packages_without_previous_are_skipped()
     {
         PackageManifests current = TestManifests.Create(TestManifests.CreateInstaller());

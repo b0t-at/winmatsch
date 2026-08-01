@@ -71,8 +71,20 @@ public sealed class Meta5FieldSetParityRule : IRule
         for (int i = 0; i < installers.Count; i++)
         {
             Installer installer = installers[i];
-            Installer? match = PolicyValues.FindPreviousByEntryKey(manifest, installer, previous.Installer)
-                ?? FindPreviousByArchitecture(installer, previous.Installer);
+            Installer? match = PolicyValues.FindPreviousByEntryKey(manifest, installer, previous.Installer);
+            if (match is null)
+            {
+                match = FindPreviousByArchitecture(installer, previous.Installer, out bool ambiguous);
+                if (ambiguous)
+                {
+                    // Several previous entries share this architecture (e.g. user/machine
+                    // twins) and the entry key no longer matches; report once per entry when
+                    // any candidate declared the fields instead of silently skipping.
+                    ReportAmbiguousCandidates(context, previous.Installer, installer, manifest, droppedFields, i);
+                    continue;
+                }
+            }
+
             if (match is null)
             {
                 continue;
@@ -98,9 +110,51 @@ public sealed class Meta5FieldSetParityRule : IRule
         }
     }
 
-    /// <summary>The unique previous installer with the same architecture, or null when none or several match.</summary>
-    private static Installer? FindPreviousByArchitecture(Installer current, InstallerManifest previousManifest)
+    private void ReportAmbiguousCandidates(
+        ManifestContext context,
+        InstallerManifest previousManifest,
+        Installer installer,
+        InstallerManifest manifest,
+        ImmutableStringSet droppedFields,
+        int index)
     {
+        List<Installer> candidates = [];
+        foreach (Installer candidate in previousManifest.Installers ?? [])
+        {
+            if (candidate.Architecture == installer.Architecture)
+            {
+                candidates.Add(candidate);
+            }
+        }
+
+        bool anySwitches = candidates.Any(c => EffectiveInstallerValues.GetInstallerSwitches(previousManifest, c) is not null);
+        if (anySwitches
+            && EffectiveInstallerValues.GetInstallerSwitches(manifest, installer) is null
+            && !Skip(context, droppedFields, "InstallerSwitches"))
+        {
+            context.AddFinding(this, RuleSeverity.Warning,
+                "The previous version's same-architecture entries declared InstallerSwitches but this entry has none and the layout changed too much for a unique match; review the switches or add an explicit drop override.",
+                $"Installers[{index}]");
+        }
+
+        bool anyDependencies = candidates.Any(c => EffectiveInstallerValues.GetDependencies(previousManifest, c) is not null);
+        if (anyDependencies
+            && EffectiveInstallerValues.GetDependencies(manifest, installer) is null
+            && !Skip(context, droppedFields, "Dependencies"))
+        {
+            context.AddFinding(this, RuleSeverity.Warning,
+                "The previous version's same-architecture entries declared Dependencies but this entry has none and the layout changed too much for a unique match; review the dependencies or add an explicit drop override.",
+                $"Installers[{index}]");
+        }
+    }
+
+    /// <summary>The unique previous installer with the same architecture, or null; <paramref name="ambiguous"/> is set when several match.</summary>
+    private static Installer? FindPreviousByArchitecture(
+        Installer current,
+        InstallerManifest previousManifest,
+        out bool ambiguous)
+    {
+        ambiguous = false;
         if (previousManifest.Installers is not { } previousInstallers || current.Architecture is null)
         {
             return null;
@@ -116,6 +170,7 @@ public sealed class Meta5FieldSetParityRule : IRule
 
             if (match is not null)
             {
+                ambiguous = true;
                 return null;
             }
 
