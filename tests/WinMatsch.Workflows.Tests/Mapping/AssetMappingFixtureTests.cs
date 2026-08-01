@@ -57,6 +57,7 @@ public sealed class AssetMappingFixtureTests
             Assert.Equal(expected.Url, actual.Url);
             Assert.Equal(expected.Architecture, actual.Architecture);
             Assert.Equal(expected.InstallerType, actual.InstallerType);
+            Assert.Equal(expected.NestedInstallerType, actual.NestedInstallerType);
             Assert.Equal(expected.Scope, actual.Scope);
             Assert.Equal(
                 expected.NestedInstallerFiles.Select(static item => item.RelativeFilePath),
@@ -66,13 +67,10 @@ public sealed class AssetMappingFixtureTests
         FixtureAsset[] intentionallyUnmapped = fixture.Descriptor.Assets
             .Where(static asset => !asset.IncludeInExpectedManifest)
             .ToArray();
-        if (intentionallyUnmapped.Length == 0)
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "ANALYSIS_METADATA_ONLY");
+        if (intentionallyUnmapped.Length > 0)
         {
-            Assert.True(plan.CanApply, string.Join(Environment.NewLine, plan.Diagnostics));
-        }
-        else
-        {
-            Assert.False(plan.CanApply);
             Assert.All(
                 intentionallyUnmapped,
                 asset => Assert.Contains(
@@ -90,6 +88,7 @@ public sealed class AssetMappingFixtureTests
         Assert.Null(asset.Analysis?.ProductVersion);
         Assert.False(asset.Analysis?.IsProductVersionTrustworthy);
         Assert.Empty(asset.Analysis?.PayloadEvidence ?? []);
+        Assert.Equal(AnalysisEvidenceOrigin.MetadataFixture, asset.Analysis?.Origin);
     }
 
     private static DiscoveredAsset CreateAsset(
@@ -105,6 +104,13 @@ public sealed class AssetMappingFixtureTests
             .Concat(fixture.Expected.NestedInstallerFiles ?? [])
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        var identity = new DownloadContentIdentity(new Sha256Hash(asset.Sha256), 1);
+        var content = new AssetContentEvidence(
+            identity,
+            asset.Url.AbsoluteUri,
+            asset.Url.AbsoluteUri,
+            "application/octet-stream",
+            fixture.Descriptor.Provenance.ObservedAt);
         return new()
         {
             ReleaseId = 1,
@@ -119,20 +125,31 @@ public sealed class AssetMappingFixtureTests
             DeclaredContentType = "application/octet-stream",
             DeclaredSize = 1,
             AssetCreatedAt = fixture.Descriptor.Provenance.ObservedAt,
-            Content = new(
-                new DownloadContentIdentity(new Sha256Hash(asset.Sha256), 1),
-                asset.Url.AbsoluteUri,
-                asset.Url.AbsoluteUri,
-                "application/octet-stream",
-                fixture.Descriptor.Provenance.ObservedAt),
+            Content = content,
             Analysis = new AssetAnalysisEvidence
             {
                 Format = FormatFor(installerType),
-                InstallerTypes = [installerType],
-                PayloadArchitectures = asset.IncludeInExpectedManifest
-                    && fixture.Descriptor.Id is not "super-productivity"
-                    ? [architecture]
-                    : [],
+                AnalyzedContentIdentity = identity,
+                AnalyzedUrl = asset.Url.AbsoluteUri,
+                Origin = AnalysisEvidenceOrigin.MetadataFixture,
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = asset.IncludeInExpectedManifest
+                            && fixture.Descriptor.Id is not "super-productivity"
+                            ? architecture
+                            : null,
+                        InstallerType = installerType,
+                        NestedInstallerType = fixture.Expected.NestedInstallerType is null
+                            ? null
+                            : ParseInstallerType(fixture.Expected.NestedInstallerType),
+                        NestedInstallerFiles =
+                        [
+                            .. nestedPaths.Select(static path => new PlannedNestedInstallerFile(path, null)),
+                        ],
+                    },
+                ],
                 ArchiveEntries = [.. nestedPaths],
                 NestedInstallerCandidates = [.. nestedPaths],
             },
@@ -155,6 +172,9 @@ public sealed class AssetMappingFixtureTests
             Sha256 = new(installer.InstallerSha256),
             Architecture = ParseArchitecture(installer.Architecture),
             InstallerType = type is null ? null : ParseInstallerType(type),
+            NestedInstallerType = fixture.Expected.NestedInstallerType is null
+                ? null
+                : ParseInstallerType(fixture.Expected.NestedInstallerType),
             Scope = ParseScope(installer.Scope),
             DisplayVersion = (installer.AppsAndFeaturesEntries ?? [])
                 .Select(static entry => entry.DisplayVersion)

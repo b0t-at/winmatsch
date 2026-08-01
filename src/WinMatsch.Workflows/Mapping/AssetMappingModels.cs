@@ -40,6 +40,8 @@ public sealed record PlannedInstaller
 
     public InstallerType? InstallerType { get; init; }
 
+    public InstallerType? NestedInstallerType { get; init; }
+
     public Scope? Scope { get; init; }
 
     public string? DisplayVersion { get; init; }
@@ -82,7 +84,7 @@ public sealed record AssetMappingPlan(
         [
             $"version|{Version.Version?.Value}|{Version.Source}|{Version.Confidence}|{Version.IsAmbiguous}",
             .. Decisions.Select(static decision =>
-                $"decision|{decision.Kind}|{decision.PreviousPosition}|{decision.Installer?.Url.AbsoluteUri}|{decision.Installer?.Sha256}|{decision.Installer?.Architecture}|{decision.Installer?.InstallerType}|{decision.Installer?.Scope}|{decision.Installer?.DisplayVersion}|{decision.Confidence}|{decision.Reason}|{FormatNested(decision.Installer)}"),
+                $"decision|{decision.Kind}|{decision.PreviousPosition}|{decision.Installer?.Url.AbsoluteUri}|{decision.Installer?.Sha256}|{decision.Installer?.Architecture}|{decision.Installer?.InstallerType}|{decision.Installer?.NestedInstallerType}|{decision.Installer?.Scope}|{decision.Installer?.DisplayVersion}|{decision.Confidence}|{decision.Reason}|{FormatNested(decision.Installer)}"),
             .. Diagnostics.Select(static diagnostic =>
                 $"diagnostic|{diagnostic.Code}|{diagnostic.Severity}|{diagnostic.AssetUrl}|{diagnostic.PreviousPosition}|{diagnostic.Message}"),
             .. UnresolvedQuestions.Select(static question =>
@@ -113,6 +115,8 @@ public sealed record PreviousInstallerEntry
     public required Architecture Architecture { get; init; }
 
     public InstallerType? InstallerType { get; init; }
+
+    public InstallerType? NestedInstallerType { get; init; }
 
     public Scope? Scope { get; init; }
 
@@ -146,6 +150,7 @@ public sealed record PreviousInstallerEntry
                     Architecture = installer.Architecture
                         ?? throw new ArgumentException($"Previous installer {index} has no architecture.", nameof(manifests)),
                     InstallerType = installer.InstallerType ?? manifest.InstallerType,
+                    NestedInstallerType = installer.NestedInstallerType ?? manifest.NestedInstallerType,
                     Scope = installer.Scope ?? manifest.Scope,
                     DisplayVersion = (installer.AppsAndFeaturesEntries ?? manifest.AppsAndFeaturesEntries)?
                         .Select(static entry => entry.DisplayVersion)
@@ -182,4 +187,7 @@ public sealed record AssetMappingRequest
 
     /// <summary>Explicit opt-in for replacing an accepted architecture/type/scope layout.</summary>
     public bool AllowStructuralRewrite { get; init; }
+
+    /// <summary>Explicit approval for a stable URL whose downloaded SHA-256 changed.</summary>
+    public bool AllowStableUrlContentChange { get; init; }
 }

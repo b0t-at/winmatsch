@@ -6,6 +6,12 @@ using WinMatsch.Downloads;
 
 namespace WinMatsch.Workflows.Mapping;
 
+public enum AnalysisEvidenceOrigin
+{
+    ContentAnalysis,
+    MetadataFixture,
+}
+
 /// <summary>Relative strength of one mapping or version conclusion.</summary>
 public enum EvidenceConfidence
 {
@@ -44,15 +50,20 @@ public sealed record AssetAnalysisEvidence
 
     public required DetectedInstallerFormat Format { get; init; }
 
+    /// <summary>The exact downloaded bytes this analysis was derived from.</summary>
+    public required DownloadContentIdentity AnalyzedContentIdentity { get; init; }
+
+    /// <summary>The requested or final download URL whose bytes were analyzed.</summary>
+    public required string AnalyzedUrl { get; init; }
+
+    public AnalysisEvidenceOrigin Origin { get; init; } = AnalysisEvidenceOrigin.ContentAnalysis;
+
     public string? ProductVersion { get; init; }
 
     public bool IsProductVersionTrustworthy { get; init; }
 
-    public ImmutableArray<Architecture> PayloadArchitectures { get; init; } = [];
-
-    public ImmutableArray<InstallerType> InstallerTypes { get; init; } = [];
-
-    public ImmutableArray<Scope> Scopes { get; init; } = [];
+    /// <summary>Correlated installer shapes emitted by the analyzer for this one asset.</summary>
+    public ImmutableArray<AnalyzedInstallerShape> InstallerShapes { get; init; } = [];
 
     public ImmutableArray<string> ArchiveEntries { get; init; } = [];
 
@@ -72,11 +83,50 @@ public sealed record AssetAnalysisEvidence
             errors.Add($"Archive entry count exceeds {MaximumArchiveEntries}.");
         }
 
-        foreach (string path in ArchiveEntries.Concat(NestedInstallerCandidates))
+        if (NestedInstallerCandidates.Length > MaximumArchiveEntries)
+        {
+            errors.Add($"Nested installer candidate count exceeds {MaximumArchiveEntries}.");
+        }
+
+        if (InstallerShapes.Length > MaximumArchiveEntries)
+        {
+            errors.Add($"Analyzed installer shape count exceeds {MaximumArchiveEntries}.");
+        }
+
+        foreach (string path in ArchiveEntries
+                     .Concat(NestedInstallerCandidates)
+                     .Concat(PayloadEvidence.Select(static evidence => evidence.Path))
+                     .Concat(InstallerShapes.SelectMany(
+                         static shape => shape.NestedInstallerFiles.Select(static file => file.RelativeFilePath))))
         {
             if (!IsSafeArchivePath(path))
             {
                 errors.Add($"Archive path '{path}' is absolute, traversing, empty, or exceeds {MaximumArchivePathLength} characters.");
+            }
+        }
+
+        foreach (AnalyzedInstallerShape shape in InstallerShapes)
+        {
+            if (shape.NestedInstallerFiles
+                    .Select(static file => file.RelativeFilePath)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Count()
+                != shape.NestedInstallerFiles.Length
+                || shape.NestedInstallerFiles
+                    .Select(static file => file.PortableCommandAlias)
+                    .Where(static alias => !string.IsNullOrWhiteSpace(alias))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Count()
+                != shape.NestedInstallerFiles.Count(static file => !string.IsNullOrWhiteSpace(file.PortableCommandAlias)))
+            {
+                errors.Add("Analyzed nested installer paths and non-empty aliases must be distinct per installer shape.");
+            }
+
+            if (!ArchiveEntries.IsEmpty
+                && shape.NestedInstallerFiles.Any(
+                    file => !ArchiveEntries.Contains(file.RelativeFilePath, StringComparer.OrdinalIgnoreCase)))
+            {
+                errors.Add("An analyzed nested installer path is absent from the bounded archive entry set.");
             }
         }
 
@@ -96,11 +146,13 @@ public sealed record AssetAnalysisEvidence
 
     public static AssetAnalysisEvidence FromAnalysis(
         InstallerAnalysis analysis,
+        AssetContentEvidence content,
         PayloadDependencyAnalysis? dependencyAnalysis = null,
         IEnumerable<string>? boundedArchiveEntries = null,
         bool isProductVersionTrustworthy = false)
     {
         ArgumentNullException.ThrowIfNull(analysis);
+        ArgumentNullException.ThrowIfNull(content);
 
         Installer[] installers = analysis.Installers.ToArray();
         bool?[] pathDependencyValues = installers
@@ -112,31 +164,32 @@ public sealed record AssetAnalysisEvidence
         return new AssetAnalysisEvidence
         {
             Format = analysis.Format,
+            AnalyzedContentIdentity = content.Identity,
+            AnalyzedUrl = content.FinalUrl,
             ProductVersion = analysis.ProductVersion,
             IsProductVersionTrustworthy = isProductVersionTrustworthy,
-            PayloadArchitectures =
+            InstallerShapes =
             [
                 .. installers
-                    .Select(static installer => installer.Architecture)
-                    .OfType<Architecture>()
-                    .Distinct()
-                    .Order(),
-            ],
-            InstallerTypes =
-            [
-                .. installers
-                    .Select(static installer => installer.InstallerType)
-                    .OfType<InstallerType>()
-                    .Distinct()
-                    .Order(),
-            ],
-            Scopes =
-            [
-                .. installers
-                    .Select(static installer => installer.Scope)
-                    .OfType<Scope>()
-                    .Distinct()
-                    .Order(),
+                    .Select(static installer => new AnalyzedInstallerShape
+                    {
+                        Architecture = installer.Architecture,
+                        InstallerType = installer.InstallerType,
+                        NestedInstallerType = installer.NestedInstallerType,
+                        Scope = installer.Scope,
+                        NestedInstallerFiles =
+                        [
+                            .. (installer.NestedInstallerFiles ?? [])
+                                .Where(static file => !string.IsNullOrWhiteSpace(file.RelativeFilePath))
+                                .Select(static file => new PlannedNestedInstallerFile(
+                                    NormalizeArchivePath(file.RelativeFilePath!),
+                                    file.PortableCommandAlias)),
+                        ],
+                        ArchiveBinariesDependOnPath = installer.ArchiveBinariesDependOnPath,
+                    })
+                    .OrderBy(static shape => shape.Architecture)
+                    .ThenBy(static shape => shape.InstallerType)
+                    .ThenBy(static shape => shape.Scope),
             ],
             ArchiveEntries = SnapshotArchivePaths(boundedArchiveEntries ?? []),
             NestedInstallerCandidates =
@@ -207,6 +260,22 @@ public sealed record AssetAnalysisEvidence
                 && path[2] == '/')
             && !Path.IsPathFullyQualified(path)
             && !path.Split('/').Contains("..", StringComparer.Ordinal);
+}
+
+/// <summary>One correlated architecture/type/scope variant emitted for an analyzed asset.</summary>
+public sealed record AnalyzedInstallerShape
+{
+    public Architecture? Architecture { get; init; }
+
+    public InstallerType? InstallerType { get; init; }
+
+    public InstallerType? NestedInstallerType { get; init; }
+
+    public Scope? Scope { get; init; }
+
+    public ImmutableArray<PlannedNestedInstallerFile> NestedInstallerFiles { get; init; } = [];
+
+    public bool? ArchiveBinariesDependOnPath { get; init; }
 }
 
 /// <summary>Architecture and dependency evidence tied to one bounded payload path.</summary>

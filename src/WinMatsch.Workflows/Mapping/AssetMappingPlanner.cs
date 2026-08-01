@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Text.RegularExpressions;
 using WinMatsch.Analysis;
 using WinMatsch.Core;
+using WinMatsch.Downloads;
 using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.Versioning;
@@ -34,19 +35,35 @@ public static class AssetMappingPlanner
         Candidate[] candidates = request.Assets
             .OrderBy(static asset => asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal)
             .ThenBy(static asset => asset.AssetId)
-            .Select(asset => BuildCandidate(asset, request, pack, diagnostics, questions))
+            .SelectMany(asset => BuildCandidates(asset, request, pack, diagnostics, questions))
             .ToArray();
 
         AddMissingUrlOverrides(request, candidates, diagnostics, questions);
         ApplySiblingCoverage(candidates, request.PreviousInstallers, diagnostics);
+        DiagnoseContentIdentityConsistency(candidates, diagnostics, questions);
 
         var usedByPosition = new Dictionary<int, Candidate>();
         var positionsByCandidate = new Dictionary<Candidate, List<PreviousInstallerEntry>>();
         foreach (PreviousInstallerEntry previous in request.PreviousInstallers.OrderBy(static entry => entry.Position))
         {
-            Candidate[] exact = candidates
+            Candidate[] exactByUrl = candidates
                 .Where(candidate => UriEquals(candidate.Asset.DownloadUri, previous.Url))
                 .ToArray();
+            Candidate[] compatibleExact = exactByUrl
+                .Where(candidate => IsCompatible(previous, candidate))
+                .ToArray();
+            bool preserveIntentionalDuplicate = request.PreviousInstallers.Count(
+                entry => UriEquals(entry.Url, previous.Url)) > 1;
+            Candidate[] exact = compatibleExact.Length > 0
+                ? compatibleExact
+                : exactByUrl.Length == 1
+                    && (preserveIntentionalDuplicate
+                        || exactByUrl[0].Architecture is null
+                        || exactByUrl[0].Type is null)
+                    ? exactByUrl
+                    : exactByUrl.Length > 1
+                        ? exactByUrl
+                        : [];
             Candidate[] matches = exact.Length > 0
                 ? exact
                 : candidates.Where(candidate => IsCompatible(previous, candidate)).ToArray();
@@ -158,6 +175,27 @@ public static class AssetMappingPlanner
                 continue;
             }
 
+            if (candidate.Asset.Analysis is null)
+            {
+                diagnostics.Add(new(
+                    "MAP_REANALYSIS_REQUIRED",
+                    AssetMappingDiagnosticSeverity.Error,
+                    "A new asset must be analyzed from its downloaded bytes before it can be proposed safely.",
+                    candidate.Asset.DownloadUri.AbsoluteUri));
+                questions.Add(new(
+                    "MAP_REANALYSIS_REQUIRED",
+                    "Analyze this new asset before applying its proposed entry.",
+                    [],
+                    candidate.Asset.DownloadUri.AbsoluteUri));
+                decisions.Add(new(
+                    AssetMappingDecisionKind.Unresolved,
+                    null,
+                    null,
+                    "MAP_REANALYSIS_REQUIRED",
+                    EvidenceConfidence.Low));
+                continue;
+            }
+
             PlannedInstaller installer = CreateInstaller(
                 candidate,
                 null,
@@ -206,7 +244,7 @@ public static class AssetMappingPlanner
             ]);
     }
 
-    private static Candidate BuildCandidate(
+    private static IEnumerable<Candidate> BuildCandidates(
         DiscoveredAsset asset,
         AssetMappingRequest request,
         OverridePack? pack,
@@ -244,6 +282,20 @@ public static class AssetMappingPlanner
                 [],
                 asset.DownloadUri.AbsoluteUri));
         }
+        else if (!Uri.TryCreate(asset.Content.InitialUrl, UriKind.Absolute, out Uri? initialUri)
+            || !UriEquals(initialUri, asset.DownloadUri))
+        {
+            diagnostics.Add(new(
+                "CONTENT_URL_MISMATCH",
+                AssetMappingDiagnosticSeverity.Error,
+                "Downloaded content evidence was requested from a different asset URL.",
+                asset.DownloadUri.AbsoluteUri));
+            questions.Add(new(
+                "CONTENT_URL_MISMATCH",
+                "Download this exact release asset URL before mapping it.",
+                [],
+                asset.DownloadUri.AbsoluteUri));
+        }
         else if (asset.DeclaredSize > 0
             && asset.Content.Identity.SizeInBytes != asset.DeclaredSize)
         {
@@ -269,6 +321,38 @@ public static class AssetMappingPlanner
             questions.Add(new(
                 "ANALYSIS_EVIDENCE_INVALID",
                 "Re-analyze the asset with bounded, normalized archive evidence.",
+                [],
+                asset.DownloadUri.AbsoluteUri));
+        }
+
+        if (asset.Analysis is { } boundAnalysis
+            && (asset.Content is null
+                || boundAnalysis.AnalyzedContentIdentity != asset.Content.Identity
+                || (!string.Equals(boundAnalysis.AnalyzedUrl, asset.Content.InitialUrl, StringComparison.Ordinal)
+                    && !string.Equals(boundAnalysis.AnalyzedUrl, asset.Content.FinalUrl, StringComparison.Ordinal))))
+        {
+            diagnostics.Add(new(
+                "ANALYSIS_IDENTITY_MISMATCH",
+                AssetMappingDiagnosticSeverity.Error,
+                "Analyzer evidence is not bound to this asset's downloaded URL, SHA-256, and byte length.",
+                asset.DownloadUri.AbsoluteUri));
+            questions.Add(new(
+                "ANALYSIS_IDENTITY_MISMATCH",
+                "Re-analyze the exact downloaded bytes for this asset.",
+                [],
+                asset.DownloadUri.AbsoluteUri));
+        }
+
+        if (asset.Analysis?.Origin == AnalysisEvidenceOrigin.MetadataFixture)
+        {
+            diagnostics.Add(new(
+                "ANALYSIS_METADATA_ONLY",
+                AssetMappingDiagnosticSeverity.Error,
+                "Fixture metadata can exercise mapping logic but is not installer-content validation.",
+                asset.DownloadUri.AbsoluteUri));
+            questions.Add(new(
+                "ANALYSIS_METADATA_ONLY",
+                "Run FileAnalyzer and payload analysis on the downloaded bytes before applying.",
                 [],
                 asset.DownloadUri.AbsoluteUri));
         }
@@ -301,16 +385,64 @@ public static class AssetMappingPlanner
                 asset.DownloadUri.AbsoluteUri));
         }
 
-        Architecture? explicitArchitecture = urlOverride?.Architecture ?? forced.FirstOrDefault()?.Architecture;
+        AssetMappingOverride[] mappings = (pack?.AssetMappings ?? [])
+            .Where(item => PatternMatches(item.AssetPattern, asset.AssetName)
+                || PatternMatches(item.AssetPattern, asset.DownloadUri.AbsoluteUri))
+            .ToArray();
+        if (mappings.Length > 1)
+        {
+            diagnostics.Add(new(
+                "MAP_OVERRIDE_AMBIGUOUS",
+                AssetMappingDiagnosticSeverity.Error,
+                "Multiple asset mapping overrides match this asset.",
+                asset.DownloadUri.AbsoluteUri));
+        }
+
+        ValidateCandidateVersion(asset, request.Version, diagnostics);
+        AnalyzedInstallerShape?[] shapes = asset.Analysis is { InstallerShapes.IsEmpty: false } analysis
+            ? [.. analysis.InstallerShapes.Cast<AnalyzedInstallerShape?>()]
+            : [null];
+        foreach (AnalyzedInstallerShape? shape in shapes)
+        {
+            yield return BuildCandidateVariant(
+                asset,
+                shape,
+                urlOverride,
+                forced,
+                mappings,
+                diagnostics,
+                questions);
+        }
+    }
+
+    private static Candidate BuildCandidateVariant(
+        DiscoveredAsset asset,
+        AnalyzedInstallerShape? shape,
+        UrlOverride? urlOverride,
+        ForcedArchitectureOverride[] forced,
+        AssetMappingOverride[] mappings,
+        List<AssetMappingDiagnostic> diagnostics,
+        List<AssetMappingQuestion> questions)
+    {
+        AssetMappingOverride? mapping = mappings.Length == 1 ? mappings[0] : null;
+        Architecture? explicitArchitecture =
+            urlOverride?.Architecture ?? mapping?.Architecture ?? forced.FirstOrDefault()?.Architecture;
         ArchitectureTokenEvidence token = ArchitectureTokenClassifier.Classify(asset.AssetName);
-        Architecture[] payload = asset.Analysis?.PayloadArchitectures.Distinct().Order().ToArray() ?? [];
-        Architecture? payloadArchitecture = payload.Length == 1 ? payload[0] : null;
-        Architecture? architecture = explicitArchitecture ?? ResolveArchitecture(token, payloadArchitecture);
+        Architecture[] payload = asset.Analysis?.PayloadEvidence
+            .Select(static evidence => evidence.Architecture)
+            .OfType<Architecture>()
+            .Distinct()
+            .Order()
+            .ToArray() ?? [];
+        Architecture? analyzedArchitecture = shape?.Architecture
+            ?? (payload.Length == 1 ? payload[0] : null);
+        Architecture? architecture = explicitArchitecture
+            ?? (token.IsAmbiguous ? null : token.Architecture ?? analyzedArchitecture);
         bool architectureConflict = token.IsAmbiguous
-            || payload.Length > 1
+            || (shape?.Architecture is null && payload.Length > 1)
             || (token.Architecture is not null
-                && payloadArchitecture is not null
-                && token.Architecture != payloadArchitecture);
+                && analyzedArchitecture is not null
+                && token.Architecture != analyzedArchitecture);
         if (architectureConflict)
         {
             AssetMappingDiagnosticSeverity severity = explicitArchitecture is null
@@ -332,6 +464,7 @@ public static class AssetMappingPlanner
                     [
                         .. token.Candidates
                             .Concat(payload)
+                            .Concat(shape?.Architecture is { } shapeArchitecture ? [shapeArchitecture] : [])
                             .Distinct()
                             .Order()
                             .Select(static item => item.ToString()),
@@ -340,64 +473,33 @@ public static class AssetMappingPlanner
             }
         }
 
-        InstallerType? type = ResolveInstallerType(asset);
-        Scope? scope = urlOverride?.Scope
-            ?? (asset.Analysis is { Scopes.Length: 1 } analysis ? analysis.Scopes[0] : null);
-        AssetMappingOverride[] mappings = (pack?.AssetMappings ?? [])
-            .Where(item => PatternMatches(item.AssetPattern, asset.AssetName)
-                || PatternMatches(item.AssetPattern, asset.DownloadUri.AbsoluteUri))
-            .ToArray();
-        if (mappings.Length == 1)
-        {
-            architecture = mappings[0].Architecture ?? architecture;
-            type = mappings[0].InstallerType ?? type;
-            scope = mappings[0].Scope ?? scope;
-        }
-        else if (mappings.Length > 1)
-        {
-            diagnostics.Add(new(
-                "MAP_OVERRIDE_AMBIGUOUS",
-                AssetMappingDiagnosticSeverity.Error,
-                "Multiple asset mapping overrides match this asset.",
-                asset.DownloadUri.AbsoluteUri));
-        }
-
-        ValidateVersionContinuity(asset, request.Version, diagnostics);
+        InstallerType? type = mapping?.InstallerType
+            ?? shape?.InstallerType
+            ?? ResolveInstallerType(asset);
+        Scope? scope = urlOverride?.Scope ?? mapping?.Scope ?? shape?.Scope;
         return new(
             asset,
             architecture,
             type,
+            shape?.NestedInstallerType,
             scope,
             urlOverride?.DisplayVersion,
-            mappings.Length == 1 ? mappings[0].Entry : null,
-            urlOverride is not null
-                || mappings.Length == 1
-                || forced.Length == 1
-                || pack?.ScopeLayout is ScopeLayoutOverride.Root or ScopeLayoutOverride.PerInstaller,
-            explicitArchitecture is not null || mappings.Length == 1
+            mapping?.Entry,
+            explicitArchitecture is not null,
+            mapping?.InstallerType is not null,
+            urlOverride?.Scope is not null || mapping?.Scope is not null,
+            explicitArchitecture is not null || mapping is not null
                 ? EvidenceConfidence.Explicit
                 : asset.Analysis is not null
                     ? EvidenceConfidence.High
                     : token.Architecture is not null
                         ? EvidenceConfidence.Medium
-                        : EvidenceConfidence.Low);
+                        : EvidenceConfidence.Low,
+            shape);
     }
-
-    private static Architecture? ResolveArchitecture(
-        ArchitectureTokenEvidence token,
-        Architecture? payloadArchitecture)
-        => token.IsAmbiguous
-            ? null
-            : token.Architecture ?? payloadArchitecture;
 
     private static InstallerType? ResolveInstallerType(DiscoveredAsset asset)
     {
-        InstallerType[] analyzed = asset.Analysis?.InstallerTypes.Distinct().ToArray() ?? [];
-        if (analyzed.Length == 1)
-        {
-            return analyzed[0];
-        }
-
         string name = asset.AssetName;
         if (ContainsBounded(name, "portable"))
         {
@@ -433,12 +535,10 @@ public static class AssetMappingPlanner
         Architecture[] missing = previousArchitectures.Except(known).ToArray();
         if (unresolved.Length == 1 && missing.Length == 1)
         {
-            unresolved[0].Architecture = missing[0];
-            unresolved[0].Confidence = EvidenceConfidence.Low;
             diagnostics.Add(new(
                 "ARCH_SIBLING_COVERAGE",
-                AssetMappingDiagnosticSeverity.Warning,
-                $"Architecture {missing[0]} was inferred only from complete sibling-set coverage.",
+                AssetMappingDiagnosticSeverity.Information,
+                $"Sibling coverage suggests {missing[0]}, but this low-confidence signal is not applied without payload evidence or an override.",
                 unresolved[0].Asset.DownloadUri.AbsoluteUri));
         }
     }
@@ -446,6 +546,7 @@ public static class AssetMappingPlanner
     private static bool IsCompatible(PreviousInstallerEntry previous, Candidate candidate)
         => candidate.Architecture == previous.Architecture
             && TypesCompatible(previous.InstallerType, candidate.Type)
+            && (candidate.NestedType is null || candidate.NestedType == previous.NestedInstallerType)
             && (candidate.Scope is null || previous.Scope is null || candidate.Scope == previous.Scope)
             && EntryMatches(previous, candidate.Entry);
 
@@ -488,6 +589,17 @@ public static class AssetMappingPlanner
         List<AssetMappingDiagnostic> diagnostics,
         List<AssetMappingQuestion> questions)
     {
+        if (!request.Version.IsResolved)
+        {
+            decisions.Add(new(
+                AssetMappingDecisionKind.Unresolved,
+                previous.Position,
+                null,
+                "VERSION_BLOCKS_MAPPING",
+                EvidenceConfidence.Low));
+            return;
+        }
+
         bool exactUrl = UriEquals(previous.Url, candidate.Asset.DownloadUri);
         bool preserveIntentionalLayout = request.PreviousInstallers.Count(
             entry => UriEquals(entry.Url, previous.Url)) > 1;
@@ -549,10 +661,25 @@ public static class AssetMappingPlanner
         bool structureChanged = !preserveIntentionalLayout
             && ((candidate.Architecture is not null && previous.Architecture != candidate.Architecture)
             || (candidate.Type is not null && previous.InstallerType != candidate.Type)
+            || (candidate.NestedType is not null && previous.NestedInstallerType != candidate.NestedType)
             || (candidate.Scope is not null && previous.Scope != candidate.Scope));
+        bool unauthorizedArchitectureChange = candidate.Architecture is not null
+            && previous.Architecture != candidate.Architecture
+            && !candidate.HasExplicitArchitecture;
+        bool unauthorizedTypeChange = candidate.Type is not null
+            && previous.InstallerType != candidate.Type
+            && !candidate.HasExplicitType;
+        bool unauthorizedNestedTypeChange = candidate.NestedType is not null
+            && previous.NestedInstallerType != candidate.NestedType;
+        bool unauthorizedScopeChange = candidate.Scope is not null
+            && previous.Scope != candidate.Scope
+            && !candidate.HasExplicitScope;
         if (structureChanged
             && !request.AllowStructuralRewrite
-            && !candidate.HasExplicitMapping)
+            && (unauthorizedArchitectureChange
+                || unauthorizedTypeChange
+                || unauthorizedNestedTypeChange
+                || unauthorizedScopeChange))
         {
             diagnostics.Add(new(
                 "MAP_STRUCTURAL_REWRITE",
@@ -575,6 +702,34 @@ public static class AssetMappingPlanner
             return;
         }
 
+        bool hashChanged = previous.Sha256 is not null
+            && candidate.Asset.Content is not null
+            && previous.Sha256 != candidate.Asset.Content.Identity.Sha256;
+        bool artifactChanged = !exactUrl || hashChanged;
+        if (artifactChanged && candidate.Asset.Analysis is null)
+        {
+            diagnostics.Add(new(
+                "MAP_REANALYSIS_REQUIRED",
+                AssetMappingDiagnosticSeverity.Error,
+                "A changed asset must be analyzed from its current downloaded bytes before mapping.",
+                candidate.Asset.DownloadUri.AbsoluteUri,
+                previous.Position));
+            questions.Add(new(
+                "MAP_REANALYSIS_REQUIRED",
+                "Analyze the changed asset content before applying this mapping.",
+                [],
+                candidate.Asset.DownloadUri.AbsoluteUri,
+                previous.Position));
+            decisions.Add(new(
+                AssetMappingDecisionKind.Unresolved,
+                previous.Position,
+                null,
+                "MAP_REANALYSIS_REQUIRED",
+                EvidenceConfidence.Low));
+            return;
+        }
+
+        ValidateVersionContinuity(previous, candidate, request.Version.Version!, diagnostics);
         PlannedInstaller installer = CreateInstaller(
             candidate,
             previous,
@@ -582,15 +737,18 @@ public static class AssetMappingPlanner
             preserveIntentionalLayout,
             diagnostics,
             questions);
-        bool hashChanged = previous.Sha256 is not null
-            && installer.Sha256 is not null
-            && previous.Sha256 != installer.Sha256;
-        if (exactUrl && hashChanged)
+        if (exactUrl && hashChanged && !request.AllowStableUrlContentChange)
         {
             diagnostics.Add(new(
                 "CONTENT_CHANGED_AT_STABLE_URL",
-                AssetMappingDiagnosticSeverity.Warning,
-                "The URL is unchanged but its downloaded SHA-256 changed.",
+                AssetMappingDiagnosticSeverity.Error,
+                "The URL is unchanged but its downloaded SHA-256 changed; explicit content-change approval is required.",
+                candidate.Asset.DownloadUri.AbsoluteUri,
+                previous.Position));
+            questions.Add(new(
+                "CONTENT_CHANGED_AT_STABLE_URL",
+                "Confirm the new content identity for this stable URL.",
+                [],
                 candidate.Asset.DownloadUri.AbsoluteUri,
                 previous.Position));
         }
@@ -617,7 +775,11 @@ public static class AssetMappingPlanner
         List<AssetMappingDiagnostic> diagnostics,
         List<AssetMappingQuestion> questions)
     {
-        NestedPathResolution nested = NestedInstallerPathResolver.Resolve(previous, candidate.Asset.Analysis, newVersion);
+        NestedPathResolution nested = NestedInstallerPathResolver.Resolve(
+            previous,
+            candidate.Asset.Analysis,
+            candidate.AnalyzedShape,
+            newVersion);
         if (nested.ErrorCode is not null)
         {
             diagnostics.Add(new(
@@ -649,23 +811,49 @@ public static class AssetMappingPlanner
             InstallerType = preservePreviousStructure
                 ? previous!.InstallerType
                 : candidate.Type ?? previous?.InstallerType,
+            NestedInstallerType = preservePreviousStructure
+                ? previous!.NestedInstallerType
+                : candidate.NestedType ?? previous?.NestedInstallerType,
             Scope = preservePreviousStructure
                 ? previous!.Scope
                 : candidate.Scope ?? previous?.Scope,
             DisplayVersion = candidate.DisplayVersion ?? previous?.DisplayVersion,
             NestedInstallerFiles = nested.Files,
             ArchiveBinariesDependOnPath =
-                candidate.Asset.Analysis?.ArchiveBinariesDependOnPath
+                candidate.AnalyzedShape?.ArchiveBinariesDependOnPath
+                ?? candidate.Asset.Analysis?.ArchiveBinariesDependOnPath
                 ?? previous?.ArchiveBinariesDependOnPath,
         };
     }
 
     private static void ValidateVersionContinuity(
-        DiscoveredAsset asset,
-        PackageVersionResolution version,
+        PreviousInstallerEntry previous,
+        Candidate candidate,
+        PackageVersion targetVersion,
         List<AssetMappingDiagnostic> diagnostics)
     {
-        if (!version.IsResolved)
+        if (!ContainsVersionToken(previous.Url, previous.PackageVersion.Value))
+        {
+            return;
+        }
+
+        if (!ContainsVersionToken(candidate.Asset.DownloadUri, targetVersion.Value))
+        {
+            diagnostics.Add(new(
+                "MAP_VERSION_DISCONTINUITY",
+                AssetMappingDiagnosticSeverity.Error,
+                $"The previous URL embedded version '{previous.PackageVersion}', but the mapped URL does not embed target version '{targetVersion}'.",
+                candidate.Asset.DownloadUri.AbsoluteUri,
+                previous.Position));
+        }
+    }
+
+    private static void ValidateCandidateVersion(
+        DiscoveredAsset asset,
+        PackageVersionResolution resolution,
+        List<AssetMappingDiagnostic> diagnostics)
+    {
+        if (!resolution.IsResolved)
         {
             return;
         }
@@ -673,14 +861,42 @@ public static class AssetMappingPlanner
         string? urlVersion = PackageVersionResolver.ExtractUrlVersion(asset.DownloadUri);
         if (urlVersion is not null
             && PackageVersion.TryCreate(urlVersion, out PackageVersion? parsed)
-            && !parsed!.IsEquivalentTo(version.Version!))
+            && !parsed!.IsEquivalentTo(resolution.Version!))
         {
             diagnostics.Add(new(
                 "MAP_VERSION_DISCONTINUITY",
                 AssetMappingDiagnosticSeverity.Error,
-                $"Asset URL version '{urlVersion}' does not match package version '{version.Version}'.",
+                $"Asset URL version '{urlVersion}' does not match target package version '{resolution.Version}'.",
                 asset.DownloadUri.AbsoluteUri));
         }
+    }
+
+    private static bool ContainsVersionToken(Uri uri, string version)
+    {
+        string path = Uri.UnescapeDataString(uri.AbsolutePath);
+        string[] representations =
+        [
+            version,
+            version.Replace('.', '_'),
+            version.Replace('.', '-'),
+        ];
+        return representations.Any(candidate =>
+        {
+            int index = path.IndexOf(candidate, StringComparison.OrdinalIgnoreCase);
+            while (index >= 0)
+            {
+                int end = index + candidate.Length;
+                if ((index == 0 || !char.IsAsciiLetterOrDigit(path[index - 1]))
+                    && (end == path.Length || !char.IsAsciiLetterOrDigit(path[end])))
+                {
+                    return true;
+                }
+
+                index = path.IndexOf(candidate, index + 1, StringComparison.OrdinalIgnoreCase);
+            }
+
+            return false;
+        });
     }
 
     private static void AddMissingUrlOverrides(
@@ -731,6 +947,38 @@ public static class AssetMappingPlanner
         }
     }
 
+    private static void DiagnoseContentIdentityConsistency(
+        IEnumerable<Candidate> candidates,
+        List<AssetMappingDiagnostic> diagnostics,
+        List<AssetMappingQuestion> questions)
+    {
+        foreach (IGrouping<string, Candidate> group in candidates.GroupBy(
+                     static candidate => candidate.Asset.DownloadUri.AbsoluteUri,
+                     StringComparer.Ordinal))
+        {
+            DownloadContentIdentity[] identities = group
+                .Select(static candidate => candidate.Asset.Content?.Identity)
+                .OfType<DownloadContentIdentity>()
+                .Distinct()
+                .ToArray();
+            if (identities.Length <= 1)
+            {
+                continue;
+            }
+
+            diagnostics.Add(new(
+                "CONTENT_IDENTITY_CONFLICT",
+                AssetMappingDiagnosticSeverity.Error,
+                "The same asset URL is associated with multiple SHA-256 or byte-length identities.",
+                group.Key));
+            questions.Add(new(
+                "CONTENT_IDENTITY_CONFLICT",
+                "Revalidate the duplicated URL and retain one content identity.",
+                [],
+                group.Key));
+        }
+    }
+
     private static bool PatternMatches(string pattern, string value)
     {
         string regex = "^" + Regex.Escape(pattern).Replace("\\*", ".*", StringComparison.Ordinal) + "$";
@@ -762,11 +1010,15 @@ public static class AssetMappingPlanner
         DiscoveredAsset asset,
         Architecture? architecture,
         InstallerType? type,
+        InstallerType? nestedType,
         Scope? scope,
         string? displayVersion,
         string? entry,
-        bool hasExplicitMapping,
-        EvidenceConfidence confidence)
+        bool hasExplicitArchitecture,
+        bool hasExplicitType,
+        bool hasExplicitScope,
+        EvidenceConfidence confidence,
+        AnalyzedInstallerShape? analyzedShape)
     {
         public DiscoveredAsset Asset { get; } = asset;
 
@@ -774,14 +1026,22 @@ public static class AssetMappingPlanner
 
         public InstallerType? Type { get; } = type;
 
+        public InstallerType? NestedType { get; } = nestedType;
+
         public Scope? Scope { get; } = scope;
 
         public string? DisplayVersion { get; } = displayVersion;
 
         public string? Entry { get; } = entry;
 
-        public bool HasExplicitMapping { get; } = hasExplicitMapping;
+        public bool HasExplicitArchitecture { get; } = hasExplicitArchitecture;
 
-        public EvidenceConfidence Confidence { get; set; } = confidence;
+        public bool HasExplicitType { get; } = hasExplicitType;
+
+        public bool HasExplicitScope { get; } = hasExplicitScope;
+
+        public EvidenceConfidence Confidence { get; } = confidence;
+
+        public AnalyzedInstallerShape? AnalyzedShape { get; } = analyzedShape;
     }
 }

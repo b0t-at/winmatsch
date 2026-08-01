@@ -62,6 +62,27 @@ public sealed class ReleaseAssetDiscoveryTests
                 cancellationToken: source.Token));
     }
 
+    [Fact]
+    public void Product_name_containing_source_is_not_dropped_when_architecture_is_explicit()
+    {
+        GitHubRelease release = CreateRelease(
+            1,
+            "v1.0.0",
+            DateTimeOffset.UnixEpoch,
+            new ReleaseAsset(
+                1,
+                "Resource-Editor-source-x64.zip",
+                new("https://example.test/Resource-Editor-source-x64.zip"),
+                "application/zip",
+                1,
+                0,
+                DateTimeOffset.UnixEpoch));
+
+        DiscoveredAsset asset = Assert.Single(ReleaseAssetDiscovery.Discover([release]));
+
+        Assert.Equal("Resource-Editor-source-x64.zip", asset.AssetName);
+    }
+
     private static GitHubRelease CreateRelease(
         long id,
         string tag,

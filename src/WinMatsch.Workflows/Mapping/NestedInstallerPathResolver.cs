@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using WinMatsch.Analysis;
 
 namespace WinMatsch.Workflows.Mapping;
 
@@ -7,6 +8,7 @@ internal static class NestedInstallerPathResolver
     public static NestedPathResolution Resolve(
         PreviousInstallerEntry? previous,
         AssetAnalysisEvidence? analysis,
+        AnalyzedInstallerShape? shape,
         string newVersion)
     {
         if (analysis is null)
@@ -17,25 +19,43 @@ internal static class NestedInstallerPathResolver
         }
 
         string[] actualPaths = analysis.ArchiveEntries
-            .Concat(analysis.NestedInstallerCandidates)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Order(StringComparer.Ordinal)
             .ToArray();
         if (actualPaths.Length == 0)
         {
-            return previous is { NestedInstallerFiles.IsEmpty: false }
-                ? NestedPathResolution.Unresolved("NESTED_PATH_REMOVED", "No bounded archive entry matches the previous nested installer.")
+            return analysis.Format == DetectedInstallerFormat.Zip
+                || previous is { NestedInstallerFiles.IsEmpty: false }
+                ? NestedPathResolution.Unresolved(
+                    "NESTED_BOUNDED_CONTENTS_REQUIRED",
+                    "Nested installer paths require the bounded archive entry set.")
                 : NestedPathResolution.Empty;
         }
 
         if (previous is null || previous.NestedInstallerFiles.IsEmpty)
         {
-            return analysis.NestedInstallerCandidates.Length == 1
-                ? new(
+            ImmutableArray<PlannedNestedInstallerFile> analyzedFiles =
+                shape?.NestedInstallerFiles ?? [];
+            if (!analyzedFiles.IsEmpty)
+            {
+                return ValidateAnalyzedFiles(analyzedFiles, actualPaths);
+            }
+
+            if (analysis.NestedInstallerCandidates.Length == 1)
+            {
+                return new(
                     [new PlannedNestedInstallerFile(analysis.NestedInstallerCandidates[0], null)],
                     null,
-                    null)
-                : NestedPathResolution.Empty;
+                    null);
+            }
+
+            return analysis.NestedInstallerCandidates.Length > 1
+                ? NestedPathResolution.Unresolved(
+                    "NESTED_PATH_AMBIGUOUS",
+                    "Multiple nested installer candidates require an analyzer-selected file set or explicit input.")
+                : NestedPathResolution.Unresolved(
+                    "NESTED_PATH_UNRESOLVED",
+                    "No nested installer file was selected from the bounded archive contents.");
         }
 
         var resolved = ImmutableArray.CreateBuilder<PlannedNestedInstallerFile>();
@@ -73,6 +93,33 @@ internal static class NestedInstallerPathResolver
         }
 
         return new([.. resolved], null, null);
+    }
+
+    private static NestedPathResolution ValidateAnalyzedFiles(
+        ImmutableArray<PlannedNestedInstallerFile> files,
+        IReadOnlyCollection<string> actualPaths)
+    {
+        if (files.Any(file => !actualPaths.Contains(file.RelativeFilePath, StringComparer.OrdinalIgnoreCase)))
+        {
+            return NestedPathResolution.Unresolved(
+                "NESTED_PATH_REMOVED",
+                "An analyzer-selected nested installer path is absent from bounded archive contents.");
+        }
+
+        if (files.Select(static file => file.RelativeFilePath).Distinct(StringComparer.OrdinalIgnoreCase).Count() != files.Length
+            || files
+                .Select(static file => file.PortableCommandAlias)
+                .Where(static alias => !string.IsNullOrWhiteSpace(alias))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count()
+                != files.Count(static file => !string.IsNullOrWhiteSpace(file.PortableCommandAlias)))
+        {
+            return NestedPathResolution.Unresolved(
+                "NESTED_DUPLICATE",
+                "Nested installer paths and non-empty aliases must be distinct.");
+        }
+
+        return new(files, null, null);
     }
 
     private static string ReplaceVersion(string path, string oldVersion, string newVersion)

@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using WinMatsch.Analysis;
 using WinMatsch.Core;
+using WinMatsch.Downloads;
 using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.Mapping;
@@ -95,12 +96,71 @@ public sealed class PackageVersionResolverTests
         Assert.Equal("12.87", PackageVersionResolver.ExtractUrlVersion(uri));
     }
 
+    [Fact]
+    public void Invalid_explicit_version_does_not_fall_back()
+    {
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = new("Vendor.Product"),
+            ExplicitPackageVersion = "invalid|version",
+            Assets = [CreateAsset("v2.0.0", "https://example.test/Product-2.0.0.exe")],
+        });
+
+        Assert.False(result.IsResolved);
+        Assert.Equal(PackageVersionSource.PackageOverride, result.Source);
+        Assert.Contains(result.Diagnostics, static diagnostic => diagnostic.StartsWith("VERSION_INVALID", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Calendar_release_tag_is_not_selected_as_version()
+    {
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = new("Vendor.Product"),
+            Assets = [CreateAsset("release-2025-01-01", "https://example.test/tool.exe")],
+        });
+
+        Assert.False(result.IsResolved);
+    }
+
+    [Fact]
+    public void Platform_version_token_is_not_treated_as_package_version()
+    {
+        Assert.Null(PackageVersionResolver.ExtractUrlVersion(
+            new Uri("https://example.test/tool-windows-10.0-x64.exe")));
+    }
+
+    [Fact]
+    public void Trustworthy_product_version_may_use_date_format()
+    {
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = new("Vendor.Product"),
+            Assets =
+            [
+                CreateAsset(
+                    "latest",
+                    "https://example.test/tool.exe",
+                    productVersion: "2025-01-01",
+                    trustworthy: true),
+            ],
+        });
+
+        Assert.Equal("2025-01-01", result.Version?.Value);
+        Assert.Equal(PackageVersionSource.InstallerProductVersion, result.Source);
+    }
+
     private static DiscoveredAsset CreateAsset(
         string tag,
         string url,
         string? productVersion = null,
         bool trustworthy = false)
-        => new()
+    {
+        var uri = new Uri(url);
+        var identity = new DownloadContentIdentity(
+            new Sha256Hash("0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"),
+            1);
+        return new()
         {
             ReleaseId = 1,
             ReleaseTag = tag,
@@ -109,17 +169,26 @@ public sealed class PackageVersionResolverTests
             IsPrerelease = false,
             ReleasePublishedAt = DateTimeOffset.UnixEpoch,
             AssetId = 1,
-            AssetName = Path.GetFileName(new Uri(url).AbsolutePath),
-            DownloadUri = new(url),
+            AssetName = Path.GetFileName(uri.AbsolutePath),
+            DownloadUri = uri,
             DeclaredContentType = "application/octet-stream",
             DeclaredSize = 1,
             AssetCreatedAt = DateTimeOffset.UnixEpoch,
+            Content = new(
+                identity,
+                uri.AbsoluteUri,
+                uri.AbsoluteUri,
+                "application/octet-stream",
+                DateTimeOffset.UnixEpoch),
             Analysis = new AssetAnalysisEvidence
             {
                 Format = DetectedInstallerFormat.GenericInstallerExe,
+                AnalyzedContentIdentity = identity,
+                AnalyzedUrl = uri.AbsoluteUri,
                 ProductVersion = productVersion,
                 IsProductVersionTrustworthy = trustworthy,
-                InstallerTypes = [InstallerType.Exe],
+                InstallerShapes = [new() { InstallerType = InstallerType.Exe }],
             },
         };
+    }
 }

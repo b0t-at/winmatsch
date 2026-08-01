@@ -120,15 +120,17 @@ public static class ReleaseAssetDiscovery
 
     private static bool IsWindowsAsset(ReleaseAsset asset)
     {
-        if (asset.Name.Contains("source", StringComparison.OrdinalIgnoreCase)
-            || asset.Name.Contains("symbols", StringComparison.OrdinalIgnoreCase))
+        bool hasWindowsSignal = _windowsTokens.Any(token => ContainsBounded(asset.Name, token))
+            || ArchitectureTokenClassifier.Classify(asset.Name).Architecture is not null;
+        if ((ContainsBounded(asset.Name, "source") || ContainsBounded(asset.Name, "symbols"))
+            && !hasWindowsSignal)
         {
             return false;
         }
 
         string extension = Path.GetExtension(asset.Name);
         return _windowsExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase)
-            || _windowsTokens.Any(token => ContainsBounded(asset.Name, token));
+            || hasWindowsSignal;
     }
 
     private static bool ContainsBounded(string value, string token)

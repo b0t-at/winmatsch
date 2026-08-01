@@ -54,6 +54,18 @@ public static partial class PackageVersionResolver
 
         input.OverridePacks.TryGet(input.PackageIdentifier, out OverridePack? pack);
         string? packageOverride = input.ExplicitPackageVersion ?? ParseLiteralOverride(pack?.VersionSource);
+        if (!string.IsNullOrWhiteSpace(packageOverride)
+            && !PackageVersion.TryCreate(packageOverride.Trim(), out _))
+        {
+            return new(
+                null,
+                PackageVersionSource.PackageOverride,
+                EvidenceConfidence.Explicit,
+                false,
+                [],
+                [$"VERSION_INVALID:PackageOverride:{packageOverride.Trim()}"]);
+        }
+
         AddCandidate(
             packageOverride,
             PackageVersionSource.PackageOverride,
@@ -186,19 +198,34 @@ public static partial class PackageVersionResolver
     public static string? ExtractUrlVersion(Uri uri)
     {
         ArgumentNullException.ThrowIfNull(uri);
-        string path = Uri.UnescapeDataString(uri.AbsolutePath);
-        string extension = Path.GetExtension(path);
+        string[] segments = uri.Segments
+            .Select(static segment => Uri.UnescapeDataString(segment).Trim('/'))
+            .Where(static segment => segment.Length > 0)
+            .ToArray();
+        string fileName = segments.LastOrDefault() ?? "";
+        string extension = Path.GetExtension(fileName);
         if (extension.Length > 0)
         {
-            path = path[..^extension.Length];
+            fileName = fileName[..^extension.Length];
         }
-        MatchCollection matches = UrlVersionRegex().Matches(path);
-        if (matches.Count == 0)
+
+        string? version = FindContextualVersion(fileName);
+        if (version is null)
+        {
+            int download = Array.FindLastIndex(
+                segments,
+                static segment => string.Equals(segment, "download", StringComparison.OrdinalIgnoreCase));
+            if (download >= 0 && download + 1 < segments.Length)
+            {
+                version = FindContextualVersion(segments[download + 1]);
+            }
+        }
+
+        if (version is null)
         {
             return null;
         }
 
-        string version = matches[^1].Groups["version"].Value;
         if (version.EndsWith("_32", StringComparison.Ordinal)
             || version.EndsWith("_64", StringComparison.Ordinal))
         {
@@ -206,6 +233,23 @@ public static partial class PackageVersionResolver
         }
 
         return version.Replace('_', '.');
+    }
+
+    private static string? FindContextualVersion(string value)
+    {
+        MatchCollection matches = UrlVersionRegex().Matches(value);
+        foreach (Match match in matches.Cast<Match>().Reverse())
+        {
+            string prefix = value[..match.Index].TrimEnd('-', '_', '.');
+            string context = (prefix.Split(['-', '_', '.'], StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "")
+                .ToLowerInvariant();
+            if (context is not ("win" or "windows" or "win32" or "win64"))
+            {
+                return match.Groups["version"].Value;
+            }
+        }
+
+        return null;
     }
 
     private static void AddCandidate(
@@ -224,6 +268,13 @@ public static partial class PackageVersionResolver
         string normalized = value.Trim();
         if (source is not PackageVersionSource.PackageOverride
             && !normalized.Any(char.IsAsciiDigit))
+        {
+            diagnostics.Add($"VERSION_INVALID:{source}:{normalized}");
+            return;
+        }
+
+        if (source == PackageVersionSource.ReleaseTag
+            && CalendarDateRegex().IsMatch(normalized))
         {
             diagnostics.Add($"VERSION_INVALID:{source}:{normalized}");
             return;
@@ -291,4 +342,7 @@ public static partial class PackageVersionResolver
         @"(?<![A-Za-z0-9])v?(?<version>[0-9]+(?:[._][0-9]+)+(?:-(?:alpha|beta|preview|rc)[0-9]*)?)(?![A-Za-z0-9])",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex UrlVersionRegex();
+
+    [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}(?:[T ].*)?$", RegexOptions.CultureInvariant)]
+    private static partial Regex CalendarDateRegex();
 }
