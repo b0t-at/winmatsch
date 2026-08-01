@@ -114,49 +114,24 @@ public sealed class RulePipeline
     }
 
     /// <summary>
-    /// Creates the default pipeline. The order is deliberate: previous-version carry-over first
-    /// (so later normalization sees the complete data), then quirks, then the generic
-    /// normalization passes ending with hoisting, and validation last.
+    /// Creates the production pipeline with empty policy evidence and layered built-in package
+    /// behavior. This compatibility factory delegates to <see cref="ProductionRuleComposer"/>
+    /// so there is one authoritative built-in order.
     /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
     public static RulePipeline CreateDefault(IEnumerable<string>? disabledRuleIds = null) => new(
-        [
-            new PreserveOnUpdateRule(),
-            new ApplyPackageQuirksRule(),
-            new PushDownRootFieldsRule(),
-            new ScrubEmptyStringsRule(),
-            new NormalizeProductCodesRule(),
-            new DedupeArpVsDefaultLocaleRule(),
-            new RemoveDuplicateInstallersRule(),
-            new HoistCommonInstallerFieldsRule(),
-            new DisplayVersionConsistencyRule(),
-            new DuplicateInstallerEntriesRule(),
-            new InstallerTypeConsistencyRule(),
-        ],
+        ProductionRuleComposer.Compose(overridePacks: OverridePackSet.BuiltIn),
         disabledRuleIds);
 
-    /// <summary>Creates the default pipeline with layered runtime and package overrides.</summary>
+    /// <summary>Creates the production pipeline with layered runtime and package overrides.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
     public static RulePipeline CreateDefaultWithRuntime(
         RuleRuntimeConfiguration runtimeConfiguration,
         OverridePackSet? overridePacks = null)
     {
         ArgumentNullException.ThrowIfNull(runtimeConfiguration);
         OverridePackSet packs = overridePacks ?? OverridePackSet.BuiltIn;
-        return new(
-            [
-                new PreserveOnUpdateRule(),
-                new ApplyPackageQuirksRule(packs),
-                new PushDownRootFieldsRule(),
-                new ScrubEmptyStringsRule(),
-                new NormalizeProductCodesRule(),
-                new DedupeArpVsDefaultLocaleRule(),
-                new RemoveDuplicateInstallersRule(),
-                new HoistCommonInstallerFieldsRule(),
-                new DisplayVersionConsistencyRule(),
-                new DuplicateInstallerEntriesRule(),
-                new InstallerTypeConsistencyRule(),
-            ],
-            runtimeConfiguration,
-            packs);
+        return new(ProductionRuleComposer.Compose(overridePacks: packs), runtimeConfiguration, packs);
     }
 
     private static void RunApplied(
@@ -172,18 +147,23 @@ public sealed class RulePipeline
 
         if (!ManifestSnapshot.TryCapture(context.Manifests, out ManifestSnapshot before))
         {
-            rule.Apply(context);
+            AddSnapshotFailure(rule, context, result: false);
             return;
         }
 
         PackageManifests beforeManifests = ManifestSnapshot.Clone(context.Manifests);
-        rule.Apply(context);
-        if (!ManifestSnapshot.TryCapture(context.Manifests, out ManifestSnapshot after))
+        ManifestContext simulation = CreateSimulation(context);
+        rule.Apply(simulation);
+        if (!ManifestSnapshot.TryCapture(simulation.Manifests, out ManifestSnapshot after))
         {
+            AddSnapshotFailure(rule, context, result: true);
             return;
         }
 
-        RecordChanges(rule, context, before.Diff(after), resolution, context, beforeManifests);
+        ManifestClone.CopyTo(simulation.Manifests, context.Manifests);
+        context.ImportFindings(simulation.Findings);
+        context.ImportTrace(simulation.Trace);
+        RecordChanges(rule, context, before.Diff(after), resolution, simulation, beforeManifests);
     }
 
     private static void RunLogOnly(
@@ -199,25 +179,16 @@ public sealed class RulePipeline
 
         if (!ManifestSnapshot.TryCapture(context.Manifests, out ManifestSnapshot before))
         {
-            throw new InvalidOperationException(
-                $"Rule '{rule.Id}' cannot run in log-only mode because the manifest cannot be snapshotted.");
+            AddSnapshotFailure(rule, context, result: false);
+            return;
         }
-        var simulation = new ManifestContext
-        {
-            Manifests = ManifestSnapshot.Clone(context.Manifests),
-            Previous = context.Previous is null ? null : ManifestSnapshot.Clone(context.Previous),
-            OriginalBotSubmission = context.OriginalBotSubmission is null
-                ? null
-                : ManifestSnapshot.Clone(context.OriginalBotSubmission),
-            Evidence = context.Evidence,
-            Options = context.Options,
-        };
+        ManifestContext simulation = CreateSimulation(context);
 
         rule.Apply(simulation);
         if (!ManifestSnapshot.TryCapture(simulation.Manifests, out ManifestSnapshot after))
         {
-            throw new InvalidOperationException(
-                $"Rule '{rule.Id}' log-only result cannot be snapshotted.");
+            AddSnapshotFailure(rule, context, result: true);
+            return;
         }
         context.ImportFindings(simulation.Findings);
         context.ImportTrace(simulation.Trace);
@@ -229,6 +200,30 @@ public sealed class RulePipeline
             simulation,
             context.Manifests);
     }
+
+    private static ManifestContext CreateSimulation(ManifestContext context)
+        => new()
+        {
+            Manifests = ManifestSnapshot.Clone(context.Manifests),
+            Previous = context.Previous is null ? null : ManifestSnapshot.Clone(context.Previous),
+            OriginalBotSubmission = context.OriginalBotSubmission is null
+                ? null
+                : ManifestSnapshot.Clone(context.OriginalBotSubmission),
+            Evidence = context.Evidence,
+            Options = context.Options,
+        };
+
+    private static void AddSnapshotFailure(
+        IRule rule,
+        ManifestContext context,
+        bool result)
+        => context.AddFinding(
+            rule,
+            RuleSeverity.Error,
+            result
+                ? "The rule produced a manifest state that could not be snapshotted safely; no changes were applied."
+                : "The rule could not run because the input manifest state could not be snapshotted safely; no changes were applied.",
+            "RulePipeline");
 
     private static void RecordChanges(
         IRule rule,

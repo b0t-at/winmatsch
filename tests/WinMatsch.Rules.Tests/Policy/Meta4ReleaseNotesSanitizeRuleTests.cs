@@ -154,4 +154,19 @@ public class Meta4ReleaseNotesSanitizeRuleTests
         Assert.Equal("- Fixed crash", manifests.DefaultLocale.ReleaseNotes);
         Assert.Empty(context.Changes);
     }
+
+    [Fact]
+    public void Dedicated_bullet_rule_logs_its_independent_runtime_id()
+    {
+        PackageManifests manifests = CreateWithNotes("- Fixed crash");
+        ManifestContext context = PolicyTestSupport.RunViaPipeline(
+            new Meta4ReleaseNotesBulletRule(),
+            manifests,
+            RuleMode.Apply);
+
+        Assert.Equal("\u2022 Fixed crash", manifests.DefaultLocale.ReleaseNotes);
+        RuleChange change = Assert.Single(context.Changes);
+        Assert.Equal(RuleCatalogueIds.Meta4Bullets, change.RuleId);
+        Assert.Contains("bullet", change.SourceEvidence, StringComparison.OrdinalIgnoreCase);
+    }
 }

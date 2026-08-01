@@ -65,6 +65,38 @@ internal sealed class ManifestSnapshot
         return ManifestClone.Clone(manifests);
     }
 
+    internal static int?[] MatchInstallerIndices(
+        PackageManifests before,
+        PackageManifests after)
+    {
+        int afterCount = after.Installer.Installers?.Count ?? 0;
+        var beforeIndexByAfter = new int?[afterCount];
+        if (!TryCapture(before, out ManifestSnapshot beforeSnapshot)
+            || !TryCapture(after, out ManifestSnapshot afterSnapshot))
+        {
+            return beforeIndexByAfter;
+        }
+
+        YamlMappingNode beforeRoot = beforeSnapshot.GetRoot("installer");
+        YamlMappingNode afterRoot = afterSnapshot.GetRoot("installer");
+        if (GetMappingValue(beforeRoot, "Installers") is not YamlSequenceNode beforeInstallers
+            || GetMappingValue(afterRoot, "Installers") is not YamlSequenceNode afterInstallers)
+        {
+            return beforeIndexByAfter;
+        }
+
+        foreach (SequencePair pair in MatchInstallerItems(
+                     beforeInstallers,
+                     afterInstallers,
+                     beforeRoot,
+                     afterRoot))
+        {
+            beforeIndexByAfter[pair.AfterIndex] = pair.BeforeIndex;
+        }
+
+        return beforeIndexByAfter;
+    }
+
     public static bool TryCapture(PackageManifests manifests, out ManifestSnapshot snapshot)
     {
         try
@@ -72,7 +104,7 @@ internal sealed class ManifestSnapshot
             snapshot = Capture(manifests);
             return true;
         }
-        catch (InvalidOperationException)
+        catch (Exception exception) when (IsSnapshotFailure(exception))
         {
             try
             {
@@ -80,13 +112,19 @@ internal sealed class ManifestSnapshot
                 snapshot.RemoveMissingRequiredValues(manifests);
                 return true;
             }
-            catch (InvalidOperationException)
+            catch (Exception fallbackException) when (IsSnapshotFailure(fallbackException))
             {
                 snapshot = null!;
                 return false;
             }
         }
     }
+
+    private static bool IsSnapshotFailure(Exception exception)
+        => exception is InvalidOperationException
+            or ArgumentException
+            or NullReferenceException
+            or IndexOutOfRangeException;
 
     private void RemoveMissingRequiredValues(PackageManifests original)
     {
@@ -465,21 +503,41 @@ internal sealed class ManifestSnapshot
                 }
             }
 
-            var addedOccurrences = new Dictionary<string, int>(StringComparer.Ordinal);
-            for (int i = 0; i < afterKeys.Length; i++)
+            var nextAddedOccurrence = new Dictionary<string, int>(StringComparer.Ordinal);
+            IEnumerable<int> addedIndices = Enumerable.Range(0, afterKeys.Length)
+                .Where(index => !usedAfter.Contains(index))
+                .OrderBy(
+                    index => LocaleOccurrenceIdentity(after._documents[afterKeys[index]].Root),
+                    StringComparer.Ordinal)
+                .ThenBy(index => CanonicalNode(after._documents[afterKeys[index]].Root), StringComparer.Ordinal)
+                .ThenBy(static index => index);
+            foreach (int index in addedIndices)
             {
-                if (!usedAfter.Contains(i))
-                {
-                    string hash = Hash(CanonicalNode(after._documents[afterKeys[i]].Root));
-                    int occurrence = addedOccurrences.GetValueOrDefault(hash);
-                    addedOccurrences[hash] = occurrence + 1;
-                    string semanticKey = $"{localeBase}#added:{hash}#{occurrence}";
-                    pairs.Add(new(semanticKey, null, after._documents[afterKeys[i]]));
-                }
+                string shape = LocaleOccurrenceIdentity(after._documents[afterKeys[index]].Root);
+                int occurrence = nextAddedOccurrence.GetValueOrDefault(shape);
+                nextAddedOccurrence[shape] = occurrence + 1;
+                string semanticKey = $"{localeBase}#added:{Hash(shape)}#{occurrence}";
+                pairs.Add(new(semanticKey, null, after._documents[afterKeys[index]]));
             }
         }
 
         return pairs;
+    }
+
+    private static string LocaleOccurrenceIdentity(YamlNode root)
+    {
+        if (root is not YamlMappingNode mapping)
+        {
+            return CanonicalNode(root);
+        }
+
+        Dictionary<string, YamlNode> values = ToMapping(mapping);
+        return string.Join(
+            '\u001f',
+            values
+                .Where(static pair => pair.Key is not "PackageVersion" and not "ManifestVersion")
+                .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+                .Select(static pair => $"{pair.Key}={CanonicalNode(pair.Value)}"));
     }
 
     private static string LocaleBaseKey(string key)
@@ -1449,7 +1507,10 @@ internal sealed class ManifestSnapshot
         var matchedBefore = new HashSet<int>(pairs.Select(static pair => pair.BeforeIndex));
         var matchedAfter = new HashSet<int>(pairs.Select(static pair => pair.AfterIndex));
         int[] beforeOccurrences = GetInstallerOccurrenceOrdinals(before, beforeRoot);
-        int[] afterOccurrences = GetInstallerOccurrenceOrdinals(after, afterRoot);
+        int[] addedOccurrences = GetAddedInstallerOccurrenceOrdinals(
+            after,
+            afterRoot,
+            matchedAfter);
 
         foreach (SequencePair pair in pairs.OrderBy(static pair => pair.AfterIndex))
         {
@@ -1496,11 +1557,12 @@ internal sealed class ManifestSnapshot
             if (!matchedAfter.Contains(i))
             {
                 string identity = InstallerIdentity(after.Children[i], afterRoot);
+                string shape = InstallerAdditionShape(after.Children[i], afterRoot);
                 FlattenAddedOrRemoved(
                     documentKey,
                     manifestPath,
                     $"{fieldPath}[{i}]",
-                    $"{semanticPath}{{installer:{Hash(identity)}#{afterOccurrences[i]}}}",
+                    $"{semanticPath}{{installer:{Hash(identity)}+{Hash(shape)}#{addedOccurrences[i]}}}",
                     after.Children[i],
                     beforeValue: null,
                     adding: true,
@@ -1675,6 +1737,16 @@ internal sealed class ManifestSnapshot
         InstallerMatchValues before,
         InstallerMatchValues after)
     {
+        if (!string.IsNullOrEmpty(before.UrlPattern)
+            && !string.IsNullOrEmpty(after.UrlPattern)
+            && !string.Equals(before.UrlPattern, after.UrlPattern, StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrEmpty(before.Architecture)
+            && !string.IsNullOrEmpty(after.Architecture)
+            && !string.Equals(before.Architecture, after.Architecture, StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
         int score = 0;
         if (EqualNonEmpty(before.PrimaryIdentity, after.PrimaryIdentity))
         {
@@ -1780,7 +1852,7 @@ internal sealed class ManifestSnapshot
         => GetScalar(values, key)
             ?? (rootValues is null ? null : GetScalar(rootValues, key));
 
-    private static string NormalizeInstallerUrl(string value)
+    internal static string NormalizeInstallerUrl(string value)
     {
         string path = Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
             ? uri.GetLeftPart(UriPartial.Path)
@@ -1803,6 +1875,7 @@ internal sealed class ManifestSnapshot
 
             ReadOnlySpan<char> digits = path.AsSpan(start, i - start);
             ReadOnlySpan<char> prefix = GetAsciiLetterPrefix(path, start);
+            bool bareArchitectureToken = IsBareArchitectureToken(path, start, i, digits);
             bool architectureToken = digits.SequenceEqual("64")
                     && (prefix.EndsWith("x", StringComparison.OrdinalIgnoreCase)
                         || prefix.EndsWith("win", StringComparison.OrdinalIgnoreCase)
@@ -1821,7 +1894,8 @@ internal sealed class ManifestSnapshot
                 || digits.SequenceEqual("386")
                     && prefix.EndsWith("i", StringComparison.OrdinalIgnoreCase)
                 || (digits.SequenceEqual("7") || digits.SequenceEqual("8"))
-                    && prefix.EndsWith("armv", StringComparison.OrdinalIgnoreCase);
+                    && prefix.EndsWith("armv", StringComparison.OrdinalIgnoreCase)
+                || bareArchitectureToken;
             if (architectureToken)
             {
                 normalized.Append(digits);
@@ -1850,6 +1924,35 @@ internal sealed class ManifestSnapshot
         return normalized.ToString();
     }
 
+    private static bool IsBareArchitectureToken(
+        string path,
+        int start,
+        int end,
+        ReadOnlySpan<char> digits)
+    {
+        if ((!digits.SequenceEqual("32") && !digits.SequenceEqual("64"))
+            || start == 0
+            || path[start - 1] is not ('-' or '_'))
+        {
+            return false;
+        }
+
+        if (end == path.Length)
+        {
+            return true;
+        }
+
+        char suffix = path[end];
+        return suffix is '-' or '_' or '/'
+            || suffix == '.' && (end + 1 == path.Length
+                || !char.IsAsciiDigit(path[end + 1])
+                || IsSevenZipExtension(path, end));
+    }
+
+    private static bool IsSevenZipExtension(string path, int dot)
+        => path.AsSpan(dot).StartsWith(".7z", StringComparison.OrdinalIgnoreCase)
+            && (dot + 3 == path.Length || path[dot + 3] is '?' or '#' or '/' or '-' or '_');
+
     private static ReadOnlySpan<char> GetAsciiLetterPrefix(string value, int end)
     {
         int start = end;
@@ -1872,6 +1975,37 @@ internal sealed class ManifestSnapshot
             string identity = InstallerIdentity(sequence.Children[i], root);
             ordinals[i] = counts.GetValueOrDefault(identity);
             counts[identity] = ordinals[i] + 1;
+        }
+
+        return ordinals;
+    }
+
+    private static string InstallerAdditionShape(YamlNode node, YamlMappingNode root)
+    {
+        InstallerMatchValues values = GetInstallerMatchValues(node, root);
+        return string.Join(
+            '\u001f',
+            values.PrimaryIdentity,
+            values.Architecture ?? string.Empty);
+    }
+
+    private static int[] GetAddedInstallerOccurrenceOrdinals(
+        YamlSequenceNode after,
+        YamlMappingNode afterRoot,
+        HashSet<int> matchedAfter)
+    {
+        var nextByShape = new Dictionary<string, int>(StringComparer.Ordinal);
+        var ordinals = new int[after.Children.Count];
+        IEnumerable<int> addedIndices = Enumerable.Range(0, after.Children.Count)
+            .Where(index => !matchedAfter.Contains(index))
+            .OrderBy(index => InstallerAdditionShape(after.Children[index], afterRoot), StringComparer.Ordinal)
+            .ThenBy(index => CanonicalNode(after.Children[index]), StringComparer.Ordinal)
+            .ThenBy(static index => index);
+        foreach (int index in addedIndices)
+        {
+            string shape = InstallerAdditionShape(after.Children[index], afterRoot);
+            ordinals[index] = nextByShape.GetValueOrDefault(shape);
+            nextByShape[shape] = ordinals[index] + 1;
         }
 
         return ordinals;

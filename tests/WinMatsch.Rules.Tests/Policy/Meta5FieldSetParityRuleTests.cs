@@ -195,6 +195,47 @@ public class Meta5FieldSetParityRuleTests
     }
 
     [Fact]
+    public void Installer_locale_disambiguates_previous_entries()
+    {
+        Installer currentInstaller = TestManifests.CreateInstaller(url: "https://example.com/app-2.0.exe");
+        currentInstaller.InstallerLocale = new LanguageTag("en-US");
+        PackageManifests current = TestManifests.Create(currentInstaller);
+
+        Installer english = TestManifests.CreateInstaller(url: "https://example.com/app-1.0.exe");
+        english.InstallerLocale = new LanguageTag("en-US");
+        Installer french = TestManifests.CreateInstaller(url: "https://example.com/app-1.0.exe");
+        french.InstallerLocale = new LanguageTag("fr-FR");
+        french.InstallerSwitches = new InstallerSwitches { Silent = "/S" };
+        PackageManifests previous = PolicyTestSupport.CreatePrevious("1.0.0", english, french);
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        new Meta5FieldSetParityRule().Apply(context);
+
+        Assert.Empty(context.Findings);
+    }
+
+    [Fact]
+    public void Indistinguishable_previous_entries_require_explicit_review()
+    {
+        Installer currentInstaller = TestManifests.CreateInstaller(url: "https://example.com/app-2.0.exe");
+        currentInstaller.InstallerLocale = new LanguageTag("en-US");
+        PackageManifests current = TestManifests.Create(currentInstaller);
+
+        Installer first = TestManifests.CreateInstaller(url: "https://example.com/app-1.0.exe");
+        first.InstallerLocale = new LanguageTag("en-US");
+        first.InstallerSwitches = new InstallerSwitches { Silent = "/S" };
+        Installer second = TestManifests.CreateInstaller(url: "https://example.com/app-1.0.exe");
+        second.InstallerLocale = new LanguageTag("en-US");
+        PackageManifests previous = PolicyTestSupport.CreatePrevious("1.0.0", first, second);
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        new Meta5FieldSetParityRule().Apply(context);
+
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Contains("layout changed too much", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void New_packages_without_previous_are_skipped()
     {
         PackageManifests current = TestManifests.Create(TestManifests.CreateInstaller());

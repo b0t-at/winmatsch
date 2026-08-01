@@ -220,7 +220,21 @@ public sealed class Dep1PayloadDependencyRule : IRule
             return;
         }
 
-        Installer? previousMatch = PolicyValues.FindPreviousByEntryKey(manifest, installer, previous.Installer);
+        Installer? previousMatch = PolicyValues.FindPreviousByEntryKey(
+            manifest,
+            installer,
+            previous.Installer,
+            out bool ambiguous);
+        if (ambiguous)
+        {
+            context.AddFinding(
+                this,
+                RuleSeverity.Warning,
+                "Several previous installers share this entry's semantic identity; verify the previous .NET dependency manually.",
+                $"Installers[{index}]");
+            return;
+        }
+
         if (previousMatch is null)
         {
             return;

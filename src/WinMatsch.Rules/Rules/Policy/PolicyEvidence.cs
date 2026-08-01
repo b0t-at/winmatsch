@@ -15,6 +15,11 @@ namespace WinMatsch.Rules.Policy;
 /// </summary>
 public sealed class PolicyEvidence
 {
+    private IReadOnlyDictionary<string, PayloadDependencyAnalysis> _dependencyAnalyses
+        = EmptyDictionary<PayloadDependencyAnalysis>();
+    private IReadOnlyDictionary<string, PolicyScopeEvidence> _installerScopes
+        = EmptyDictionary<PolicyScopeEvidence>();
+
     /// <summary>An empty evidence set: every rule falls back to its no-evidence behavior.</summary>
     public static PolicyEvidence Empty { get; } = new();
 
@@ -41,15 +46,21 @@ public sealed class PolicyEvidence
     /// DEP-1: payload runtime-dependency evidence per installer URL, produced by
     /// <c>PayloadDependencyAnalyzer</c> ahead of the pipeline run.
     /// </summary>
-    public IReadOnlyDictionary<string, PayloadDependencyAnalysis> DependencyAnalyses { get; init; }
-        = EmptyDictionary<PayloadDependencyAnalysis>();
+    public IReadOnlyDictionary<string, PayloadDependencyAnalysis> DependencyAnalyses
+    {
+        get => _dependencyAnalyses;
+        init => _dependencyAnalyses = CopyUniqueIgnoreCase(value, nameof(DependencyAnalyses));
+    }
 
     /// <summary>
     /// SCOPE-2: explicit installation-scope evidence per installer URL. Only evidence whose
     /// <see cref="PolicyScopeEvidence.Origin"/> is direct installer metadata is trusted.
     /// </summary>
-    public IReadOnlyDictionary<string, PolicyScopeEvidence> InstallerScopes { get; init; }
-        = EmptyDictionary<PolicyScopeEvidence>();
+    public IReadOnlyDictionary<string, PolicyScopeEvidence> InstallerScopes
+    {
+        get => _installerScopes;
+        init => _installerScopes = CopyUniqueIgnoreCase(value, nameof(InstallerScopes));
+    }
 
     /// <summary>
     /// PIPE-4: installer URLs whose portable payload was determined (by archive import
@@ -89,11 +100,11 @@ public sealed class PolicyEvidence
 
     /// <summary>Case-insensitive lookup in <see cref="DependencyAnalyses"/>.</summary>
     internal PayloadDependencyAnalysis? FindDependencyAnalysis(string? installerUrl)
-        => FindIgnoreCase(DependencyAnalyses, installerUrl);
+        => Find(DependencyAnalyses, installerUrl);
 
     /// <summary>Case-insensitive lookup in <see cref="InstallerScopes"/>.</summary>
     internal PolicyScopeEvidence? FindScopeEvidence(string? installerUrl)
-        => FindIgnoreCase(InstallerScopes, installerUrl);
+        => Find(InstallerScopes, installerUrl);
 
     private static bool ContainsIgnoreCase(IReadOnlyCollection<string> values, string value)
     {
@@ -108,28 +119,30 @@ public sealed class PolicyEvidence
         return false;
     }
 
-    private static T? FindIgnoreCase<T>(IReadOnlyDictionary<string, T> values, string? key)
+    private static T? Find<T>(IReadOnlyDictionary<string, T> values, string? key)
         where T : class
     {
-        if (key is null)
-        {
-            return null;
-        }
+        return key is not null && values.TryGetValue(key, out T? value) ? value : null;
+    }
 
-        if (values.TryGetValue(key, out T? direct))
+    private static ReadOnlyDictionary<string, T> CopyUniqueIgnoreCase<T>(
+        IReadOnlyDictionary<string, T>? source,
+        string propertyName)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var copy = new Dictionary<string, T>(StringComparer.OrdinalIgnoreCase);
+        foreach ((string key, T value) in source.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
         {
-            return direct;
-        }
-
-        foreach ((string candidate, T value) in values)
-        {
-            if (string.Equals(candidate, key, StringComparison.OrdinalIgnoreCase))
+            ArgumentException.ThrowIfNullOrWhiteSpace(key);
+            if (!copy.TryAdd(key, value))
             {
-                return value;
+                throw new ArgumentException(
+                    $"{propertyName} contains case-insensitive duplicate key '{key}'.",
+                    propertyName);
             }
         }
 
-        return null;
+        return new ReadOnlyDictionary<string, T>(copy);
     }
 
     private static ReadOnlyDictionary<string, T> EmptyDictionary<T>()

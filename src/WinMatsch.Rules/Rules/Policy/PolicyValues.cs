@@ -96,35 +96,84 @@ internal static partial class PolicyValues
     private static bool IsVersionChar(char c) => char.IsAsciiDigit(c) || c == '.';
 
     /// <summary>
-    /// Finds the previous installer matching the given effective Architecture+InstallerType+Scope
-    /// key, or null when none or several match.
+    /// Finds the previous installer matching the effective entry key, then narrows same-key
+    /// candidates by locale, nested type, and version-neutral URL identity. Ambiguity is explicit.
     /// </summary>
     public static Installer? FindPreviousByEntryKey(
         InstallerManifest currentManifest,
         Installer current,
-        InstallerManifest previousManifest)
+        InstallerManifest previousManifest,
+        out bool ambiguous)
     {
+        ambiguous = false;
         if (previousManifest.Installers is not { } previousInstallers)
         {
             return null;
         }
 
         string key = EffectiveInstallerValues.GetEntryKey(currentManifest, current);
-        Installer? match = null;
-        foreach (Installer candidate in previousInstallers)
+        List<Installer> candidates =
+        [
+            .. previousInstallers.Where(candidate => string.Equals(
+                EffectiveInstallerValues.GetEntryKey(previousManifest, candidate),
+                key,
+                StringComparison.Ordinal)),
+        ];
+        if (candidates.Count <= 1)
         {
-            if (string.Equals(EffectiveInstallerValues.GetEntryKey(previousManifest, candidate), key, StringComparison.Ordinal))
-            {
-                if (match is not null)
-                {
-                    return null;
-                }
-
-                match = candidate;
-            }
+            return candidates.SingleOrDefault();
         }
 
-        return match;
+        Narrow(
+            candidates,
+            candidate => EffectiveLocale(previousManifest, candidate),
+            EffectiveLocale(currentManifest, current));
+        Narrow(
+            candidates,
+            candidate => EffectiveInstallerValues.GetNestedInstallerType(previousManifest, candidate)?.ToString(),
+            EffectiveInstallerValues.GetNestedInstallerType(currentManifest, current)?.ToString());
+        Narrow(
+            candidates,
+            candidate => NormalizeUrl(candidate.InstallerUrl),
+            NormalizeUrl(current.InstallerUrl));
+
+        if (candidates.Count == 1)
+        {
+            return candidates[0];
+        }
+
+        ambiguous = candidates.Count > 1;
+        return null;
+    }
+
+    private static string? EffectiveLocale(InstallerManifest manifest, Installer installer)
+        => (installer.InstallerLocale ?? manifest.InstallerLocale)?.Value;
+
+    private static string? NormalizeUrl(string? url)
+        => url is null ? null : ManifestSnapshot.NormalizeInstallerUrl(url);
+
+    private static void Narrow(
+        List<Installer> candidates,
+        Func<Installer, string?> selector,
+        string? expected)
+    {
+        if (expected is null)
+        {
+            return;
+        }
+
+        List<Installer> matches =
+        [
+            .. candidates.Where(candidate => string.Equals(
+                selector(candidate),
+                expected,
+                StringComparison.OrdinalIgnoreCase)),
+        ];
+        if (matches.Count > 0)
+        {
+            candidates.Clear();
+            candidates.AddRange(matches);
+        }
     }
 
     /// <summary>True when the value contains a version-looking token (digits separated by dots).</summary>

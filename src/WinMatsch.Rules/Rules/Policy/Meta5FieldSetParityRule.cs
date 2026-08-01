@@ -71,7 +71,17 @@ public sealed class Meta5FieldSetParityRule : IRule
         for (int i = 0; i < installers.Count; i++)
         {
             Installer installer = installers[i];
-            Installer? match = PolicyValues.FindPreviousByEntryKey(manifest, installer, previous.Installer);
+            Installer? match = PolicyValues.FindPreviousByEntryKey(
+                manifest,
+                installer,
+                previous.Installer,
+                out bool semanticAmbiguity);
+            if (semanticAmbiguity)
+            {
+                ReportAmbiguousCandidates(context, previous.Installer, installer, manifest, droppedFields, i);
+                continue;
+            }
+
             if (match is null)
             {
                 match = FindPreviousByArchitecture(installer, previous.Installer, out bool ambiguous);

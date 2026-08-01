@@ -51,6 +51,7 @@ internal static class PolicyTestSupport
         new Scope4WrapperClassificationRule(),
         new Meta1HttpsUpgradeRule(),
         new Meta3GitHubLicenseUrlRule(),
+        new Meta4ReleaseNotesBulletRule(),
         new Meta4ReleaseNotesSanitizeRule(),
         new Meta5FieldSetParityRule(),
         new Dep1PayloadDependencyRule(),

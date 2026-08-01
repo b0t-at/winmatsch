@@ -36,6 +36,108 @@ internal static class ManifestClone
         };
     }
 
+    public static void CopyTo(PackageManifests source, PackageManifests target)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(target);
+
+        int?[] installerCorrespondence = ManifestSnapshot.MatchInstallerIndices(target, source);
+        CopyInstallerManifest(source.Installer, target.Installer, installerCorrespondence);
+        CopyDefaultLocale(source.DefaultLocale, target.DefaultLocale);
+        CopyLocales(source.Locales, target.Locales);
+        target.Version.PackageIdentifier = source.Version.PackageIdentifier;
+        target.Version.PackageVersion = source.Version.PackageVersion;
+        target.Version.DefaultLocale = source.Version.DefaultLocale;
+        target.Version.ManifestType = source.Version.ManifestType;
+        target.Version.ManifestVersion = source.Version.ManifestVersion;
+    }
+
+    private static void CopyInstallerManifest(
+        InstallerManifest source,
+        InstallerManifest target,
+        int?[] beforeIndexByAfter)
+    {
+        List<Installer>? existingInstallers = target.Installers;
+        target.PackageIdentifier = source.PackageIdentifier;
+        target.PackageVersion = source.PackageVersion;
+        target.Channel = source.Channel;
+        target.ManifestType = source.ManifestType;
+        target.ManifestVersion = source.ManifestVersion;
+        CloneInstallerFields(source, target);
+
+        if (source.Installers is null)
+        {
+            target.Installers = null;
+            return;
+        }
+
+        if (existingInstallers is null)
+        {
+            target.Installers = source.Installers.ConvertAll(CloneInstaller);
+            return;
+        }
+
+        var committed = new List<Installer>(source.Installers.Count);
+        for (int afterIndex = 0; afterIndex < source.Installers.Count; afterIndex++)
+        {
+            Installer retained;
+            if (beforeIndexByAfter[afterIndex] is int beforeIndex
+                && beforeIndex >= 0
+                && beforeIndex < existingInstallers.Count)
+            {
+                retained = existingInstallers[beforeIndex];
+                CopyInstaller(source.Installers[afterIndex], retained);
+            }
+            else
+            {
+                retained = CloneInstaller(source.Installers[afterIndex]);
+            }
+
+            committed.Add(retained);
+        }
+
+        existingInstallers.Clear();
+        existingInstallers.AddRange(committed);
+    }
+
+    private static void CopyInstaller(Installer source, Installer target)
+    {
+        target.Architecture = source.Architecture;
+        target.InstallerUrl = source.InstallerUrl;
+        target.InstallerSha256 = source.InstallerSha256;
+        target.SignatureSha256 = source.SignatureSha256;
+        CloneInstallerFields(source, target);
+    }
+
+    private static void CopyDefaultLocale(DefaultLocaleManifest source, DefaultLocaleManifest target)
+    {
+        target.Moniker = source.Moniker;
+        CloneLocaleFields(source, target);
+    }
+
+    private static void CopyLocales(
+        List<LocaleManifest> source,
+        List<LocaleManifest> target)
+    {
+        int commonCount = Math.Min(source.Count, target.Count);
+        for (int i = 0; i < commonCount; i++)
+        {
+            CloneLocaleFields(source[i], target[i]);
+        }
+
+        if (target.Count > source.Count)
+        {
+            target.RemoveRange(source.Count, target.Count - source.Count);
+        }
+        else
+        {
+            for (int i = target.Count; i < source.Count; i++)
+            {
+                target.Add(CloneLocale(source[i]));
+            }
+        }
+    }
+
     private static InstallerManifest CloneInstallerManifest(InstallerManifest source)
     {
         var clone = new InstallerManifest

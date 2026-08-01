@@ -1,3 +1,4 @@
+using WinMatsch.Core;
 using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Rules.Policy;
 using Xunit;
@@ -26,6 +27,7 @@ public class ProductionRuleComposerTests
         RuleCatalogueIds.Meta5,
         RuleCatalogueIds.Meta1,
         RuleCatalogueIds.Meta3,
+        RuleCatalogueIds.Meta4Bullets,
         RuleCatalogueIds.Meta4,
         RuleCatalogueIds.Dep1,
         RuleCatalogueIds.Pipe2,
@@ -111,6 +113,30 @@ public class ProductionRuleComposerTests
         Assert.Equal(RuleModeSource.CommandOverride, meta.ModeSource);
         RuleExecution dep = Assert.Single(context.Executions, execution => execution.RuleId == RuleCatalogueIds.Dep2);
         Assert.Equal(RuleMode.LogOnly, dep.Mode);
+    }
+
+    [Fact]
+    public void Meta4_bullet_sub_mode_is_independently_configurable()
+    {
+        var runtime = new RuleRuntimeConfiguration(
+            commandOverrides: new Dictionary<string, RuleMode>
+            {
+                [RuleCatalogueIds.Meta4Bullets] = RuleMode.Disabled,
+            });
+        RulePipeline pipeline = RulePipeline.Create(
+            ProductionRuleComposer.Compose(PolicyEvidence.Empty, OverridePackSet.Empty),
+            runtime,
+            OverridePackSet.Empty);
+        PackageManifests manifests = TestManifests.Create(TestManifests.CreateInstaller());
+        manifests.DefaultLocale.ReleaseNotes = "- Fixed\nBreaking: config changed";
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        pipeline.Run(context);
+
+        Assert.Equal("- Fixed\nBreaking\uFF1Aconfig changed", manifests.DefaultLocale.ReleaseNotes);
+        Assert.Contains(context.Executions, execution =>
+            execution.RuleId == RuleCatalogueIds.Meta4Bullets
+            && execution.Mode == RuleMode.Disabled);
     }
 
     private static int Index(IReadOnlyList<string> ids, string id)

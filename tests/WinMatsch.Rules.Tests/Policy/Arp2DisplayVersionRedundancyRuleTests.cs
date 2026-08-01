@@ -112,6 +112,43 @@ public class Arp2DisplayVersionRedundancyRuleTests
     }
 
     [Fact]
+    public void Removed_values_keep_specific_pre_removal_evidence()
+    {
+        Installer installer = TestManifests.CreateInstaller();
+        installer.AppsAndFeaturesEntries =
+        [
+            new AppsAndFeaturesEntry
+            {
+                DisplayName = "First",
+                DisplayVersion = TestManifests.DefaultVersion,
+            },
+            new AppsAndFeaturesEntry
+            {
+                DisplayName = "Second",
+                DisplayVersion = TestManifests.DefaultVersion,
+            },
+        ];
+        PackageManifests manifests = TestManifests.Create(installer);
+
+        ManifestContext context = PolicyTestSupport.RunViaPipeline(
+            new Arp2DisplayVersionRedundancyRule(),
+            manifests,
+            RuleMode.Apply);
+
+        RuleChange[] removals =
+        [
+            .. context.Changes.Where(change =>
+                change.FieldPath.EndsWith(".DisplayVersion", StringComparison.Ordinal)),
+        ];
+        Assert.Equal(2, removals.Length);
+        Assert.All(removals, change =>
+        {
+            Assert.Contains("equivalent to the PackageVersion", change.SourceEvidence, StringComparison.Ordinal);
+            Assert.DoesNotContain("rule ARP-2", change.SourceEvidence, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
     public void Disabled_mode_does_nothing()
     {
         PackageManifests manifests = CreateWithDisplayVersion(TestManifests.DefaultVersion);

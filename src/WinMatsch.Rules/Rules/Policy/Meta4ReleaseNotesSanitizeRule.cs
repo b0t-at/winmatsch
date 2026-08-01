@@ -133,7 +133,7 @@ public sealed class Meta4ReleaseNotesSanitizeRule : IRule
         return string.Join('\n', lines);
     }
 
-    private static bool TrySanitizeBullet(string line, out string result)
+    internal static bool TrySanitizeBullet(string line, out string result)
     {
         int indent = 0;
         while (indent < line.Length && line[indent] == ' ')
@@ -203,5 +203,58 @@ public sealed class Meta4ReleaseNotesSanitizeRule : IRule
             $"ReleaseNotesUrl still references the previous version '{oldVersion}'; no confirmed-URL evidence for the '{newVersion}' variant was supplied, so it was not changed.",
             documentName);
         return url;
+    }
+}
+
+/// <summary>
+/// Independently configurable META-4 bullet normalization. Production composition keeps this
+/// sub-mode separate from the base META-4 URL, colon, and length policy.
+/// </summary>
+public sealed class Meta4ReleaseNotesBulletRule : IRule
+{
+    public string Id => RuleCatalogueIds.Meta4Bullets;
+
+    public RuleCategory Category => RuleCategory.Policy;
+
+    public RuleSeverity Severity => RuleSeverity.Info;
+
+    public string Description => "Normalizes leading dash/star release-note bullets.";
+
+    public void Apply(ManifestContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        foreach ((LocaleManifest locale, string documentName) in PolicyValues.EnumerateLocales(context.Manifests))
+        {
+            if (locale.ReleaseNotes is not { } notes)
+            {
+                continue;
+            }
+
+            string[] lines = notes.Split('\n');
+            bool changed = false;
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (Meta4ReleaseNotesSanitizeRule.TrySanitizeBullet(lines[i], out string sanitized))
+                {
+                    lines[i] = sanitized;
+                    changed = true;
+                }
+            }
+
+            if (!changed)
+            {
+                continue;
+            }
+
+            locale.ReleaseNotes = string.Join('\n', lines);
+            context.AddChangeEvidence(
+                this,
+                PolicyValues.GetLocaleManifestPath(context.Manifests, locale),
+                "ReleaseNotes",
+                "release-notes bullet normalization",
+                RuleChangeConfidence.High);
+            context.AddTrace(this, $"{documentName}: replaced leading '-'/'*' release-note bullets with '•'.");
+        }
     }
 }

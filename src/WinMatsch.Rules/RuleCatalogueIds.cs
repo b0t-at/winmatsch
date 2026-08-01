@@ -32,6 +32,7 @@ public static class RuleCatalogueIds
     public const string Meta2 = "META-2";
     public const string Meta3 = "META-3";
     public const string Meta4 = "META-4";
+    public const string Meta4Bullets = "META-4-BULLETS";
     public const string Meta5 = "META-5";
     public const string Dep1 = "DEP-1";
     public const string Dep2 = "DEP-2";

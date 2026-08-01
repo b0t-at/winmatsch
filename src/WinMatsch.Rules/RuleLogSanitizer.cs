@@ -2,6 +2,10 @@ namespace WinMatsch.Rules;
 
 internal static class RuleLogSanitizer
 {
+    private const int MaximumTextLength = 65_536;
+    private const int MaximumJwtHeaderLength = 4_096;
+    private const int MaximumJwtPayloadLength = 16_384;
+
     private static readonly string[] _sensitivePathTerms =
     [
         "password",
@@ -41,6 +45,11 @@ internal static class RuleLogSanitizer
 
     private static string SanitizeText(string value)
     {
+        if (value.Length > MaximumTextLength)
+        {
+            return "[REDACTED]";
+        }
+
         if (TryDecodeSensitiveText(value, out string decoded))
         {
             value = decoded;
@@ -112,7 +121,12 @@ internal static class RuleLogSanitizer
         const int maximumDecodeIterations = 5;
         for (int iteration = 0; iteration < maximumDecodeIterations; iteration++)
         {
-            string next = Uri.UnescapeDataString(current);
+            if (!TryUnescape(current, out string next))
+            {
+                decoded = "[REDACTED]";
+                return true;
+            }
+
             if (string.Equals(next, current, StringComparison.Ordinal))
             {
                 break;
@@ -161,7 +175,12 @@ internal static class RuleLogSanitizer
         const int maximumDecodeIterations = 5;
         for (int iteration = 0; iteration < maximumDecodeIterations; iteration++)
         {
-            string next = Uri.UnescapeDataString(decodedPath);
+            if (!TryUnescape(decodedPath, out string next))
+            {
+                sanitized = "[REDACTED]";
+                return true;
+            }
+
             if (string.Equals(next, decodedPath, StringComparison.Ordinal))
             {
                 break;
@@ -304,6 +323,20 @@ internal static class RuleLogSanitizer
         return false;
     }
 
+    private static bool TryUnescape(string value, out string decoded)
+    {
+        try
+        {
+            decoded = Uri.UnescapeDataString(value);
+            return true;
+        }
+        catch (UriFormatException)
+        {
+            decoded = null!;
+            return false;
+        }
+    }
+
     private static bool ContainsBasicCredentials(string value)
     {
         foreach (ReadOnlyMemory<char> token in FindAuthorizationTokens(value, "basic"))
@@ -382,9 +415,20 @@ internal static class RuleLogSanitizer
 
             int thirdStart = secondEnd + 1;
             int thirdEnd = ReadBase64UrlSegment(value, thirdStart);
+            bool tokenBoundary = thirdEnd == value.Length
+                || !IsBase64UrlCharacter(value[thirdEnd]) && value[thirdEnd] != '.';
+            int headerLength = firstEnd - start;
+            int payloadLength = secondEnd - secondStart;
             if (thirdEnd - thirdStart >= 6
-                && (thirdEnd == value.Length
-                    || !IsBase64UrlCharacter(value[thirdEnd]) && value[thirdEnd] != '.'))
+                && tokenBoundary
+                && (headerLength > MaximumJwtHeaderLength
+                    || payloadLength > MaximumJwtPayloadLength
+                    || IsJwtJsonSegment(
+                        value.AsSpan(start, headerLength),
+                        requireAlgorithm: true)
+                        && IsJwtJsonSegment(
+                            value.AsSpan(secondStart, payloadLength),
+                            requireAlgorithm: false)))
             {
                 return true;
             }
@@ -393,6 +437,64 @@ internal static class RuleLogSanitizer
         }
 
         return false;
+    }
+
+    private static bool IsJwtJsonSegment(
+        ReadOnlySpan<char> encoded,
+        bool requireAlgorithm)
+    {
+        if (encoded.Length == 0)
+        {
+            return false;
+        }
+
+        int unpaddedLength = encoded.Length;
+        while (unpaddedLength > 0 && encoded[unpaddedLength - 1] == '=')
+        {
+            unpaddedLength--;
+        }
+
+        int paddedLength = (unpaddedLength + 3) / 4 * 4;
+        Span<char> base64 = paddedLength <= 1024
+            ? stackalloc char[paddedLength]
+            : new char[paddedLength];
+        for (int i = 0; i < unpaddedLength; i++)
+        {
+            base64[i] = encoded[i] switch
+            {
+                '-' => '+',
+                '_' => '/',
+                var character => character,
+            };
+        }
+
+        base64[unpaddedLength..].Fill('=');
+        int maximumDecodedLength = paddedLength / 4 * 3;
+        byte[] decoded = new byte[maximumDecodedLength];
+        if (!Convert.TryFromBase64Chars(base64, decoded, out int bytesWritten))
+        {
+            return false;
+        }
+
+        try
+        {
+            using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(
+                decoded.AsMemory(0, bytesWritten),
+                new System.Text.Json.JsonDocumentOptions { MaxDepth = 8 });
+            if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            return !requireAlgorithm
+                || document.RootElement.TryGetProperty("alg", out System.Text.Json.JsonElement algorithm)
+                    && algorithm.ValueKind == System.Text.Json.JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(algorithm.GetString());
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
     }
 
     private static int ReadBase64UrlSegment(string value, int start)
@@ -411,19 +513,6 @@ internal static class RuleLogSanitizer
 
     private static bool IsAuthorizationTokenCharacter(char value)
         => IsBase64UrlCharacter(value) || value is '.' or '~' or '+' or '/';
-
-    private static bool IsBase64UrlToken(ReadOnlySpan<char> value)
-    {
-        foreach (char character in value)
-        {
-            if (!IsBase64UrlCharacter(character))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
 
     private static bool IsAuthorizationToken(ReadOnlySpan<char> value)
     {

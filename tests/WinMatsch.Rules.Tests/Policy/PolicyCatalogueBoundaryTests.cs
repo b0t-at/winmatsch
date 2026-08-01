@@ -72,7 +72,13 @@ public class PolicyCatalogueBoundaryTests
     {
         IReadOnlyList<IRule> rules = PolicyTestSupport.CreateAllPolicyRules();
         Assert.Equal(rules.Count, rules.Select(static r => r.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count());
-        Assert.All(rules, static r => Assert.Matches("^(ARP|SCOPE|META|DEP|PIPE)-[0-9]$", r.Id));
+        Assert.All(rules, static rule =>
+        {
+            if (rule.Id != RuleCatalogueIds.Meta4Bullets)
+            {
+                Assert.Matches("^(ARP|SCOPE|META|DEP|PIPE)-[0-9]$", rule.Id);
+            }
+        });
     }
 
     [Fact]

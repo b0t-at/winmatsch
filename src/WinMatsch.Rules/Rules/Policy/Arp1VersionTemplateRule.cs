@@ -53,9 +53,24 @@ public sealed class Arp1VersionTemplateRule : IRule
             }
 
             AppsAndFeaturesEntry? analysisEntry = FindAnalysisArpEntry(context, installer.InstallerUrl);
-            Installer? previousMatch = context.Previous is { } previous
-                ? PolicyValues.FindPreviousByEntryKey(manifest, installer, previous.Installer)
-                : null;
+            Installer? previousMatch = null;
+            if (context.Previous is { } previous)
+            {
+                previousMatch = PolicyValues.FindPreviousByEntryKey(
+                    manifest,
+                    installer,
+                    previous.Installer,
+                    out bool ambiguous);
+                if (ambiguous)
+                {
+                    context.AddFinding(
+                        this,
+                        RuleSeverity.Warning,
+                        "Several previous installers share this entry's semantic identity; review ARP version templating because no previous entry was selected.",
+                        $"Installers[{i}]");
+                }
+            }
+
             ProcessEntries(context, entries, oldVersion, newVersion, i, analysisEntry, previousMatch?.AppsAndFeaturesEntries);
         }
     }

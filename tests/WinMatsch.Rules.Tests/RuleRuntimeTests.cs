@@ -994,6 +994,81 @@ public class RuleRuntimeTests
     }
 
     [Fact]
+    public void Same_url_flagship_expansion_from_one_to_two_installers_preserves_all_reviews()
+    {
+        static Installer Installer(
+            Architecture architecture,
+            string version,
+            string productCode)
+        {
+            Installer installer = TestManifests.CreateInstaller(
+                architecture,
+                url: $"https://github.com/surrealdb/surrealdb/releases/download/v{version}/surreal.exe");
+            installer.ProductCode = productCode;
+            return installer;
+        }
+
+        PackageManifests originalBot = TestManifests.Create(
+            Installer(Architecture.X64, "1.0.0", "BOT-X64"));
+        PackageManifests merged = TestManifests.Create(
+            Installer(Architecture.X86, "1.0.0", "HUMAN-X86"),
+            Installer(Architecture.X64, "1.0.0", "HUMAN-X64"));
+        PackageManifests generated = TestManifests.Create(
+            Installer(Architecture.X86, "2.0.0", "HUMAN-X86"),
+            Installer(Architecture.X64, "2.0.0", "BOT-X64"));
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Equal(1, context.HumanCorrectionReviews.Count(review =>
+            review.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal)));
+        Assert.Contains(context.HumanCorrectionReviews, review => review.HumanValue == "HUMAN-X64");
+    }
+
+    [Fact]
+    public void Retaining_later_same_url_twin_reports_only_the_dropped_twin()
+    {
+        static Installer Installer(Architecture architecture, string command)
+        {
+            Installer installer = TestManifests.CreateInstaller(
+                architecture,
+                url: "https://example.test/universal.zip");
+            installer.Commands = [command];
+            return installer;
+        }
+
+        PackageManifests originalBot = TestManifests.Create(
+            TestManifests.CreateInstaller(url: "https://example.test/base.exe"));
+        PackageManifests merged = TestManifests.Create(
+            TestManifests.CreateInstaller(url: "https://example.test/base.exe"),
+            Installer(Architecture.X86, "human-a"),
+            Installer(Architecture.Arm64, "human-b"));
+        PackageManifests generated = TestManifests.Create(
+            TestManifests.CreateInstaller(url: "https://example.test/base.exe"),
+            Installer(Architecture.Arm64, "human-b"));
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(context.HumanCorrectionReviews, review =>
+            review.FieldPath.EndsWith(".Architecture", StringComparison.Ordinal)
+            && review.HumanValue == "x86");
+        Assert.DoesNotContain(context.HumanCorrectionReviews, review =>
+            review.HumanValue == "arm64"
+            || review.HumanValue == "human-b");
+    }
+
+    [Fact]
     public void Duplicate_sequence_removal_logs_only_the_removed_occurrence()
     {
         Installer installer = TestManifests.CreateInstaller();
@@ -1237,6 +1312,31 @@ public class RuleRuntimeTests
     }
 
     [Theory]
+    [InlineData("Microsoft.VisualStudioCode.Insiders")]
+    [InlineData("Contoso.Package.Preview")]
+    [InlineData("Package Microsoft.VisualStudioCode.Insiders retained")]
+    public void Dotted_package_identifiers_are_not_classified_as_jwts(string message)
+    {
+        Assert.Equal(message, RuleLogSanitizer.SanitizeMessage(message));
+    }
+
+    [Fact]
+    public void Oversized_valid_jwt_payload_is_redacted_instead_of_skipping_inspection()
+    {
+        static string Encode(string value) => Convert.ToBase64String(
+                System.Text.Encoding.UTF8.GetBytes(value))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
+        string header = Encode("{\"alg\":\"HS256\",\"typ\":\"JWT\"}");
+        string payload = Encode($"{{\"data\":\"{new string('a', 13_000)}\"}}");
+        string token = $"{header}.{payload}.{new string('b', 32)}";
+
+        Assert.Equal("[REDACTED]", RuleLogSanitizer.SanitizeMessage(token));
+    }
+
+    [Theory]
     [InlineData("basic installer session")]
     [InlineData("Token Studio")]
     [InlineData("secret sauce")]
@@ -1323,6 +1423,50 @@ public class RuleRuntimeTests
 
         Assert.DoesNotContain("do-not-log", sanitized, StringComparison.Ordinal);
         Assert.DoesNotContain("sig=", sanitized, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Malformed_percent_encoded_credentials_fail_closed()
+    {
+        string sanitized = RuleLogSanitizer.SanitizeMessage(
+            "Download https%3A%2F%2Fexample.test%2Ffile%3Fclient_secret%3Dabc%ZZ");
+
+        Assert.Equal("Download https://example.test/file", sanitized);
+        Assert.DoesNotContain("client_secret", sanitized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("abc", sanitized, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("exe")]
+    [InlineData("7z")]
+    public void Bare_architecture_url_tokens_do_not_pair_different_architectures(string extension)
+    {
+        static Installer Installer(
+            Architecture architecture,
+            string token,
+            string productCode,
+            string extension)
+        {
+            Installer installer = TestManifests.CreateInstaller(
+                architecture,
+                url: $"https://example.test/app-{token}.{extension}");
+            installer.ProductCode = productCode;
+            return installer;
+        }
+
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = TestManifests.Create(
+                Installer(Architecture.X64, "64", "BOT", extension)),
+            Previous = TestManifests.Create(
+                Installer(Architecture.X64, "64", "HUMAN", extension)),
+            Manifests = TestManifests.Create(
+                Installer(Architecture.X86, "32", "BOT", extension)),
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
     }
 
     [Fact]
@@ -1607,6 +1751,78 @@ public class RuleRuntimeTests
             review => review.FieldPath == "ShortDescription"
                 && review.HumanValue == "A-corrected"
                 && review.GeneratedValue == "A");
+    }
+
+    [Fact]
+    public void Retained_human_added_duplicate_locale_survives_version_change_without_false_review()
+    {
+        static LocaleManifest Locale(string version, string description) => new()
+        {
+            PackageIdentifier = new PackageIdentifier("Test.App"),
+            PackageVersion = new PackageVersion(version),
+            PackageLocale = new LanguageTag("fr-FR"),
+            Publisher = TestManifests.DefaultPublisher,
+            PackageName = TestManifests.DefaultPackageName,
+            License = "MIT",
+            ShortDescription = description,
+        };
+
+        PackageManifests originalBot = TestManifests.Create(TestManifests.CreateInstaller());
+        originalBot.Locales = [Locale("1.0.0", "Original")];
+        PackageManifests merged = TestManifests.Create(TestManifests.CreateInstaller());
+        merged.Locales =
+        [
+            Locale("1.0.0", "Original"),
+            Locale("1.0.0", "Human added"),
+        ];
+        PackageManifests generated = TestManifests.Create(TestManifests.CreateInstaller());
+        generated.Locales =
+        [
+            Locale("2.0.0", "Original"),
+            Locale("2.0.0", "Human added"),
+        ];
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.False(context.RequiresReview);
+    }
+
+    [Fact]
+    public void Retaining_later_duplicate_locale_reports_only_the_dropped_locale()
+    {
+        static LocaleManifest Locale(string description) => new()
+        {
+            PackageIdentifier = new PackageIdentifier("Test.App"),
+            PackageVersion = new PackageVersion("1.0.0"),
+            PackageLocale = new LanguageTag("fr-FR"),
+            Publisher = TestManifests.DefaultPublisher,
+            PackageName = TestManifests.DefaultPackageName,
+            License = "MIT",
+            ShortDescription = description,
+        };
+
+        PackageManifests originalBot = TestManifests.Create(TestManifests.CreateInstaller());
+        PackageManifests merged = TestManifests.Create(TestManifests.CreateInstaller());
+        merged.Locales = [Locale("Human A"), Locale("Human B")];
+        PackageManifests generated = TestManifests.Create(TestManifests.CreateInstaller());
+        generated.Locales = [Locale("Human B")];
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = originalBot,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(context.HumanCorrectionReviews, review => review.HumanValue == "Human A");
+        Assert.DoesNotContain(context.HumanCorrectionReviews, review => review.HumanValue == "Human B");
     }
 
     [Fact]
