@@ -100,15 +100,16 @@ public sealed class GitHubFeedbackWorkflow
 
                         if (result.RemoteState.PullRequestNumber is { } replacementNumber)
                         {
-                            GitHubLifecycleDiagnostic? supersedeFailure = await CloseSupersededAsync(
+                            SupersessionResult supersession = await CloseSupersededAsync(
                                 upstream,
                                 observation,
                                 replacementNumber,
                                 result.RemoteState.Fork?.Owner,
                                 cancellationToken).ConfigureAwait(false);
-                            if (supersedeFailure is not null)
+                            remoteStates.Add(new(observation.PullRequest.Number, supersession.State));
+                            if (supersession.Diagnostic is not null)
                             {
-                                diagnostics.Add(supersedeFailure);
+                                diagnostics.Add(supersession.Diagnostic);
                                 statuses.Add(Status(
                                     observation,
                                     PullRequestLifecycleAction.EscalateToHuman,
@@ -255,13 +256,14 @@ public sealed class GitHubFeedbackWorkflow
         string reason)
         => new(observation.PullRequest.Number, "open", action, reason);
 
-    private async Task<GitHubLifecycleDiagnostic?> CloseSupersededAsync(
+    private async Task<SupersessionResult> CloseSupersededAsync(
         RepositoryCoordinates upstream,
         PullRequestObservation observation,
         long replacementNumber,
         string? expectedReplacementOwner,
         CancellationToken cancellationToken)
     {
+        RemoteMutationState state = new() { PullRequestNumber = observation.PullRequest.Number };
         if (!observation.ToolOwned
             || !observation.PullRequest.HeadBranch.StartsWith("winmatsch/", StringComparison.Ordinal)
             || observation.PullRequest.Body?.Contains(
@@ -269,8 +271,10 @@ public sealed class GitHubFeedbackWorkflow
                 StringComparison.Ordinal) != true)
         {
             return new(
-                "GH3204",
-                $"Refused to close PR #{observation.PullRequest.Number} because tool ownership was not proven.");
+                new(
+                    "GH3204",
+                    $"Refused to close PR #{observation.PullRequest.Number} because tool ownership was not proven."),
+                state);
         }
 
         PullRequestInfo replacement = await _gitHub.GetPullRequestAsync(
@@ -301,10 +305,13 @@ public sealed class GitHubFeedbackWorkflow
             || old.Body?.Contains("<!-- winmatsch:package=", StringComparison.Ordinal) != true)
         {
             return new(
-                "GH3205",
-                $"Fresh state no longer proves PR #{old.Number} is the tool-owned superseded PR.");
+                new(
+                    "GH3205",
+                    $"Fresh state no longer proves PR #{old.Number} is the tool-owned superseded PR."),
+                state);
         }
 
+        RemoteOperationKind attempted = RemoteOperationKind.Comment;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -314,20 +321,28 @@ public sealed class GitHubFeedbackWorkflow
                 $"Superseded by #{replacement.Number}. Closing this tool-owned PR for the stable reason `superseded`.",
                 new MutationRequest($"feedback:{old.Number}:superseded-comment:{replacement.Number}"),
                 cancellationToken).ConfigureAwait(false);
+            state = state with { CommentCreated = true };
             cancellationToken.ThrowIfCancellationRequested();
+            attempted = RemoteOperationKind.ClosePullRequest;
             _ = await _gitHub.ClosePullRequestAsync(
                 upstream,
                 old.Number,
                 new MutationRequest($"feedback:{old.Number}:superseded-close:{replacement.Number}"),
                 cancellationToken).ConfigureAwait(false);
-            return null;
+            return new(null, state with { PullRequestClosed = true });
         }
         catch (Exception exception) when (exception is GitHubApiException or OperationCanceledException)
         {
             return new(
-                "GH3206",
-                "Superseded PR response was partially applied or has an uncertain remote outcome: " +
-                GitHubSubmissionFormatter.Redact(exception.Message));
+                new(
+                    "GH3206",
+                    "Superseded PR response was partially applied or has an uncertain remote outcome: " +
+                    GitHubSubmissionFormatter.Redact(exception.Message)),
+                state with
+                {
+                    LastAttemptedOperation = attempted,
+                    RemoteOutcomeUncertain = true,
+                });
         }
     }
 

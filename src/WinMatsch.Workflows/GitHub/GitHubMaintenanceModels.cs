@@ -158,6 +158,10 @@ public sealed record FeedbackRemoteState(
     long PullRequestNumber,
     RemoteMutationState State);
 
+public sealed record SupersessionResult(
+    GitHubLifecycleDiagnostic? Diagnostic,
+    RemoteMutationState State);
+
 public sealed record FeedbackResult(
     ImmutableArray<PullRequestLifecycleStatus> Statuses,
     ImmutableArray<FeedbackRetryMetadata> RetryMetadata,

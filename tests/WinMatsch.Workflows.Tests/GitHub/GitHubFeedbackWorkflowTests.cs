@@ -113,9 +113,49 @@ public sealed class GitHubFeedbackWorkflowTests
         Assert.Equal(1, repairs.Calls);
         Assert.Equal(1, preflight.BoundaryCalls);
         Assert.Equal(["branch", "commit", "pull-request", "comment", "close"], client.Mutations);
-        Assert.Single(result.RemoteStates);
+        Assert.Equal(2, result.RemoteStates.Length);
         Assert.True(result.RemoteStates[0].State.CommitCreated);
-        Assert.Empty(result.Diagnostics);
+        Assert.True(result.RemoteStates[1].State.PullRequestClosed);
+    }
+
+    [Fact]
+    public async Task Partial_supersession_propagates_recoverable_mutation_state()
+    {
+        var client = new FakeGitHubClient { FailMutation = "close" };
+        var repairs = new FakeRepairPlanner
+        {
+            Repair = GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Apply) with
+            {
+                SupersedesPullRequestNumber = 20,
+            },
+        };
+        PullRequestObservation observation = Observation("Installer hash mismatch") with
+        {
+            PullRequest = GitHubLifecycleTestSupport.PullRequest(
+                20,
+                branch: "winmatsch/update/example-app/old"),
+        };
+        client.AddPullRequest(observation.PullRequest);
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            repairs,
+            new FakeClock());
+
+        FeedbackResult result = await workflow.ProcessAsync(
+            GitHubLifecycleTestSupport.Upstream,
+            [observation]);
+
+        Assert.Equal(
+            PullRequestLifecycleAction.EscalateToHuman,
+            result.Statuses[0].RecommendedAction);
+        Assert.Equal(2, result.RemoteStates.Length);
+        Assert.True(result.RemoteStates[1].State.CommentCreated);
+        Assert.Equal(
+            RemoteOperationKind.ClosePullRequest,
+            result.RemoteStates[1].State.LastAttemptedOperation);
+        Assert.True(result.RemoteStates[1].State.RemoteOutcomeUncertain);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH3206");
     }
 
     [Fact]

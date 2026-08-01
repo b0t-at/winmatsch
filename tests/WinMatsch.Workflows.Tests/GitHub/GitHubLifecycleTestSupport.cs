@@ -152,6 +152,10 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public Action<FakeGitHubClient, int>? OnSearch { get; set; }
 
+    public Action<FakeGitHubClient, long>? OnGetPullRequest { get; set; }
+
+    public Action<FakeGitHubClient, int>? OnGetReleases { get; set; }
+
     public string? MoveUpstreamBeforeCommitTo { get; set; }
 
     public string? FailMutation { get; set; }
@@ -160,13 +164,23 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public bool ForkAhead { get; set; }
 
+    public bool BranchCreatedBeforeFailure { get; set; }
+
     public string PullRequestHeadSha { get; set; } = GitHubLifecycleTestSupport.CommitSha;
 
     public IReadOnlyList<GitHubRelease> Releases { get; set; } = [];
 
+    public int GetReleasesCalls { get; private set; }
+
     public IReadOnlyList<PullRequestInfo> PullRequests => _pullRequests;
 
     public void AddPullRequest(PullRequestInfo pullRequest) => _pullRequests.Add(pullRequest);
+
+    public void UpdatePullRequest(long number, Func<PullRequestInfo, PullRequestInfo> update)
+    {
+        int index = _pullRequests.FindIndex(pullRequest => pullRequest.Number == number);
+        _pullRequests[index] = update(_pullRequests[index]);
+    }
 
     public void MoveUpstream(string sha)
     {
@@ -248,6 +262,8 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        GetReleasesCalls++;
+        OnGetReleases?.Invoke(this, GetReleasesCalls);
         return Task.FromResult(Releases);
     }
 
@@ -305,6 +321,15 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
                 "reference exists",
                 HttpStatusCode.UnprocessableEntity,
                 null));
+        }
+
+        if (BranchCreatedBeforeFailure && FailMutation == "branch")
+        {
+            _references.Add((repository, branchName), new(branchName, sha));
+            throw new GitHubApiException(
+                "Synthetic branch response loss",
+                HttpStatusCode.ServiceUnavailable,
+                null);
         }
 
         BeforeMutation("branch", cancellationToken);
@@ -451,6 +476,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        OnGetPullRequest?.Invoke(this, number);
         return Task.FromResult(_pullRequests.Single(pr => pr.Number == number));
     }
 

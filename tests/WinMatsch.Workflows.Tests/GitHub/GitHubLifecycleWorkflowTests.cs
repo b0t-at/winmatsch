@@ -614,6 +614,63 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
+    public async Task Final_pull_request_read_rejects_concurrent_close()
+    {
+        var client = new FakeGitHubClient
+        {
+            OnSearch = static (fake, call) =>
+            {
+                if (call == 3)
+                {
+                    fake.UpdatePullRequest(
+                        42,
+                        static pullRequest => pullRequest with { State = PullRequestState.Closed });
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.False(result.Applied);
+    }
+
+    [Fact]
+    public async Task Duplicate_winner_is_refreshed_before_loser_self_close()
+    {
+        var client = new FakeGitHubClient
+        {
+            OnSearch = static (fake, call) =>
+            {
+                if (call == 3)
+                {
+                    fake.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
+                        1,
+                        author: "other-fork",
+                        branch: "winmatsch/submissions/example-app/2-0-0"));
+                }
+            },
+            OnGetPullRequest = static (fake, number) =>
+            {
+                if (number == 1)
+                {
+                    fake.UpdatePullRequest(
+                        number,
+                        static pullRequest => pullRequest with { State = PullRequestState.Closed });
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.False(result.RemoteState.PullRequestClosed);
+        Assert.DoesNotContain("close", client.Mutations);
+    }
+
+    [Fact]
     public async Task Cross_fork_duplicate_loser_closes_only_its_own_new_pr()
     {
         var client = new FakeGitHubClient
@@ -640,6 +697,67 @@ public sealed class GitHubLifecycleWorkflowTests
             client.Mutations);
         Assert.Equal(PullRequestState.Closed, client.PullRequests.Single(pr => pr.Number == 42).State);
         Assert.Equal(PullRequestState.Open, client.PullRequests.Single(pr => pr.Number == 1).State);
+    }
+
+    [Fact]
+    public async Task Live_release_is_rechecked_as_last_success_gate()
+    {
+        var clock = new FakeClock();
+        GitHubRelease safeRelease = new(
+            200,
+            "v2.0.0",
+            "2.0.0",
+            null,
+            new Uri("https://github.invalid/releases/200"),
+            false,
+            false,
+            clock.UtcNow.AddDays(-2),
+            [],
+            clock.UtcNow.AddHours(-2));
+        var client = new FakeGitHubClient
+        {
+            Releases = [safeRelease],
+            OnGetReleases = (fake, call) =>
+            {
+                if (call == 3)
+                {
+                    fake.Releases = [safeRelease with { UpdatedAt = clock.UtcNow }];
+                }
+            },
+        };
+        GitHubSubmissionRequest request = GitHubLifecycleTestSupport.Request() with
+        {
+            Policy = new() { MinimumReleaseFreshness = TimeSpan.FromHours(1) },
+            ReleaseUpdatedAt = clock.UtcNow.AddHours(-2),
+            ReleaseRepository = new RepositoryCoordinates("vendor", "app"),
+            ReleaseId = 200,
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(request);
+
+        Assert.Equal(GitHubLifecycleResultCode.ValidationFailed, result.Code);
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.Equal(3, client.GetReleasesCalls);
+        Assert.False(result.Applied);
+    }
+
+    [Fact]
+    public async Task Uncertain_branch_creation_reports_and_reconciles_deterministic_identity()
+    {
+        var client = new FakeGitHubClient
+        {
+            FailMutation = "branch",
+            BranchCreatedBeforeFailure = true,
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.Equal("winmatsch/update/example-app/2.0.0/test", result.RemoteState.BranchName);
+        Assert.True(result.RemoteState.BranchCreated);
+        Assert.True(result.RemoteState.RemoteOutcomeUncertain);
     }
 
     [Fact]

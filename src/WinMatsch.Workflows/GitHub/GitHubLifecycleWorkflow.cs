@@ -108,6 +108,8 @@ public sealed class GitHubLifecycleWorkflow
         var audit = ImmutableArray.CreateBuilder<GitHubLifecycleAuditEntry>();
         RemoteMutationState state = new();
         RemoteOperationKind? attemptedMutation = null;
+        RepositoryCoordinates? mutationRepository = null;
+        string? expectedReservationSha = null;
         try
         {
             await using IAsyncDisposable packageLock = await _locks.AcquireAsync(
@@ -153,6 +155,7 @@ public sealed class GitHubLifecycleWorkflow
                 Fork = targetRepository.Coordinates,
                 ForkCreated = forkCreated,
             };
+            mutationRepository = targetRepository.Coordinates;
 
             attemptedMutation = RemoteOperationKind.SyncFork;
             await EnsureTargetDefaultIsFreshAsync(
@@ -233,6 +236,8 @@ public sealed class GitHubLifecycleWorkflow
 
                     boundaryCancellation.ThrowIfCancellationRequested();
                     attemptedMutation = RemoteOperationKind.CreateBranch;
+                    expectedReservationSha = upstreamDefault.HeadSha;
+                    state = state with { BranchName = branchName };
                     branch = await _gitHub.CreateUniqueReferenceAsync(
                         targetRepository.Coordinates,
                         branchName,
@@ -380,9 +385,14 @@ public sealed class GitHubLifecycleWorkflow
             BranchState finalUpstream = await _gitHub.GetDefaultBranchAsync(
                 request.UpstreamRepository,
                 cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(freshPullRequest.HeadSha, commit.Sha, StringComparison.Ordinal)
+            if (freshPullRequest.State != PullRequestState.Open
+                || !string.Equals(freshPullRequest.HeadOwner, targetRepository.Coordinates.Owner, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(freshPullRequest.HeadBranch, branchName, StringComparison.Ordinal)
+                || !string.Equals(freshPullRequest.BaseBranch, upstreamDefault.Name, StringComparison.Ordinal)
+                || !string.Equals(freshPullRequest.HeadSha, commit.Sha, StringComparison.Ordinal)
                 || finalBranch is null
                 || !string.Equals(finalBranch.Sha, commit.Sha, StringComparison.Ordinal)
+                || !string.Equals(finalUpstream.Name, upstreamDefault.Name, StringComparison.Ordinal)
                 || !string.Equals(finalUpstream.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal))
             {
                 state = state with
@@ -407,6 +417,24 @@ public sealed class GitHubLifecycleWorkflow
                 PullRequestInfo winner = associated.MinBy(static candidate => candidate.Number)!;
                 if (winner.Number != pullRequest.Number)
                 {
+                    PullRequestInfo freshWinner = await _gitHub.GetPullRequestAsync(
+                        request.UpstreamRepository,
+                        winner.Number,
+                        cancellationToken).ConfigureAwait(false);
+                    if (!IsAssociatedPullRequest(plan, freshWinner)
+                        || !string.Equals(
+                            freshWinner.BaseBranch,
+                            pullRequest.BaseBranch,
+                            StringComparison.Ordinal))
+                    {
+                        return Result(
+                            GitHubLifecycleResultCode.HumanEscalationRequired,
+                            plan,
+                            state,
+                            audit,
+                            [new("GH2026", "The duplicate winner changed before reconciliation; the new PR remains open.")]);
+                    }
+
                     try
                     {
                         attemptedMutation = RemoteOperationKind.Comment;
@@ -455,6 +483,7 @@ public sealed class GitHubLifecycleWorkflow
                     [new("GH2025", "A later duplicate PR exists; only its proven owner may close it.")]);
             }
 
+            await VerifyLiveReleaseFreshnessAsync(request, cancellationToken).ConfigureAwait(false);
             Audit(audit, "GH2009", $"Created pull request #{pullRequest.Number}.");
             attemptedMutation = null;
             return Result(GitHubLifecycleResultCode.Succeeded, plan, state, audit);
@@ -507,6 +536,37 @@ public sealed class GitHubLifecycleWorkflow
         }
         catch (GitHubApiException exception)
         {
+            GitHubLifecycleDiagnostic? reconciliationDiagnostic = null;
+            if (!exception.IsConflict
+                && attemptedMutation == RemoteOperationKind.CreateBranch
+                && mutationRepository is not null
+                && state.BranchName is not null
+                && expectedReservationSha is not null)
+            {
+                try
+                {
+                    GitReference? uncertainBranch = await _gitHub.GetReferenceAsync(
+                        mutationRepository,
+                        state.BranchName,
+                        CancellationToken.None).ConfigureAwait(false);
+                    if (uncertainBranch is not null
+                        && string.Equals(uncertainBranch.Sha, expectedReservationSha, StringComparison.Ordinal))
+                    {
+                        state = state with
+                        {
+                            BranchCreated = true,
+                            BranchHeadSha = uncertainBranch.Sha,
+                        };
+                    }
+                }
+                catch (GitHubApiException reconciliationException)
+                {
+                    reconciliationDiagnostic = new(
+                        "GH2027",
+                        "Unable to reconcile uncertain branch creation: " + reconciliationException.Message);
+                }
+            }
+
             state = exception.IsConflict ? state : MarkUncertain(state, attemptedMutation);
             return Result(
                 exception.IsConflict
@@ -515,7 +575,13 @@ public sealed class GitHubLifecycleWorkflow
                 plan,
                 state,
                 audit,
-                [new("GH2013", GitHubSubmissionFormatter.Redact(exception.Message))]);
+                reconciliationDiagnostic is null
+                    ? [new("GH2013", GitHubSubmissionFormatter.Redact(exception.Message))]
+                    :
+                    [
+                        new("GH2013", GitHubSubmissionFormatter.Redact(exception.Message)),
+                        reconciliationDiagnostic,
+                    ]);
         }
     }
 
@@ -609,18 +675,23 @@ public sealed class GitHubLifecycleWorkflow
                 PullRequestState.Open,
                 ExactTitleToken: request.LocalPlan.PackageIdentifier.Value),
             cancellationToken).ConfigureAwait(false);
-        string versionToken = request.LocalPlan.PackageVersion.Value;
-        string association = $"winmatsch:package={request.LocalPlan.PackageIdentifier.Value};version={versionToken}";
-        return
-        [
-            .. candidates.Where(pullRequest =>
+        return [.. candidates.Where(pullRequest =>
             pullRequest.Number != request.SupersedesPullRequestNumber
-            &&
-            pullRequest.Title.Contains(request.LocalPlan.PackageIdentifier.Value, StringComparison.Ordinal)
-            && pullRequest.Title.Contains(versionToken, StringComparison.Ordinal)
-            && (pullRequest.Body?.Contains(association, StringComparison.Ordinal) == true
-                || pullRequest.Body?.Contains(plan.PackageVersionDirectory, StringComparison.Ordinal) == true))
-        ];
+            && IsAssociatedPullRequest(plan, pullRequest))];
+    }
+
+    private static bool IsAssociatedPullRequest(
+        GitHubSubmissionPlan plan,
+        PullRequestInfo pullRequest)
+    {
+        string packageIdentifier = plan.Request.LocalPlan.PackageIdentifier.Value;
+        string version = plan.Request.LocalPlan.PackageVersion.Value;
+        string marker = $"winmatsch:package={packageIdentifier};version={version}";
+        return pullRequest.State == PullRequestState.Open
+            && pullRequest.Title.Contains(packageIdentifier, StringComparison.Ordinal)
+            && pullRequest.Title.Contains(version, StringComparison.Ordinal)
+            && (pullRequest.Body?.Contains(marker, StringComparison.Ordinal) == true
+                || pullRequest.Body?.Contains(plan.PackageVersionDirectory, StringComparison.Ordinal) == true);
     }
 
     private async Task VerifyRemoteFilePreconditionsAsync(

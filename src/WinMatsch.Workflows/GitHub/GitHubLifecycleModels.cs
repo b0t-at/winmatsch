@@ -89,6 +89,8 @@ public sealed record RemoteMutationState
 
     public bool PullRequestClosed { get; init; }
 
+    public bool CommentCreated { get; init; }
+
     public RemoteOperationKind? LastAttemptedOperation { get; init; }
 
     public bool RemoteOutcomeUncertain { get; init; }
