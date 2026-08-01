@@ -82,7 +82,8 @@ internal static class MaintenanceCommandHelpers
             or YamlDotNet.Core.YamlException;
 
     public static bool IsKeyringFailure(Exception exception)
-        => exception is TokenStoreException
+        => exception is ArgumentException
+            or TokenStoreException
             or IOException
             or UnauthorizedAccessException
             or InvalidOperationException

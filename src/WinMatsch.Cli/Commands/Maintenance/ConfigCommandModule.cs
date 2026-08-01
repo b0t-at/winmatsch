@@ -18,7 +18,10 @@ public interface IConfigFileSystem
     /// moved into place, so a failure never leaves a truncated configuration file. On Unix the
     /// file is created owner-readable only.
     /// </summary>
-    public void WriteTextAtomic(string path, string content);
+    public void WriteTextAtomic(
+        string path,
+        string content,
+        string? expectedContent);
 }
 
 /// <summary>The production <see cref="IConfigFileSystem"/> over the real file system.</summary>
@@ -26,11 +29,26 @@ public sealed class ConfigFileSystem : IConfigFileSystem
 {
     public string? ReadText(string path) => File.Exists(path) ? File.ReadAllText(path) : null;
 
-    public void WriteTextAtomic(string path, string content)
+    public void WriteTextAtomic(
+        string path,
+        string content,
+        string? expectedContent)
     {
         string directory = Path.GetDirectoryName(Path.GetFullPath(path))
             ?? throw new IOException($"The configuration path '{path}' has no parent directory.");
         Directory.CreateDirectory(directory);
+        using var writeLock = new FileStream(
+            path + ".lock",
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None);
+        string? current = File.Exists(path) ? File.ReadAllText(path) : null;
+        if (!string.Equals(current, expectedContent, StringComparison.Ordinal))
+        {
+            throw new IOException(
+                "The configuration file changed concurrently; refusing to overwrite it.");
+        }
+
         string temporaryPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
         try
         {
@@ -229,7 +247,11 @@ public sealed class ConfigCommandModule : ICommandModule
             }
 
             string path = ResolvePath(context, registry).Path;
-            ConfigurationLayer layer = LoadUserLayer(context, registry, rejectComments: true);
+            string? originalContent = _fileSystem.ReadText(path);
+            ConfigurationLayer layer = ParseUserLayer(
+                path,
+                originalContent,
+                rejectComments: true);
             layer = ApplyKey(layer, keyName, rawValue);
             string yaml = SerializeDeterministic(layer);
             ValidateRoundTrip(yaml, keyName, rawValue);
@@ -240,7 +262,7 @@ public sealed class ConfigCommandModule : ICommandModule
                 return Task.FromResult(ExitCodes.Success);
             }
 
-            WriteAtomic(path, yaml);
+            WriteAtomic(path, yaml, originalContent);
             WriteMutationResult(context, "set", keyName, rawValue, path, applied: true);
             return Task.FromResult(ExitCodes.Success);
         });
@@ -263,7 +285,11 @@ public sealed class ConfigCommandModule : ICommandModule
         {
             string keyName = RequireKnownKey(context.ParseResult.GetValue(key));
             string path = ResolvePath(context, registry).Path;
-            ConfigurationLayer layer = LoadUserLayer(context, registry, rejectComments: true);
+            string? originalContent = _fileSystem.ReadText(path);
+            ConfigurationLayer layer = ParseUserLayer(
+                path,
+                originalContent,
+                rejectComments: true);
             layer = ApplyKey(layer, keyName, null);
             string yaml = SerializeDeterministic(layer);
             if (context.IsDryRun)
@@ -272,7 +298,7 @@ public sealed class ConfigCommandModule : ICommandModule
                 return Task.FromResult(ExitCodes.Success);
             }
 
-            WriteAtomic(path, yaml);
+            WriteAtomic(path, yaml, originalContent);
             WriteMutationResult(context, "unset", keyName, null, path, applied: true);
             return Task.FromResult(ExitCodes.Success);
         });
@@ -336,6 +362,14 @@ public sealed class ConfigCommandModule : ICommandModule
         // configuration-error exit code — a malformed user file is a configuration problem.
         (string path, _) = ResolvePath(context, registry);
         string? content = _fileSystem.ReadText(path);
+        return ParseUserLayer(path, content, rejectComments);
+    }
+
+    private static ConfigurationLayer ParseUserLayer(
+        string path,
+        string? content,
+        bool rejectComments)
+    {
         if (content is null)
         {
             return ConfigurationLayer.Empty;
@@ -375,7 +409,17 @@ public sealed class ConfigCommandModule : ICommandModule
 
                 if (character is '"' or '\'' && !escaped)
                 {
-                    quote = quote == '\0' ? character : quote == character ? '\0' : quote;
+                    if (quote == character)
+                    {
+                        quote = '\0';
+                    }
+                    else if (quote == '\0'
+                             && (index == 0
+                                 || char.IsWhiteSpace(line[index - 1])
+                                 || line[index - 1] is ':' or '-' or ',' or '[' or '{'))
+                    {
+                        quote = character;
+                    }
                 }
                 else if (character == '#'
                          && quote == '\0'
@@ -391,11 +435,14 @@ public sealed class ConfigCommandModule : ICommandModule
         return false;
     }
 
-    private void WriteAtomic(string path, string content)
+    private void WriteAtomic(
+        string path,
+        string content,
+        string? expectedContent)
     {
         try
         {
-            _fileSystem.WriteTextAtomic(path, content);
+            _fileSystem.WriteTextAtomic(path, content, expectedContent);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {

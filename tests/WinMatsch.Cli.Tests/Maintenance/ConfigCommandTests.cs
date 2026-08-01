@@ -156,6 +156,22 @@ public sealed class ConfigCommandTests
     }
 
     [Fact]
+    public async Task Set_refuses_to_overwrite_a_concurrent_change()
+    {
+        (CliHarness harness, DictionaryConfigFileSystem fileSystem) = CreateHarness();
+        harness.Files[_defaultPath] = "repository: \"contoso/pkgs\"\n";
+        fileSystem.BeforeWrite = () =>
+            harness.Files[_defaultPath] = "repository: \"other/pkgs\"\n";
+
+        CliRunResult result = await harness.RunAsync(
+            ["config", "set", "interaction", "never"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains("changed concurrently", result.StandardError, StringComparison.Ordinal);
+        Assert.Equal("repository: \"other/pkgs\"\n", harness.Files[_defaultPath]);
+    }
+
+    [Fact]
     public async Task Set_honors_the_explicit_config_option()
     {
         (CliHarness harness, _) = CreateHarness();
@@ -186,6 +202,7 @@ public sealed class ConfigCommandTests
     [Theory]
     [InlineData("# operator note\nrepository: \"contoso/pkgs\"\n")]
     [InlineData("repository: \"contoso/pkgs\" # keep this explanation\n")]
+    [InlineData("cache:\n  directory: C:\\Users\\O'Brien # keep this explanation\n")]
     public async Task Set_explicitly_refuses_to_discard_existing_comments(string yaml)
     {
         (CliHarness harness, DictionaryConfigFileSystem fileSystem) = CreateHarness();

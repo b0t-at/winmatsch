@@ -184,7 +184,7 @@ public sealed class CompletionCommandModule : ICommandModule
         builder.Append("            continue\n");
         builder.Append("        fi\n");
         builder.Append("        if [[ \" $bool_opts \" == *\" $option \"* ]]; then\n");
-        builder.Append("            if [[ \"$word\" != *=* && \"${COMP_WORDS[i+1]}\" =~ ^(true|false)$ ]]; then ((i++)); fi\n");
+        builder.Append("            if [[ \"$word\" != *=* && \"${COMP_WORDS[i+1]}\" =~ ^([Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee])$ ]]; then ((i++)); fi\n");
         builder.Append("            continue\n");
         builder.Append("        fi\n");
         builder.Append("        [[ \"$word\" == -* ]] && continue\n");
@@ -237,7 +237,7 @@ public sealed class CompletionCommandModule : ICommandModule
         builder.Append("            continue\n");
         builder.Append("        fi\n");
         builder.Append("        if (( ${bool_opts[(Ie)$option]} )); then\n");
-        builder.Append("            if [[ \"$word\" != *=* && \"${words[i+1]}\" == (true|false) ]]; then ((i++)); fi\n");
+        builder.Append("            if [[ \"$word\" != *=* && \"${(L)words[i+1]}\" == (true|false) ]]; then ((i++)); fi\n");
         builder.Append("            continue\n");
         builder.Append("        fi\n");
         builder.Append("        [[ \"$word\" == -* ]] && continue\n");
@@ -288,7 +288,7 @@ public sealed class CompletionCommandModule : ICommandModule
         builder.Append("            continue\n");
         builder.Append("        end\n");
         builder.Append("        if contains -- $option $bool_opts\n");
-        builder.Append("            if not string match -q '*=*' -- $word; and test (math $i + 1) -le (count $tokens); and contains -- $tokens[(math $i + 1)] true false\n");
+        builder.Append("            if not string match -q '*=*' -- $word; and test (math $i + 1) -le (count $tokens); and contains -- (string lower -- $tokens[(math $i + 1)]) true false\n");
         builder.Append("                set i (math $i + 2)\n");
         builder.Append("            else\n");
         builder.Append("                set i (math $i + 1)\n");
@@ -365,7 +365,7 @@ public sealed class CompletionCommandModule : ICommandModule
                 .Append(")\n");
         }
 
-        builder.Append("    $elements = $commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.ToString() }\n");
+        builder.Append("    $elements = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.ToString() })\n");
         builder.Append("    $valueOptions = @(").Append(JoinQuoted(tree.GlobalOptionsWithValues)).Append(")\n");
         builder.Append("    $booleanOptions = @(").Append(JoinQuoted(tree.GlobalBooleanOptions)).Append(")\n");
         builder.Append("    $first = $null\n");

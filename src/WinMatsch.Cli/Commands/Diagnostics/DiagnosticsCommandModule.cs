@@ -387,7 +387,7 @@ public sealed class DiagnosticsCommandModule : ICommandModule
         => context.Output.WriteFormatted(
             writer =>
             {
-                writer.WriteLine($"Source: {result.Input}");
+                writer.WriteLine($"Source: {RedactInput(result)}");
                 writer.WriteLine($"File: {result.FileName}");
                 writer.WriteLine($"SHA-256: {result.Sha256}");
                 writer.WriteLine($"Size: {result.SizeInBytes.ToString(CultureInfo.InvariantCulture)} bytes");
@@ -428,7 +428,7 @@ public sealed class DiagnosticsCommandModule : ICommandModule
     private static void WriteAnalyzeJson(Utf8JsonWriter writer, InstallerDiagnosticResult result)
     {
         writer.WriteStartObject();
-        writer.WriteString("input", result.Input);
+        writer.WriteString("input", RedactInput(result));
         writer.WriteString("fileName", result.FileName);
         writer.WriteBoolean("remote", result.IsRemote);
         writer.WriteBoolean("fromCache", result.IsFromCache);
@@ -645,4 +645,9 @@ public sealed class DiagnosticsCommandModule : ICommandModule
     private static string ToCamelCase<T>(T value)
         where T : struct, Enum
         => CliJson.EnumValue(value);
+
+    private static string RedactInput(InstallerDiagnosticResult result)
+        => result.IsRemote
+            ? CliRedactor.RedactUrl(result.Input, redactAllQueryValues: true)
+            : CliRedactor.Redact(result.Input);
 }

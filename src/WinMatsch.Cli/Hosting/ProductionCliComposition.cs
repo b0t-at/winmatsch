@@ -2,6 +2,7 @@ using WinMatsch.Cli.Commands.Diagnostics;
 using WinMatsch.Cli.Commands.Maintenance;
 using WinMatsch.Cli.Commands.Mutations;
 using WinMatsch.GitHub.Auth;
+using WinMatsch.Workflows.GitHub;
 
 namespace WinMatsch.Cli.Hosting;
 
@@ -17,11 +18,11 @@ public static class ProductionCliComposition
             environment,
             homeDirectory);
         IFeedbackStateStore feedbackState = configurationPath is null
-            ? new NullFeedbackStateStore()
+            ? new FileFeedbackStateStore()
             : new FileFeedbackStateStore(
                 Path.Combine(
                     Path.GetDirectoryName(configurationPath)!,
-                    "feedback-state.json"));
+                    "feedback"));
         IReadOnlyList<ICommandModule> modules =
         [
             new DiagnosticsCommandModule(),

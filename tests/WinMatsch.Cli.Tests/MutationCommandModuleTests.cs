@@ -490,9 +490,7 @@ public sealed class MutationCommandModuleTests
     {
         var workflow = new FakeMutationWorkflow
         {
-            Handler = request => request.ApproveReview
-                ? FakeMutationWorkflow.Result(request)
-                : Review(request),
+            Handler = Review,
         };
         CliHarness harness = CreateHarness(workflow);
         harness.Interaction.EnqueueConfirm(true);
@@ -528,13 +526,39 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
-    public async Task Json_review_emits_auditable_envelope_before_missing_approval()
+    public async Task Changed_review_values_after_consent_block_apply()
     {
         var workflow = new FakeMutationWorkflow
         {
             Handler = request => request.ApproveReview
-                ? FakeMutationWorkflow.Result(request)
+                ? FakeMutationWorkflow.Result(
+                    request,
+                    WorkflowResultCode.Succeeded,
+                    reviews:
+                    [
+                        new("manifest.yaml", "Publisher", "bot", "changed", "new"),
+                    ])
                 : Review(request),
+        };
+        CliHarness harness = CreateHarness(workflow);
+        harness.Interaction.EnqueueConfirm(true);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains("reviews changed after approval", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            workflow.Requests,
+            request => request.ExecutionMode == WorkflowExecutionMode.Apply);
+    }
+
+    [Fact]
+    public async Task Json_review_emits_auditable_envelope_before_missing_approval()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = Review,
         };
         CliHarness harness = CreateHarness(workflow);
 
@@ -557,9 +581,7 @@ public sealed class MutationCommandModuleTests
     {
         var workflow = new FakeMutationWorkflow
         {
-            Handler = request => request.ApproveReview
-                ? FakeMutationWorkflow.Result(request)
-                : Review(request),
+            Handler = Review,
         };
         CliHarness harness = CreateHarness(workflow);
 
@@ -586,9 +608,7 @@ public sealed class MutationCommandModuleTests
     {
         var workflow = new FakeMutationWorkflow
         {
-            Handler = request => request.ApproveReview
-                ? FakeMutationWorkflow.Result(request)
-                : Review(request),
+            Handler = Review,
         };
         CliHarness harness = CreateHarness(workflow);
         harness.Interaction.EnqueueConfirm(true);
@@ -1475,6 +1495,43 @@ public sealed class MutationCommandModuleTests
         Assert.Contains("[REDACTED]", result.StandardOutput, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Explain_rules_renders_trace_in_text_and_json(bool json)
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => FakeMutationWorkflow.Result(
+                request,
+                trace:
+                [
+                    new("META-1", "explained token=trace-secret"),
+                ]),
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        var arguments = new List<string>
+        {
+            "update",
+            "Example.App",
+            "1.0",
+            "--dry-run",
+            "--explain-rules",
+        };
+        if (json)
+        {
+            arguments.Add("--format");
+            arguments.Add("json");
+        }
+
+        CliRunResult result = await harness.RunAsync([.. arguments]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains(json ? "\"trace\":[" : "trace META-1", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("trace-secret", result.StandardOutput, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Factory_composes_real_local_workflow_for_golden_new_apply()
     {
@@ -1548,7 +1605,9 @@ public sealed class MutationCommandModuleTests
     private static WorkflowOperationResult Review(WorkflowOperationRequest request)
         => FakeMutationWorkflow.Result(
             request,
-            WorkflowResultCode.ReviewRequired,
+            request.ApproveReview
+                ? WorkflowResultCode.Succeeded
+                : WorkflowResultCode.ReviewRequired,
             reviews:
             [
                 new(
@@ -1701,6 +1760,7 @@ internal sealed class FakeMutationWorkflow : IMutationWorkflow
         ValidationReport? validation = null,
         ImmutableArray<WorkflowQuestion> questions = default,
         ImmutableArray<HumanCorrectionReview> reviews = default,
+        ImmutableArray<RuleTraceEntry> trace = default,
         string content = "PackageIdentifier: Example.App\nPackageVersion: 1.0\n",
         ImmutableArray<WorkflowAuditEntry> audit = default)
     {
@@ -1729,7 +1789,12 @@ internal sealed class FakeMutationWorkflow : IMutationWorkflow
                 AfterDocuments = [document],
                 Changes = [change],
             },
-            Rules = new([], [], [], reviews.IsDefault ? [] : reviews, []),
+            Rules = new(
+                [],
+                [],
+                [],
+                reviews.IsDefault ? [] : reviews,
+                trace.IsDefault ? [] : trace),
             Questions = questions.IsDefault ? [] : questions,
             ReviewApproved = request.ApproveReview,
             Audit = audit.IsDefault ? [] : audit,

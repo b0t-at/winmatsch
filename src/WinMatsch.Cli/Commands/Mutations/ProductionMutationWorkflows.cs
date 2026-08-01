@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
+using System.Text;
 using WinMatsch.Core;
+using WinMatsch.Core.Yaml;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.GitHub.Auth;
@@ -46,14 +48,31 @@ public sealed class ProductionSubmissionWorkflowFactory : ISubmissionWorkflowFac
 internal sealed class ProductionMutationWorkflow(
     WinMatschConfiguration configuration,
     Hosting.ITokenAccessor tokens,
-    GitHubClientOptions gitHubOptions) : IVerifiedMutationWorkflow
+    GitHubClientOptions gitHubOptions) : IVerifiedMutationWorkflow, IDisposable
 {
+    private WorkflowOperationRequest? _preparedRequest;
+    private string? _artifactDirectory;
+    private string? _submitCacheDirectory;
+
     public async Task<WorkflowOperationResult> ExecuteAsync(
         WorkflowOperationRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        using var downloader = new InstallerDownloader(DownloaderOptions(configuration));
+        bool usePrepared = request.ExecutionMode == WorkflowExecutionMode.Apply
+            && _preparedRequest is not null;
+        if (usePrepared)
+        {
+            request = WithExecutionMode(_preparedRequest!, WorkflowExecutionMode.Apply);
+        }
+        else if (request.ExecutionMode == WorkflowExecutionMode.Plan)
+        {
+            CleanupArtifactDirectory();
+            _preparedRequest = null;
+        }
+
+        using var downloader = new InstallerDownloader(
+            DownloaderOptions(configuration, request is SubmitOperationRequest));
         using HttpClient? gitHubHttp = await CreateReleaseHttpClientAsync(request, cancellationToken)
             .ConfigureAwait(false);
         using IGitHubRepositoryClient? gitHub = gitHubHttp is null
@@ -63,28 +82,42 @@ internal sealed class ProductionMutationWorkflow(
                 (await tokens.RequireAsync(cancellationToken).ConfigureAwait(false)).Token.RevealValue(),
                 gitHubOptions));
         IWorkflowReleaseSource? releases = CreateReleaseSource(request, gitHub, gitHubOptions);
-        string? artifactDirectory = null;
         try
         {
-            (request, artifactDirectory) = await EnrichAssetsAsync(
-                request,
-                releases,
-                downloader,
-                cancellationToken).ConfigureAwait(false);
+            if (!usePrepared)
+            {
+                (request, _artifactDirectory) = await EnrichAssetsAsync(
+                    request,
+                    releases,
+                    downloader,
+                    cancellationToken).ConfigureAwait(false);
+                request = await PrefetchSubmitAsync(
+                    request,
+                    downloader,
+                    cancellationToken).ConfigureAwait(false);
+                if (request.ExecutionMode == WorkflowExecutionMode.Plan)
+                {
+                    _preparedRequest = request;
+                }
+            }
+
             LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
                 downloader,
                 releases,
                 overridePackStoreOptions: OverrideStoreOptions(configuration));
-            return await new LocalMutationWorkflow(engine)
+            WorkflowOperationResult result = await new LocalMutationWorkflow(engine)
                 .ExecuteAsync(request, cancellationToken)
                 .ConfigureAwait(false);
+            return AttachTrustedReleaseProvenance(result, request, gitHubOptions);
         }
-        finally
+        catch
         {
-            if (artifactDirectory is not null && Directory.Exists(artifactDirectory))
+            if (!usePrepared)
             {
-                Directory.Delete(artifactDirectory, recursive: true);
+                CleanupArtifactDirectory();
             }
+
+            throw;
         }
     }
 
@@ -94,7 +127,11 @@ internal sealed class ProductionMutationWorkflow(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        using var downloader = new InstallerDownloader(DownloaderOptions(configuration));
+        WorkflowOperationRequest prepared = _preparedRequest is null
+            ? request
+            : WithExecutionMode(_preparedRequest, WorkflowExecutionMode.Apply);
+        using var downloader = new InstallerDownloader(
+            DownloaderOptions(configuration, prepared is SubmitOperationRequest));
         using HttpClient? gitHubHttp = await CreateReleaseHttpClientAsync(request, cancellationToken)
             .ConfigureAwait(false);
         using IGitHubRepositoryClient? gitHub = gitHubHttp is null
@@ -105,12 +142,25 @@ internal sealed class ProductionMutationWorkflow(
                 gitHubOptions));
         LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
             downloader,
-            CreateReleaseSource(request, gitHub, gitHubOptions),
+            CreateReleaseSource(prepared, gitHub, gitHubOptions),
             overridePackStoreOptions: OverrideStoreOptions(configuration));
-        return await engine.ApplyVerifiedPlanAsync(
-            request,
+        WorkflowOperationResult result = await engine.ApplyVerifiedPlanAsync(
+            prepared,
             expectedPlanFingerprint,
             cancellationToken).ConfigureAwait(false);
+        return AttachTrustedReleaseProvenance(result, prepared, gitHubOptions);
+    }
+
+    public void Dispose()
+    {
+        CleanupArtifactDirectory();
+        if (_submitCacheDirectory is not null
+            && Directory.Exists(_submitCacheDirectory))
+        {
+            Directory.Delete(_submitCacheDirectory, recursive: true);
+        }
+        GC.SuppressFinalize(this);
+        GC.SuppressFinalize(this);
     }
 
     private static IWorkflowReleaseSource? CreateReleaseSource(
@@ -195,12 +245,17 @@ internal sealed class ProductionMutationWorkflow(
         return new(segments[0], segments[1]);
     }
 
-    private static DownloaderOptions DownloaderOptions(WinMatschConfiguration configuration)
+    private DownloaderOptions DownloaderOptions(
+        WinMatschConfiguration configuration,
+        bool submit)
         => new()
         {
             CacheDirectory = configuration.CacheEnabled
                 ? configuration.CacheDirectory ?? DefaultCacheDirectory()
-                : null,
+                : submit
+                    ? _submitCacheDirectory ??= Directory.CreateTempSubdirectory(
+                        "winmatsch-submit-cache-").FullName
+                    : null,
         };
 
     private static OverridePackStoreOptions? OverrideStoreOptions(
@@ -211,6 +266,149 @@ internal sealed class ProductionMutationWorkflow(
             {
                 RootDirectory = configuration.OverrideStoreDirectory,
             };
+
+    private async Task<WorkflowOperationRequest> PrefetchSubmitAsync(
+        WorkflowOperationRequest request,
+        InstallerDownloader downloader,
+        CancellationToken cancellationToken)
+    {
+        if (request is not SubmitOperationRequest submit)
+        {
+            return request;
+        }
+
+        ImmutableArray<string> urls = ExtractInstallerUrls(submit.Documents);
+        if (urls.IsEmpty)
+        {
+            return request;
+        }
+
+        _artifactDirectory ??= Directory.CreateTempSubdirectory(
+            "winmatsch-submit-artifacts-").FullName;
+        _ = await downloader.DownloadManyAsync(
+            urls,
+            _artifactDirectory,
+            configuration.ConcurrentDownloads,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return submit with { ArtifactDirectory = _artifactDirectory };
+    }
+
+    private static ImmutableArray<string> ExtractInstallerUrls(
+        ImmutableArray<RawManifestDocument> documents)
+    {
+        var urls = ImmutableArray.CreateBuilder<string>();
+        foreach (RawManifestDocument document in documents)
+        {
+            string yaml = new UTF8Encoding(false, true).GetString(document.Content.AsSpan());
+            if (ManifestYamlReader.TryDetectType(yaml) != ManifestType.Installer)
+            {
+                continue;
+            }
+
+            InstallerManifest manifest = ManifestYamlReader.ReadInstaller(yaml);
+            urls.AddRange((manifest.Installers ?? [])
+                .Select(static installer => installer.InstallerUrl)
+                .OfType<string>()
+                .Where(static url => !string.IsNullOrWhiteSpace(url)));
+        }
+
+        return urls
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToImmutableArray();
+    }
+
+    private static WorkflowOperationResult AttachTrustedReleaseProvenance(
+        WorkflowOperationResult result,
+        WorkflowOperationRequest request,
+        GitHubClientOptions options)
+    {
+        if (result.Plan.Release is not null)
+        {
+            return result;
+        }
+
+        ImmutableArray<DiscoveredAsset> assets = request switch
+        {
+            NewOperationRequest value => value.Assets,
+            UpdateOperationRequest value => value.Assets,
+            _ => [],
+        };
+        DiscoveredAsset[] releaseAssets =
+        [
+            .. assets.Where(static asset => asset.ReleaseId > 0),
+        ];
+        if (releaseAssets.Length == 0
+            || releaseAssets.Select(static asset => asset.ReleaseId).Distinct().Count() != 1)
+        {
+            return result;
+        }
+
+        string trustedWebHost = options.ApiBaseUri.Host.Equals(
+            "api.github.com",
+            StringComparison.OrdinalIgnoreCase)
+            ? "github.com"
+            : options.ApiBaseUri.Host;
+        Uri releaseUri = releaseAssets[0].ReleaseUri;
+        if (!releaseUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || !releaseUri.Host.Equals(trustedWebHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return result;
+        }
+
+        string[] segments = releaseUri.AbsolutePath.Split(
+            '/',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        DateTimeOffset[] timestamps =
+        [
+            .. releaseAssets.SelectMany(static asset => new DateTimeOffset?[]
+                {
+                    asset.ReleaseUpdatedAt,
+                    asset.ReleasePublishedAt,
+                    asset.AssetUpdatedAt,
+                    asset.AssetCreatedAt,
+                })
+                .OfType<DateTimeOffset>(),
+        ];
+        if (segments.Length < 2 || timestamps.Length == 0)
+        {
+            return result;
+        }
+
+        return result with
+        {
+            Plan = result.Plan with
+            {
+                Release = new(
+                    new RepositoryCoordinates(segments[0], segments[1]),
+                    releaseAssets[0].ReleaseId,
+                    timestamps.Max()),
+            },
+        };
+    }
+
+    private static WorkflowOperationRequest WithExecutionMode(
+        WorkflowOperationRequest request,
+        WorkflowExecutionMode mode)
+        => request switch
+        {
+            NewOperationRequest value => value with { ExecutionMode = mode },
+            UpdateOperationRequest value => value with { ExecutionMode = mode },
+            RemoveOperationRequest value => value with { ExecutionMode = mode },
+            SubmitOperationRequest value => value with { ExecutionMode = mode },
+            NewLocaleOperationRequest value => value with { ExecutionMode = mode },
+            UpdateLocaleOperationRequest value => value with { ExecutionMode = mode },
+            _ => throw new ArgumentException("Unsupported mutation request.", nameof(request)),
+        };
+
+    private void CleanupArtifactDirectory()
+    {
+        if (_artifactDirectory is not null && Directory.Exists(_artifactDirectory))
+        {
+            Directory.Delete(_artifactDirectory, recursive: true);
+        }
+        _artifactDirectory = null;
+    }
 
     private async Task<(WorkflowOperationRequest Request, string? ArtifactDirectory)>
         EnrichAssetsAsync(

@@ -251,6 +251,25 @@ public sealed class TokenCommandTests
         Assert.DoesNotContain(Secret, result.StandardError, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Stdin_token_read_observes_invocation_cancellation()
+    {
+        var harness = new CliHarness();
+        harness.Modules.Add(new TokenCommandModule(
+            harness.TokenStore,
+            new RecordingValidator(TokenValidationResult.Valid("octocat")),
+            () => new CancellationAwareReader()));
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+
+        CliRunResult result = await harness.RunAsync(
+            ["token", "add", "--stdin"],
+            cancellation.Token);
+
+        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
+        Assert.Null(harness.TokenStore.StoredToken);
+    }
+
     private sealed class RecordingValidator : ITokenValidator
     {
         private readonly TokenValidationResult _result;
@@ -269,5 +288,12 @@ public sealed class TokenCommandTests
             Calls++;
             return Task.FromResult(_result);
         }
+    }
+
+    private sealed class CancellationAwareReader : TextReader
+    {
+        public override ValueTask<string?> ReadLineAsync(
+            CancellationToken cancellationToken)
+            => ValueTask.FromCanceled<string?>(cancellationToken);
     }
 }

@@ -61,11 +61,16 @@ public sealed class PublicReadOnlyGitHubClientTests
             new RepositoryCoordinates("owner", "repo"),
             "tree",
             recursive: false);
+        _ = await client.GetTreeAsync(
+            new RepositoryCoordinates("owner", "repo"),
+            "tree",
+            recursive: false);
 
         Assert.Empty(entries);
-        Assert.Equal(2, handler.Calls);
+        Assert.Equal(3, handler.Calls);
         Assert.True(handler.FirstWasAuthenticated);
         Assert.True(handler.SecondWasAnonymous);
+        Assert.True(handler.ThirdWasAnonymous);
     }
 
     private sealed class RecordingHandler(string json) : HttpMessageHandler
@@ -95,6 +100,8 @@ public sealed class PublicReadOnlyGitHubClientTests
 
         public bool SecondWasAnonymous { get; private set; }
 
+        public bool ThirdWasAnonymous { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
@@ -106,7 +113,14 @@ public sealed class PublicReadOnlyGitHubClientTests
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
             }
 
-            SecondWasAnonymous = request.Headers.Authorization is null;
+            if (Calls == 2)
+            {
+                SecondWasAnonymous = request.Headers.Authorization is null;
+            }
+            else
+            {
+                ThirdWasAnonymous = request.Headers.Authorization is null;
+            }
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(

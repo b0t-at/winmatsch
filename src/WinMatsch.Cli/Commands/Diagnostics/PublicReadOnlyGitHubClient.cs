@@ -14,7 +14,7 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
 
     private readonly HttpClient _httpClient;
     private readonly GitHubClientOptions _options;
-    private readonly string? _token;
+    private string? _token;
 
     public PublicReadOnlyGitHubClient(
         GitHubClientOptions options,
@@ -286,11 +286,13 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken)
     {
         Uri uri = new(_options.ApiBaseUri, relativePath);
-        HttpResponseMessage response = await SendAsync(uri, _token, cancellationToken)
+        string? token = Volatile.Read(ref _token);
+        HttpResponseMessage response = await SendAsync(uri, token, cancellationToken)
             .ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized
-            && !string.IsNullOrWhiteSpace(_token))
+            && !string.IsNullOrWhiteSpace(token))
         {
+            _ = Interlocked.Exchange(ref _token, null);
             response.Dispose();
             response = await SendAsync(uri, token: null, cancellationToken)
                 .ConfigureAwait(false);

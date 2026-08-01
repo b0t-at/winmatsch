@@ -86,6 +86,25 @@ public sealed class DiagnosticsCommandModuleTests
     }
 
     [Fact]
+    public async Task Analyze_redacts_every_remote_input_query_value()
+    {
+        var analyzer = new FakeInstallerDiagnosticService { IsRemote = true };
+        CliHarness harness = CreateHarness(analyzer: analyzer);
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "analyze",
+            "https://example.test/setup.exe?download_key=opaque-secret&page=2",
+            "--format",
+            "json",
+        ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.DoesNotContain("opaque-secret", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("page=2", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Validate_json_is_deterministic_and_blocking_findings_exit_nonzero()
     {
         var validation = new FakeManifestValidationService
@@ -294,6 +313,8 @@ public sealed class DiagnosticsCommandModuleTests
 
 internal sealed class FakeInstallerDiagnosticService : IInstallerDiagnosticService
 {
+    public bool IsRemote { get; init; }
+
     public Exception? Failure { get; init; }
 
     public CancellationTokenSource? Cancellation { get; init; }
@@ -316,7 +337,7 @@ internal sealed class FakeInstallerDiagnosticService : IInstallerDiagnosticServi
         return Task.FromResult(new InstallerDiagnosticResult(
             request.Input,
             "fixture.exe",
-            IsRemote: false,
+            IsRemote,
             IsFromCache: false,
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             42,

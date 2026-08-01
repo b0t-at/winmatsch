@@ -114,10 +114,14 @@ public sealed class CompletionCommandTests
         Assert.Contains("$valueOptions", powerShell.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("$booleanOptions", powerShell.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("@('true', 'false')", powerShell.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("$elements = @(", powerShell.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("[Tt][Rr][Uu][Ee]", bash.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("${(L)words[i+1]}", zsh.StandardOutput, StringComparison.Ordinal);
         CliRunResult fish = await harness.RunAsync(["completion", "fish"]);
         Assert.Contains("__winmatsch_command", fish.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("set -l value_opts", fish.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("-l output -r", fish.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("string lower", fish.StandardOutput, StringComparison.Ordinal);
     }
 
     [Fact]

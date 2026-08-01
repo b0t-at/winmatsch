@@ -196,15 +196,29 @@ internal sealed class DictionaryConfigFileSystem : IConfigFileSystem
     /// <summary>When set, every write throws to exercise the atomic-failure path.</summary>
     public Exception? WriteFailure { get; set; }
 
+    public Action? BeforeWrite { get; set; }
+
     public List<string> Writes { get; } = [];
 
     public string? ReadText(string path) => _files.GetValueOrDefault(path);
 
-    public void WriteTextAtomic(string path, string content)
+    public void WriteTextAtomic(
+        string path,
+        string content,
+        string? expectedContent)
     {
+        BeforeWrite?.Invoke();
         if (WriteFailure is not null)
         {
             throw WriteFailure;
+        }
+
+        if (!string.Equals(
+                _files.GetValueOrDefault(path),
+                expectedContent,
+                StringComparison.Ordinal))
+        {
+            throw new IOException("The configuration file changed concurrently.");
         }
 
         Writes.Add(path);

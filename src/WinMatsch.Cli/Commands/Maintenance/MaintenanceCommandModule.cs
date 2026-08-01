@@ -51,7 +51,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
         _feedbackFactory = feedbackFactory;
         _repairPlannerFactory = repairPlannerFactory
             ?? new CliApprovedRepairPlannerFactory(new ProductionMutationWorkflowFactory());
-        _feedbackStateStore = feedbackStateStore ?? new NullFeedbackStateStore();
+        _feedbackStateStore = feedbackStateStore ?? new NoOpFeedbackStateStore();
         _submissionJournals = submissionJournals;
     }
 
@@ -420,14 +420,14 @@ public sealed class MaintenanceCommandModule : ICommandModule
                     "Pull request inspection failed",
                     () => source.GetOpenToolPullRequestsAsync(upstream, context.CancellationToken))
                 .ConfigureAwait(false);
-            var replayCoordinator = new FeedbackReplayCoordinator(
-                _feedbackStateStore,
-                _clock);
-            ImmutableArray<DurableFeedbackRetry> pending = await MaintenanceCommandHelpers
+            ImmutableArray<FeedbackWorkItem> pending = await MaintenanceCommandHelpers
                 .RunRemoteAsync(
                     context,
                     "Feedback state read failed",
-                    () => replayCoordinator.LoadAsync(context.CancellationToken))
+                    () => _feedbackStateStore.GetPendingAsync(
+                        upstream.ToString(),
+                        _clock.UtcNow,
+                        context.CancellationToken))
                 .ConfigureAwait(false);
             using InstallerDownloader? feedbackDownloader = _feedbackFactory is null
                 ? new InstallerDownloader(new DownloaderOptions
@@ -439,30 +439,28 @@ public sealed class MaintenanceCommandModule : ICommandModule
                 : null;
             IApprovedRepairPlanner planner = _repairPlannerFactory.Create(
                 context,
-                context.IsDryRun || !apply
+                context.IsDryRun || !apply || schedule
                     ? new Dictionary<long, string>()
                     : approvedRepairs);
+            IFeedbackStateStore stateForRun = replay && context.IsDryRun
+                ? new ReadOnlyFeedbackStateStore(_feedbackStateStore)
+                : schedule && !context.IsDryRun || apply && !context.IsDryRun
+                    ? _feedbackStateStore
+                    : new NoOpFeedbackStateStore();
             GitHubFeedbackWorkflow feedback = _feedbackFactory?.Invoke(client)
-                ?? CreateDefaultFeedbackWorkflow(client, planner, feedbackDownloader!);
+                ?? CreateDefaultFeedbackWorkflow(
+                    client,
+                    planner,
+                    feedbackDownloader!,
+                    stateForRun);
             if (!apply || context.IsDryRun || schedule)
             {
-                FeedbackResult inspection = await MaintenanceCommandHelpers.RunRemoteAsync(
-                    context,
-                    "Pull request inspection failed",
-                    () => feedback.ProcessAsync(
-                        upstream,
-                        observations,
-                        new FeedbackPolicy { ApplyKnownSafeResponses = false },
-                        context.CancellationToken))
-                    .ConfigureAwait(false);
                 if (schedule && !context.IsDryRun)
                 {
                     bool confirmedSchedule = await MaintenanceCommandHelpers.ConfirmMutationAsync(
                         context,
                         context.ParseResult.GetValue(yes),
-                        $"Persist {inspection.RetryMetadata.Length} retry schedule entr"
-                        + (inspection.RetryMetadata.Length == 1 ? "y" : "ies")
-                        + "?")
+                        "Classify open tool pull requests and persist their native retry state?")
                         .ConfigureAwait(false);
                     if (!confirmedSchedule)
                     {
@@ -470,14 +468,38 @@ public sealed class MaintenanceCommandModule : ICommandModule
                             "Aborted: confirmation declined; retry state was unchanged.");
                         return ExitCodes.OperationFailed;
                     }
+                }
 
+                FeedbackResult inspection = await MaintenanceCommandHelpers.RunRemoteAsync(
+                    context,
+                    "Pull request inspection failed",
+                    () => replay && context.IsDryRun
+                        ? feedback.ReplayPendingAsync(
+                            upstream,
+                            source,
+                            new FeedbackPolicy { ApplyKnownSafeResponses = false },
+                            context.CancellationToken)
+                        : feedback.ProcessAsync(
+                            upstream,
+                            observations,
+                            new FeedbackPolicy { ApplyKnownSafeResponses = false },
+                            context.CancellationToken))
+                    .ConfigureAwait(false);
+                if (schedule && !context.IsDryRun)
+                {
                     pending = await MaintenanceCommandHelpers.RunRemoteAsync(
                         context,
-                        "Feedback state update failed",
-                        () => replayCoordinator.ScheduleAsync(
-                            inspection.RetryMetadata,
+                        "Feedback state read failed",
+                        () => _feedbackStateStore.GetPendingAsync(
+                            upstream.ToString(),
+                            DateTimeOffset.MaxValue,
                             context.CancellationToken)).ConfigureAwait(false);
                 }
+
+                ImmutableArray<FeedbackWorkItem> displayedPending = ProjectPending(
+                    upstream,
+                    pending,
+                    inspection);
 
                 GitHubCompleteResult lifecycle = GitHubMaintenanceWorkflow.Complete(observations);
                 Dictionary<long, PullRequestLifecycleStatus> classified =
@@ -495,7 +517,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
                     statuses,
                     [.. lifecycle.Diagnostics, .. inspection.Diagnostics],
                     applied: false,
-                    pending: pending);
+                    pending: displayedPending);
                 return ExitCodes.Success;
             }
 
@@ -515,13 +537,12 @@ public sealed class MaintenanceCommandModule : ICommandModule
             FeedbackResult result;
             if (replay)
             {
-                (result, pending) = await MaintenanceCommandHelpers.RunRemoteAsync(
+                result = await MaintenanceCommandHelpers.RunRemoteAsync(
                     context,
                     "Pending feedback replay failed",
-                    () => replayCoordinator.ReplayPendingAsync(
-                        feedback,
+                    () => feedback.ReplayPendingAsync(
                         upstream,
-                        observations,
+                        source,
                         new FeedbackPolicy { ApplyKnownSafeResponses = true },
                         context.CancellationToken)).ConfigureAwait(false);
             }
@@ -536,19 +557,21 @@ public sealed class MaintenanceCommandModule : ICommandModule
                         new FeedbackPolicy { ApplyKnownSafeResponses = true },
                         context.CancellationToken))
                     .ConfigureAwait(false);
-                pending = await MaintenanceCommandHelpers.RunRemoteAsync(
-                    context,
-                    "Feedback state update failed",
-                    () => replayCoordinator.RecordResultAsync(
-                        result,
-                        observations.Select(static observation =>
-                            observation.PullRequest.Number),
-                        context.CancellationToken)).ConfigureAwait(false);
             }
+            pending = await MaintenanceCommandHelpers.RunRemoteAsync(
+                context,
+                "Feedback state read failed",
+                () => _feedbackStateStore.GetPendingAsync(
+                    upstream.ToString(),
+                    DateTimeOffset.MaxValue,
+                    context.CancellationToken)).ConfigureAwait(false);
+            ImmutableArray<FeedbackWorkItem> displayedAfterApply = ProjectPending(
+                upstream,
+                pending,
+                result);
             bool appliedKnownSafeResponse = result.Statuses.Any(static status =>
-                    status.RecommendedAction is PullRequestLifecycleAction.RerunChecks
-                        or PullRequestLifecycleAction.RepairManifest)
-                && !result.Diagnostics.Any(static diagnostic => diagnostic.Code == "GH3207");
+                status.RecommendedAction is PullRequestLifecycleAction.RerunChecks
+                    or PullRequestLifecycleAction.RepairManifest);
             WriteCompleteResult(
                 context,
                 upstream,
@@ -556,7 +579,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
                 result.Statuses,
                 result.Diagnostics,
                 applied: appliedKnownSafeResponse,
-                pending: pending);
+                pending: displayedAfterApply);
             if (result.RemoteStates.Any(static state => state.State.RemoteOutcomeUncertain))
             {
                 context.Output.WriteError(
@@ -648,7 +671,13 @@ public sealed class MaintenanceCommandModule : ICommandModule
                 () => workflow.PlanAsync(request, context.CancellationToken))
                 .ConfigureAwait(false);
             bool stillRemovable = plans.All(static plan => plan.CanRemove);
-            WriteRemoveDeadVersionsResult(context, upstream, plans, escalated: stillRemovable);
+            bool revalidationIndeterminate = plans.Any(static plan =>
+                plan.Diagnostics.Any(static diagnostic => diagnostic.Code == "GH3103"));
+            WriteRemoveDeadVersionsResult(
+                context,
+                upstream,
+                plans,
+                escalated: stillRemovable || revalidationIndeterminate);
             if (!stillRemovable)
             {
                 return ExitCodes.OperationFailed;
@@ -709,15 +738,56 @@ public sealed class MaintenanceCommandModule : ICommandModule
     private GitHubFeedbackWorkflow CreateDefaultFeedbackWorkflow(
         IGitHubRepositoryClient client,
         IApprovedRepairPlanner planner,
-        InstallerDownloader downloader)
-        => WorkflowProductionComposition.CreateGitHubFeedback(
+        InstallerDownloader downloader,
+        IFeedbackStateStore stateStore)
+        => new(
             client,
             WorkflowProductionComposition.CreateGitHubLifecycle(
                 client,
                 downloader,
                 _clock),
             planner,
-            _clock);
+            _clock,
+            stateStore);
+
+    private ImmutableArray<FeedbackWorkItem> ProjectPending(
+        RepositoryCoordinates repository,
+        ImmutableArray<FeedbackWorkItem> stored,
+        FeedbackResult result)
+    {
+        HashSet<long> terminal =
+        [
+            .. result.Statuses
+                .Where(static status =>
+                    status.RecommendedAction is PullRequestLifecycleAction.RepairManifest
+                        or PullRequestLifecycleAction.EscalateToHuman)
+                .Select(static status => status.PullRequestNumber),
+        ];
+        Dictionary<long, FeedbackWorkItem> projected = stored
+            .Where(item => !terminal.Contains(item.PullRequestNumber))
+            .ToDictionary(static item => item.PullRequestNumber);
+        foreach (FeedbackRetryMetadata retry in result.RetryMetadata.Where(item =>
+                     !terminal.Contains(item.PullRequestNumber)))
+        {
+            projected[retry.PullRequestNumber] = new(
+                repository.ToString(),
+                retry.PullRequestNumber,
+                retry.Classification,
+                retry.Classification is FeedbackClassification.DuplicateEntry
+                    or FeedbackClassification.HashMismatch
+                        ? FeedbackWorkState.AwaitingApprovedRepair
+                        : FeedbackWorkState.RetryScheduled,
+                _clock.UtcNow,
+                retry.RetryAfter,
+                retry.LearnedOverrideSignal,
+                "Pending retry or approved repair.");
+        }
+
+        return
+        [
+            .. projected.Values.OrderBy(static item => item.PullRequestNumber),
+        ];
+    }
 
     private static Dictionary<long, string> ParseApprovedRepairs(
         string[]? values)
@@ -839,7 +909,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
         ImmutableArray<PullRequestLifecycleStatus> statuses,
         ImmutableArray<GitHubLifecycleDiagnostic> diagnostics,
         bool applied,
-        ImmutableArray<DurableFeedbackRetry> pending)
+        ImmutableArray<FeedbackWorkItem> pending)
         => context.Output.WriteFormatted(
             writer =>
             {
@@ -865,12 +935,15 @@ public sealed class MaintenanceCommandModule : ICommandModule
                     writer.WriteLine("  (none)");
                 }
 
-                foreach (DurableFeedbackRetry item in pending)
+                foreach (FeedbackWorkItem item in pending)
                 {
                     writer.WriteLine(
                         $"  #{item.PullRequestNumber} "
                         + $"{MaintenanceCommandHelpers.ToCamelCase(item.Classification)} "
-                        + $"after {MaintenanceCommandHelpers.FormatTimestamp(item.RetryAfter)}"
+                        + $"{MaintenanceCommandHelpers.ToCamelCase(item.State)} "
+                        + (item.RetryAfter is { } retryAfter
+                            ? $"after {MaintenanceCommandHelpers.FormatTimestamp(retryAfter)}"
+                            : "(unscheduled)")
                         + (item.LearnedOverrideSignal is null
                             ? ""
                             : $" learned={item.LearnedOverrideSignal}"));
@@ -901,12 +974,22 @@ public sealed class MaintenanceCommandModule : ICommandModule
 
                 writer.WriteEndArray();
                 writer.WriteStartArray("pendingRetries");
-                foreach (DurableFeedbackRetry item in pending)
+                foreach (FeedbackWorkItem item in pending)
                 {
                     writer.WriteStartObject();
                     writer.WriteNumber("pullRequestNumber", item.PullRequestNumber);
                     CliJson.WriteEnum(writer, "classification", item.Classification);
-                    writer.WriteString("retryAfter", item.RetryAfter);
+                    CliJson.WriteEnum(writer, "state", item.State);
+                    if (item.RetryAfter is { } retryAfter)
+                    {
+                        writer.WriteString("retryAfter", retryAfter);
+                    }
+                    else
+                    {
+                        writer.WriteNull("retryAfter");
+                    }
+
+                    writer.WriteString("reason", item.Reason);
                     if (item.LearnedOverrideSignal is null)
                     {
                         writer.WriteNull("learnedOverrideSignal");

@@ -101,6 +101,11 @@ internal static class MutationOutput
                 $"  review {review.ManifestPath}:{review.FieldPath}"
                 + $" human={Redact(review.HumanValue)} generated={Redact(review.GeneratedValue)}");
         }
+
+        foreach (var trace in plan.Rules.Trace)
+        {
+            writer.WriteLine($"  trace {trace.RuleId}: {Redact(trace.Message)}");
+        }
     }
 
     private static void WriteValidation(TextWriter writer, LocalOperationPlan plan)
@@ -198,7 +203,7 @@ internal static class MutationOutput
 
         if (state.PullRequestUri is not null)
         {
-            writer.WriteLine($"  pull request URL: {state.PullRequestUri}");
+            writer.WriteLine($"  pull request URL: {Redact(state.PullRequestUri.AbsoluteUri)}");
         }
 
         writer.WriteLine(
@@ -315,6 +320,16 @@ internal static class MutationOutput
         }
 
         json.WriteEndArray();
+        json.WriteStartArray("trace");
+        foreach (var trace in plan.Rules.Trace)
+        {
+            json.WriteStartObject();
+            json.WriteString("id", trace.RuleId);
+            json.WriteString("message", Redact(trace.Message));
+            json.WriteEndObject();
+        }
+
+        json.WriteEndArray();
         json.WriteEndObject();
     }
 
@@ -412,7 +427,10 @@ internal static class MutationOutput
             json.WriteNull("pullRequestNumber");
         }
 
-        WriteNullable(json, "pullRequestUrl", remote.RemoteState.PullRequestUri?.AbsoluteUri);
+        WriteNullable(
+            json,
+            "pullRequestUrl",
+            Redact(remote.RemoteState.PullRequestUri?.AbsoluteUri));
         json.WriteBoolean("forkCreated", remote.RemoteState.ForkCreated);
         json.WriteBoolean("branchCreated", remote.RemoteState.BranchCreated);
         json.WriteBoolean("commitCreated", remote.RemoteState.CommitCreated);

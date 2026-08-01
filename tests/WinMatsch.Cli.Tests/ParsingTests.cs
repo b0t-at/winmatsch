@@ -260,7 +260,7 @@ public sealed class ParsingTests
             probe.LastContext!.GitHubOptions.ApiBaseUri.AbsoluteUri);
         Assert.Equal(
             "https://ghe.example.test/api/graphql",
-            probe.LastContext.GitHubOptions.GraphQlUri.AbsoluteUri);
+            probe.LastContext!.GitHubOptions.GraphQlUri!.AbsoluteUri);
     }
 
     [Fact]

@@ -56,7 +56,10 @@ public sealed class TokenCommandModule : ICommandModule
 
         registry.SetHandler(command, async context =>
         {
-            GitHubToken token = ReadToken(context, context.ParseResult.GetValue(stdin), registry);
+            GitHubToken token = await ReadTokenAsync(
+                context,
+                context.ParseResult.GetValue(stdin),
+                registry).ConfigureAwait(false);
             EnsureStoreAvailable("stored");
             ITokenValidator validator = _validator ?? new GitHubTokenValidator(value =>
                 new RedactingGitHubRepositoryClient(new WinMatsch.GitHub.GitHubRepositoryClient(
@@ -186,7 +189,10 @@ public sealed class TokenCommandModule : ICommandModule
         return command;
     }
 
-    private GitHubToken ReadToken(CommandContext context, bool fromStdin, ICommandRegistry registry)
+    private async Task<GitHubToken> ReadTokenAsync(
+        CommandContext context,
+        bool fromStdin,
+        ICommandRegistry registry)
     {
         GitHubToken? explicitToken = context.ParseResult.GetValue(registry.GlobalOptions.Token);
         if (explicitToken is not null)
@@ -206,7 +212,9 @@ public sealed class TokenCommandModule : ICommandModule
                 + "--token option. Interactive prompting is not offered for secrets.");
         }
 
-        string? line = _standardInput().ReadLine();
+        string? line = await _standardInput()
+            .ReadLineAsync(context.CancellationToken)
+            .ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(line))
         {
             throw new MissingInputException(

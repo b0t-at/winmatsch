@@ -1,259 +1,41 @@
 using System.Collections.Immutable;
-using System.Globalization;
-using System.Text;
-using System.Text.Json;
 using WinMatsch.Cli.Commands.Mutations;
 using WinMatsch.Cli.Hosting;
 using WinMatsch.Core;
-using WinMatsch.GitHub;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
 
 namespace WinMatsch.Cli.Commands.Maintenance;
 
-public sealed record DurableFeedbackRetry(
-    long PullRequestNumber,
-    FeedbackClassification Classification,
-    DateTimeOffset RetryAfter,
-    string? LearnedOverrideSignal);
-
-public interface IFeedbackStateStore
+/// <summary>Non-persisting state adapter used by read-only feedback inspection.</summary>
+public sealed class NoOpFeedbackStateStore : IFeedbackStateStore
 {
-    public Task<ImmutableArray<DurableFeedbackRetry>> LoadAsync(
-        CancellationToken cancellationToken);
-
-    public Task SaveAsync(
-        ImmutableArray<DurableFeedbackRetry> pending,
-        CancellationToken cancellationToken);
-}
-
-public sealed class NullFeedbackStateStore : IFeedbackStateStore
-{
-    public Task<ImmutableArray<DurableFeedbackRetry>> LoadAsync(
-        CancellationToken cancellationToken)
-        => Task.FromResult(ImmutableArray<DurableFeedbackRetry>.Empty);
-
-    public Task SaveAsync(
-        ImmutableArray<DurableFeedbackRetry> pending,
+    public Task PersistAsync(
+        FeedbackWorkItem item,
         CancellationToken cancellationToken)
         => Task.CompletedTask;
 }
 
-public sealed class FileFeedbackStateStore(string path) : IFeedbackStateStore
+/// <summary>
+/// Read-only adapter over the native store: replay can inspect the exact pending queue without
+/// mutating it during dry-run.
+/// </summary>
+public sealed class ReadOnlyFeedbackStateStore(IFeedbackStateStore inner) : IFeedbackStateStore
 {
-    private readonly string _path =
-        !string.IsNullOrWhiteSpace(path)
-            ? Path.GetFullPath(path)
-            : throw new ArgumentException("Feedback state path is required.", nameof(path));
+    private readonly IFeedbackStateStore _inner =
+        inner ?? throw new ArgumentNullException(nameof(inner));
 
-    public async Task<ImmutableArray<DurableFeedbackRetry>> LoadAsync(
+    public Task PersistAsync(
+        FeedbackWorkItem item,
         CancellationToken cancellationToken)
-    {
-        if (!File.Exists(_path))
-        {
-            return [];
-        }
+        => Task.CompletedTask;
 
-        byte[] content = await File.ReadAllBytesAsync(_path, cancellationToken)
-            .ConfigureAwait(false);
-        using JsonDocument document = JsonDocument.Parse(content);
-        var pending = ImmutableArray.CreateBuilder<DurableFeedbackRetry>();
-        foreach (JsonElement item in document.RootElement.GetProperty("pending").EnumerateArray())
-        {
-            if (!Enum.TryParse(
-                    item.GetProperty("classification").GetString(),
-                    ignoreCase: true,
-                    out FeedbackClassification classification))
-            {
-                throw new InvalidDataException("Feedback state contains an unknown classification.");
-            }
-
-            pending.Add(new(
-                item.GetProperty("pullRequestNumber").GetInt64(),
-                classification,
-                item.GetProperty("retryAfter").GetDateTimeOffset(),
-                item.TryGetProperty("learnedOverrideSignal", out JsonElement learned)
-                    && learned.ValueKind == JsonValueKind.String
-                        ? learned.GetString()
-                        : null));
-        }
-
-        return pending
-            .OrderBy(static item => item.PullRequestNumber)
-            .ToImmutableArray();
-    }
-
-    public async Task SaveAsync(
-        ImmutableArray<DurableFeedbackRetry> pending,
+    public Task<ImmutableArray<FeedbackWorkItem>> GetPendingAsync(
+        string repository,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
-    {
-        string directory = Path.GetDirectoryName(_path)
-            ?? throw new IOException("Feedback state path has no parent directory.");
-        Directory.CreateDirectory(directory);
-        string temporary = _path + ".tmp-" + Guid.NewGuid().ToString("N");
-        try
-        {
-            await using (var stream = new FileStream(
-                             temporary,
-                             FileMode.CreateNew,
-                             FileAccess.Write,
-                             FileShare.None,
-                             4096,
-                             FileOptions.Asynchronous | FileOptions.WriteThrough))
-            {
-                using var writer = new Utf8JsonWriter(stream);
-                writer.WriteStartObject();
-                writer.WriteNumber("version", 1);
-                writer.WriteStartArray("pending");
-                foreach (DurableFeedbackRetry item in pending.OrderBy(
-                             static item => item.PullRequestNumber))
-                {
-                    writer.WriteStartObject();
-                    writer.WriteNumber("pullRequestNumber", item.PullRequestNumber);
-                    writer.WriteString("classification", item.Classification.ToString());
-                    writer.WriteString("retryAfter", item.RetryAfter);
-                    if (item.LearnedOverrideSignal is null)
-                    {
-                        writer.WriteNull("learnedOverrideSignal");
-                    }
-                    else
-                    {
-                        writer.WriteString("learnedOverrideSignal", item.LearnedOverrideSignal);
-                    }
-
-                    writer.WriteEndObject();
-                }
-
-                writer.WriteEndArray();
-                writer.WriteEndObject();
-                await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            if (!OperatingSystem.IsWindows())
-            {
-                File.SetUnixFileMode(
-                    temporary,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite);
-            }
-
-            File.Move(temporary, _path, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporary))
-            {
-                File.Delete(temporary);
-            }
-        }
-    }
-}
-
-public sealed class FeedbackReplayCoordinator(
-    IFeedbackStateStore store,
-    IWorkflowClock clock)
-{
-    private readonly IFeedbackStateStore _store =
-        store ?? throw new ArgumentNullException(nameof(store));
-    private readonly IWorkflowClock _clock =
-        clock ?? throw new ArgumentNullException(nameof(clock));
-
-    public Task<ImmutableArray<DurableFeedbackRetry>> LoadAsync(
-        CancellationToken cancellationToken)
-        => _store.LoadAsync(cancellationToken);
-
-    public async Task<ImmutableArray<DurableFeedbackRetry>> ScheduleAsync(
-        ImmutableArray<FeedbackRetryMetadata> retries,
-        CancellationToken cancellationToken)
-    {
-        ImmutableArray<DurableFeedbackRetry> existing = await _store
-            .LoadAsync(cancellationToken)
-            .ConfigureAwait(false);
-        ImmutableArray<DurableFeedbackRetry> updated = Merge(
-            existing,
-            retries,
-            retries.Select(static item => item.PullRequestNumber).ToHashSet());
-        await _store.SaveAsync(updated, cancellationToken).ConfigureAwait(false);
-        return updated;
-    }
-
-    public async Task<ImmutableArray<DurableFeedbackRetry>> RecordResultAsync(
-        FeedbackResult result,
-        IEnumerable<long> processedPullRequests,
-        CancellationToken cancellationToken)
-    {
-        ImmutableArray<DurableFeedbackRetry> existing = await _store
-            .LoadAsync(cancellationToken)
-            .ConfigureAwait(false);
-        ImmutableArray<DurableFeedbackRetry> updated = Merge(
-            existing,
-            result.RetryMetadata,
-            processedPullRequests.ToHashSet());
-        await _store.SaveAsync(updated, cancellationToken).ConfigureAwait(false);
-        return updated;
-    }
-
-    public async Task<(FeedbackResult Result, ImmutableArray<DurableFeedbackRetry> Pending)>
-        ReplayPendingAsync(
-        GitHubFeedbackWorkflow workflow,
-        RepositoryCoordinates upstream,
-        ImmutableArray<PullRequestObservation> observations,
-        FeedbackPolicy policy,
-        CancellationToken cancellationToken)
-    {
-        ImmutableArray<DurableFeedbackRetry> existing = await _store
-            .LoadAsync(cancellationToken)
-            .ConfigureAwait(false);
-        HashSet<long> due = existing
-            .Where(item => item.RetryAfter <= _clock.UtcNow)
-            .Select(static item => item.PullRequestNumber)
-            .ToHashSet();
-        ImmutableArray<PullRequestObservation> selected =
-        [
-            .. observations.Where(observation =>
-                due.Contains(observation.PullRequest.Number)),
-        ];
-        FeedbackResult result = await workflow.ProcessAsync(
-            upstream,
-            selected,
-            policy,
-            cancellationToken).ConfigureAwait(false);
-        HashSet<long> resolved = result.Statuses
-            .Where(static status =>
-                status.RecommendedAction == PullRequestLifecycleAction.RepairManifest)
-            .Select(static status => status.PullRequestNumber)
-            .ToHashSet();
-        HashSet<long> processed = selected
-            .Select(static item => item.PullRequest.Number)
-            .ToHashSet();
-        ImmutableArray<FeedbackRetryMetadata> remainingRetries =
-        [
-            .. result.RetryMetadata.Where(item =>
-                !resolved.Contains(item.PullRequestNumber)),
-        ];
-        ImmutableArray<DurableFeedbackRetry> updated = Merge(
-            existing,
-            remainingRetries,
-            processed);
-        await _store.SaveAsync(updated, cancellationToken).ConfigureAwait(false);
-        return (result, updated);
-    }
-
-    private static ImmutableArray<DurableFeedbackRetry> Merge(
-        ImmutableArray<DurableFeedbackRetry> existing,
-        ImmutableArray<FeedbackRetryMetadata> replacements,
-        HashSet<long> replacedPullRequests)
-        =>
-        [
-            .. existing
-                .Where(item => !replacedPullRequests.Contains(item.PullRequestNumber))
-                .Concat(replacements.Select(static item => new DurableFeedbackRetry(
-                    item.PullRequestNumber,
-                    item.Classification,
-                    item.RetryAfter,
-                    item.LearnedOverrideSignal)))
-                .OrderBy(static item => item.PullRequestNumber),
-        ];
+        => _inner.GetPendingAsync(repository, now, cancellationToken);
 }
 
 public interface IApprovedRepairPlannerFactory
@@ -364,10 +146,7 @@ public sealed class AllowlistedApprovedRepairPlanner(
 
         string content = body![(start + marker.Length)..end];
         string[] parts = content.Split(';', StringSplitOptions.TrimEntries);
-        string? package = parts.FirstOrDefault(static part =>
-            part.StartsWith("package=", StringComparison.Ordinal))?["package=".Length..];
-        // The marker prefix already consumed package=, so the first segment is the identifier.
-        package ??= parts[0];
+        string package = parts[0];
         string? version = parts.FirstOrDefault(static part =>
             part.StartsWith("version=", StringComparison.Ordinal))?["version=".Length..];
         return (

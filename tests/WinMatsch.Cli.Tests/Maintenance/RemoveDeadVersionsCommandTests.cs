@@ -138,6 +138,29 @@ public sealed class RemoveDeadVersionsCommandTests
     }
 
     [Fact]
+    public async Task Revalidation_indeterminate_result_remains_escalated()
+    {
+        var inspector = new FakeDeadVersionInspector();
+        inspector.InspectionSequences["1.0.0"] = new Queue<DeadVersionInspection>(
+        [
+            Dead(),
+            new(
+                Identifier(),
+                new PackageVersion("1.0.0"),
+                ExistsUpstream: true,
+                [DeadArtifactState.TransientFailure]),
+        ]);
+        CliHarness harness = CreateHarness(inspector);
+
+        CliRunResult result = await harness.RunAsync(
+            ["remove-dead-versions", Package, "1.0.0", "--yes", "--format", "json"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains("\"humanEscalationRequired\":true", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("GH3103", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Json_output_is_stable()
     {
         FakeDeadVersionInspector inspector = Inspecting(("1.0.0", Dead()));

@@ -407,6 +407,30 @@ public sealed class MaintenanceWorkflowCommandTests
     }
 
     [Fact]
+    public async Task Complete_reports_partial_application_when_one_response_fails()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(42));
+        client.CommentFailures[42] = new GitHubApiException("failed");
+        CliHarness harness = CreateHarness(
+            client,
+            TransientFeedbackSource(41, 42));
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--apply-safe", "--yes", "--format", "json"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains(
+            "\"appliedKnownSafeResponses\":true",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.Contains("\"number\":41", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"number\":42", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Single(client.Mutations);
+    }
+
+    [Fact]
     public async Task Complete_apply_safe_cancellation_maps_to_the_cancelled_exit_code()
     {
         FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
@@ -501,16 +525,8 @@ public sealed class MaintenanceWorkflowCommandTests
         {
             Pending =
             [
-                new(
-                    41,
-                    FeedbackClassification.TransientInternalError,
-                    DateTimeOffset.UnixEpoch,
-                    "transient-internal-error"),
-                new(
-                    42,
-                    FeedbackClassification.TransientInternalError,
-                    DateTimeOffset.MaxValue,
-                    "transient-internal-error"),
+                PendingItem(41, DateTimeOffset.UnixEpoch, "transient-internal-error"),
+                PendingItem(42, DateTimeOffset.MaxValue, "transient-internal-error"),
             ],
         };
         CliHarness harness = CreateHarness(
@@ -551,11 +567,7 @@ public sealed class MaintenanceWorkflowCommandTests
         {
             Pending =
             [
-                new(
-                    41,
-                    FeedbackClassification.TransientInternalError,
-                    DateTimeOffset.UnixEpoch,
-                    null),
+                PendingItem(41, DateTimeOffset.UnixEpoch, null),
             ],
         };
         CliHarness harness = CreateHarness(
@@ -644,11 +656,7 @@ public sealed class MaintenanceWorkflowCommandTests
         {
             Pending =
             [
-                new(
-                    41,
-                    FeedbackClassification.TransientInternalError,
-                    DateTimeOffset.UnixEpoch,
-                    null),
+                PendingItem(41, DateTimeOffset.UnixEpoch, null),
             ],
         };
         CliHarness harness = CreateHarness(
@@ -672,27 +680,25 @@ public sealed class MaintenanceWorkflowCommandTests
     public async Task Feedback_retry_state_round_trips_durably()
     {
         string directory = Directory.CreateTempSubdirectory("winmatsch-feedback-state-").FullName;
-        string path = Path.Combine(directory, "feedback-state.json");
+        string stateRoot = Path.Combine(directory, "feedback");
         try
         {
-            var store = new FileFeedbackStateStore(path);
-            ImmutableArray<DurableFeedbackRetry> expected =
-            [
-                new(
-                    41,
-                    FeedbackClassification.HashMismatch,
-                    new DateTimeOffset(2026, 8, 2, 0, 0, 0, TimeSpan.Zero),
-                    "hash-mismatch"),
-            ];
+            var store = new FileFeedbackStateStore(stateRoot);
+            FeedbackWorkItem expected = PendingItem(
+                41,
+                new DateTimeOffset(2026, 8, 2, 0, 0, 0, TimeSpan.Zero),
+                "hash-mismatch",
+                FeedbackClassification.HashMismatch);
 
-            await store.SaveAsync(expected, CancellationToken.None);
-            ImmutableArray<DurableFeedbackRetry> actual =
-                await store.LoadAsync(CancellationToken.None);
-
+            await store.PersistAsync(expected, CancellationToken.None);
+            ImmutableArray<FeedbackWorkItem> actual = await store.GetPendingAsync(
+                Upstream,
+                DateTimeOffset.MaxValue,
+                CancellationToken.None);
             Assert.Collection(
                 actual,
-                item => Assert.Equal(expected[0], item));
-            Assert.True(File.Exists(path));
+                item => Assert.Equal(expected, item));
+            Assert.NotEmpty(Directory.EnumerateFiles(stateRoot, "*.json"));
         }
         finally
         {
@@ -776,6 +782,22 @@ public sealed class MaintenanceWorkflowCommandTests
         }
     }
 
+    private static FeedbackWorkItem PendingItem(
+        long pullRequestNumber,
+        DateTimeOffset retryAfter,
+        string? learnedOverrideSignal,
+        FeedbackClassification classification =
+            FeedbackClassification.TransientInternalError)
+        => new(
+            Upstream,
+            pullRequestNumber,
+            classification,
+            FeedbackWorkState.RetryScheduled,
+            DateTimeOffset.UnixEpoch,
+            retryAfter,
+            learnedOverrideSignal,
+            "test pending feedback");
+
     private sealed class ScriptedFeedbackSource : IPullRequestFeedbackSource
     {
         private readonly ImmutableArray<PullRequestObservation> _observations;
@@ -793,22 +815,43 @@ public sealed class MaintenanceWorkflowCommandTests
 
     private sealed class InMemoryFeedbackStateStore : IFeedbackStateStore
     {
-        public ImmutableArray<DurableFeedbackRetry> Pending { get; set; } = [];
+        public ImmutableArray<FeedbackWorkItem> Pending { get; set; } = [];
 
-        public Task<ImmutableArray<DurableFeedbackRetry>> LoadAsync(
+        public Task PersistAsync(
+            FeedbackWorkItem item,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(Pending);
+            Pending =
+            [
+                .. Pending.Where(existing =>
+                    !string.Equals(
+                        existing.Repository,
+                        item.Repository,
+                        StringComparison.OrdinalIgnoreCase)
+                    || existing.PullRequestNumber != item.PullRequestNumber),
+                item,
+            ];
+            return Task.CompletedTask;
         }
 
-        public Task SaveAsync(
-            ImmutableArray<DurableFeedbackRetry> pending,
+        public Task<ImmutableArray<FeedbackWorkItem>> GetPendingAsync(
+            string repository,
+            DateTimeOffset now,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Pending = pending;
-            return Task.CompletedTask;
+            return Task.FromResult<ImmutableArray<FeedbackWorkItem>>(
+            [
+                .. Pending.Where(item =>
+                    string.Equals(
+                        item.Repository,
+                        repository,
+                        StringComparison.OrdinalIgnoreCase)
+                    && item.State is FeedbackWorkState.AwaitingApprovedRepair
+                        or FeedbackWorkState.RetryScheduled
+                    && item.RetryAfter.GetValueOrDefault(DateTimeOffset.MinValue) <= now),
+            ]);
         }
     }
 }

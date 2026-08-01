@@ -169,6 +169,18 @@ public sealed class SecretRedactionTests
         Assert.Contains(CliRedactor.Placeholder, result, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Escaped_quotes_do_not_expose_secret_suffixes()
+    {
+        const string value = "token=\"alpha\\\"omega\"";
+
+        string result = CliRedactor.Redact(value);
+
+        Assert.DoesNotContain("alpha", result, StringComparison.Ordinal);
+        Assert.DoesNotContain("omega", result, StringComparison.Ordinal);
+        Assert.Contains(CliRedactor.Placeholder, result, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("Microsoft.VisualStudioCode.Insiders")]
     [InlineData("MongoDB.Compass.Community")]

@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
 using WinMatsch.Cli.Hosting;
+using WinMatsch.Cli.Output;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
@@ -234,7 +235,9 @@ public sealed class MutationCommandModule : ICommandModule
                     or ArgumentException
                     or YamlException)
             {
-                throw new CliOperationException($"Manifest input failed: {exception.Message}", exception);
+                throw new CliOperationException(
+                    $"Manifest input failed: {MutationRedact(exception.Message)}",
+                    exception);
             }
 
             return await ExecuteAsync(
@@ -345,16 +348,19 @@ public sealed class MutationCommandModule : ICommandModule
         }
         catch (Exception exception) when (exception is ArgumentException or FormatException)
         {
-            throw new CliUsageException(exception.Message, exception);
+            throw new CliUsageException(MutationRedact(exception.Message), exception);
         }
 
         IMutationWorkflow workflow = await CreateMutationWorkflowAsync(context).ConfigureAwait(false);
+        using IDisposable? workflowLease = workflow as IDisposable;
+        string? approvedReviewFingerprint = null;
         WorkflowOperationResult local = await RunLocalAsync(workflow, request, context)
             .ConfigureAwait(false);
         (local, request) = await ResolveQuestionsAsync(workflow, local, request, context)
             .ConfigureAwait(false);
         if (local.Plan.RequiresReview)
         {
+            string displayedReviewFingerprint = ReviewFingerprint(local.Plan);
             ReportApprovalContext(context, local.Plan, "Review approval required");
             if (!context.ParseResult.GetValue(options.ApproveReviews))
             {
@@ -379,6 +385,19 @@ public sealed class MutationCommandModule : ICommandModule
 
             request = ReviewApproval.Bind(request, local.Plan);
             local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
+            if (!string.Equals(
+                    displayedReviewFingerprint,
+                    ReviewFingerprint(local.Plan),
+                    StringComparison.Ordinal))
+            {
+                MutationOutput.Write(context, local, remote: null);
+                context.Output.WriteError(
+                    "The human-correction reviews changed after approval; nothing was applied. "
+                    + "Review the new values and rerun.");
+                return ExitCodes.OperationFailed;
+            }
+
+            approvedReviewFingerprint = displayedReviewFingerprint;
         }
 
         WorkflowReleaseProvenance? originalReleaseProvenance = local.Plan.Release;
@@ -505,6 +524,19 @@ public sealed class MutationCommandModule : ICommandModule
                     ReleaseProvenance = applicableReleaseProvenance,
                 });
                 local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
+                if (approvedReviewFingerprint is not null
+                    && !string.Equals(
+                        approvedReviewFingerprint,
+                        ReviewFingerprint(local.Plan),
+                        StringComparison.Ordinal))
+                {
+                    MutationOutput.Write(context, local, remote: null);
+                    context.Output.WriteError(
+                        "Editing changed the approved human-correction reviews; nothing was "
+                        + "applied. Review the new values and rerun.");
+                    return ExitCodes.OperationFailed;
+                }
+
                 applicableReleaseProvenance = originalReleaseProvenance is not null
                     && releaseInstallerUrls.Count > 0
                     && releaseInstallerUrls.SetEquals(InstallerUrls(local.Plan))
@@ -566,7 +598,6 @@ public sealed class MutationCommandModule : ICommandModule
         }
 
         GitHubLifecycleResult? remote = null;
-        bool outputWritten = false;
         bool submit = submitRequested;
         bool submissionConsent = context.ParseResult.GetValue(options.Yes);
         ISubmissionWorkflow? submission = null;
@@ -637,13 +668,7 @@ public sealed class MutationCommandModule : ICommandModule
                 };
             }
 
-            if (!local.Applied)
-            {
-                MutationOutput.Write(context, local, remote: null);
-                return ExitCodes.OperationFailed;
-            }
-
-            if (!string.IsNullOrWhiteSpace(local.ErrorMessage))
+            if (!local.Applied || !string.IsNullOrWhiteSpace(local.ErrorMessage))
             {
                 MutationOutput.Write(context, local, remote: null);
                 return ExitCodes.OperationFailed;
@@ -661,39 +686,42 @@ public sealed class MutationCommandModule : ICommandModule
                     submission!,
                     submissionRequest!,
                     context).ConfigureAwait(false);
-            MutationOutput.Write(context, local, remote);
-            outputWritten = true;
-            if (remote.Applied
-                && context.ParseResult.GetValue(options.OpenPullRequest)
-                && remote.RemoteState.PullRequestUri is Uri pullRequestUri)
+            if (!context.IsDryRun && !remote.Applied)
             {
-                try
-                {
-                    await _urlLauncher.OpenAsync(pullRequestUri, context.CancellationToken)
-                        .ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (!context.CancellationToken.IsCancellationRequested)
-                {
-                    context.Output.WriteDiagnostic(
-                        $"Pull request #{remote.RemoteState.PullRequestNumber} was created, "
-                        + "but opening it was cancelled.");
-                }
-                catch (Exception exception) when (
-                    exception is InvalidOperationException
-                        or IOException
-                        or UnauthorizedAccessException
-                        or Win32Exception)
-                {
-                    context.Output.WriteDiagnostic(
-                        $"Pull request #{remote.RemoteState.PullRequestNumber} was created, "
-                        + $"but the browser could not be opened: {exception.Message}");
-                }
+                MutationOutput.Write(context, local, remote);
+                return remote.Code == GitHubLifecycleResultCode.Cancelled
+                    && context.CancellationToken.IsCancellationRequested
+                        ? ExitCodes.Cancelled
+                        : ExitCodes.OperationFailed;
             }
         }
 
-        if (!outputWritten)
+        MutationOutput.Write(context, local, remote);
+        if (remote?.Applied == true
+            && context.ParseResult.GetValue(options.OpenPullRequest)
+            && remote.RemoteState.PullRequestUri is Uri pullRequestUri)
         {
-            MutationOutput.Write(context, local, remote);
+            try
+            {
+                await _urlLauncher.OpenAsync(pullRequestUri, context.CancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!context.CancellationToken.IsCancellationRequested)
+            {
+                context.Output.WriteDiagnostic(
+                    $"Pull request #{remote.RemoteState.PullRequestNumber} was created, "
+                    + "but opening it was cancelled.");
+            }
+            catch (Exception exception) when (
+                exception is InvalidOperationException
+                    or IOException
+                    or UnauthorizedAccessException
+                    or Win32Exception)
+            {
+                context.Output.WriteDiagnostic(
+                    $"Pull request #{remote.RemoteState.PullRequestNumber} was created, "
+                    + $"but the browser could not be opened: {MutationRedact(exception.Message)}");
+            }
         }
 
         if (remote?.Code == GitHubLifecycleResultCode.Cancelled)
@@ -780,7 +808,7 @@ public sealed class MutationCommandModule : ICommandModule
         catch (OperationCanceledException exception)
         {
             throw new CliOperationException(
-                $"Local mutation timed out: {exception.Message}",
+                $"Local mutation timed out: {MutationRedact(exception.Message)}",
                 exception);
         }
         catch (Exception exception) when (
@@ -791,7 +819,9 @@ public sealed class MutationCommandModule : ICommandModule
                 or DownloadException
                 or WorkflowOperationException)
         {
-            throw new CliOperationException($"Local mutation failed: {exception.Message}", exception);
+            throw new CliOperationException(
+                $"Local mutation failed: {MutationRedact(exception.Message)}",
+                exception);
         }
     }
 
@@ -848,7 +878,7 @@ public sealed class MutationCommandModule : ICommandModule
         catch (OperationCanceledException exception)
         {
             throw new CliOperationException(
-                $"Manifest editor timed out: {exception.Message}",
+                $"Manifest editor timed out: {MutationRedact(exception.Message)}",
                 exception);
         }
         catch (Exception exception) when (
@@ -858,7 +888,7 @@ public sealed class MutationCommandModule : ICommandModule
                 or Win32Exception)
         {
             throw new CliOperationException(
-                $"Manifest editing failed: {exception.Message}",
+                $"Manifest editing failed: {MutationRedact(exception.Message)}",
                 exception);
         }
     }
@@ -896,7 +926,7 @@ public sealed class MutationCommandModule : ICommandModule
         catch (OperationCanceledException exception)
         {
             throw new CliOperationException(
-                $"Remote submission timed out: {exception.Message}",
+                $"Remote submission timed out: {MutationRedact(exception.Message)}",
                 exception);
         }
         catch (Exception exception) when (
@@ -905,7 +935,9 @@ public sealed class MutationCommandModule : ICommandModule
                 or UnauthorizedAccessException
                 or HttpRequestException)
         {
-            throw new CliOperationException($"Remote submission failed: {exception.Message}", exception);
+            throw new CliOperationException(
+                $"Remote submission failed: {MutationRedact(exception.Message)}",
+                exception);
         }
     }
 
@@ -1004,7 +1036,7 @@ public sealed class MutationCommandModule : ICommandModule
         catch (OperationCanceledException exception)
         {
             throw new CliOperationException(
-                $"Mutation workflow setup timed out: {exception.Message}",
+                $"Mutation workflow setup timed out: {MutationRedact(exception.Message)}",
                 exception);
         }
     }
@@ -1023,7 +1055,7 @@ public sealed class MutationCommandModule : ICommandModule
         catch (OperationCanceledException exception)
         {
             throw new CliOperationException(
-                $"Submission workflow setup timed out: {exception.Message}",
+                $"Submission workflow setup timed out: {MutationRedact(exception.Message)}",
                 exception);
         }
     }
@@ -1469,6 +1501,33 @@ public sealed class MutationCommandModule : ICommandModule
         }
     }
 
+    private static string ReviewFingerprint(LocalOperationPlan plan)
+    {
+        var builder = new StringBuilder();
+        foreach (var review in plan.Rules.Reviews.OrderBy(
+                     static review => review.ManifestPath,
+                     StringComparer.Ordinal).ThenBy(
+                     static review => review.FieldPath,
+                     StringComparer.Ordinal))
+        {
+            Append(review.ManifestPath);
+            Append(review.FieldPath);
+            Append(review.BotValue);
+            Append(review.HumanValue);
+            Append(review.GeneratedValue);
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+
+        void Append(string? value)
+        {
+            builder.Append(value?.Length ?? -1)
+                .Append(':')
+                .Append(value)
+                .Append('|');
+        }
+    }
+
     private static ReleaseRequest ParseRelease(ParseResult result, MutationOptions options)
     {
         ImmutableArray<Uri> releaseUrls = ParseUris(
@@ -1531,7 +1590,7 @@ public sealed class MutationCommandModule : ICommandModule
                 or YamlException)
         {
             throw new CliUsageException(
-                $"Override-pack input failed: {exception.Message}",
+                $"Override-pack input failed: {MutationRedact(exception.Message)}",
                 exception);
         }
     }
@@ -1610,6 +1669,9 @@ public sealed class MutationCommandModule : ICommandModule
         => value.Any(static character =>
             char.IsControl(character)
             || character is '\u0085' or '\u2028' or '\u2029');
+
+    private static string MutationRedact(string value)
+        => CliRedactor.RedactUrl(value, redactAllQueryValues: true);
 
     private static bool TryParseArchitecture(string value, out Architecture architecture)
     {

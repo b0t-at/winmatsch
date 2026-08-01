@@ -44,6 +44,8 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
     /// <summary>Thrown by <see cref="CommentOnPullRequestAsync"/> after <see cref="OnComment"/> ran.</summary>
     public Exception? CommentFailure { get; set; }
 
+    public Dictionary<long, Exception> CommentFailures { get; } = [];
+
     /// <summary>The fork head SHA reported after a successful sync.</summary>
     public string? SyncedHeadSha { get; set; }
 
@@ -153,6 +155,11 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
     {
         OnComment?.Invoke();
+        if (CommentFailures.TryGetValue(number, out Exception? specificFailure))
+        {
+            throw specificFailure;
+        }
+
         if (CommentFailure is not null)
         {
             throw CommentFailure;
@@ -296,6 +303,9 @@ internal sealed class FakeDeadVersionInspector : IDeadVersionInspector
 {
     public Dictionary<string, DeadVersionInspection> Inspections { get; } = new(StringComparer.Ordinal);
 
+    public Dictionary<string, Queue<DeadVersionInspection>> InspectionSequences { get; } =
+        new(StringComparer.Ordinal);
+
     public int InspectCallCount { get; private set; }
 
     public Task<DeadVersionInspection> InspectAsync(
@@ -305,6 +315,14 @@ internal sealed class FakeDeadVersionInspector : IDeadVersionInspector
         CancellationToken cancellationToken)
     {
         InspectCallCount++;
+        if (InspectionSequences.TryGetValue(
+                packageVersion.Value,
+                out Queue<DeadVersionInspection>? sequence)
+            && sequence.Count > 0)
+        {
+            return Task.FromResult(sequence.Dequeue());
+        }
+
         return Task.FromResult(Inspections[packageVersion.Value]);
     }
 }

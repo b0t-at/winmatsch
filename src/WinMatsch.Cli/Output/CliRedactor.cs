@@ -199,7 +199,11 @@ public static partial class CliRedactor
             {
                 char valueQuote = input[index + 1];
                 valueStart = index + 2;
-                valueEnd = input.IndexOf("\\" + valueQuote, valueStart, StringComparison.Ordinal);
+                valueEnd = FindClosingQuote(
+                    input,
+                    valueStart,
+                    valueQuote,
+                    escapedDelimiter: true);
                 if (valueEnd < 0)
                 {
                     valueEnd = input.Length;
@@ -209,7 +213,11 @@ public static partial class CliRedactor
             {
                 char valueQuote = input[index];
                 valueStart = index + 1;
-                valueEnd = input.IndexOf(valueQuote, valueStart);
+                valueEnd = FindClosingQuote(
+                    input,
+                    valueStart,
+                    valueQuote,
+                    escapedDelimiter: false);
                 if (valueEnd < 0)
                 {
                     valueEnd = input.Length;
@@ -248,6 +256,37 @@ public static partial class CliRedactor
         }
 
         return ApplyReplacements(input, replacements);
+    }
+
+    private static int FindClosingQuote(
+        string value,
+        int start,
+        char quote,
+        bool escapedDelimiter)
+    {
+        for (int index = start; index < value.Length; index++)
+        {
+            if (value[index] != quote)
+            {
+                continue;
+            }
+
+            int backslashes = 0;
+            for (int cursor = index - 1;
+                 cursor >= start && value[cursor] == '\\';
+                 cursor--)
+            {
+                backslashes++;
+            }
+
+            bool escaped = (backslashes & 1) == 1;
+            if (escaped == escapedDelimiter)
+            {
+                return index - (escapedDelimiter ? 1 : 0);
+            }
+        }
+
+        return -1;
     }
 
     private static bool IsSensitiveQueryKey(string value)
