@@ -37,14 +37,16 @@ public static class ExitCodes
 
     /// <summary>
     /// The command executed but its operation failed for a domain reason (validation failed,
-    /// resource not found, remote rejection). Reserved for command modules via
+    /// resource not found, remote rejection), or the user declined/cancelled an interactive
+    /// confirmation without sending SIGINT. Reserved for command modules via
     /// <see cref="CliOperationException"/>.
     /// </summary>
     public const int OperationFailed = 5;
 
     /// <summary>
-    /// The invocation was cancelled (Ctrl+C or a propagated cancellation). Follows the POSIX
-    /// 128+SIGINT convention.
+    /// The invocation received Ctrl+C/SIGINT or its propagated cancellation token was cancelled.
+    /// Interactive "no" answers use <see cref="OperationFailed"/>, never this POSIX
+    /// 128+SIGINT code.
     /// </summary>
     public const int Cancelled = 130;
 }

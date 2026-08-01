@@ -8,7 +8,8 @@ namespace WinMatsch.Cli.Output;
 /// <para>Stream contract (stable; scripts may rely on it):</para>
 /// <list type="bullet">
 /// <item><em>Standard output</em> carries results only: human-readable text in text mode, one
-/// stable JSON document in JSON mode. Nothing else is ever written there.</item>
+/// stable JSON document in JSON mode. Every JSON object has an additive
+/// <c>schemaVersion</c> property while preserving the documented 0.x root fields.</item>
 /// <item><em>Standard error</em> carries diagnostics, warnings, and error messages as plain
 /// text in both formats.</item>
 /// <item>JSON output is deterministic: fixed property order chosen by the writer, invariant

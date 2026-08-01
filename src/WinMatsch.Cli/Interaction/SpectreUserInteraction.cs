@@ -83,4 +83,28 @@ public sealed class SpectreUserInteraction : IUserInteraction
         ArgumentNullException.ThrowIfNull(message);
         _console.WriteLine(message);
     }
+
+    public async Task<T> RunProgressAsync<T>(
+        string description,
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(description);
+        ArgumentNullException.ThrowIfNull(operation);
+        T? result = default;
+        await _console.Progress()
+            .AutoClear(true)
+            .HideCompleted(false)
+            .Columns(new SpinnerColumn(), new TaskDescriptionColumn())
+            .StartAsync(async progress =>
+            {
+                ProgressTask task = progress.AddTask(Markup.Escape(description), maxValue: 1);
+                task.IsIndeterminate = true;
+                result = await operation(cancellationToken).ConfigureAwait(false);
+                task.IsIndeterminate = false;
+                task.Value = 1;
+            })
+            .ConfigureAwait(false);
+        return result!;
+    }
 }

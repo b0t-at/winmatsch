@@ -42,6 +42,7 @@ public sealed class RemoveDeadVersionsCommandTests
         Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
         Assert.Contains("not removable", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("GH3103", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("Escalation", result.StandardOutput, StringComparison.Ordinal);
         Assert.Empty(harness.Interaction.Questions);
     }
 
@@ -80,7 +81,7 @@ public sealed class RemoveDeadVersionsCommandTests
     }
 
     [Fact]
-    public async Task Multiple_versions_enforce_the_one_version_per_pr_policy()
+    public async Task Multiple_versions_are_rejected_before_remote_inspection()
     {
         FakeDeadVersionInspector inspector = Inspecting(
             ("1.0.0", Dead()),
@@ -90,8 +91,8 @@ public sealed class RemoveDeadVersionsCommandTests
         CliRunResult result = await harness.RunAsync(
             ["remove-dead-versions", Package, "1.0.0", "1.1.0", "--yes"]);
 
-        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
-        Assert.Contains("GH3101", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Equal(string.Empty, result.StandardOutput);
         Assert.Equal(0, inspector.InspectCallCount);
     }
 
@@ -117,7 +118,7 @@ public sealed class RemoveDeadVersionsCommandTests
 
         CliRunResult result = await harness.RunAsync(["remove-dead-versions", Package, "1.0.0"]);
 
-        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
         Assert.Equal(1, inspector.InspectCallCount);
     }
 
@@ -147,7 +148,7 @@ public sealed class RemoveDeadVersionsCommandTests
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.StartsWith(
-            "{\"operation\":\"remove-dead-versions\"",
+            "{\"schemaVersion\":\"1.0\",\"operation\":\"remove-dead-versions\"",
             result.StandardOutput,
             StringComparison.Ordinal);
         Assert.Contains("\"canRemove\":true", result.StandardOutput, StringComparison.Ordinal);

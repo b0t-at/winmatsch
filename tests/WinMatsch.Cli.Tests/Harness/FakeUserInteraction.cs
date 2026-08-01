@@ -25,6 +25,8 @@ public sealed class FakeUserInteraction : IUserInteraction
 
     public List<string> StatusMessages { get; } = [];
 
+    public List<string> ProgressDescriptions { get; } = [];
+
     public void EnqueueConfirm(bool answer) => _confirmAnswers.Enqueue(answer);
 
     public void EnqueueText(string answer) => _textAnswers.Enqueue(answer);
@@ -71,6 +73,15 @@ public sealed class FakeUserInteraction : IUserInteraction
     }
 
     public void ReportStatus(string message) => StatusMessages.Add(message);
+
+    public Task<T> RunProgressAsync<T>(
+        string description,
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken = default)
+    {
+        ProgressDescriptions.Add(description);
+        return operation(cancellationToken);
+    }
 
     private void GuardPrompt(string question)
     {

@@ -47,7 +47,10 @@ public sealed class ConfigCommandTests
         CliRunResult result = await harness.RunAsync(["config", "show", "--format", "json"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.StartsWith("{\"settings\":[{\"key\":\"repository\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.StartsWith(
+            "{\"schemaVersion\":\"1.0\",\"settings\":[{\"key\":\"repository\"",
+            result.StandardOutput,
+            StringComparison.Ordinal);
         Assert.Contains("\"source\":\"default\"", result.StandardOutput, StringComparison.Ordinal);
     }
 
@@ -180,6 +183,38 @@ public sealed class ConfigCommandTests
         Assert.Equal("unknownKey: true\n", harness.Files[_defaultPath]);
     }
 
+    [Theory]
+    [InlineData("# operator note\nrepository: \"contoso/pkgs\"\n")]
+    [InlineData("repository: \"contoso/pkgs\" # keep this explanation\n")]
+    public async Task Set_explicitly_refuses_to_discard_existing_comments(string yaml)
+    {
+        (CliHarness harness, DictionaryConfigFileSystem fileSystem) = CreateHarness();
+        harness.Files[_defaultPath] = yaml;
+
+        CliRunResult result = await harness.RunAsync(
+            ["config", "set", "interaction", "never"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains("contains comments", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("edit the file manually", result.StandardError, StringComparison.Ordinal);
+        Assert.Equal(yaml, harness.Files[_defaultPath]);
+        Assert.Empty(fileSystem.Writes);
+    }
+
+    [Fact]
+    public async Task Hash_inside_a_plain_scalar_is_not_treated_as_a_comment()
+    {
+        (CliHarness harness, _) = CreateHarness();
+        harness.Files[_defaultPath] = "cache:\n  directory: C:\\cache#v1\n";
+
+        CliRunResult result = await harness.RunAsync(
+            ["config", "set", "interaction", "never"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        ConfigurationLayer parsed = ConfigurationYamlParser.Parse(harness.Files[_defaultPath]);
+        Assert.Equal(@"C:\cache#v1", parsed.CacheDirectory);
+    }
+
     [Fact]
     public async Task Set_and_unset_dry_run_never_write()
     {
@@ -245,7 +280,8 @@ public sealed class ConfigCommandTests
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.Equal(
-            "{\"path\":\"/tmp/custom.yaml\",\"source\":\"explicit\",\"exists\":true}\n",
+            "{\"schemaVersion\":\"1.0\",\"path\":\"/tmp/custom.yaml\","
+            + "\"source\":\"explicit\",\"exists\":true}\n",
             result.StandardOutput);
     }
 

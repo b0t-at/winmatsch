@@ -36,6 +36,28 @@ public sealed class RealProcessTests
     }
 
     [Fact]
+    public async Task Unknown_option_never_echoes_a_secret_shaped_following_value()
+    {
+        const string secret = "github_pat_11AA0abcdefghijklmnopqrstuv_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+        ProcessResult result = await RunCliAsync("config", "path", "--tokn", secret);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.DoesNotContain(secret, result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Unknown_validate_option_is_not_treated_as_a_manifest_path()
+    {
+        ProcessResult result = await RunCliAsync("validate", "--network");
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains("Unrecognized option '--network'", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("Manifest path", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Help_exposes_the_complete_production_command_root()
     {
         ProcessResult result = await RunCliAsync("--help");
@@ -115,7 +137,10 @@ public sealed class RealProcessTests
 
             Assert.Equal(ExitCodes.Success, result.ExitCode);
             Assert.Contains("\"format\":\"portableExe\"", result.StandardOutput, StringComparison.Ordinal);
-            Assert.Equal(string.Empty, result.StandardError);
+            Assert.Contains(
+                "Downloading and analyzing installer",
+                result.StandardError,
+                StringComparison.Ordinal);
         }
         finally
         {

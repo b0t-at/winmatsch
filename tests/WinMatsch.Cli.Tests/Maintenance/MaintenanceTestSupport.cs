@@ -25,10 +25,16 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
 
     public List<PullRequestInfo> PullRequests { get; } = [];
 
+    public bool IgnoreHeadOwnerFilter { get; set; }
+
     public CompareResult Comparison { get; set; } = new("identical", 0, 0, 0, []);
 
     /// <summary>Manifest file lists keyed by repository-relative directory.</summary>
     public Dictionary<string, IReadOnlyList<ManifestFile>> ManifestFiles { get; } = new(StringComparer.Ordinal);
+
+    public Dictionary<string, IReadOnlyList<RepositoryTreeEntry>> Trees { get; } = new(StringComparer.Ordinal);
+
+    public Dictionary<string, RepositoryContent> Contents { get; } = new(StringComparer.Ordinal);
 
     public Exception? SyncForkFailure { get; set; }
 
@@ -42,6 +48,10 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
     public string? SyncedHeadSha { get; set; }
 
     public List<string> Mutations { get; } = [];
+
+    public ServerCommitRequest? LastCommitRequest { get; private set; }
+
+    public CreatePullRequestRequest? LastCreatePullRequestRequest { get; private set; }
 
     public RateLimitInfo? LastRateLimit => null;
 
@@ -118,7 +128,8 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         [
             .. PullRequests.Where(pullRequest =>
                 (search.State == PullRequestState.All || pullRequest.State == search.State)
-                && (search.HeadOwner is null
+                && (IgnoreHeadOwnerFilter
+                    || search.HeadOwner is null
                     || string.Equals(pullRequest.HeadOwner, search.HeadOwner, StringComparison.OrdinalIgnoreCase))),
         ]);
 
@@ -175,14 +186,24 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         string path,
         string reference,
         CancellationToken cancellationToken = default)
-        => throw new NotSupportedException();
+        => Contents.TryGetValue(path, out RepositoryContent? content)
+            ? Task.FromResult(content)
+            : throw new GitHubApiException(
+                $"Content '{path}' not found.",
+                System.Net.HttpStatusCode.NotFound,
+                requestId: null);
 
     public Task<IReadOnlyList<RepositoryTreeEntry>> GetTreeAsync(
         RepositoryCoordinates repository,
         string treeish,
         bool recursive = true,
         CancellationToken cancellationToken = default)
-        => throw new NotSupportedException();
+        => Trees.TryGetValue(treeish, out IReadOnlyList<RepositoryTreeEntry>? entries)
+            ? Task.FromResult(entries)
+            : throw new GitHubApiException(
+                $"Tree '{treeish}' not found.",
+                System.Net.HttpStatusCode.NotFound,
+                requestId: null);
 
     public Task<IReadOnlyList<ManifestFile>> GetManifestFilesAsync(
         RepositoryCoordinates repository,
@@ -241,7 +262,12 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         ServerCommitRequest request,
         MutationRequest mutation,
         CancellationToken cancellationToken = default)
-        => throw new NotSupportedException();
+    {
+        LastCommitRequest = request;
+        return Task.FromResult(new ServerCommitResult(
+            "commit-sha",
+            new Uri("https://example.invalid/commit/commit-sha")));
+    }
 
     public Task<ForkResult> EnsureForkAsync(
         RepositoryCoordinates upstream,
@@ -255,7 +281,14 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         CreatePullRequestRequest request,
         MutationRequest mutation,
         CancellationToken cancellationToken = default)
-        => throw new NotSupportedException();
+    {
+        LastCreatePullRequestRequest = request;
+        return Task.FromResult(MaintenancePullRequests.ToolOwned(42) with
+        {
+            Title = request.Title,
+            Body = request.Body,
+        });
+    }
 }
 
 /// <summary>A scripted <see cref="IDeadVersionInspector"/> keyed by version string.</summary>

@@ -78,6 +78,10 @@ public sealed class CompletionCommandTests
         Assert.Contains("complete -c winmatsch -f", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("-l yes", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("-l format", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains(
+            "-a sync -d 'Synchronize the fork\\'s default branch",
+            result.StandardOutput,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -91,7 +95,29 @@ public sealed class CompletionCommandTests
             "Register-ArgumentCompleter -Native -CommandName 'winmatsch'",
             result.StandardOutput,
             StringComparison.Ordinal);
-        Assert.Contains("'cache' = @(", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("$tree['cache'] = @(", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("[REDACTED]", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Scripts_skip_leading_global_options_when_locating_the_command()
+    {
+        CliHarness harness = CreateHarness();
+
+        CliRunResult bash = await harness.RunAsync(["completion", "bash"]);
+        CliRunResult zsh = await harness.RunAsync(["completion", "zsh"]);
+        CliRunResult powerShell = await harness.RunAsync(["completion", "powershell"]);
+
+        Assert.Contains("local command=\"\" word option", bash.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("value_opts=", bash.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("local command=\"\" word option", zsh.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("$valueOptions", powerShell.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("$booleanOptions", powerShell.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("@('true', 'false')", powerShell.StandardOutput, StringComparison.Ordinal);
+        CliRunResult fish = await harness.RunAsync(["completion", "fish"]);
+        Assert.Contains("__winmatsch_command", fish.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("set -l value_opts", fish.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("-l output -r", fish.StandardOutput, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -116,7 +142,10 @@ public sealed class CompletionCommandTests
         CliRunResult result = await harness.RunAsync(["completion", "bash", "--format", "json"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.StartsWith("{\"shell\":\"bash\",\"script\":\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.StartsWith(
+            "{\"schemaVersion\":\"1.0\",\"shell\":\"bash\",\"script\":\"",
+            result.StandardOutput,
+            StringComparison.Ordinal);
     }
 
     [Fact]

@@ -152,4 +152,50 @@ public sealed class InteractionContractTests
         Assert.True(creation.Capabilities.ColorEnabled);
         Assert.True(creation.Capabilities.PromptsEnabled);
     }
+
+    [Fact]
+    public async Task Prompt_text_is_redacted_before_reaching_the_terminal()
+    {
+        const string prompt =
+            "Choose https://example.test/app?X-Amz-Signature=secret-signature";
+        var harness = new CliHarness();
+        harness.Interaction.EnqueueText("answer");
+        harness.Modules.Add(new ProbeModule(async context =>
+        {
+            _ = await context.Interaction.AskAsync(prompt);
+            return ExitCodes.Success;
+        }));
+
+        CliRunResult result = await harness.RunAsync(["probe"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        string actual = Assert.Single(harness.Interaction.Questions);
+        Assert.DoesNotContain("secret-signature", actual, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", actual, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Redirected_progress_fallback_emits_only_start_and_completion_lines()
+    {
+        var harness = new CliHarness
+        {
+            IsInputRedirected = true,
+            IsErrorRedirected = true,
+            UseFakeInteraction = false,
+        };
+        harness.Modules.Add(new ProbeModule(async context =>
+        {
+            int value = await context.Interaction.RunProgressAsync(
+                "Analyzing",
+                _ => Task.FromResult(42),
+                context.CancellationToken);
+            Assert.Equal(42, value);
+            return ExitCodes.Success;
+        }));
+
+        CliRunResult result = await harness.RunAsync(["probe"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal("Analyzing...\nAnalyzing: complete.\n", result.StandardError);
+    }
 }

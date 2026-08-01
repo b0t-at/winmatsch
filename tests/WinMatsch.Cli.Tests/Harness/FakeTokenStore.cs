@@ -11,8 +11,12 @@ public sealed class FakeTokenStore : ITokenStore
 
     public GitHubToken? StoredToken { get; set; }
 
-    public Task<GitHubToken?> GetTokenAsync(CancellationToken cancellationToken = default) =>
-        Task.FromResult(StoredToken);
+    public Exception? GetFailure { get; set; }
+
+    public Task<GitHubToken?> GetTokenAsync(CancellationToken cancellationToken = default)
+        => GetFailure is null
+            ? Task.FromResult(StoredToken)
+            : Task.FromException<GitHubToken?>(GetFailure);
 
     public Task SetTokenAsync(GitHubToken token, CancellationToken cancellationToken = default)
     {

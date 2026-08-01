@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using WinMatsch.Cli.Hosting;
 using WinMatsch.Core;
@@ -100,6 +101,21 @@ public interface IUrlLauncher
     public Task OpenAsync(Uri uri, CancellationToken cancellationToken = default);
 }
 
+public interface IUrlProcessRunner
+{
+    public Task<int> RunAsync(
+        string executable,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken = default);
+}
+
+public enum UrlLauncherPlatform
+{
+    Windows,
+    MacOS,
+    Linux,
+}
+
 public enum EditorResultCode
 {
     Accepted,
@@ -194,7 +210,10 @@ public sealed class FileSystemRawManifestSetLoader : IRawManifestSetLoader
         string[] files;
         if (File.Exists(input))
         {
-            files = [input];
+            throw new CliUsageException(
+                "Submitting one file is unsupported because a WinGet multi-file manifest "
+                + "requires its installer, version, and default-locale siblings. "
+                + "Pass the complete manifest directory.");
         }
         else if (Directory.Exists(input))
         {
@@ -212,7 +231,9 @@ public sealed class FileSystemRawManifestSetLoader : IRawManifestSetLoader
             RejectLink(file);
             string relative = Path.GetRelativePath(root, file).Replace('\\', '/');
             string? repositoryPath = relative;
-            if (relative.StartsWith("../", StringComparison.Ordinal) || relative == "..")
+            if (Path.IsPathRooted(relative)
+                || relative.StartsWith("../", StringComparison.Ordinal)
+                || relative == "..")
             {
                 repositoryPath = FindManifestSegment(file);
             }
@@ -305,13 +326,16 @@ public sealed class ProcessEditorRunner : IEditorRunner
 {
     private readonly Func<string, string?> _environment;
     private readonly IEditorProcessRunner _processes;
+    private readonly Action<string> _cleanup;
 
     public ProcessEditorRunner(
         Func<string, string?>? environment = null,
-        IEditorProcessRunner? processes = null)
+        IEditorProcessRunner? processes = null,
+        Action<string>? cleanup = null)
     {
         _environment = environment ?? Environment.GetEnvironmentVariable;
         _processes = processes ?? new EditorProcessRunner();
+        _cleanup = cleanup ?? (static path => Directory.Delete(path, recursive: true));
     }
 
     public async Task<EditorResult> EditAsync(
@@ -340,60 +364,138 @@ public sealed class ProcessEditorRunner : IEditorRunner
         string temporaryRoot = Path.Combine(
             Path.GetTempPath(),
             $"winmatsch-editor-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(temporaryRoot);
+        CreateSecureDirectory(temporaryRoot);
+        EditorResult? result = null;
+        Exception? primaryFailure = null;
         try
         {
-            var paths = new List<string>(documents.Length);
-            foreach (RawManifestDocument document in documents)
-            {
-                string destination = Path.GetFullPath(
-                    Path.Combine(temporaryRoot, document.RepositoryPath.Replace('/', Path.DirectorySeparatorChar)));
-                if (!destination.StartsWith(
-                        temporaryRoot + Path.DirectorySeparatorChar,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    return new(
-                        EditorResultCode.Failed,
-                        documents,
-                        "Manifest path escaped the isolated editor directory.");
-                }
+            result = await EditInTemporaryDirectoryAsync(
+                documents,
+                commandParts,
+                temporaryRoot,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+        }
 
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                await File.WriteAllBytesAsync(
-                    destination,
-                    document.Content.ToArray(),
-                    cancellationToken).ConfigureAwait(false);
-                paths.Add(destination);
+        Exception? cleanupFailure = null;
+        try
+        {
+            _cleanup(temporaryRoot);
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = exception;
+        }
+
+        if (primaryFailure is not null && cleanupFailure is not null)
+        {
+            if (primaryFailure is OperationCanceledException
+                && cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(
+                    $"{primaryFailure.Message} Cleanup of the isolated editor directory also "
+                    + $"failed: {cleanupFailure.Message}",
+                    new AggregateException(primaryFailure, cleanupFailure),
+                    cancellationToken);
             }
 
-            int exitCode = await _processes.RunAsync(
-                commandParts[0],
-                [.. commandParts.Skip(1), .. paths],
-                cancellationToken).ConfigureAwait(false);
-            if (exitCode != 0)
+            throw new IOException(
+                $"Manifest editing failed: {primaryFailure.Message} "
+                + $"Cleanup of the isolated editor directory also failed: {cleanupFailure.Message}",
+                new AggregateException(primaryFailure, cleanupFailure));
+        }
+
+        if (primaryFailure is not null)
+        {
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+        }
+
+        if (cleanupFailure is not null)
+        {
+            string primaryResult = result?.ErrorMessage
+                ?? "The editor completed, but its isolated files could not be removed.";
+            return new(
+                EditorResultCode.Failed,
+                documents,
+                $"{primaryResult} Cleanup of the isolated editor directory failed: "
+                + cleanupFailure.Message);
+        }
+
+        return result!;
+    }
+
+    private async Task<EditorResult> EditInTemporaryDirectoryAsync(
+        ImmutableArray<RawManifestDocument> documents,
+        IReadOnlyList<string> commandParts,
+        string temporaryRoot,
+        CancellationToken cancellationToken)
+    {
+        var paths = new List<string>(documents.Length);
+        foreach (RawManifestDocument document in documents)
+        {
+            string destination = Path.GetFullPath(
+                Path.Combine(temporaryRoot, document.RepositoryPath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!destination.StartsWith(
+                    temporaryRoot + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase))
             {
                 return new(
                     EditorResultCode.Failed,
                     documents,
-                    $"The configured editor exited with code {exitCode}.");
+                    "Manifest path escaped the isolated editor directory.");
             }
 
-            var edited = ImmutableArray.CreateBuilder<RawManifestDocument>(documents.Length);
-            for (int index = 0; index < documents.Length; index++)
+            CreateSecureDirectory(Path.GetDirectoryName(destination)!);
+            await File.WriteAllBytesAsync(
+                destination,
+                document.Content.ToArray(),
+                cancellationToken).ConfigureAwait(false);
+            if (!OperatingSystem.IsWindows())
             {
-                byte[] content = await File.ReadAllBytesAsync(paths[index], cancellationToken)
-                    .ConfigureAwait(false);
-                edited.Add(new(documents[index].RepositoryPath, content));
+                File.SetUnixFileMode(
+                    destination,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite);
             }
 
-            return new(EditorResultCode.Accepted, edited.ToImmutable());
+            paths.Add(destination);
         }
-        finally
+
+        int exitCode = await _processes.RunAsync(
+            commandParts[0],
+            [.. commandParts.Skip(1), .. paths],
+            cancellationToken).ConfigureAwait(false);
+        if (exitCode != 0)
         {
-            Directory.Delete(temporaryRoot, recursive: true);
+            return new(
+                EditorResultCode.Failed,
+                documents,
+                $"The configured editor exited with code {exitCode}.");
         }
+
+        var edited = ImmutableArray.CreateBuilder<RawManifestDocument>(documents.Length);
+        for (int index = 0; index < documents.Length; index++)
+        {
+            byte[] content = await File.ReadAllBytesAsync(paths[index], cancellationToken)
+                .ConfigureAwait(false);
+            edited.Add(new(documents[index].RepositoryPath, content));
+        }
+
+        return new(EditorResultCode.Accepted, edited.ToImmutable());
     }
 
+    private static void CreateSecureDirectory(string path)
+    {
+        Directory.CreateDirectory(path);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
 }
 
 public sealed class EditorProcessRunner : IEditorProcessRunner
@@ -439,20 +541,100 @@ public sealed class EditorProcessRunner : IEditorProcessRunner
 
 public sealed class ProcessUrlLauncher : IUrlLauncher
 {
-    public Task OpenAsync(Uri uri, CancellationToken cancellationToken = default)
+    private readonly Func<UrlLauncherPlatform> _platform;
+    private readonly IUrlProcessRunner _processes;
+
+    public ProcessUrlLauncher(
+        Func<UrlLauncherPlatform>? platform = null,
+        IUrlProcessRunner? processes = null)
+    {
+        _platform = platform ?? DetectPlatform;
+        _processes = processes ?? new UrlProcessRunner();
+    }
+
+    public async Task OpenAsync(Uri uri, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(uri);
         cancellationToken.ThrowIfCancellationRequested();
-        using Process? process = Process.Start(new ProcessStartInfo(uri.AbsoluteUri)
+        string executable = _platform() switch
         {
-            UseShellExecute = true,
-        });
-        if (process is null)
+            UrlLauncherPlatform.Windows => "explorer.exe",
+            UrlLauncherPlatform.MacOS => "open",
+            UrlLauncherPlatform.Linux => "xdg-open",
+            _ => throw new PlatformNotSupportedException(
+                "Opening pull request URLs is unsupported on this platform."),
+        };
+        int exitCode = await _processes.RunAsync(
+            executable,
+            [uri.AbsoluteUri],
+            cancellationToken).ConfigureAwait(false);
+        if (exitCode != 0)
         {
-            throw new InvalidOperationException("The pull request URL could not be opened.");
+            throw new InvalidOperationException(
+                $"The pull request URL launcher exited with code {exitCode}.");
+        }
+    }
+
+    private static UrlLauncherPlatform DetectPlatform()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return UrlLauncherPlatform.Windows;
         }
 
-        return Task.CompletedTask;
+        if (OperatingSystem.IsMacOS())
+        {
+            return UrlLauncherPlatform.MacOS;
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            return UrlLauncherPlatform.Linux;
+        }
+
+        throw new PlatformNotSupportedException(
+            "Opening pull request URLs is unsupported on this platform.");
+    }
+}
+
+public sealed class UrlProcessRunner : IUrlProcessRunner
+{
+    private const int StartupObservationMilliseconds = 2000;
+    private const int PollMilliseconds = 100;
+
+    public Task<int> RunAsync(
+        string executable,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken = default)
+    {
+        var startInfo = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+        };
+        foreach (string argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("The pull request URL launcher could not be started.");
+        }
+
+        for (int elapsed = 0; elapsed < StartupObservationMilliseconds; elapsed += PollMilliseconds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (process.WaitForExit(PollMilliseconds))
+            {
+                return Task.FromResult(process.ExitCode);
+            }
+        }
+
+        // xdg-open/open/explorer may hand the URL to a long-lived browser. Once startup has been
+        // observed without an immediate error, release our process handle without owning or
+        // killing the browser process tree.
+        return Task.FromResult(0);
     }
 }
 

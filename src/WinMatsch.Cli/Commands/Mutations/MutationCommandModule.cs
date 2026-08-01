@@ -2,6 +2,8 @@ using System.Collections.Immutable;
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using System.ComponentModel;
+using System.Security.Cryptography;
+using System.Text;
 using WinMatsch.Cli.Hosting;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
@@ -196,7 +198,7 @@ public sealed class MutationCommandModule : ICommandModule
     {
         var path = new Argument<string>("path")
         {
-            Description = "Existing raw manifest file or directory.",
+            Description = "Directory containing one complete raw multi-file manifest set.",
             Arity = ArgumentArity.ZeroOrOne,
         };
         var options = new MutationOptions(
@@ -216,7 +218,7 @@ public sealed class MutationCommandModule : ICommandModule
         registry.AddCommand(command);
         registry.SetHandler(command, async context =>
         {
-            string input = Require(context.ParseResult.GetValue(path), "manifest path", "--path");
+            string input = Require(context.ParseResult.GetValue(path), "manifest path", "the path argument");
             ImmutableArray<RawManifestDocument> documents;
             try
             {
@@ -312,8 +314,25 @@ public sealed class MutationCommandModule : ICommandModule
         {
             request = ApplyCommon(context, options, requestFactory());
             ValidateReplace(context.ParseResult, options, request);
+            bool edit = context.ParseResult.GetValue(options.Edit);
+            if (edit && context.ParseResult.GetResult(options.Replace) is not null)
+            {
+                throw new CliUsageException("--edit cannot be combined with --replace.");
+            }
+
+            int editAttempts = context.ParseResult.GetValue(options.EditAttempts) ?? 3;
+            if (editAttempts is < 1 or > 10)
+            {
+                throw new CliUsageException("--edit-attempts must be between 1 and 10.");
+            }
+
+            if (!edit && context.ParseResult.GetResult(options.EditAttempts) is not null)
+            {
+                throw new CliUsageException("--edit-attempts requires --edit.");
+            }
+
             if (request is RemoveOperationRequest
-                && context.ParseResult.GetValue(options.Edit))
+                && edit)
             {
                 throw new CliUsageException("--edit is not supported by the remove command.");
             }
@@ -337,22 +356,33 @@ public sealed class MutationCommandModule : ICommandModule
         if (local.Plan.RequiresReview)
         {
             ReportApprovalContext(context, local.Plan, "Review approval required");
-            EnsurePrompting(context, "Review approval is required; rerun interactively.");
-            bool approved = await context.Interaction.ConfirmAsync(
-                "Approve the listed human-correction reviews?",
-                defaultValue: false,
-                context.CancellationToken).ConfigureAwait(false);
-            if (!approved)
+            if (!context.ParseResult.GetValue(options.ApproveReviews))
             {
-                MutationOutput.Write(context, local, remote: null);
-                return ExitCodes.OperationFailed;
+                if (!context.Interaction.CanPrompt)
+                {
+                    MutationOutput.Write(context, local, remote: null);
+                    throw new MissingInputException(
+                        "Review approval is required; inspect the emitted plan and pass "
+                        + "--approve-reviews to approve only the listed reviews.");
+                }
+
+                bool approved = await context.Interaction.ConfirmAsync(
+                    "Approve the listed human-correction reviews?",
+                    defaultValue: false,
+                    context.CancellationToken).ConfigureAwait(false);
+                if (!approved)
+                {
+                    MutationOutput.Write(context, local, remote: null);
+                    return ExitCodes.OperationFailed;
+                }
             }
 
             request = ReviewApproval.Bind(request, local.Plan);
             local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
         }
 
-        WorkflowReleaseProvenance? releaseProvenance = local.Plan.Release;
+        WorkflowReleaseProvenance? originalReleaseProvenance = local.Plan.Release;
+        WorkflowReleaseProvenance? applicableReleaseProvenance = originalReleaseProvenance;
         ImmutableHashSet<string> releaseInstallerUrls = InstallerUrls(local.Plan);
         bool learningOnly = local.Code == WorkflowResultCode.NoChanges
             && local.Plan.LearnedOverride is not null
@@ -420,12 +450,7 @@ public sealed class MutationCommandModule : ICommandModule
                     "Manifest editing requires an interactive text terminal; JSON and non-interactive modes cannot edit.");
             }
 
-            if (request is UpdateOperationRequest update && update.ReplacePreviousVersion)
-            {
-                throw new CliUsageException("--edit cannot be combined with --replace.");
-            }
-
-            ImmutableArray<RawManifestDocument> editableDocuments =
+            ImmutableArray<RawManifestDocument> initialEditableDocuments =
                 operation is GitHubManifestOperation.Add or GitHubManifestOperation.Update
                 && request is NewLocaleOperationRequest or UpdateLocaleOperationRequest
                     ?
@@ -438,83 +463,86 @@ public sealed class MutationCommandModule : ICommandModule
                                     StringComparison.Ordinal))),
                     ]
                     : local.Plan.AfterDocuments;
-            EditorResult edited;
-            try
+            var editablePaths = initialEditableDocuments
+                .Select(static document => document.RepositoryPath)
+                .ToImmutableHashSet(StringComparer.Ordinal);
+            ImmutableArray<RawManifestDocument> completeDocuments = local.Plan.AfterDocuments;
+            int maximumAttempts = context.ParseResult.GetValue(options.EditAttempts) ?? 3;
+            for (int attempt = 1; attempt <= maximumAttempts; attempt++)
             {
-                edited = await _editor.EditAsync(
+                ImmutableArray<RawManifestDocument> editableDocuments =
+                [
+                    .. completeDocuments.Where(document =>
+                        editablePaths.Contains(document.RepositoryPath)),
+                ];
+                EditorResult edited = await RunEditorAsync(editableDocuments, context)
+                    .ConfigureAwait(false);
+                if (!edited.Accepted)
+                {
+                    throw edited.Code switch
+                    {
+                        EditorResultCode.Cancelled => new CliOperationException(
+                            edited.ErrorMessage ?? "Manifest editing was cancelled; nothing was applied."),
+                        EditorResultCode.MissingConfiguration => new MissingInputException(
+                            edited.ErrorMessage ?? "An editor must be configured."),
+                        EditorResultCode.InvalidConfiguration => new FormatException(
+                            edited.ErrorMessage ?? "The editor configuration is invalid."),
+                        EditorResultCode.Failed => new CliOperationException(
+                            edited.ErrorMessage ?? "Manifest editing failed."),
+                        _ => new CliOperationException("Manifest editing failed."),
+                    };
+                }
+
+                ImmutableArray<RawManifestDocument> editedDocuments = MergeEditedDocuments(
+                    completeDocuments,
                     editableDocuments,
-                    context.CancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (OperationCanceledException exception)
-            {
-                throw new CliOperationException(
-                    $"Manifest editor timed out: {exception.Message}",
-                    exception);
-            }
-            catch (Exception exception) when (
-                exception is IOException
-                    or UnauthorizedAccessException
-                    or InvalidOperationException
-                    or Win32Exception)
-            {
-                throw new CliOperationException(
-                    $"Manifest editing failed: {exception.Message}",
-                    exception);
-            }
-            if (!edited.Accepted)
-            {
-                throw edited.Code switch
+                    edited.Documents);
+                request = ApplyCommon(context, options, new SubmitOperationRequest
                 {
-                    EditorResultCode.Cancelled => new OperationCanceledException(
-                        edited.ErrorMessage ?? "Manifest editing was cancelled.",
-                        context.CancellationToken),
-                    EditorResultCode.MissingConfiguration => new MissingInputException(
-                        edited.ErrorMessage ?? "An editor must be configured."),
-                    EditorResultCode.InvalidConfiguration => new FormatException(
-                        edited.ErrorMessage ?? "The editor configuration is invalid."),
-                    EditorResultCode.Failed => new CliOperationException(
-                        edited.ErrorMessage ?? "Manifest editing failed."),
-                    _ => new CliOperationException("Manifest editing failed."),
-                };
-            }
-
-            ImmutableArray<RawManifestDocument> editedDocuments = MergeEditedDocuments(
-                local.Plan.AfterDocuments,
-                editableDocuments,
-                edited.Documents);
-            request = ApplyCommon(context, options, new SubmitOperationRequest
-            {
-                OutputDirectory = request.OutputDirectory,
-                Documents = editedDocuments,
-                ReleaseProvenance = releaseProvenance,
-            });
-            local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
-            if (releaseProvenance is not null
-                && releaseInstallerUrls.Count > 0
-                && releaseInstallerUrls.SetEquals(InstallerUrls(local.Plan)))
-            {
-                local = local with
+                    OutputDirectory = request.OutputDirectory,
+                    Documents = editedDocuments,
+                    ApproveReview = request.ApproveReview,
+                    ReleaseProvenance = applicableReleaseProvenance,
+                });
+                local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
+                applicableReleaseProvenance = originalReleaseProvenance is not null
+                    && releaseInstallerUrls.Count > 0
+                    && releaseInstallerUrls.SetEquals(InstallerUrls(local.Plan))
+                        ? originalReleaseProvenance
+                        : null;
+                if (applicableReleaseProvenance is not null)
                 {
-                    Plan = local.Plan with { Release = releaseProvenance },
-                };
-            }
-            else
-            {
-                releaseProvenance = null;
-                request = request is SubmitOperationRequest submitRequest
-                    ? submitRequest with { ReleaseProvenance = null }
-                    : request;
-                local = local with { Plan = local.Plan with { Release = null } };
-            }
+                    local = local with
+                    {
+                        Plan = local.Plan with { Release = applicableReleaseProvenance },
+                    };
+                }
+                else
+                {
+                    request = request is SubmitOperationRequest submitRequest
+                        ? submitRequest with { ReleaseProvenance = null }
+                        : request;
+                    local = local with { Plan = local.Plan with { Release = null } };
+                }
 
-            if (local.Code != WorkflowResultCode.Succeeded)
-            {
-                MutationOutput.Write(context, local, remote: null);
-                return ExitCodes.OperationFailed;
+                if (local.Code == WorkflowResultCode.Succeeded)
+                {
+                    break;
+                }
+
+                completeDocuments = local.Plan.AfterDocuments.IsEmpty
+                    ? editedDocuments
+                    : local.Plan.AfterDocuments;
+                ReportEditFailure(context, local, attempt, maximumAttempts);
+                if (attempt == maximumAttempts
+                    || !await context.Interaction.ConfirmAsync(
+                        "The edited manifests are still invalid. Edit again?",
+                        defaultValue: false,
+                        context.CancellationToken).ConfigureAwait(false))
+                {
+                    MutationOutput.Write(context, local, remote: null);
+                    return ExitCodes.OperationFailed;
+                }
             }
         }
 
@@ -601,11 +629,11 @@ public sealed class MutationCommandModule : ICommandModule
                     workflow,
                     WithExecutionMode(request, WorkflowExecutionMode.Apply),
                     context).ConfigureAwait(false);
-            if (releaseProvenance is not null)
+            if (applicableReleaseProvenance is not null)
             {
                 local = local with
                 {
-                    Plan = local.Plan with { Release = releaseProvenance },
+                    Plan = local.Plan with { Release = applicableReleaseProvenance },
                 };
             }
 
@@ -644,7 +672,7 @@ public sealed class MutationCommandModule : ICommandModule
                     await _urlLauncher.OpenAsync(pullRequestUri, context.CancellationToken)
                         .ConfigureAwait(false);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (!context.CancellationToken.IsCancellationRequested)
                 {
                     context.Output.WriteDiagnostic(
                         $"Pull request #{remote.RemoteState.PullRequestNumber} was created, "
@@ -697,9 +725,14 @@ public sealed class MutationCommandModule : ICommandModule
     {
         for (int attempt = 0; result.Code == WorkflowResultCode.QuestionsRequired && attempt < 32; attempt++)
         {
-            EnsurePrompting(
-                context,
-                "Required workflow input is missing; supply command options in non-interactive mode.");
+            if (!context.Interaction.CanPrompt)
+            {
+                MutationOutput.Write(context, result, remote: null);
+                throw new MissingInputException(
+                    "Required workflow input is missing; inspect the emitted questions and "
+                    + "supply explicit command options or an override pack.");
+            }
+
             WorkflowOperationRequest updated = request;
             foreach (WorkflowQuestion question in result.Plan.Questions)
             {
@@ -734,7 +767,10 @@ public sealed class MutationCommandModule : ICommandModule
     {
         try
         {
-            return await workflow.ExecuteAsync(request, context.CancellationToken).ConfigureAwait(false);
+            return await context.Interaction.RunProgressAsync(
+                "Downloading and analyzing installers",
+                cancellation => workflow.ExecuteAsync(request, cancellation),
+                context.CancellationToken).ConfigureAwait(false);
         }
 
         catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
@@ -793,6 +829,52 @@ public sealed class MutationCommandModule : ICommandModule
             throw new CliOperationException(
                 $"Verified local mutation failed: {exception.Message}",
                 exception);
+        }
+    }
+
+    private async Task<EditorResult> RunEditorAsync(
+        ImmutableArray<RawManifestDocument> documents,
+        CommandContext context)
+    {
+        try
+        {
+            return await _editor.EditAsync(documents, context.CancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException exception)
+        {
+            throw new CliOperationException(
+                $"Manifest editor timed out: {exception.Message}",
+                exception);
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or InvalidOperationException
+                or Win32Exception)
+        {
+            throw new CliOperationException(
+                $"Manifest editing failed: {exception.Message}",
+                exception);
+        }
+    }
+
+    private static void ReportEditFailure(
+        CommandContext context,
+        WorkflowOperationResult local,
+        int attempt,
+        int maximumAttempts)
+    {
+        context.Interaction.ReportStatus(
+            $"Edited manifests did not pass validation (attempt {attempt}/{maximumAttempts}).");
+        foreach (ValidationFinding finding in local.Plan.Validation.Findings)
+        {
+            context.Interaction.ReportStatus(
+                $"  {finding.Severity} finding: {finding.Code}");
         }
     }
 
@@ -954,11 +1036,19 @@ public sealed class MutationCommandModule : ICommandModule
         RuleRuntimeConfiguration runtime = ParseRuleRuntime(context, options);
         OverridePackSet packs = ParseOverridePacks(context.ParseResult, options);
         string createdWith = context.ParseResult.GetValue(options.CreatedWith) ?? "winmatsch";
+        if (ContainsYamlLineBreak(createdWith))
+        {
+            throw new CliUsageException(
+                "--created-with must be a single line without control characters.");
+        }
+
         string? createdWithUrl = context.ParseResult.GetValue(options.CreatedWithUrl);
         if (!string.IsNullOrWhiteSpace(createdWithUrl))
         {
-            _ = ParseHttpUri(createdWithUrl, "--created-with-url");
-            createdWith = $"{createdWith} ({createdWithUrl})";
+            Uri normalizedCreatedWithUrl = ParseHttpUri(
+                createdWithUrl,
+                "--created-with-url");
+            createdWith = $"{createdWith} ({normalizedCreatedWithUrl.AbsoluteUri})";
         }
 
         return request switch
@@ -1243,7 +1333,7 @@ public sealed class MutationCommandModule : ICommandModule
                     ? TimeSpan.Zero
                     : context.Configuration.FreshnessDelay,
             },
-            CreatedWith = context.ParseResult.GetValue(options.CreatedWith) ?? "winmatsch",
+            CreatedWith = localRequest.CreatedWith,
             CustomTitle = context.ParseResult.GetValue(options.PullRequestTitle),
             Resolves = context.ParseResult.GetValue(options.Resolves),
             IdempotencyKey =
@@ -1289,11 +1379,113 @@ public sealed class MutationCommandModule : ICommandModule
             .Select(static artifact => artifact.InstallerUrl)
             .ToImmutableHashSet(StringComparer.Ordinal);
 
+    private static string PlanFingerprint(LocalOperationPlan plan)
+    {
+        var builder = new StringBuilder();
+        Append(plan.Operation);
+        Append(plan.PackageIdentifier.Value);
+        Append(plan.PackageVersion.Value);
+        Append(plan.OutputDirectory);
+        Append(plan.WarningPolicy.ToString());
+        Append(plan.ReviewApproved.ToString());
+        foreach (WorkflowFileChange change in plan.FileChanges.OrderBy(
+                     static change => change.RepositoryPath,
+                     StringComparer.Ordinal))
+        {
+            Append(change.Kind.ToString());
+            Append(change.RepositoryPath);
+            Append(change.ExpectedState.ToString());
+            Append(change.ExpectedSha256);
+            Append(Convert.ToHexString(SHA256.HashData(change.Content.AsSpan())));
+        }
+
+        foreach (RawManifestDocument document in plan.AfterDocuments.OrderBy(
+                     static document => document.RepositoryPath,
+                     StringComparer.Ordinal))
+        {
+            Append(document.RepositoryPath);
+            Append(Convert.ToHexString(SHA256.HashData(document.Content.AsSpan())));
+        }
+
+        foreach (WorkflowQuestion question in plan.Questions)
+        {
+            Append(question.Code);
+            Append(question.Prompt);
+            Append(question.Path);
+            foreach (string option in question.Options)
+            {
+                Append(option);
+            }
+        }
+
+        foreach (var execution in plan.Rules.Executions)
+        {
+            Append(execution.RuleId);
+            Append(execution.Mode.ToString());
+            Append(execution.ModeSource.ToString());
+        }
+
+        foreach (var change in plan.Rules.Changes)
+        {
+            Append(change.RuleId);
+            Append(change.ManifestPath);
+            Append(change.FieldPath);
+            Append(change.Before);
+            Append(change.After);
+        }
+
+        foreach (var review in plan.Rules.Reviews)
+        {
+            Append(review.ManifestPath);
+            Append(review.FieldPath);
+            Append(review.BotValue);
+            Append(review.HumanValue);
+            Append(review.GeneratedValue);
+        }
+
+        foreach (ValidationFinding finding in plan.Validation.Findings)
+        {
+            Append(finding.Code);
+            Append(finding.Severity.ToString());
+            Append(finding.Message);
+            Append(finding.Path);
+        }
+
+        if (plan.Release is { } release)
+        {
+            Append(release.Repository.ToString());
+            Append(release.ReleaseId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Append(release.UpdatedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+
+        void Append(string? value)
+        {
+            builder.Append(value?.Length ?? -1)
+                .Append(':')
+                .Append(value)
+                .Append('|');
+        }
+    }
+
     private static ReleaseRequest ParseRelease(ParseResult result, MutationOptions options)
-        => new(
+    {
+        ImmutableArray<Uri> releaseUrls = ParseUris(
+            result.GetValue(options.ReleaseUrls),
+            "--release-url");
+        if (releaseUrls.Length > 1)
+        {
+            throw new CliUsageException(
+                "--release-url may be specified only once; multiple release repositories "
+                + "cannot be combined safely.");
+        }
+
+        return new(
             result.GetValue(options.Release),
             ParseUris(result.GetValue(options.Urls), "--urls"),
-            ParseUris(result.GetValue(options.ReleaseUrls), "--release-url"));
+            releaseUrls);
+    }
 
     private static ImmutableArray<Uri> ParseUris(string[]? values, string option)
         =>
@@ -1359,7 +1551,12 @@ public sealed class MutationCommandModule : ICommandModule
                 throw new FormatException("--rule-mode must use RULE_ID=apply|log-only|disabled syntax.");
             }
 
-            overrides.Add(entry[..separator], ParseRuleMode(entry[(separator + 1)..]));
+            string ruleId = entry[..separator];
+            if (!overrides.TryAdd(ruleId, ParseRuleMode(entry[(separator + 1)..])))
+            {
+                throw new CliUsageException(
+                    $"--rule-mode specifies rule '{ruleId}' more than once.");
+            }
         }
 
         var userOverrides = new Dictionary<string, RuleMode>(StringComparer.OrdinalIgnoreCase);
@@ -1399,7 +1596,8 @@ public sealed class MutationCommandModule : ICommandModule
 
     private static Uri ParseHttpUri(string value, string option)
     {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
+        if (ContainsYamlLineBreak(value)
+            || !Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
         {
             throw new FormatException($"{option} requires an absolute HTTP or HTTPS URL.");
@@ -1407,6 +1605,11 @@ public sealed class MutationCommandModule : ICommandModule
 
         return uri;
     }
+
+    private static bool ContainsYamlLineBreak(string value)
+        => value.Any(static character =>
+            char.IsControl(character)
+            || character is '\u0085' or '\u2028' or '\u2029');
 
     private static bool TryParseArchitecture(string value, out Architecture architecture)
     {
@@ -1556,12 +1759,26 @@ public sealed class MutationCommandModule : ICommandModule
 
         public Option<bool> Yes { get; } = new("--yes")
         {
-            Description = "Explicitly approve destructive actions, fork creation, and submission.",
+            Description = "Approve destructive actions, fork creation, and remote submission. "
+                + "Does not answer workflow questions or approve human-correction reviews.",
+        };
+
+        public Option<bool> ApproveReviews { get; } = new("--approve-reviews")
+        {
+            Description = "Approve only the human-correction reviews listed in the emitted plan. "
+                + "Does not answer mapping or metadata questions.",
         };
 
         public Option<bool> Edit { get; } = new("--edit")
         {
-            Description = "Edit an isolated temporary manifest copy and rerun full preflight.",
+            Description = "Edit an isolated temporary manifest copy until validation succeeds or "
+                + "the bounded retry loop is exited.",
+        };
+
+        public Option<int?> EditAttempts { get; } = new("--edit-attempts")
+        {
+            Description = "Maximum edit/validate attempts (default: 3, maximum: 10). Requires --edit.",
+            HelpName = "count",
         };
 
         public Option<bool> AllowStructuralRewrite { get; } = new("--allow-structural-rewrite")
@@ -1651,7 +1868,9 @@ public sealed class MutationCommandModule : ICommandModule
             }
             command.Options.Add(PullRequestTitle);
             command.Options.Add(Yes);
+            command.Options.Add(ApproveReviews);
             command.Options.Add(Edit);
+            command.Options.Add(EditAttempts);
             command.Options.Add(WarningsAsErrors);
             command.Options.Add(DefaultRuleMode);
             command.Options.Add(RuleModes);
@@ -1664,9 +1883,13 @@ public sealed class MutationCommandModule : ICommandModule
                 command.Options.Add(Urls);
                 command.Options.Add(ReleaseUrls);
                 command.Options.Add(UrlOverrides);
+                command.Options.Add(AllowSharedContent);
+            }
+
+            if (IncludeReplace)
+            {
                 command.Options.Add(AllowStructuralRewrite);
                 command.Options.Add(AllowStableUrlChange);
-                command.Options.Add(AllowSharedContent);
             }
 
             if (IncludeMetadata)
@@ -1694,7 +1917,6 @@ public sealed class MutationCommandModule : ICommandModule
         private static Option<string[]> Multiple(string name, string description) => new(name)
         {
             Description = description,
-            AllowMultipleArgumentsPerToken = true,
         };
 
         private static Option<string?> Text(string name, string description) => new(name)

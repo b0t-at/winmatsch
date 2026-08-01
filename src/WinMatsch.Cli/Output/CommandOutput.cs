@@ -34,7 +34,7 @@ public sealed class CommandOutput : ICommandOutput
     public void WriteResult(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
-        _output.WriteLine(text);
+        _output.WriteLine(CliRedactor.Redact(text));
     }
 
     public void WriteJsonResult(Action<Utf8JsonWriter> writeDocument)
@@ -46,7 +46,39 @@ public sealed class CommandOutput : ICommandOutput
             writeDocument(writer);
         }
 
-        _output.WriteLine(Encoding.UTF8.GetString(buffer.ToArray()));
+        using JsonDocument document = JsonDocument.Parse(buffer.ToArray());
+        if (document.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidOperationException("CLI JSON results must be root objects.");
+        }
+
+        using var envelope = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(envelope, _writerOptions))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("schemaVersion", CliJson.SchemaVersion);
+            foreach (JsonProperty property in document.RootElement.EnumerateObject())
+            {
+                if (property.NameEquals("schemaVersion"))
+                {
+                    continue;
+                }
+
+                writer.WritePropertyName(property.Name);
+                if (CliRedactor.IsSecretKey(property.Name))
+                {
+                    writer.WriteStringValue(CliRedactor.Placeholder);
+                }
+                else
+                {
+                    WriteRedactedJson(writer, property.Value);
+                }
+            }
+
+            writer.WriteEndObject();
+        }
+
+        _output.WriteLine(Encoding.UTF8.GetString(envelope.ToArray()));
     }
 
     public void WriteFormatted(Action<TextWriter> writeText, Action<Utf8JsonWriter> writeJson)
@@ -59,19 +91,61 @@ public sealed class CommandOutput : ICommandOutput
         }
         else
         {
-            writeText(_output);
+            using var buffer = new StringWriter();
+            buffer.NewLine = _output.NewLine;
+            writeText(buffer);
+            _output.Write(CliRedactor.Redact(buffer.ToString()));
         }
     }
 
     public void WriteDiagnostic(string message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        _error.WriteLine(message);
+        _error.WriteLine(CliRedactor.Redact(message));
     }
 
     public void WriteError(string message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        _error.WriteLine(message);
+        _error.WriteLine(CliRedactor.Redact(message));
+    }
+
+    private static void WriteRedactedJson(Utf8JsonWriter writer, JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                writer.WriteStartObject();
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    writer.WritePropertyName(property.Name);
+                    if (CliRedactor.IsSecretKey(property.Name))
+                    {
+                        writer.WriteStringValue(CliRedactor.Placeholder);
+                    }
+                    else
+                    {
+                        WriteRedactedJson(writer, property.Value);
+                    }
+                }
+
+                writer.WriteEndObject();
+                break;
+            case JsonValueKind.Array:
+                writer.WriteStartArray();
+                foreach (JsonElement item in element.EnumerateArray())
+                {
+                    WriteRedactedJson(writer, item);
+                }
+
+                writer.WriteEndArray();
+                break;
+            case JsonValueKind.String:
+                writer.WriteStringValue(CliRedactor.Redact(element.GetString() ?? ""));
+                break;
+            default:
+                element.WriteTo(writer);
+                break;
+        }
     }
 }

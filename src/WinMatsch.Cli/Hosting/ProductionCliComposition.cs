@@ -13,14 +13,23 @@ public static class ProductionCliComposition
         Func<string, string?> environment = Environment.GetEnvironmentVariable;
         string homeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         ITokenStore tokenStore = TokenStores.CreateDefault();
+        string? configurationPath = UserConfigurationFile.GetDefaultPath(
+            environment,
+            homeDirectory);
+        IFeedbackStateStore feedbackState = configurationPath is null
+            ? new NullFeedbackStateStore()
+            : new FileFeedbackStateStore(
+                Path.Combine(
+                    Path.GetDirectoryName(configurationPath)!,
+                    "feedback-state.json"));
         IReadOnlyList<ICommandModule> modules =
         [
             new DiagnosticsCommandModule(),
             new MutationCommandModule(
                 new ProductionMutationWorkflowFactory(),
                 new ProductionSubmissionWorkflowFactory()),
-            new MaintenanceCommandModule(),
-            new TokenCommandModule(tokenStore, new GitHubTokenValidator()),
+            new MaintenanceCommandModule(feedbackStateStore: feedbackState),
+            new TokenCommandModule(tokenStore),
             new ConfigCommandModule(environment, homeDirectory),
             new CacheCommandModule(),
             new CompletionCommandModule(),

@@ -2,13 +2,14 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using WinMatsch.Cli.Hosting;
+using WinMatsch.Cli.Output;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
 
 namespace WinMatsch.Cli.Commands.Mutations;
 
-internal static partial class MutationOutput
+internal static class MutationOutput
 {
     public static void Write(
         CommandContext context,
@@ -214,7 +215,7 @@ internal static partial class MutationOutput
         json.WriteString("operation", plan.Operation);
         json.WriteString("packageIdentifier", plan.PackageIdentifier.Value);
         json.WriteString("packageVersion", plan.PackageVersion.Value);
-        json.WriteString("result", ToKebab(local.Code));
+        CliJson.WriteEnum(json, "result", local.Code, ToKebab(local.Code));
         json.WriteBoolean("applied", local.Applied);
         if (!string.IsNullOrWhiteSpace(local.ErrorMessage))
         {
@@ -222,6 +223,7 @@ internal static partial class MutationOutput
         }
 
         json.WriteString("outputDirectory", plan.OutputDirectory);
+        json.WriteBoolean("reviewApproved", plan.ReviewApproved);
         json.WriteBoolean("requiresReview", plan.RequiresReview);
         json.WriteStartArray("changes");
         foreach (WorkflowFileChange change in plan.FileChanges.OrderBy(
@@ -229,7 +231,7 @@ internal static partial class MutationOutput
                      StringComparer.Ordinal))
         {
             json.WriteStartObject();
-            json.WriteString("kind", ToKebab(change.Kind));
+            CliJson.WriteEnum(json, "kind", change.Kind, ToKebab(change.Kind));
             json.WriteString("path", change.RepositoryPath);
             json.WriteEndObject();
         }
@@ -241,7 +243,7 @@ internal static partial class MutationOutput
             json.WriteStartObject();
             json.WriteString("code", question.Code);
             json.WriteString("prompt", Redact(question.Prompt));
-            WriteNullable(json, "path", question.Path);
+            WriteNullable(json, "path", Redact(question.Path));
             json.WriteStartArray("options");
             foreach (string option in question.Options)
             {
@@ -278,8 +280,12 @@ internal static partial class MutationOutput
         {
             json.WriteStartObject();
             json.WriteString("id", execution.RuleId);
-            json.WriteString("mode", ToKebab(execution.Mode));
-            json.WriteString("source", ToKebab(execution.ModeSource));
+            CliJson.WriteEnum(json, "mode", execution.Mode, ToKebab(execution.Mode));
+            CliJson.WriteEnum(
+                json,
+                "source",
+                execution.ModeSource,
+                ToKebab(execution.ModeSource));
             json.WriteEndObject();
         }
 
@@ -319,7 +325,11 @@ internal static partial class MutationOutput
         {
             json.WriteStartObject();
             json.WriteString("code", finding.Code);
-            json.WriteString("severity", ToKebab(finding.Severity));
+            CliJson.WriteEnum(
+                json,
+                "severity",
+                finding.Severity,
+                ToKebab(finding.Severity));
             json.WriteString("message", Redact(finding.Message));
             WriteNullable(json, "path", Redact(finding.Path));
             json.WriteEndObject();
@@ -372,13 +382,17 @@ internal static partial class MutationOutput
     private static void WriteRemote(Utf8JsonWriter json, GitHubLifecycleResult remote)
     {
         json.WriteStartObject();
-        json.WriteString("result", ToKebab(remote.Code));
+        CliJson.WriteEnum(json, "result", remote.Code, ToKebab(remote.Code));
         json.WriteBoolean("applied", remote.Applied);
         json.WriteStartArray("operations");
         foreach (PlannedRemoteOperation operation in remote.Plan.Operations)
         {
             json.WriteStartObject();
-            json.WriteString("kind", ToKebab(operation.Kind));
+            CliJson.WriteEnum(
+                json,
+                "kind",
+                operation.Kind,
+                ToKebab(operation.Kind));
             json.WriteString("target", operation.Target);
             json.WriteString("description", Redact(operation.Description));
             json.WriteEndObject();
@@ -432,38 +446,13 @@ internal static partial class MutationOutput
     }
 
     private static string? Redact(string? value)
-    {
-        if (value is null)
-        {
-            return null;
-        }
-
-        string redacted = GitHubTokenPattern().Replace(value, "[REDACTED]");
-        redacted = SecretAssignmentPattern().Replace(redacted, "$1$2[REDACTED]");
-        redacted = AuthorizationPattern().Replace(redacted, "$1[REDACTED]");
-        redacted = UriUserInfoPattern().Replace(redacted, "$1[REDACTED]@");
-        return QueryValuePattern().Replace(redacted, "$1=[REDACTED]");
-    }
+        => value is null
+            ? null
+            : CliRedactor.RedactUrl(value, redactAllQueryValues: true);
 
     private static string ToKebab<T>(T value)
         where T : struct, Enum
         => Regex.Replace(value.ToString(), "([a-z0-9])([A-Z])", "$1-$2")
             .ToLowerInvariant();
 
-    [GeneratedRegex(@"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")]
-    private static partial Regex GitHubTokenPattern();
-
-    [GeneratedRegex(
-        @"(?i)\b(password|client[-_]?secret|access[-_]?token|refresh[-_]?token|token|secret|api[-_]?key|signature|sig|credential)(\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\s,;]+)")]
-    private static partial Regex SecretAssignmentPattern();
-
-    [GeneratedRegex(
-        @"(?i)\b(authorization\s*[:=]\s*(?:(?:bearer|basic|token)\s+)?)(?:""[^""]*""|'[^']*'|[^\s,;]+)")]
-    private static partial Regex AuthorizationPattern();
-
-    [GeneratedRegex(@"(?i)(https?://)[^/\s:@]+:[^/\s@]+@")]
-    private static partial Regex UriUserInfoPattern();
-
-    [GeneratedRegex(@"([?&][^=\s&#]+)=[^&\s#]+")]
-    private static partial Regex QueryValuePattern();
 }

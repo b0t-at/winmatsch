@@ -46,10 +46,13 @@ public sealed class OutputContractTests
         CliRunResult result = await harness.RunAsync(["probe", "--format", "json", "--dry-run"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal("{\"name\":\"Fancy.Package\",\"installers\":2,\"dryRun\":true}\n", result.StandardOutput);
+        Assert.Equal(
+            "{\"schemaVersion\":\"1.0\",\"name\":\"Fancy.Package\",\"installers\":2,\"dryRun\":true}\n",
+            result.StandardOutput);
         Assert.Equal(string.Empty, result.StandardError);
         // The document parses back cleanly.
         using JsonDocument document = JsonDocument.Parse(result.StandardOutput);
+        Assert.Equal("1.0", document.RootElement.GetProperty("schemaVersion").GetString());
         Assert.Equal("Fancy.Package", document.RootElement.GetProperty("name").GetString());
     }
 
@@ -93,7 +96,7 @@ public sealed class OutputContractTests
 
         CliRunResult result = await harness.RunAsync(["probe", "--format", "json"]);
 
-        Assert.Equal("{\"kind\":\"result\"}\n", result.StandardOutput);
+        Assert.Equal("{\"schemaVersion\":\"1.0\",\"kind\":\"result\"}\n", result.StandardOutput);
     }
 
     [Fact]

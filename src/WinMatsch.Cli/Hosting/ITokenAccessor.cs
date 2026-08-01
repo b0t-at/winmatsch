@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using WinMatsch.GitHub.Auth;
 
 namespace WinMatsch.Cli.Hosting;
@@ -32,8 +33,33 @@ public sealed class TokenAccessor : ITokenAccessor
         _explicitToken = explicitToken;
     }
 
-    public Task<ResolvedToken?> ResolveAsync(CancellationToken cancellationToken = default) =>
-        _resolver.ResolveAsync(_explicitToken, cancellationToken);
+    public async Task<ResolvedToken?> ResolveAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await _resolver.ResolveAsync(_explicitToken, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (TokenStoreException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+                or IOException
+                or UnauthorizedAccessException
+                or InvalidOperationException
+                or Win32Exception)
+        {
+            throw new TokenStoreException(
+                $"The OS keyring lookup failed: {exception.Message}",
+                exception);
+        }
+    }
 
     public async Task<ResolvedToken> RequireAsync(CancellationToken cancellationToken = default) =>
         await ResolveAsync(cancellationToken).ConfigureAwait(false)

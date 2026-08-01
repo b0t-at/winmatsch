@@ -149,7 +149,7 @@ public sealed class CacheCommandTests : IDisposable
 
         CliRunResult result = await harness.RunAsync(["cache", "clear"]);
 
-        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
         Assert.Contains("confirmation declined", result.StandardError, StringComparison.Ordinal);
         Assert.True(File.Exists(SoleMetadataPath()));
     }
@@ -216,6 +216,24 @@ public sealed class CacheCommandTests : IDisposable
         CliRunResult result = await harness.RunAsync(["cache", "clear", EntryUrl, "--yes"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
+    }
+
+    [Fact]
+    public async Task Clear_whole_cache_removes_orphaned_artifacts_without_metadata()
+    {
+        Directory.CreateDirectory(_cacheDirectory);
+        string orphan = Path.Combine(_cacheDirectory, "orphan.tmp.payload");
+        await File.WriteAllTextAsync(orphan, "orphaned");
+        CliHarness harness = CreateHarness();
+
+        CliRunResult dryRun = await harness.RunAsync(["cache", "clear", "--dry-run"]);
+        CliRunResult result = await harness.RunAsync(["cache", "clear", "--yes"]);
+
+        Assert.Equal(ExitCodes.Success, dryRun.ExitCode);
+        Assert.Contains("orphan.tmp.payload", dryRun.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("would be removed", dryRun.StandardOutput, StringComparison.Ordinal);
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.False(File.Exists(orphan));
         Assert.Contains("Removed 0 entries", result.StandardOutput, StringComparison.Ordinal);
     }
 

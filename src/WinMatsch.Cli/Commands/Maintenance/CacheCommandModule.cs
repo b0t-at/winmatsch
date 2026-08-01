@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Globalization;
 using System.Text.Json;
 using WinMatsch.Cli.Hosting;
+using WinMatsch.Cli.Output;
 using WinMatsch.Downloads;
 
 namespace WinMatsch.Cli.Commands.Maintenance;
@@ -119,26 +120,38 @@ public sealed class CacheCommandModule : ICommandModule
             IReadOnlyList<DownloadCacheEntryInfo> targets = urlValue is null
                 ? entries
                 : [.. entries.Where(entry => string.Equals(entry.Url, urlValue, StringComparison.Ordinal))];
+            IReadOnlyList<string> plannedFiles = urlValue is null
+                ? InspectCacheFiles(cache.DirectoryPath)
+                : [];
 
             if (context.IsDryRun)
             {
-                WriteMutationPlan(context, cache.DirectoryPath, "clear", targets, applied: false);
+                WriteMutationPlan(
+                    context,
+                    cache.DirectoryPath,
+                    "clear",
+                    targets,
+                    applied: false,
+                    plannedFiles: plannedFiles);
                 return ExitCodes.Success;
             }
 
-            if (targets.Count > 0)
+            if (urlValue is null || targets.Count > 0)
             {
                 bool confirmed = await MaintenanceCommandHelpers.ConfirmMutationAsync(
                     context,
                     context.ParseResult.GetValue(yes),
                     urlValue is null
-                        ? $"Remove all {targets.Count} entr{(targets.Count == 1 ? "y" : "ies")} from the download cache?"
+                        ? targets.Count == 0
+                            ? "Remove all artifacts, including orphaned files, from the download cache?"
+                            : $"Remove all {targets.Count} entr{(targets.Count == 1 ? "y" : "ies")} "
+                                + "and any orphaned files from the download cache?"
                         : $"Remove the cache entry for '{RedactUrl(urlValue)}'?")
                     .ConfigureAwait(false);
                 if (!confirmed)
                 {
                     context.Output.WriteDiagnostic("Aborted: confirmation declined; nothing was removed.");
-                    return ExitCodes.Cancelled;
+                    return ExitCodes.OperationFailed;
                 }
 
                 await RunCacheAsync(
@@ -147,7 +160,13 @@ public sealed class CacheCommandModule : ICommandModule
                     .ConfigureAwait(false);
             }
 
-            WriteMutationPlan(context, cache.DirectoryPath, "clear", targets, applied: true);
+            WriteMutationPlan(
+                context,
+                cache.DirectoryPath,
+                "clear",
+                targets,
+                applied: true,
+                plannedFiles: plannedFiles);
             return ExitCodes.Success;
         });
         return command;
@@ -194,7 +213,7 @@ public sealed class CacheCommandModule : ICommandModule
                 if (!confirmed)
                 {
                     context.Output.WriteDiagnostic("Aborted: confirmation declined; nothing was removed.");
-                    return ExitCodes.Cancelled;
+                    return ExitCodes.OperationFailed;
                 }
 
                 // Re-inspect after the confirmation gap and keep only entries that are still
@@ -320,7 +339,8 @@ public sealed class CacheCommandModule : ICommandModule
         string action,
         IReadOnlyList<DownloadCacheEntryInfo> targets,
         bool applied,
-        IReadOnlyList<DownloadCacheEntryInfo>? unaddressable = null)
+        IReadOnlyList<DownloadCacheEntryInfo>? unaddressable = null,
+        IReadOnlyList<string>? plannedFiles = null)
         => context.Output.WriteFormatted(
             writer =>
             {
@@ -332,6 +352,18 @@ public sealed class CacheCommandModule : ICommandModule
                 {
                     writer.WriteLine(
                         $"  [{MaintenanceCommandHelpers.ToCamelCase(entry.State)}] {FormatUrl(entry)}");
+                }
+
+                if (plannedFiles is { Count: > 0 })
+                {
+                    writer.WriteLine(
+                        $"{plannedFiles.Count.ToString(CultureInfo.InvariantCulture)} file"
+                        + (plannedFiles.Count == 1 ? "" : "s")
+                        + (applied ? " removed:" : " would be removed:"));
+                    foreach (string file in plannedFiles)
+                    {
+                        writer.WriteLine($"  file {file}");
+                    }
                 }
 
                 if (unaddressable is { Count: > 0 })
@@ -356,8 +388,40 @@ public sealed class CacheCommandModule : ICommandModule
 
                 writer.WriteEndArray();
                 writer.WriteNumber("unaddressableCorruptEntries", unaddressable?.Count ?? 0);
+                writer.WriteStartArray("files");
+                foreach (string file in plannedFiles ?? [])
+                {
+                    writer.WriteStringValue(file);
+                }
+
+                writer.WriteEndArray();
                 writer.WriteEndObject();
             });
+
+    private static IReadOnlyList<string> InspectCacheFiles(string directory)
+    {
+        try
+        {
+            return Directory.Exists(directory)
+                ?
+                [
+                    .. Directory.EnumerateFiles(directory)
+                        .Where(static path => !Path.GetFileName(path).Equals(
+                            ".winmatsch-cache.lock",
+                            StringComparison.Ordinal))
+                        .Select(static path => Path.GetFileName(path)!)
+                        .Order(StringComparer.Ordinal),
+                ]
+                : [];
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            throw new CliOperationException(
+                $"Cache inventory failed: {exception.Message}",
+                exception);
+        }
+    }
 
     private static void WriteEntryText(TextWriter writer, DownloadCacheEntryInfo entry, string indent)
     {
@@ -375,7 +439,7 @@ public sealed class CacheCommandModule : ICommandModule
         writer.WriteStartObject();
         writer.WriteString("url", RedactUrl(entry.Url));
         writer.WriteString("cacheKey", entry.CacheKey);
-        writer.WriteString("state", MaintenanceCommandHelpers.ToCamelCase(entry.State));
+        CliJson.WriteEnum(writer, "state", entry.State);
         if (entry.ContentIdentity is { } identity)
         {
             writer.WriteString("sha256", identity.Sha256.Value);
@@ -420,16 +484,7 @@ public sealed class CacheCommandModule : ICommandModule
     /// already knows.
     /// </summary>
     private static string RedactUrl(string url)
-    {
-        string display = url;
-        if (Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) && uri.UserInfo.Length > 0)
-        {
-            // Uri.Authority never contains userinfo, so this drops it structurally.
-            display = $"{uri.Scheme}{Uri.SchemeDelimiter}[REDACTED]@{uri.Authority}{uri.PathAndQuery}{uri.Fragment}";
-        }
-
-        return MaintenanceCommandHelpers.Redact(display);
-    }
+        => CliRedactor.RedactUrl(url, redactAllQueryValues: true);
 
     private static string FormatUrl(DownloadCacheEntryInfo entry)
         => entry.Url.Length > 0 ? RedactUrl(entry.Url) : $"(unreadable metadata; key {entry.CacheKey})";

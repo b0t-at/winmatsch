@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Net;
 using System.Text;
 using WinMatsch.Cli.Commands.Maintenance;
@@ -16,6 +17,65 @@ namespace WinMatsch.Cli.Tests.Maintenance;
 /// </summary>
 public sealed class MaintenanceAdapterTests
 {
+    [Fact]
+    public void Lifecycle_cancellation_maps_to_130_only_for_a_cancelled_invocation()
+    {
+        using var cancellation = new CancellationTokenSource();
+
+        Assert.Equal(
+            ExitCodes.OperationFailed,
+            MaintenanceCommandHelpers.MapResultCode(
+                GitHubLifecycleResultCode.Cancelled,
+                cancellation.Token));
+        cancellation.Cancel();
+        Assert.Equal(
+            ExitCodes.Cancelled,
+            MaintenanceCommandHelpers.MapResultCode(
+                GitHubLifecycleResultCode.Cancelled,
+                cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Pull_request_source_enforces_fork_owner_and_enriches_feedback()
+    {
+        var client = new FakeMaintenanceGitHubClient { IgnoreHeadOwnerFilter = true };
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41, headOwner: "octocat"));
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(42, headOwner: "attacker"));
+        var metadata = new FakePullRequestMetadataSource();
+        using var source = new ToolPullRequestObservationSource(client, "octocat", metadata);
+
+        ImmutableArray<PullRequestObservation> observations =
+                await source.GetOpenToolPullRequestsAsync(
+                    new RepositoryCoordinates("microsoft", "winget-pkgs"),
+                    CancellationToken.None);
+
+        PullRequestObservation observation = Assert.Single(observations);
+        Assert.Equal(41, observation.PullRequest.Number);
+        Assert.Collection(
+            observation.Labels,
+            label => Assert.Equal("infra-failure", label));
+        Assert.Single(observation.Comments);
+        Assert.Equal([41L], metadata.RequestedPullRequests);
+    }
+
+    [Fact]
+    public async Task Pull_request_metadata_follows_pages_and_skips_deleted_users()
+    {
+        var handler = new FeedbackMetadataHandler();
+        using var source = new GitHubPullRequestMetadataSource(
+            new GitHubClientOptions(),
+            "token",
+            new HttpClient(handler));
+
+        PullRequestMetadata metadata = await source.GetAsync(
+            new RepositoryCoordinates("owner", "repo"),
+            41,
+            CancellationToken.None);
+
+        Assert.Equal(["first", "second"], metadata.Comments.Select(static comment => comment.Body));
+        Assert.Equal(3, handler.RequestCount);
+    }
+
     private static readonly RepositoryCoordinates _upstream = new("microsoft", "winget-pkgs");
     private static readonly PackageIdentifier _package = new("Contoso.App");
     private static readonly PackageVersion _version = new("1.0.0");
@@ -168,19 +228,107 @@ public sealed class MaintenanceAdapterTests
         Assert.Equal(["https://example.invalid/a.exe", "https://example.invalid/b.exe"], urls);
     }
 
+    [Fact]
+    public void Installer_url_extraction_rejects_yaml_alias_cycles()
+    {
+        byte[] manifest = Encoding.UTF8.GetBytes("root: &loop\n  - *loop\n");
+
+        Assert.Throws<YamlDotNet.Core.YamlException>(
+            () => GitHubDeadVersionInspector.ExtractInstallerUrls(manifest));
+    }
+
     private static FakeMaintenanceGitHubClient WithInstallerManifest(string yaml)
     {
         var client = new FakeMaintenanceGitHubClient();
         client.DefaultBranches[_upstream.ToString()] = new BranchState("master", "sha", IsProtected: true);
         string directory = ManifestPaths.GetVersionDirectory(_package, _version);
-        client.ManifestFiles[directory] =
+        string treeish = "sha";
+        int index = 0;
+        foreach (string segment in directory.Split('/'))
+        {
+            string next = $"tree-{index++}";
+            client.Trees[treeish] =
+            [
+                new RepositoryTreeEntry(segment, next, RepositoryTreeEntryType.Tree, null),
+            ];
+            treeish = next;
+        }
+
+        string fileName = ManifestPaths.GetInstallerFileName(_package);
+        string path = $"{directory}/{fileName}";
+        byte[] content = Encoding.UTF8.GetBytes(yaml);
+        client.Trees[treeish] =
         [
-            new ManifestFile(
-                $"{directory}/{ManifestPaths.GetInstallerFileName(_package)}",
+            new RepositoryTreeEntry(
+                fileName,
                 "file-sha",
-                Encoding.UTF8.GetBytes(yaml)),
+                RepositoryTreeEntryType.Blob,
+                content.Length),
         ];
+        client.Contents[path] = new RepositoryContent(
+            fileName,
+            path,
+            "file-sha",
+            content.Length,
+            "base64",
+            content);
         return client;
+    }
+
+    private sealed class FakePullRequestMetadataSource : IPullRequestMetadataSource
+    {
+        public List<long> RequestedPullRequests { get; } = [];
+
+        public Task<PullRequestMetadata> GetAsync(
+            RepositoryCoordinates repository,
+            long pullRequestNumber,
+            CancellationToken cancellationToken)
+        {
+            RequestedPullRequests.Add(pullRequestNumber);
+            return Task.FromResult(new PullRequestMetadata(
+                ["infra-failure"],
+                [new PullRequestCommentObservation("github-actions", "timed out", DateTimeOffset.UnixEpoch)]));
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class FeedbackMetadataHandler : HttpMessageHandler
+    {
+        public int RequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            string path = request.RequestUri!.PathAndQuery;
+            if (!path.Contains("/comments", StringComparison.Ordinal))
+            {
+                return Task.FromResult(Json("""{"labels":[]}"""));
+            }
+
+            if (!path.Contains("page=2", StringComparison.Ordinal))
+            {
+                HttpResponseMessage first = Json(
+                    """[{"user":{"login":"wingetbot"},"body":"first","created_at":"2026-01-01T00:00:00Z"}]""");
+                first.Headers.TryAddWithoutValidation(
+                    "Link",
+                    "<https://api.github.com/repos/owner/repo/issues/41/comments?per_page=100&page=2>; rel=\"next\"");
+                return Task.FromResult(first);
+            }
+
+            return Task.FromResult(Json(
+                """[{"user":null,"body":"deleted","created_at":"2026-01-01T00:00:00Z"},{"user":{"login":"wingetbot"},"body":"second","created_at":"2026-01-02T00:00:00Z"}]"""));
+
+            static HttpResponseMessage Json(string content)
+                => new(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(content, Encoding.UTF8, "application/json"),
+                };
+        }
     }
 
     private sealed class ThrowingProber : IInstallerUrlProber

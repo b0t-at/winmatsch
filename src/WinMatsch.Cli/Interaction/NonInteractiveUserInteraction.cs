@@ -39,6 +39,19 @@ public sealed class NonInteractiveUserInteraction : IUserInteraction
 
     public void ReportStatus(string message) => _error.WriteLine(message);
 
+    public async Task<T> RunProgressAsync<T>(
+        string description,
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(description);
+        ArgumentNullException.ThrowIfNull(operation);
+        _error.WriteLine($"{description}...");
+        T result = await operation(cancellationToken).ConfigureAwait(false);
+        _error.WriteLine($"{description}: complete.");
+        return result;
+    }
+
     private MissingInputException Missing(string question) =>
         new($"Input is required but prompting is unavailable ({_reason}): {question}");
 }

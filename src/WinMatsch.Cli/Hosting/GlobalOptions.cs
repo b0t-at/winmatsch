@@ -1,6 +1,8 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
+using WinMatsch.GitHub;
 using WinMatsch.GitHub.Auth;
+using WinMatsch.Workflows;
 using WinMatsch.Workflows.Configuration;
 
 namespace WinMatsch.Cli.Hosting;
@@ -25,6 +27,10 @@ namespace WinMatsch.Cli.Hosting;
 /// </summary>
 public sealed class GlobalOptions
 {
+    public const string DryRunVariable = "DRY_RUN";
+    public const string GitHubApiUrlVariable = "WINMATSCH_GITHUB_API_URL";
+    public const string GitHubGraphQlUrlVariable = "WINMATSCH_GITHUB_GRAPHQL_URL";
+
     public GlobalOptions()
     {
         Repository = new Option<string?>("--repo")
@@ -97,6 +103,22 @@ public sealed class GlobalOptions
             Recursive = true,
             CustomParser = ParseToken,
         };
+
+        GitHubApiUrl = new Option<Uri?>("--github-api-url")
+        {
+            Description = "GitHub REST API base URL. For GHES, use https://host/api/v3/.",
+            HelpName = "url",
+            Recursive = true,
+            CustomParser = result => ParseEndpoint(result, "--github-api-url"),
+        };
+
+        GitHubGraphQlUrl = new Option<Uri?>("--github-graphql-url")
+        {
+            Description = "GitHub GraphQL endpoint. Derived safely from --github-api-url when omitted.",
+            HelpName = "url",
+            Recursive = true,
+            CustomParser = result => ParseEndpoint(result, "--github-graphql-url"),
+        };
     }
 
     public Option<string?> Repository { get; }
@@ -119,6 +141,10 @@ public sealed class GlobalOptions
 
     public Option<GitHubToken?> Token { get; }
 
+    public Option<Uri?> GitHubApiUrl { get; }
+
+    public Option<Uri?> GitHubGraphQlUrl { get; }
+
     /// <summary>Every global option, for registration on the root command.</summary>
     public IReadOnlyList<Option> All =>
     [
@@ -132,6 +158,8 @@ public sealed class GlobalOptions
         NoColor,
         ConfigFile,
         Token,
+        GitHubApiUrl,
+        GitHubGraphQlUrl,
     ];
 
     /// <summary>Builds the command-line configuration layer from parsed global options.</summary>
@@ -146,6 +174,70 @@ public sealed class GlobalOptions
             OutputFormat = parseResult.GetValue(Format),
             OutputDirectory = parseResult.GetValue(OutputDirectory),
             Interaction = parseResult.GetValue(Interaction),
+        };
+    }
+
+    /// <summary>
+    /// Resolves the affirmative command flag over the documented DRY_RUN environment fallback.
+    /// </summary>
+    public WorkflowExecutionMode BindExecutionMode(
+        ParseResult parseResult,
+        Func<string, string?> environment)
+    {
+        ArgumentNullException.ThrowIfNull(parseResult);
+        ArgumentNullException.ThrowIfNull(environment);
+        if (parseResult.GetResult(DryRun) is OptionResult { Implicit: false })
+        {
+            return parseResult.GetValue(DryRun)
+                ? WorkflowExecutionMode.Plan
+                : WorkflowExecutionMode.Apply;
+        }
+
+        string? value = environment(DryRunVariable);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return WorkflowExecutionMode.Apply;
+        }
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "1" or "true" or "yes" or "on" => WorkflowExecutionMode.Plan,
+            "0" or "false" or "no" or "off" => WorkflowExecutionMode.Apply,
+            _ => throw new FormatException(
+                $"{DryRunVariable}: '{Cli.Output.CliRedactor.Redact(value)}' is not a valid boolean. "
+                + "Use true or false."),
+        };
+    }
+
+    /// <summary>
+    /// Resolves GitHub.com/GHES endpoints without ever allowing REST and GraphQL credentials to
+    /// cross authorities. Command options override their WINMATSCH_* environment counterparts.
+    /// </summary>
+    public GitHubClientOptions BindGitHubClientOptions(
+        ParseResult parseResult,
+        Func<string, string?> environment)
+    {
+        ArgumentNullException.ThrowIfNull(parseResult);
+        ArgumentNullException.ThrowIfNull(environment);
+        Uri api = parseResult.GetValue(GitHubApiUrl)
+            ?? ParseEndpointEnvironment(environment(GitHubApiUrlVariable), GitHubApiUrlVariable)
+            ?? new Uri("https://api.github.com/");
+        api = EnsureTrailingSlash(api);
+        Uri graphQl = parseResult.GetValue(GitHubGraphQlUrl)
+            ?? ParseEndpointEnvironment(
+                environment(GitHubGraphQlUrlVariable),
+                GitHubGraphQlUrlVariable)
+            ?? DeriveGraphQl(api);
+        if (!SameAuthority(api, graphQl))
+        {
+            throw new FormatException(
+                "The GitHub REST and GraphQL endpoints must use the same scheme, host, and port.");
+        }
+
+        return new GitHubClientOptions
+        {
+            ApiBaseUri = api,
+            GraphQlUri = graphQl,
         };
     }
 
@@ -196,4 +288,72 @@ public sealed class GlobalOptions
             return null;
         }
     }
+
+    private static Uri? ParseEndpoint(ArgumentResult result, string optionName)
+    {
+        string value = result.Tokens[0].Value;
+        if (!TryParseEndpoint(value, out Uri? endpoint))
+        {
+            result.AddError(
+                $"{optionName} requires an absolute HTTPS URL without credentials, query, or fragment.");
+            return null;
+        }
+
+        return endpoint;
+    }
+
+    private static Uri? ParseEndpointEnvironment(string? value, string variable)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        if (!TryParseEndpoint(value.Trim(), out Uri? endpoint))
+        {
+            throw new FormatException(
+                $"{variable}: expected an absolute HTTPS URL without credentials, query, or fragment.");
+        }
+
+        return endpoint;
+    }
+
+    private static bool TryParseEndpoint(string value, out Uri? endpoint)
+    {
+        bool valid = Uri.TryCreate(value, UriKind.Absolute, out endpoint)
+            && endpoint.Scheme == Uri.UriSchemeHttps
+            && string.IsNullOrEmpty(endpoint.UserInfo)
+            && string.IsNullOrEmpty(endpoint.Query)
+            && string.IsNullOrEmpty(endpoint.Fragment);
+        if (!valid)
+        {
+            endpoint = null;
+        }
+
+        return valid;
+    }
+
+    private static Uri EnsureTrailingSlash(Uri value)
+        => value.AbsolutePath.EndsWith('/')
+            ? value
+            : new Uri(value.AbsoluteUri + "/", UriKind.Absolute);
+
+    private static Uri DeriveGraphQl(Uri api)
+    {
+        if (api.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Uri("https://api.github.com/graphql");
+        }
+
+        var builder = new UriBuilder(api)
+        {
+            Path = "/api/graphql",
+        };
+        return builder.Uri;
+    }
+
+    private static bool SameAuthority(Uri left, Uri right)
+        => left.Scheme.Equals(right.Scheme, StringComparison.OrdinalIgnoreCase)
+            && left.IdnHost.Equals(right.IdnHost, StringComparison.OrdinalIgnoreCase)
+            && left.Port == right.Port;
 }

@@ -14,7 +14,7 @@ namespace WinMatsch.Cli.Commands.Maintenance;
 public sealed class TokenCommandModule : ICommandModule
 {
     private readonly ITokenStore _store;
-    private readonly ITokenValidator _validator;
+    private readonly ITokenValidator? _validator;
     private readonly Func<TextReader> _standardInput;
 
     public TokenCommandModule(
@@ -23,7 +23,7 @@ public sealed class TokenCommandModule : ICommandModule
         Func<TextReader>? standardInput = null)
     {
         _store = store ?? TokenStores.CreateDefault();
-        _validator = validator ?? new GitHubTokenValidator();
+        _validator = validator;
         _standardInput = standardInput ?? (static () => Console.In);
     }
 
@@ -58,10 +58,15 @@ public sealed class TokenCommandModule : ICommandModule
         {
             GitHubToken token = ReadToken(context, context.ParseResult.GetValue(stdin), registry);
             EnsureStoreAvailable("stored");
+            ITokenValidator validator = _validator ?? new GitHubTokenValidator(value =>
+                new RedactingGitHubRepositoryClient(new WinMatsch.GitHub.GitHubRepositoryClient(
+                    new HttpClient(),
+                    value,
+                    context.GitHubOptions)));
             TokenValidationResult validation = await MaintenanceCommandHelpers.RunRemoteAsync(
                 context,
                 "Token validation failed",
-                () => _validator.ValidateAsync(token, context.CancellationToken))
+                () => validator.ValidateAsync(token, context.CancellationToken))
                 .ConfigureAwait(false);
             if (!validation.IsValid)
             {
@@ -79,7 +84,7 @@ public sealed class TokenCommandModule : ICommandModule
             {
                 await _store.SetTokenAsync(token, context.CancellationToken).ConfigureAwait(false);
             }
-            catch (TokenStoreException exception)
+            catch (Exception exception) when (MaintenanceCommandHelpers.IsKeyringFailure(exception))
             {
                 throw new CliOperationException(
                     $"The token could not be stored: {exception.Message} "
@@ -115,7 +120,7 @@ public sealed class TokenCommandModule : ICommandModule
 
                 removed = await _store.RemoveTokenAsync(context.CancellationToken).ConfigureAwait(false);
             }
-            catch (TokenStoreException exception)
+            catch (Exception exception) when (MaintenanceCommandHelpers.IsKeyringFailure(exception))
             {
                 throw new CliOperationException(
                     $"The token could not be removed: {exception.Message}",
@@ -135,9 +140,19 @@ public sealed class TokenCommandModule : ICommandModule
             "Show whether a token is stored in the OS keyring. The token value is never shown.");
         registry.SetHandler(command, async context =>
         {
-            TokenStoreStatus status = await TokenStores
-                .GetStatusAsync(_store, context.CancellationToken)
-                .ConfigureAwait(false);
+            TokenStoreStatus status;
+            try
+            {
+                status = await TokenStores
+                    .GetStatusAsync(_store, context.CancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (MaintenanceCommandHelpers.IsKeyringFailure(exception))
+            {
+                throw new CliOperationException(
+                    $"The token status could not be read: {exception.Message}",
+                    exception);
+            }
             context.Output.WriteFormatted(
                 writer =>
                 {

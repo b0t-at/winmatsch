@@ -4,6 +4,7 @@ using System.CommandLine.Invocation;
 using System.CommandLine.Parsing;
 using WinMatsch.Cli.Interaction;
 using WinMatsch.Cli.Output;
+using WinMatsch.GitHub;
 using WinMatsch.GitHub.Auth;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.Configuration;
@@ -55,11 +56,15 @@ public sealed class CliHost
         ArgumentNullException.ThrowIfNull(args);
 
         ParseResult parseResult = _rootCommand.Parse(args);
-        if (parseResult.Errors.Count > 0)
+        string? unknownOption = FindUnknownOption(args, parseResult);
+        if (parseResult.Errors.Count > 0 || unknownOption is not null)
         {
-            foreach (ParseError parseError in parseResult.Errors)
+            IEnumerable<string> messages = unknownOption is null
+                ? parseResult.Errors.Select(static error => CliRedactor.Redact(error.Message))
+                : [$"Unrecognized option '{CliRedactor.Redact(unknownOption)}'."];
+            foreach (string message in messages.Distinct(StringComparer.Ordinal))
             {
-                _options.Error.WriteLine(parseError.Message);
+                _options.Error.WriteLine(message);
             }
 
             _options.Error.WriteLine("Run with '--help' for usage.");
@@ -81,6 +86,85 @@ public sealed class CliHost
         {
             _options.Error.WriteLine("The operation was cancelled.");
             return ExitCodes.Cancelled;
+        }
+    }
+
+    private string? FindUnknownOption(IReadOnlyList<string> args, ParseResult parseResult)
+    {
+        var allowed = new Dictionary<string, Option>(StringComparer.Ordinal);
+        AddOptionNames(_rootCommand, allowed);
+        _ = AddSelectedCommandPath(
+            _rootCommand,
+            parseResult.CommandResult.Command,
+            allowed);
+        bool endOfOptions = false;
+        for (int index = 0; index < args.Count; index++)
+        {
+            string argument = args[index];
+            if (argument == "--")
+            {
+                endOfOptions = true;
+                continue;
+            }
+
+            if (endOfOptions || argument.Length < 2 || argument[0] != '-')
+            {
+                continue;
+            }
+
+            int equals = argument.IndexOf('=');
+            string optionName = equals < 0 ? argument : argument[..equals];
+            if (!allowed.TryGetValue(optionName, out Option? option))
+            {
+                return optionName;
+            }
+
+            if (equals < 0
+                && index + 1 < args.Count
+                && parseResult.GetResult(option)?.Tokens.Any(token =>
+                    token.Value.Equals(args[index + 1], StringComparison.Ordinal)) == true)
+            {
+                index++;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool AddSelectedCommandPath(
+        Command current,
+        Command selected,
+        Dictionary<string, Option> allowed)
+    {
+        if (ReferenceEquals(current, selected))
+        {
+            AddOptionNames(current, allowed);
+            return true;
+        }
+
+        foreach (Command child in current.Subcommands)
+        {
+            if (AddSelectedCommandPath(child, selected, allowed))
+            {
+                AddOptionNames(current, allowed);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void AddOptionNames(
+        Command command,
+        Dictionary<string, Option> allowed)
+    {
+        foreach (Option option in command.Options)
+        {
+            allowed[option.Name] = option;
+            foreach (string alias in option.Aliases)
+            {
+                allowed[alias] = option;
+            }
         }
     }
 
@@ -128,7 +212,7 @@ public sealed class CliHost
         {
             // FileNotFoundException (missing --config) is an IOException; unreadable
             // configuration files (locked, deny-read ACL) land here too.
-            error.WriteLine($"Configuration error: {exception.Message}");
+            error.WriteLine($"Configuration error: {CliRedactor.Redact(exception.Message)}");
             return ExitCodes.ConfigurationError;
         }
         catch (OperationCanceledException)
@@ -140,7 +224,7 @@ public sealed class CliHost
         catch (Exception exception)
 #pragma warning restore CA1031
         {
-            error.WriteLine($"Unexpected error: {exception.Message}");
+            error.WriteLine($"Unexpected error: {CliRedactor.Redact(exception.Message)}");
             return ExitCodes.UnexpectedError;
         }
 
@@ -150,17 +234,22 @@ public sealed class CliHost
         }
         catch (CliUsageException exception)
         {
-            error.WriteLine(exception.Message);
+            error.WriteLine(CliRedactor.Redact(exception.Message));
             return ExitCodes.UsageError;
         }
         catch (MissingInputException exception)
         {
-            error.WriteLine(exception.Message);
+            error.WriteLine(CliRedactor.Redact(exception.Message));
             return ExitCodes.MissingInput;
         }
         catch (CliOperationException exception)
         {
-            error.WriteLine(exception.Message);
+            error.WriteLine(CliRedactor.Redact(exception.Message));
+            return ExitCodes.OperationFailed;
+        }
+        catch (TokenStoreException exception)
+        {
+            error.WriteLine(CliRedactor.Redact($"OS keyring failure: {exception.Message}"));
             return ExitCodes.OperationFailed;
         }
         catch (FormatException exception)
@@ -168,7 +257,7 @@ public sealed class CliHost
             // By repository convention FormatException always carries a bad user-supplied
             // value (configuration, environment, or option content) discovered lazily, such
             // as a malformed GITHUB_TOKEN resolved at handler time.
-            error.WriteLine($"Configuration error: {exception.Message}");
+            error.WriteLine($"Configuration error: {CliRedactor.Redact(exception.Message)}");
             return ExitCodes.ConfigurationError;
         }
         catch (OperationCanceledException)
@@ -180,7 +269,7 @@ public sealed class CliHost
         catch (Exception exception)
 #pragma warning restore CA1031
         {
-            error.WriteLine($"Unexpected error: {exception.Message}");
+            error.WriteLine($"Unexpected error: {CliRedactor.Redact(exception.Message)}");
             return ExitCodes.UnexpectedError;
         }
     }
@@ -197,6 +286,9 @@ public sealed class CliHost
 
         WinMatschConfiguration configuration = ConfigurationResolver.Resolve(
             commandLayer, environmentLayer, userLayer);
+        GitHubClientOptions gitHubOptions = _globalOptions.BindGitHubClientOptions(
+            parseResult,
+            _options.EnvironmentVariables);
 
         ConsoleCapabilities capabilities = ConsoleCapabilities.Resolve(
             configuration.Interaction,
@@ -214,33 +306,35 @@ public sealed class CliHost
         {
             ParseResult = parseResult,
             Configuration = configuration,
-            ExecutionMode = parseResult.GetValue(_globalOptions.DryRun)
-                ? WorkflowExecutionMode.Plan
-                : WorkflowExecutionMode.Apply,
+            ExecutionMode = _globalOptions.BindExecutionMode(
+                parseResult,
+                _options.EnvironmentVariables),
             Capabilities = capabilities,
             Interaction = CreateInteraction(capabilities),
             Output = new CommandOutput(_options.Output, _options.Error, configuration.OutputFormat),
             Tokens = new TokenAccessor(tokenResolver, parseResult.GetValue(_globalOptions.Token)),
+            GitHubOptions = gitHubOptions,
             CancellationToken = cancellationToken,
         };
     }
 
-    private IUserInteraction CreateInteraction(ConsoleCapabilities capabilities)
+    private RedactingUserInteraction CreateInteraction(ConsoleCapabilities capabilities)
     {
         if (_options.InteractionFactory is not null)
         {
-            return _options.InteractionFactory(new InteractionCreation(capabilities, _options.Error));
+            return new RedactingUserInteraction(
+                _options.InteractionFactory(new InteractionCreation(capabilities, _options.Error)));
         }
 
         if (capabilities.PromptsEnabled)
         {
-            return new SpectreUserInteraction(
-                SpectreUserInteraction.CreateErrorConsole(_options.Error, capabilities.ColorEnabled));
+            return new RedactingUserInteraction(new SpectreUserInteraction(
+                SpectreUserInteraction.CreateErrorConsole(_options.Error, capabilities.ColorEnabled)));
         }
 
-        return new NonInteractiveUserInteraction(
+        return new RedactingUserInteraction(new NonInteractiveUserInteraction(
             _options.Error,
-            capabilities.PromptsDisabledReason ?? "non-interactive session");
+            capabilities.PromptsDisabledReason ?? "non-interactive session"));
     }
 
     private sealed class WriteCliVersionAction : SynchronousCommandLineAction

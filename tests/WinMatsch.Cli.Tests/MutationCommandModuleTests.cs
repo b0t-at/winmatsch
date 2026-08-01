@@ -70,10 +70,18 @@ public sealed class MutationCommandModuleTests
         CliRunResult result = await harness.RunAsync(commandLine.Split(' '));
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(2, workflow.Requests.Count);
+        Assert.Equal(3, workflow.Requests.Count);
         Assert.Equal(WorkflowExecutionMode.Plan, workflow.Requests[0].ExecutionMode);
-        Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[1].ExecutionMode);
+        Assert.Equal(WorkflowExecutionMode.Plan, workflow.Requests[1].ExecutionMode);
+        Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[2].ExecutionMode);
         Assert.Contains("Applied: true", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Equal(
+            [
+                "Downloading and analyzing installers",
+                "Downloading and analyzing installers",
+                "Downloading and analyzing installers",
+            ],
+            harness.Interaction.ProgressDescriptions);
     }
 
     [Theory]
@@ -248,6 +256,60 @@ public sealed class MutationCommandModuleTests
         Assert.Null(request.ReleaseId);
     }
 
+    [Fact]
+    public async Task Failed_edit_retry_does_not_permanently_discard_release_provenance()
+    {
+        int submitPlans = 0;
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request =>
+            {
+                bool firstInvalidSubmit = request is SubmitOperationRequest
+                    && request.ExecutionMode == WorkflowExecutionMode.Plan
+                    && ++submitPlans == 1;
+                WorkflowOperationResult result = WithInstallerArtifact(
+                    FakeMutationWorkflow.Result(
+                        request,
+                        firstInvalidSubmit
+                            ? WorkflowResultCode.ValidationFailed
+                            : WorkflowResultCode.Succeeded,
+                        firstInvalidSubmit
+                            ? new ValidationReport(
+                            [
+                                new("EDIT_INVALID", ValidationSeverity.Error, "Retry."),
+                            ])
+                            : null),
+                    firstInvalidSubmit
+                        ? "https://example.test/temporarily-edited.exe"
+                        : "https://example.test/original.exe");
+                return request is SubmitOperationRequest
+                    ? result
+                    : result with
+                    {
+                        Plan = result.Plan with
+                        {
+                            Release = new(
+                                new RepositoryCoordinates("vendor", "app"),
+                                42,
+                                new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero)),
+                        },
+                    };
+            },
+        };
+        var submission = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submission, new FakeEditorRunner());
+        harness.EnvironmentVariables["WINMATSCH_FRESHNESS_DELAY"] = "00:42:00";
+        harness.Interaction.EnqueueConfirm(true);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--edit", "--submit", "--yes"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        GitHubSubmissionRequest request = Assert.Single(submission.Requests);
+        Assert.Equal(TimeSpan.FromMinutes(42), request.Policy.MinimumReleaseFreshness);
+        Assert.Equal(new RepositoryCoordinates("vendor", "app"), request.ReleaseRepository);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -318,10 +380,16 @@ public sealed class MutationCommandModuleTests
         CliHarness harness = CreateHarness(workflow);
 
         CliRunResult result = await harness.RunAsync(
-            ["new", "Example.App", "--version", "2.0", "--format", "json"]);
+            ["new", "Example.App", "--version", "2.0", "--yes", "--format", "json"]);
 
         Assert.Equal(ExitCodes.MissingInput, result.ExitCode);
-        Assert.Equal(string.Empty, result.StandardOutput);
+        Assert.Contains("\"schemaVersion\":\"1.0\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"questions\":[", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"rules\":{", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"validation\":[", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"result\":\"questions-required\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"resultCode\":\"questionsRequired\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Empty(harness.Interaction.Questions);
     }
 
     [Theory]
@@ -357,7 +425,6 @@ public sealed class MutationCommandModuleTests
             result.StandardOutput,
             StringComparison.Ordinal);
         Assert.Contains("LEARNED_OVERRIDE_ACTIVE", result.StandardOutput, StringComparison.Ordinal);
-        Assert.Empty(harness.Interaction.Questions);
     }
 
     [Theory]
@@ -396,7 +463,7 @@ public sealed class MutationCommandModuleTests
             ["new", "Example.App", "--version", "2.0"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(3, workflow.Requests.Count);
+        Assert.Equal(4, workflow.Requests.Count);
         var first = Assert.IsType<NewOperationRequest>(workflow.Requests[0]);
         var rerun = Assert.IsType<NewOperationRequest>(workflow.Requests[1]);
         Assert.Null(first.Locale.Publisher);
@@ -433,7 +500,7 @@ public sealed class MutationCommandModuleTests
         CliRunResult result = await harness.RunAsync(["update", "Example.App", "1.0"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(3, workflow.Requests.Count);
+        Assert.Equal(4, workflow.Requests.Count);
         Assert.False(workflow.Requests[0].ApproveReview);
         Assert.True(workflow.Requests[1].ApproveReview);
     }
@@ -458,6 +525,81 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(3, workflow.Requests.Count);
         Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[2].ExecutionMode);
         Assert.Empty(submissions.Requests);
+    }
+
+    [Fact]
+    public async Task Json_review_emits_auditable_envelope_before_missing_approval()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => request.ApproveReview
+                ? FakeMutationWorkflow.Result(request)
+                : Review(request),
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--yes", "--format", "json"]);
+
+        Assert.Equal(ExitCodes.MissingInput, result.ExitCode);
+        Assert.Contains("\"result\":\"review-required\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"resultCode\":\"reviewRequired\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"reviewApproved\":false", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"requiresReview\":true", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"reviews\":[", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("--approve-reviews", result.StandardError, StringComparison.Ordinal);
+        Assert.Empty(harness.Interaction.Questions);
+        Assert.Single(workflow.Requests);
+    }
+
+    [Fact]
+    public async Task Approve_reviews_is_explicit_auditable_and_noninteractive()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => request.ApproveReview
+                ? FakeMutationWorkflow.Result(request)
+                : Review(request),
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "update",
+            "Example.App",
+            "1.0",
+            "--approve-reviews",
+            "--format",
+            "json",
+        ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("\"reviewApproved\":true", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"requiresReview\":false", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Empty(harness.Interaction.Questions);
+        Assert.Equal(4, workflow.Requests.Count);
+        Assert.True(workflow.Requests[1].ApproveReview);
+    }
+
+    [Fact]
+    public async Task Editing_preserves_the_explicit_review_approval()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => request.ApproveReview
+                ? FakeMutationWorkflow.Result(request)
+                : Review(request),
+        };
+        CliHarness harness = CreateHarness(workflow);
+        harness.Interaction.EnqueueConfirm(true);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--edit"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.All(
+            workflow.Requests.Skip(1),
+            request => Assert.True(request.ApproveReview));
     }
 
     [Fact]
@@ -488,13 +630,14 @@ public sealed class MutationCommandModuleTests
             ["update", "Example.App", "1.0", "--edit"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(3, workflow.Requests.Count);
+        Assert.Equal(4, workflow.Requests.Count);
         var edited = Assert.IsType<SubmitOperationRequest>(workflow.Requests[1]);
         Assert.Contains(
             "edited: true",
             Encoding.UTF8.GetString(edited.Documents[0].Content.AsSpan()),
             StringComparison.Ordinal);
-        Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[2].ExecutionMode);
+        Assert.Equal(WorkflowExecutionMode.Plan, workflow.Requests[2].ExecutionMode);
+        Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[3].ExecutionMode);
     }
 
     [Fact]
@@ -536,7 +679,7 @@ public sealed class MutationCommandModuleTests
         CliRunResult result = await harness.RunAsync(
             ["update", "Example.App", "1.0", "--edit"]);
 
-        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
         Assert.Single(workflow.Requests);
     }
 
@@ -565,7 +708,114 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
-    public async Task File_loader_infers_repository_path_from_external_raw_version_manifest()
+    public async Task Editor_cleanup_failure_cannot_mask_the_primary_failure()
+    {
+        var processes = new FakeEditorProcessRunner
+        {
+            Failure = new IOException("editor transport failed"),
+        };
+        var editor = new ProcessEditorRunner(
+            _ => "editor",
+            processes,
+            _ => throw new UnauthorizedAccessException("cleanup denied"));
+        var document = new RawManifestDocument(
+            "manifests/e/Example/App/1.0/file.yaml",
+            Encoding.UTF8.GetBytes("safe: true\n"));
+
+        IOException exception = await Assert.ThrowsAsync<IOException>(
+            () => editor.EditAsync([document]));
+
+        Assert.Contains("editor transport failed", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("cleanup denied", exception.Message, StringComparison.Ordinal);
+        AggregateException aggregate = Assert.IsType<AggregateException>(exception.InnerException);
+        Assert.Collection(
+            aggregate.InnerExceptions,
+            primary => Assert.Equal("editor transport failed", primary.Message),
+            cleanup => Assert.Equal("cleanup denied", cleanup.Message));
+    }
+
+    [Fact]
+    public async Task Editor_cleanup_failure_is_visible_with_a_failed_editor_result()
+    {
+        var processes = new FakeEditorProcessRunner { ExitCode = 9 };
+        var editor = new ProcessEditorRunner(
+            _ => "editor",
+            processes,
+            _ => throw new UnauthorizedAccessException("cleanup denied"));
+        var document = new RawManifestDocument(
+            "manifests/e/Example/App/1.0/file.yaml",
+            Encoding.UTF8.GetBytes("safe: true\n"));
+
+        EditorResult result = await editor.EditAsync([document]);
+
+        Assert.Equal(EditorResultCode.Failed, result.Code);
+        Assert.Contains("code 9", result.ErrorMessage, StringComparison.Ordinal);
+        Assert.Contains("cleanup denied", result.ErrorMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Editor_cleanup_failure_preserves_invocation_cancellation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+        var processes = new FakeEditorProcessRunner
+        {
+            Failure = new OperationCanceledException(cancellation.Token),
+        };
+        var editor = new ProcessEditorRunner(
+            _ => "editor",
+            processes,
+            _ => throw new UnauthorizedAccessException("cleanup denied"));
+        var document = new RawManifestDocument(
+            "manifests/e/Example/App/1.0/file.yaml",
+            Encoding.UTF8.GetBytes("safe: true\n"));
+
+        OperationCanceledException exception = await Assert.ThrowsAsync<OperationCanceledException>(
+            () => editor.EditAsync([document], cancellation.Token));
+
+        Assert.Contains("cleanup denied", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Editor_temporary_files_are_user_only_on_unix()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        UnixFileMode? directoryMode = null;
+        UnixFileMode? fileMode = null;
+        var editor = new ProcessEditorRunner(
+            _ => "editor",
+            new FakeEditorProcessRunner(),
+            path =>
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    throw new PlatformNotSupportedException();
+                }
+
+                directoryMode = File.GetUnixFileMode(path);
+                fileMode = File.GetUnixFileMode(Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories).Single());
+                Directory.Delete(path, recursive: true);
+            });
+        var document = new RawManifestDocument(
+            "manifests/e/Example/App/1.0/file.yaml",
+            Encoding.UTF8.GetBytes("safe: true\n"));
+
+        EditorResult result = await editor.EditAsync([document]);
+
+        Assert.True(result.Accepted);
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+            directoryMode);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, fileMode);
+    }
+
+    [Fact]
+    public async Task File_loader_explicitly_rejects_incomplete_single_file_submit()
     {
         string input = Directory.CreateTempSubdirectory("winmatsch-loader-input-").FullName;
         string output = Directory.CreateTempSubdirectory("winmatsch-loader-output-").FullName;
@@ -581,12 +831,10 @@ public sealed class MutationCommandModuleTests
                 + "ManifestVersion: 1.9.0\n");
             var loader = new FileSystemRawManifestSetLoader();
 
-            ImmutableArray<RawManifestDocument> documents =
-                await loader.LoadAsync(input, output);
+            CliUsageException exception = await Assert.ThrowsAsync<CliUsageException>(
+                () => loader.LoadAsync(file, output));
 
-            Assert.Equal(
-                "manifests/e/Example/App/2.0.0/Example.App.yaml",
-                Assert.Single(documents).RepositoryPath);
+            Assert.Contains("complete manifest directory", exception.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -618,6 +866,31 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task Changed_plan_after_approval_blocks_apply()
+    {
+        int planCalls = 0;
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => FakeMutationWorkflow.Result(
+                request,
+                content: request.ExecutionMode == WorkflowExecutionMode.Plan
+                    && ++planCalls > 1
+                        ? "PackageIdentifier: Example.App\nPackageVersion: changed\n"
+                        : "PackageIdentifier: Example.App\nPackageVersion: 1.0\n"),
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.DoesNotContain(
+            workflow.Requests,
+            request => request.ExecutionMode == WorkflowExecutionMode.Apply);
+        Assert.Contains("plan changed after approval", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Partial_remote_state_is_rendered_and_fails_without_retry()
     {
         var workflow = new FakeMutationWorkflow();
@@ -646,6 +919,98 @@ public sealed class MutationCommandModuleTests
             "\"branch\":\"winmatsch/submissions/example\"",
             result.StandardOutput,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Invalid_editor_result_can_be_reedited_until_valid()
+    {
+        int submitPlans = 0;
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request =>
+            {
+                if (request is SubmitOperationRequest
+                    && request.ExecutionMode == WorkflowExecutionMode.Plan
+                    && ++submitPlans == 1)
+                {
+                    return FakeMutationWorkflow.Result(
+                        request,
+                        WorkflowResultCode.ValidationFailed,
+                        new ValidationReport(
+                        [
+                            new("EDIT_INVALID", ValidationSeverity.Error, "Fix the edited file."),
+                        ]));
+                }
+
+                return FakeMutationWorkflow.Result(request);
+            },
+        };
+        var editor = new FakeEditorRunner();
+        CliHarness harness = CreateHarness(workflow, editor: editor);
+        harness.Interaction.EnqueueConfirm(true);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--edit", "--edit-attempts", "3"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(2, editor.Inputs.Count);
+        Assert.Contains(
+            harness.Interaction.StatusMessages,
+            message => message.Contains("attempt 1/3", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Editor_retry_loop_honors_the_exit_choice()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => request is SubmitOperationRequest
+                ? FakeMutationWorkflow.Result(
+                    request,
+                    WorkflowResultCode.ValidationFailed,
+                    new ValidationReport(
+                    [
+                        new("EDIT_INVALID", ValidationSeverity.Error, "Still invalid."),
+                    ]))
+                : FakeMutationWorkflow.Result(request),
+        };
+        var editor = new FakeEditorRunner();
+        CliHarness harness = CreateHarness(workflow, editor: editor);
+        harness.Interaction.EnqueueConfirm(false);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--edit", "--edit-attempts", "3"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Single(editor.Inputs);
+        Assert.Contains("EDIT_INVALID", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Editor_retry_loop_stops_at_the_configured_bound()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => request is SubmitOperationRequest
+                ? FakeMutationWorkflow.Result(
+                    request,
+                    WorkflowResultCode.ValidationFailed,
+                    new ValidationReport(
+                    [
+                        new("EDIT_INVALID", ValidationSeverity.Error, "Still invalid."),
+                    ]))
+                : FakeMutationWorkflow.Result(request),
+        };
+        var editor = new FakeEditorRunner();
+        CliHarness harness = CreateHarness(workflow, editor: editor);
+        harness.Interaction.EnqueueConfirm(true);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--edit", "--edit-attempts", "2"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Equal(2, editor.Inputs.Count);
+        Assert.Single(harness.Interaction.Questions);
     }
 
     [Fact]
@@ -693,6 +1058,20 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(ExitCodes.UsageError, result.ExitCode);
         Assert.Empty(workflow.Requests);
         Assert.Contains("must match", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Edit_and_replace_conflict_is_rejected_before_planning()
+    {
+        var workflow = new FakeMutationWorkflow();
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--edit", "--replace", "1.0"]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Empty(workflow.Requests);
+        Assert.Contains("--edit cannot be combined with --replace", result.StandardError, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -768,6 +1147,30 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.Contains("pull request URL", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("browser could not be opened", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ctrl_c_while_opening_created_pr_maps_to_130()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var launcher = new FakeUrlLauncher
+        {
+            OnOpen = cancellation.Cancel,
+            Failure = new OperationCanceledException(),
+        };
+        var harness = new CliHarness();
+        harness.Modules.Add(new MutationCommandModule(
+            new FakeMutationWorkflow(),
+            new FakeSubmissionWorkflow(),
+            new FakeEditorRunner(),
+            new FakeManifestLoader(),
+            launcher));
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--submit", "--yes", "--open-pr"],
+            cancellation.Token);
+
+        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
     }
 
     [Fact]
@@ -890,6 +1293,146 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task Multi_value_options_do_not_consume_required_positional_arguments()
+    {
+        var workflow = new FakeMutationWorkflow();
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "new",
+            "--urls",
+            "https://example.test/a.exe",
+            "Example.App",
+            "--version",
+            "2.0",
+            "--dry-run",
+        ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        NewOperationRequest request = Assert.IsType<NewOperationRequest>(Assert.Single(workflow.Requests));
+        Assert.Equal("Example.App", request.PackageIdentifier.Value);
+        Assert.Equal(
+            "https://example.test/a.exe",
+            Assert.Single(request.Release.InstallerUrls).AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task Multiple_release_urls_are_rejected_instead_of_ignored()
+    {
+        var workflow = new FakeMutationWorkflow();
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "new",
+            "Example.App",
+            "--version",
+            "2.0",
+            "--release-url",
+            "https://github.com/vendor/one/releases/tag/v2",
+            "--release-url",
+            "https://github.com/vendor/two/releases/tag/v2",
+        ]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Empty(workflow.Requests);
+        Assert.Contains("specified only once", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Duplicate_rule_modes_have_a_stable_usage_error()
+    {
+        CliHarness harness = CreateHarness(new FakeMutationWorkflow());
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "update",
+            "Example.App",
+            "1.0",
+            "--rule-mode",
+            "META-1=apply",
+            "--rule-mode",
+            "META-1=disabled",
+        ]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains("specifies rule 'META-1' more than once", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("same key", result.StandardError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("--allow-structural-rewrite")]
+    [InlineData("--allow-stable-url-change")]
+    public async Task Update_only_safety_flags_are_not_advertised_on_new(string option)
+    {
+        CliHarness harness = CreateHarness(new FakeMutationWorkflow());
+
+        CliRunResult result = await harness.RunAsync(
+            ["new", "Example.App", "--version", "2.0", option]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains(option, result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Submit_missing_path_names_the_positional_argument()
+    {
+        CliHarness harness = CreateHarness(new FakeMutationWorkflow());
+
+        CliRunResult result = await harness.RunAsync(["submit"]);
+
+        Assert.Equal(ExitCodes.MissingInput, result.ExitCode);
+        Assert.Contains("path argument", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("--path", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Created_with_url_reaches_the_submission_request()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var submission = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submission);
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "update",
+            "Example.App",
+            "1.0",
+            "--created-with",
+            "winmatsch-test",
+            "--created-with-url",
+            "https://example.test/tool",
+            "--submit",
+            "--yes",
+        ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        GitHubSubmissionRequest request = Assert.Single(submission.Requests);
+        Assert.Equal(
+            "winmatsch-test (https://example.test/tool)",
+            request.CreatedWith);
+    }
+
+    [Theory]
+    [InlineData("tool\nInjected: true")]
+    [InlineData("tool\u2028Injected: true")]
+    [InlineData("tool\u2029Injected: true")]
+    public async Task Created_with_rejects_multiline_manifest_header_injection(
+        string createdWith)
+    {
+        var workflow = new FakeMutationWorkflow();
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--created-with", createdWith]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Empty(workflow.Requests);
+        Assert.Contains("single line", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Output_redacts_tokens_in_preview_and_diagnostics()
     {
         const string token = "github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
@@ -908,7 +1451,9 @@ public sealed class MutationCommandModuleTests
                 ]),
                 content: $"value: {token}\n"
                     + "InstallerUrl: https://user:password@example.test/app.exe?sig=secret"
-                    + "&X-Amz-Signature=signature\n"),
+                    + "&X-Amz-Signature=signature\n"
+                    + "ReleaseNotesUrl: https://example.test/notes?code=oauth-code"
+                    + "&key=download-key&session=session-value\n"),
         };
         CliHarness harness = CreateHarness(workflow);
 
@@ -924,6 +1469,9 @@ public sealed class MutationCommandModuleTests
         Assert.DoesNotContain("refresh-secret", result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("bearer-secret", result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("signature", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("oauth-code", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("download-key", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("session-value", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("[REDACTED]", result.StandardOutput, StringComparison.Ordinal);
     }
 
@@ -1342,8 +1890,11 @@ internal sealed class FakeUrlLauncher : IUrlLauncher
 
     public Exception? Failure { get; init; }
 
+    public Action? OnOpen { get; init; }
+
     public Task OpenAsync(Uri uri, CancellationToken cancellationToken = default)
     {
+        OnOpen?.Invoke();
         if (Failure is not null)
         {
             return Task.FromException(Failure);
@@ -1383,6 +1934,10 @@ internal sealed class FailingSubmissionWorkflowFactory : ISubmissionWorkflowFact
 
 internal sealed class FakeEditorProcessRunner : IEditorProcessRunner
 {
+    public Exception? Failure { get; init; }
+
+    public int ExitCode { get; init; }
+
     public string? Executable { get; private set; }
 
     public IReadOnlyList<string> Arguments { get; private set; } = [];
@@ -1392,9 +1947,14 @@ internal sealed class FakeEditorProcessRunner : IEditorProcessRunner
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken = default)
     {
+        if (Failure is not null)
+        {
+            return Task.FromException<int>(Failure);
+        }
+
         Executable = executable;
         Arguments = arguments;
-        return Task.FromResult(0);
+        return Task.FromResult(ExitCode);
     }
 }
 

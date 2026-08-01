@@ -63,7 +63,8 @@ public sealed class ConfigFileSystem : IConfigFileSystem
 /// <summary>
 /// Reads and edits the user configuration file: <c>config show</c> (effective values with
 /// per-key provenance), <c>config set</c> / <c>config unset</c> (deterministic YAML, atomic
-/// write, known keys only), and <c>config path</c>. Tokens are never configuration; any
+/// write, known keys only, explicit refusal when comments would be lost), and <c>config path</c>.
+/// Tokens are never configuration; any
 /// attempt to store one here is rejected with a pointer to <c>token add</c>.
 /// </summary>
 public sealed class ConfigCommandModule : ICommandModule
@@ -228,7 +229,7 @@ public sealed class ConfigCommandModule : ICommandModule
             }
 
             string path = ResolvePath(context, registry).Path;
-            ConfigurationLayer layer = LoadUserLayer(context, registry);
+            ConfigurationLayer layer = LoadUserLayer(context, registry, rejectComments: true);
             layer = ApplyKey(layer, keyName, rawValue);
             string yaml = SerializeDeterministic(layer);
             ValidateRoundTrip(yaml, keyName, rawValue);
@@ -262,7 +263,7 @@ public sealed class ConfigCommandModule : ICommandModule
         {
             string keyName = RequireKnownKey(context.ParseResult.GetValue(key));
             string path = ResolvePath(context, registry).Path;
-            ConfigurationLayer layer = LoadUserLayer(context, registry);
+            ConfigurationLayer layer = LoadUserLayer(context, registry, rejectComments: true);
             layer = ApplyKey(layer, keyName, null);
             string yaml = SerializeDeterministic(layer);
             if (context.IsDryRun)
@@ -326,7 +327,10 @@ public sealed class ConfigCommandModule : ICommandModule
         return (defaultPath, "default");
     }
 
-    private ConfigurationLayer LoadUserLayer(CommandContext context, ICommandRegistry registry)
+    private ConfigurationLayer LoadUserLayer(
+        CommandContext context,
+        ICommandRegistry registry,
+        bool rejectComments = false)
     {
         // Parse failures propagate as FormatException, which the host maps to the
         // configuration-error exit code — a malformed user file is a configuration problem.
@@ -337,6 +341,13 @@ public sealed class ConfigCommandModule : ICommandModule
             return ConfigurationLayer.Empty;
         }
 
+        if (rejectComments && ContainsYamlComment(content))
+        {
+            throw new CliOperationException(
+                "The configuration file contains comments. config set/unset refuses to rewrite "
+                + "it because deterministic serialization would discard them; edit the file manually.");
+        }
+
         try
         {
             return ConfigurationYamlParser.Parse(content);
@@ -345,6 +356,39 @@ public sealed class ConfigCommandModule : ICommandModule
         {
             throw new FormatException($"{path}: {exception.Message}", exception);
         }
+    }
+
+    private static bool ContainsYamlComment(string content)
+    {
+        foreach (string line in content.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            char quote = '\0';
+            bool escaped = false;
+            for (int index = 0; index < line.Length; index++)
+            {
+                char character = line[index];
+                if (quote == '"' && character == '\\' && !escaped)
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (character is '"' or '\'' && !escaped)
+                {
+                    quote = quote == '\0' ? character : quote == character ? '\0' : quote;
+                }
+                else if (character == '#'
+                         && quote == '\0'
+                         && (index == 0 || char.IsWhiteSpace(line[index - 1])))
+                {
+                    return true;
+                }
+
+                escaped = false;
+            }
+        }
+
+        return false;
     }
 
     private void WriteAtomic(string path, string content)

@@ -5,6 +5,7 @@ using WinMatsch.Cli.Commands.Diagnostics;
 using WinMatsch.Cli.Tests.Harness;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
+using WinMatsch.GitHub.Auth;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Diagnostics;
 using Xunit;
@@ -36,16 +37,25 @@ public sealed class DiagnosticsCommandModuleTests
             ["analyze", "fixture.exe", "--format", "json"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(string.Empty, result.StandardError);
+        Assert.Contains(
+            "Downloading and analyzing installer",
+            result.StandardError,
+            StringComparison.Ordinal);
         Assert.Equal(
-            "{\"input\":\"fixture.exe\",\"fileName\":\"fixture.exe\",\"remote\":false,\"fromCache\":false,"
+            "{\"schemaVersion\":\"1.0\",\"input\":\"fixture.exe\",\"fileName\":\"fixture.exe\","
+            + "\"remote\":false,\"fromCache\":false,"
             + "\"sha256\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\","
-            + "\"sizeInBytes\":42,\"format\":\"portableExe\",\"confidence\":\"high\","
+            + "\"sizeInBytes\":42,\"format\":\"portableExe\",\"formatCode\":\"portableExe\","
+            + "\"confidence\":\"high\","
             + "\"product\":{\"name\":\"Fixture\",\"publisher\":\"Example\",\"version\":\"1.0\",\"copyright\":null},"
-            + "\"installers\":[{\"architecture\":\"x64\",\"installerType\":\"portable\","
-            + "\"nestedInstallerType\":null,\"productCode\":null,\"packageFamilyName\":null}],"
+            + "\"installers\":[{\"architecture\":\"x64\",\"architectureCode\":\"x64\","
+            + "\"installerType\":\"portable\",\"installerTypeCode\":\"portable\","
+            + "\"nestedInstallerType\":null,\"nestedInstallerTypeCode\":null,"
+            + "\"productCode\":null,\"packageFamilyName\":null}],"
             + "\"dependencies\":[{\"payloadPath\":\"fixture.exe\",\"architecture\":\"x64\","
-            + "\"kind\":\"dotNetRuntime\",\"status\":\"detected\",\"runtimeMajor\":10,"
+            + "\"architectureCode\":\"x64\",\"kind\":\"dotNetRuntime\","
+            + "\"kindCode\":\"dotNetRuntime\",\"status\":\"detected\",\"statusCode\":\"detected\","
+            + "\"runtimeMajor\":10,"
             + "\"signals\":[\"runtimeconfig:framework=Microsoft.NETCore.App@10.0.0\"]}],"
             + "\"diagnostics\":[{\"code\":\"AN001\",\"message\":\"fixture diagnostic\","
             + "\"requiresManualAnalysis\":false}]}\n",
@@ -99,11 +109,17 @@ public sealed class DiagnosticsCommandModuleTests
             ["validate", "manifests", "--offline", "--format", "json"]);
 
         Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
-        Assert.Equal(string.Empty, result.StandardError);
+        Assert.Contains(
+            "Downloading and validating manifests",
+            result.StandardError,
+            StringComparison.Ordinal);
         Assert.Equal(
-            "{\"isValid\":false,\"canProceed\":false,\"networkMode\":\"offline\","
-            + "\"warningPolicy\":\"allow\",\"files\":[\"C:\\\\fixture\\\\Example.App.installer.yaml\"],"
+            "{\"schemaVersion\":\"1.0\",\"isValid\":false,\"canProceed\":false,"
+            + "\"networkMode\":\"offline\",\"networkModeCode\":\"offline\","
+            + "\"warningPolicy\":\"allow\",\"warningPolicyCode\":\"allow\","
+            + "\"files\":[\"C:\\\\fixture\\\\Example.App.installer.yaml\"],"
             + "\"findings\":[{\"code\":\"VLD6001\",\"severity\":\"error\","
+            + "\"severityCode\":\"error\","
             + "\"message\":\"Origin SHA validation is unavailable.\","
             + "\"path\":\"https://example.test/app.exe\"}]}\n",
             result.StandardOutput);
@@ -123,7 +139,7 @@ public sealed class DiagnosticsCommandModuleTests
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.Equal(
-            "{\"repository\":\"microsoft/winget-pkgs\",\"reference\":\"main\","
+            "{\"schemaVersion\":\"1.0\",\"repository\":\"microsoft/winget-pkgs\",\"reference\":\"main\","
             + "\"packageIdentifier\":\"Example.App\",\"packageVersion\":\"2.0.0\","
             + "\"normalized\":false,\"files\":[{\"path\":\"manifests/e/Example/App/2.0.0/Example.App.yaml\","
             + "\"content\":\"PackageIdentifier: Example.App\\n\"}]}\n",
@@ -145,6 +161,63 @@ public sealed class DiagnosticsCommandModuleTests
         Assert.Equal("2.0.0\n2.0.0-rc\n", result.StandardOutput);
         Assert.Equal(1, repository.LastSkip);
         Assert.Equal(2, repository.LastLimit);
+    }
+
+    [Fact]
+    public async Task Public_repository_reads_work_anonymously_and_receive_ghes_options()
+    {
+        var repository = new FakeRepositoryDiagnosticService();
+        string? observedToken = "not-called";
+        GitHubClientOptions? observedOptions = null;
+        var harness = new CliHarness();
+        harness.Modules.Add(new DiagnosticsCommandModule(
+            new FakeInstallerDiagnosticService(),
+            new FakeManifestValidationService(),
+            publicRepositoryServiceFactory: (options, token) =>
+            {
+                observedOptions = options;
+                observedToken = token;
+                return repository;
+            }));
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "show",
+            "Example.App",
+            "2.0.0",
+            "--github-api-url",
+            "https://ghe.example.test/api/v3/",
+        ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Null(observedToken);
+        Assert.Equal(
+            "https://ghe.example.test/api/v3/",
+            observedOptions!.ApiBaseUri.AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task Public_repository_read_continues_when_optional_keyring_lookup_fails()
+    {
+        var repository = new FakeRepositoryDiagnosticService();
+        string? observedToken = "not-called";
+        var harness = new CliHarness();
+        harness.TokenStore.GetFailure = new IOException("secret-tool could not start");
+        harness.Modules.Add(new DiagnosticsCommandModule(
+            new FakeInstallerDiagnosticService(),
+            new FakeManifestValidationService(),
+            publicRepositoryServiceFactory: (_, token) =>
+            {
+                observedToken = token;
+                return repository;
+            }));
+
+        CliRunResult result = await harness.RunAsync(
+            ["list-versions", "Example.App"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Null(observedToken);
+        Assert.Contains("continuing with an anonymous public read", result.StandardError, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -4,6 +4,7 @@ using System.Text.Json;
 using WinMatsch.Analysis;
 using WinMatsch.Analysis.Dependencies;
 using WinMatsch.Cli.Hosting;
+using WinMatsch.Cli.Output;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
@@ -17,16 +18,22 @@ public sealed class DiagnosticsCommandModule : ICommandModule
 {
     private readonly IInstallerDiagnosticService _installerDiagnostics;
     private readonly IManifestValidationService _manifestValidation;
-    private readonly Func<string, IRepositoryDiagnosticService> _repositoryServiceFactory;
+    private readonly Func<string, IRepositoryDiagnosticService>? _repositoryServiceFactory;
+    private readonly Func<GitHubClientOptions, string?, IRepositoryDiagnosticService>
+        _publicRepositoryServiceFactory;
 
     public DiagnosticsCommandModule(
         IInstallerDiagnosticService? installerDiagnostics = null,
         IManifestValidationService? manifestValidation = null,
-        Func<string, IRepositoryDiagnosticService>? repositoryServiceFactory = null)
+        Func<string, IRepositoryDiagnosticService>? repositoryServiceFactory = null,
+        Func<GitHubClientOptions, string?, IRepositoryDiagnosticService>?
+            publicRepositoryServiceFactory = null)
     {
         _installerDiagnostics = installerDiagnostics ?? new InstallerDiagnosticService();
         _manifestValidation = manifestValidation ?? new ManifestValidationService();
-        _repositoryServiceFactory = repositoryServiceFactory ?? CreateRepositoryService;
+        _repositoryServiceFactory = repositoryServiceFactory;
+        _publicRepositoryServiceFactory = publicRepositoryServiceFactory
+            ?? CreatePublicRepositoryService;
     }
 
     public string Name => "diagnostics";
@@ -60,13 +67,15 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                 ?? throw new CliUsageException("An installer path or HTTPS URL is required.");
             try
             {
-                InstallerDiagnosticResult result = await _installerDiagnostics
-                    .AnalyzeAsync(
+                InstallerDiagnosticResult result = await context.Interaction.RunProgressAsync(
+                    "Downloading and analyzing installer",
+                    cancellation => _installerDiagnostics.AnalyzeAsync(
                         new InstallerAnalysisRequest(
                             input,
                             context.Configuration.CacheEnabled,
                             context.Configuration.CacheDirectory),
-                        context.CancellationToken)
+                        cancellation),
+                    context.CancellationToken)
                     .ConfigureAwait(false);
                 WriteAnalyzeResult(context, result);
                 return ExitCodes.Success;
@@ -123,8 +132,9 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                 : WarningPolicy.Allow;
             try
             {
-                ManifestValidationResult result = await _manifestValidation
-                    .ValidateAsync(
+                ManifestValidationResult result = await context.Interaction.RunProgressAsync(
+                    "Downloading and validating manifests",
+                    cancellation => _manifestValidation.ValidateAsync(
                         new ManifestValidationRequest(
                             inputs,
                             context.ParseResult.GetValue(offline),
@@ -132,7 +142,8 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                             context.Configuration.CacheEnabled,
                             context.Configuration.CacheDirectory,
                             context.Configuration.ConcurrentDownloads),
-                        context.CancellationToken)
+                        cancellation),
+                    context.CancellationToken)
                     .ConfigureAwait(false);
                 WriteValidationResult(context, result);
                 return result.Report.CanProceed(warningPolicy)
@@ -299,14 +310,38 @@ public sealed class DiagnosticsCommandModule : ICommandModule
     private async Task<IRepositoryDiagnosticService> CreateRepositoryServiceAsync(
         CommandContext context)
     {
-        ResolvedToken token = await context.Tokens
-            .RequireAsync(context.CancellationToken)
-            .ConfigureAwait(false);
-        return _repositoryServiceFactory(token.Token.RevealValue());
+        if (_repositoryServiceFactory is not null)
+        {
+            ResolvedToken required = await context.Tokens
+                .RequireAsync(context.CancellationToken)
+                .ConfigureAwait(false);
+            return _repositoryServiceFactory(required.Token.RevealValue());
+        }
+
+        ResolvedToken? optional;
+        try
+        {
+            optional = await context.Tokens
+                .ResolveAsync(context.CancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (TokenStoreException exception)
+        {
+            context.Output.WriteDiagnostic(
+                $"The token keyring is unavailable; continuing with an anonymous public read: "
+                + exception.Message);
+            optional = null;
+        }
+
+        return _publicRepositoryServiceFactory(
+            context.GitHubOptions,
+            optional?.Token.RevealValue());
     }
 
-    private static RepositoryDiagnosticService CreateRepositoryService(string token)
-        => new(new GitHubRepositoryClient(new HttpClient(), token));
+    private static RepositoryDiagnosticService CreatePublicRepositoryService(
+        GitHubClientOptions options,
+        string? token)
+        => new(new PublicReadOnlyGitHubClient(options, token));
 
     private static PackageIdentifier ParseIdentifier(string? value)
     {
@@ -399,7 +434,7 @@ public sealed class DiagnosticsCommandModule : ICommandModule
         writer.WriteBoolean("fromCache", result.IsFromCache);
         writer.WriteString("sha256", result.Sha256);
         writer.WriteNumber("sizeInBytes", result.SizeInBytes);
-        writer.WriteString("format", ToCamelCase(result.Analysis.Format));
+        CliJson.WriteEnum(writer, "format", result.Analysis.Format);
         writer.WriteString("confidence", result.Confidence);
         writer.WriteStartObject("product");
         WriteNullableString(writer, "name", result.Analysis.ProductName);
@@ -426,8 +461,8 @@ public sealed class DiagnosticsCommandModule : ICommandModule
             writer.WriteStartObject();
             writer.WriteString("payloadPath", evidence.PayloadPath);
             WriteNullableEnum(writer, "architecture", evidence.Architecture);
-            writer.WriteString("kind", ToCamelCase(evidence.Kind));
-            writer.WriteString("status", ToCamelCase(evidence.Status));
+            CliJson.WriteEnum(writer, "kind", evidence.Kind);
+            CliJson.WriteEnum(writer, "status", evidence.Status);
             if (evidence.RuntimeMajor is { } major)
             {
                 writer.WriteNumber("runtimeMajor", major);
@@ -485,8 +520,12 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                 writer.WriteStartObject();
                 writer.WriteBoolean("isValid", result.Report.IsValid);
                 writer.WriteBoolean("canProceed", result.Report.CanProceed(result.WarningPolicy));
-                writer.WriteString("networkMode", result.NetworkMode.ToString().ToLowerInvariant());
-                writer.WriteString("warningPolicy", ToCamelCase(result.WarningPolicy));
+                CliJson.WriteEnum(
+                    writer,
+                    "networkMode",
+                    result.NetworkMode,
+                    result.NetworkMode.ToString().ToLowerInvariant());
+                CliJson.WriteEnum(writer, "warningPolicy", result.WarningPolicy);
                 writer.WriteStartArray("files");
                 foreach (string file in result.Files)
                 {
@@ -505,7 +544,7 @@ public sealed class DiagnosticsCommandModule : ICommandModule
         {
             writer.WriteStartObject();
             writer.WriteString("code", finding.Code);
-            writer.WriteString("severity", finding.Severity.ToString().ToLowerInvariant());
+            CliJson.WriteEnum(writer, "severity", finding.Severity);
             writer.WriteString("message", finding.Message);
             if (finding.Path is null)
             {
@@ -600,20 +639,10 @@ public sealed class DiagnosticsCommandModule : ICommandModule
     private static void WriteNullableEnum<T>(Utf8JsonWriter writer, string name, T? value)
         where T : struct, Enum
     {
-        if (value is null)
-        {
-            writer.WriteNull(name);
-        }
-        else
-        {
-            writer.WriteString(name, ToCamelCase(value.Value));
-        }
+        CliJson.WriteNullableEnum(writer, name, value);
     }
 
     private static string ToCamelCase<T>(T value)
         where T : struct, Enum
-    {
-        string text = value.ToString();
-        return text.Length == 0 ? text : char.ToLowerInvariant(text[0]) + text[1..];
-    }
+        => CliJson.EnumValue(value);
 }

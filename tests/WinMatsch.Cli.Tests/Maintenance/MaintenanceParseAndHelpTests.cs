@@ -84,6 +84,10 @@ public sealed class MaintenanceParseAndHelpTests
         Assert.Equal(ExitCodes.Success, help.ExitCode);
         Assert.Equal(ExitCodes.UsageError, missing.ExitCode);
         Assert.Contains("Required", missing.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(
+            1,
+            missing.StandardError.Split('\n').Count(line =>
+                line.Contains("Required", StringComparison.OrdinalIgnoreCase)));
     }
 
     [Theory]

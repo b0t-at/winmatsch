@@ -43,4 +43,13 @@ public interface IUserInteraction
     /// interaction mode; never throws for being non-interactive.
     /// </summary>
     public void ReportStatus(string message);
+
+    /// <summary>
+    /// Runs a long operation with bounded progress UI. Interactive terminals get one Spectre
+    /// progress task; redirected, no-prompt, and CI sessions get only start/completion lines.
+    /// </summary>
+    public Task<T> RunProgressAsync<T>(
+        string description,
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken = default);
 }

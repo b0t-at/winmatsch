@@ -1,6 +1,8 @@
+using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
 using WinMatsch.Cli.Hosting;
+using WinMatsch.Cli.Output;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.GitHub.Auth;
@@ -45,15 +47,21 @@ internal static class MaintenanceCommandHelpers
             .ConfigureAwait(false);
     }
 
-    /// <summary>Maps a lifecycle result code to the documented exit-code contract.</summary>
-    public static int MapResultCode(GitHubLifecycleResultCode code) => code switch
-    {
-        GitHubLifecycleResultCode.Succeeded
-            or GitHubLifecycleResultCode.Planned
-            or GitHubLifecycleResultCode.NoAction => ExitCodes.Success,
-        GitHubLifecycleResultCode.Cancelled => ExitCodes.Cancelled,
-        _ => ExitCodes.OperationFailed,
-    };
+    /// <summary>
+    /// Maps lifecycle outcomes to the documented contract. A result-shaped cancellation without
+    /// a cancelled invocation token is an operation failure; only propagated Ctrl+C reaches 130.
+    /// </summary>
+    public static int MapResultCode(
+        GitHubLifecycleResultCode code,
+        CancellationToken cancellationToken) => code switch
+        {
+            GitHubLifecycleResultCode.Succeeded
+                or GitHubLifecycleResultCode.Planned
+                or GitHubLifecycleResultCode.NoAction => ExitCodes.Success,
+            GitHubLifecycleResultCode.Cancelled when cancellationToken.IsCancellationRequested
+                => ExitCodes.Cancelled,
+            _ => ExitCodes.OperationFailed,
+        };
 
     /// <summary>
     /// The exception types a maintenance handler converts to <see cref="CliOperationException"/>.
@@ -72,6 +80,13 @@ internal static class MaintenanceCommandHelpers
             or DownloadException
             or TokenStoreException
             or YamlDotNet.Core.YamlException;
+
+    public static bool IsKeyringFailure(Exception exception)
+        => exception is TokenStoreException
+            or IOException
+            or UnauthorizedAccessException
+            or InvalidOperationException
+            or Win32Exception;
 
     /// <summary>Runs a remote operation converting operational failures and preserving cancellation.</summary>
     public static async Task<T> RunRemoteAsync<T>(
@@ -103,7 +118,7 @@ internal static class MaintenanceCommandHelpers
     }
 
     /// <summary>Redacts secret-shaped content from a display message.</summary>
-    public static string Redact(string message) => GitHubSubmissionFormatter.Redact(message);
+    public static string Redact(string message) => CliRedactor.Redact(message);
 
     /// <summary>Parses an <c>owner/name</c> option value into repository coordinates.</summary>
     public static RepositoryCoordinates ParseRepository(string value, string optionName)
@@ -125,10 +140,7 @@ internal static class MaintenanceCommandHelpers
     /// <summary>Lower-camel-cases an enum value for stable text and JSON output.</summary>
     public static string ToCamelCase<T>(T value)
         where T : struct, Enum
-    {
-        string name = value.ToString();
-        return char.ToLowerInvariant(name[0]) + name[1..];
-    }
+        => CliJson.EnumValue(value);
 
     /// <summary>Writes plan operations and diagnostics as stable text lines.</summary>
     public static void WritePlanText(
@@ -145,7 +157,8 @@ internal static class MaintenanceCommandHelpers
         foreach (PlannedRemoteOperation operation in plan.Operations)
         {
             writer.WriteLine(
-                $"  {ToCamelCase(operation.Kind)} {operation.Target}: {operation.Description}");
+                $"  {ToCamelCase(operation.Kind)} {Redact(operation.Target)}: "
+                + Redact(operation.Description));
         }
 
         WriteDiagnosticsText(writer, diagnostics);
@@ -164,7 +177,7 @@ internal static class MaintenanceCommandHelpers
         writer.WriteLine("Diagnostics:");
         foreach (GitHubLifecycleDiagnostic diagnostic in diagnostics)
         {
-            writer.WriteLine($"  {diagnostic.Code}: {diagnostic.Message}");
+            writer.WriteLine($"  {diagnostic.Code}: {Redact(diagnostic.Message)}");
         }
     }
 
@@ -178,9 +191,9 @@ internal static class MaintenanceCommandHelpers
         foreach (PlannedRemoteOperation operation in plan.Operations)
         {
             writer.WriteStartObject();
-            writer.WriteString("kind", ToCamelCase(operation.Kind));
-            writer.WriteString("target", operation.Target);
-            writer.WriteString("description", operation.Description);
+            CliJson.WriteEnum(writer, "kind", operation.Kind);
+            writer.WriteString("target", Redact(operation.Target));
+            writer.WriteString("description", Redact(operation.Description));
             writer.WriteEndObject();
         }
 
@@ -198,7 +211,7 @@ internal static class MaintenanceCommandHelpers
         {
             writer.WriteStartObject();
             writer.WriteString("code", diagnostic.Code);
-            writer.WriteString("message", diagnostic.Message);
+            writer.WriteString("message", Redact(diagnostic.Message));
             writer.WriteEndObject();
         }
 

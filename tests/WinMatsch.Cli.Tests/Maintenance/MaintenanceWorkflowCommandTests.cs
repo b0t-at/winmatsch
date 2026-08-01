@@ -1,8 +1,11 @@
 using System.Collections.Immutable;
 using WinMatsch.Cli.Commands.Maintenance;
+using WinMatsch.Cli.Commands.Mutations;
 using WinMatsch.Cli.Tests.Harness;
 using WinMatsch.GitHub;
+using WinMatsch.Workflows;
 using WinMatsch.Workflows.GitHub;
+using WinMatsch.Workflows.Operations;
 using Xunit;
 
 namespace WinMatsch.Cli.Tests.Maintenance;
@@ -85,7 +88,7 @@ public sealed class MaintenanceWorkflowCommandTests
 
         CliRunResult result = await harness.RunAsync(["sync"]);
 
-        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
         Assert.Contains("confirmation declined", result.StandardError, StringComparison.Ordinal);
         Assert.Empty(client.Mutations);
     }
@@ -161,7 +164,10 @@ public sealed class MaintenanceWorkflowCommandTests
         CliRunResult result = await harness.RunAsync(["sync", "--dry-run", "--format", "json"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.StartsWith("{\"operation\":\"sync\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.StartsWith(
+            "{\"schemaVersion\":\"1.0\",\"operation\":\"sync\"",
+            result.StandardOutput,
+            StringComparison.Ordinal);
         Assert.Contains("\"result\":\"planned\"", result.StandardOutput, StringComparison.Ordinal);
         Assert.Empty(harness.Interaction.Questions);
         Assert.DoesNotContain(Token, result.StandardOutput, StringComparison.Ordinal);
@@ -268,13 +274,30 @@ public sealed class MaintenanceWorkflowCommandTests
     {
         FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
         client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
-        CliHarness harness = CreateHarness(client);
+        var source = new ScriptedFeedbackSource(
+        [
+            .. MaintenancePullRequests.Observe(MaintenancePullRequests.ToolOwned(41))
+                .Select(observation => observation with
+                {
+                    Comments =
+                    [
+                        new PullRequestCommentObservation(
+                            "wingetbot",
+                            "Please rerun after the transient infrastructure error.",
+                            DateTimeOffset.UnixEpoch),
+                    ],
+                }),
+        ]);
+        CliHarness harness = CreateHarness(client, source);
 
         CliRunResult result = await harness.RunAsync(["complete", "--format", "json"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.StartsWith("{\"operation\":\"complete\"", result.StandardOutput, StringComparison.Ordinal);
-        Assert.Contains("\"recommendedAction\":\"wait\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.StartsWith(
+            "{\"schemaVersion\":\"1.0\",\"operation\":\"complete\"",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.Contains("\"recommendedAction\":\"rerunChecks\"", result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain(Token, result.StandardOutput, StringComparison.Ordinal);
     }
 
@@ -283,7 +306,21 @@ public sealed class MaintenanceWorkflowCommandTests
     {
         FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
         client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
-        CliHarness harness = CreateHarness(client);
+        var source = new ScriptedFeedbackSource(
+        [
+            .. MaintenancePullRequests.Observe(MaintenancePullRequests.ToolOwned(41))
+                .Select(observation => observation with
+                {
+                    Comments =
+                    [
+                        new PullRequestCommentObservation(
+                            "wingetbot",
+                            "Please rerun after the transient infrastructure error.",
+                            DateTimeOffset.UnixEpoch),
+                    ],
+                }),
+        ]);
+        CliHarness harness = CreateHarness(client, source);
         harness.IsInputRedirected = true;
 
         CliRunResult result = await harness.RunAsync(["complete", "--apply-safe"]);
@@ -327,13 +364,46 @@ public sealed class MaintenanceWorkflowCommandTests
     {
         FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
         client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
-        CliHarness harness = CreateHarness(client);
+        var source = new ScriptedFeedbackSource(
+        [
+            .. MaintenancePullRequests.Observe(MaintenancePullRequests.ToolOwned(41))
+                .Select(observation => observation with
+                {
+                    Comments =
+                    [
+                        new PullRequestCommentObservation(
+                            "wingetbot",
+                            "Please rerun after the transient infrastructure error.",
+                            DateTimeOffset.UnixEpoch),
+                    ],
+                }),
+        ]);
+        CliHarness harness = CreateHarness(client, source);
 
         CliRunResult result = await harness.RunAsync(["complete", "--apply-safe", "--dry-run"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.Empty(client.Mutations);
         Assert.Empty(harness.Interaction.Questions);
+        Assert.Contains("rerunChecks", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Complete_apply_safe_reports_false_when_nothing_was_actionable()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
+        CliHarness harness = CreateHarness(client);
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--apply-safe", "--yes", "--format", "json"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains(
+            "\"appliedKnownSafeResponses\":false",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.Empty(client.Mutations);
     }
 
     [Fact]
@@ -399,6 +469,237 @@ public sealed class MaintenanceWorkflowCommandTests
         Assert.Empty(client.Mutations);
     }
 
+    [Fact]
+    public async Task Complete_can_schedule_durable_retry_state_without_remote_writes()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
+        var store = new InMemoryFeedbackStateStore();
+        CliHarness harness = CreateHarness(
+            client,
+            TransientFeedbackSource(41),
+            store);
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--schedule-pending", "--yes"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(41, Assert.Single(store.Pending).PullRequestNumber);
+        Assert.Contains("Pending retries:", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("#41", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Empty(client.Mutations);
+        Assert.Empty(harness.Interaction.Questions);
+    }
+
+    [Fact]
+    public async Task Complete_replays_only_due_durable_entries_in_json_without_prompts()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(42));
+        var store = new InMemoryFeedbackStateStore
+        {
+            Pending =
+            [
+                new(
+                    41,
+                    FeedbackClassification.TransientInternalError,
+                    DateTimeOffset.UnixEpoch,
+                    "transient-internal-error"),
+                new(
+                    42,
+                    FeedbackClassification.TransientInternalError,
+                    DateTimeOffset.MaxValue,
+                    "transient-internal-error"),
+            ],
+        };
+        CliHarness harness = CreateHarness(
+            client,
+            TransientFeedbackSource(41, 42),
+            store);
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "complete",
+            "--replay-pending",
+            "--apply-safe",
+            "--yes",
+            "--format",
+            "json",
+        ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.StartsWith(
+            "comment:41:",
+            Assert.Single(client.Mutations),
+            StringComparison.Ordinal);
+        Assert.Contains("\"pendingRetries\":[", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"pullRequestNumber\":41", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains(
+            "\"learnedOverrideSignal\":\"transient-internal-error\"",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.Empty(harness.Interaction.Questions);
+    }
+
+    [Fact]
+    public async Task Replay_requires_explicit_confirmation_without_a_tty()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
+        var store = new InMemoryFeedbackStateStore
+        {
+            Pending =
+            [
+                new(
+                    41,
+                    FeedbackClassification.TransientInternalError,
+                    DateTimeOffset.UnixEpoch,
+                    null),
+            ],
+        };
+        CliHarness harness = CreateHarness(
+            client,
+            TransientFeedbackSource(41),
+            store);
+        harness.IsInputRedirected = true;
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--replay-pending", "--apply-safe"]);
+
+        Assert.Equal(ExitCodes.MissingInput, result.ExitCode);
+        Assert.Empty(client.Mutations);
+        Assert.Empty(harness.Interaction.Questions);
+    }
+
+    [Fact]
+    public async Task Allowlisted_repair_factory_runs_local_preflight_and_binds_superseded_pr()
+    {
+        var workflow = new FakeMutationWorkflow();
+        GitHubSubmissionRequest? planned = null;
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule(async context =>
+        {
+            var planner = new AllowlistedApprovedRepairPlanner(
+                context,
+                new Dictionary<long, string> { [41] = "approved-directory" },
+                new FixedMutationWorkflowFactory(workflow),
+                new FakeManifestLoader());
+            PullRequestInfo pullRequest = MaintenancePullRequests.ToolOwned(41) with
+            {
+                Body = "<!-- winmatsch:package=Example.App;version=1.0 -->",
+            };
+            planned = await planner.PlanApprovedRepairAsync(
+                Assert.Single(MaintenancePullRequests.Observe(pullRequest)),
+                FeedbackClassification.HashMismatch,
+                context.CancellationToken);
+            return ExitCodes.Success;
+        }));
+
+        CliRunResult result = await harness.RunAsync(["probe"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.NotNull(planned);
+        Assert.Equal(WorkflowExecutionMode.Apply, planned!.ExecutionMode);
+        Assert.Equal(41, planned.SupersedesPullRequestNumber);
+        Assert.Equal(
+            WorkflowExecutionMode.Plan,
+            Assert.Single(workflow.Requests).ExecutionMode);
+    }
+
+    [Fact]
+    public async Task Allowlisted_repair_never_runs_for_arbitrary_classifications()
+    {
+        var workflow = new FakeMutationWorkflow();
+        GitHubSubmissionRequest? planned = null;
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule(async context =>
+        {
+            var planner = new AllowlistedApprovedRepairPlanner(
+                context,
+                new Dictionary<long, string> { [41] = "approved-directory" },
+                new FixedMutationWorkflowFactory(workflow),
+                new FakeManifestLoader());
+            planned = await planner.PlanApprovedRepairAsync(
+                Assert.Single(MaintenancePullRequests.Observe(
+                    MaintenancePullRequests.ToolOwned(41))),
+                FeedbackClassification.TransientInternalError,
+                context.CancellationToken);
+            return ExitCodes.Success;
+        }));
+
+        CliRunResult result = await harness.RunAsync(["probe"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Null(planned);
+        Assert.Empty(workflow.Requests);
+    }
+
+    [Fact]
+    public async Task Replay_cancellation_maps_to_130_and_preserves_pending_state()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
+        var store = new InMemoryFeedbackStateStore
+        {
+            Pending =
+            [
+                new(
+                    41,
+                    FeedbackClassification.TransientInternalError,
+                    DateTimeOffset.UnixEpoch,
+                    null),
+            ],
+        };
+        CliHarness harness = CreateHarness(
+            client,
+            TransientFeedbackSource(41),
+            store);
+        using var cancellation = new CancellationTokenSource();
+        client.OnComment = cancellation.Cancel;
+        client.CommentFailure = new OperationCanceledException();
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--replay-pending", "--apply-safe", "--yes"],
+            cancellation.Token);
+
+        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
+        Assert.Equal(41, Assert.Single(store.Pending).PullRequestNumber);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Feedback_retry_state_round_trips_durably()
+    {
+        string directory = Directory.CreateTempSubdirectory("winmatsch-feedback-state-").FullName;
+        string path = Path.Combine(directory, "feedback-state.json");
+        try
+        {
+            var store = new FileFeedbackStateStore(path);
+            ImmutableArray<DurableFeedbackRetry> expected =
+            [
+                new(
+                    41,
+                    FeedbackClassification.HashMismatch,
+                    new DateTimeOffset(2026, 8, 2, 0, 0, 0, TimeSpan.Zero),
+                    "hash-mismatch"),
+            ];
+
+            await store.SaveAsync(expected, CancellationToken.None);
+            ImmutableArray<DurableFeedbackRetry> actual =
+                await store.LoadAsync(CancellationToken.None);
+
+            Assert.Collection(
+                actual,
+                item => Assert.Equal(expected[0], item));
+            Assert.True(File.Exists(path));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static FakeMaintenanceGitHubClient CreateClient(string forkSha)
     {
         var client = new FakeMaintenanceGitHubClient();
@@ -420,16 +721,39 @@ public sealed class MaintenanceWorkflowCommandTests
     private static CliHarness CreateHarness(
         FakeMaintenanceGitHubClient client,
         IPullRequestFeedbackSource? source = null,
+        IFeedbackStateStore? feedbackStateStore = null,
+        IApprovedRepairPlannerFactory? repairPlannerFactory = null,
         ISubmissionJournalStore? submissionJournals = null)
     {
         var harness = new CliHarness();
         harness.EnvironmentVariables["GITHUB_TOKEN"] = Token;
         harness.Modules.Add(new MaintenanceCommandModule(
             clientFactory: _ => client,
-            sourceFactory: source is null ? null : (_, _) => source,
+            sourceFactory: source is null
+                ? (gitHub, forkOwner) => new ToolPullRequestObservationSource(gitHub, forkOwner)
+                : (_, _) => source,
+            repairPlannerFactory: repairPlannerFactory,
+            feedbackStateStore: feedbackStateStore,
             submissionJournals: submissionJournals));
         return harness;
     }
+
+    private static ScriptedFeedbackSource TransientFeedbackSource(params long[] numbers)
+        => new(
+        [
+            .. numbers.Select(number =>
+                MaintenancePullRequests.Observe(MaintenancePullRequests.ToolOwned(number))
+                    .Single() with
+                {
+                    Comments =
+                    [
+                        new PullRequestCommentObservation(
+                            "wingetbot",
+                            "Please rerun after the transient infrastructure error.",
+                            DateTimeOffset.UnixEpoch),
+                    ],
+                }),
+        ]);
 
     private sealed class TemporaryDirectory : IDisposable
     {
@@ -465,5 +789,26 @@ public sealed class MaintenanceWorkflowCommandTests
             RepositoryCoordinates upstream,
             CancellationToken cancellationToken)
             => Task.FromResult(_observations);
+    }
+
+    private sealed class InMemoryFeedbackStateStore : IFeedbackStateStore
+    {
+        public ImmutableArray<DurableFeedbackRetry> Pending { get; set; } = [];
+
+        public Task<ImmutableArray<DurableFeedbackRetry>> LoadAsync(
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(Pending);
+        }
+
+        public Task SaveAsync(
+            ImmutableArray<DurableFeedbackRetry> pending,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Pending = pending;
+            return Task.CompletedTask;
+        }
     }
 }

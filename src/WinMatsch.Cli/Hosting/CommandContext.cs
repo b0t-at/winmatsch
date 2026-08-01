@@ -1,6 +1,7 @@
 using System.CommandLine;
 using WinMatsch.Cli.Interaction;
 using WinMatsch.Cli.Output;
+using WinMatsch.GitHub;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.Configuration;
 
@@ -41,6 +42,9 @@ public sealed class CommandContext
 
     /// <summary>Lazy GitHub token access honoring <c>--token &gt; GITHUB_TOKEN &gt; OS keyring</c>.</summary>
     public required ITokenAccessor Tokens { get; init; }
+
+    /// <summary>Invocation-scoped GitHub.com or GHES endpoint contract.</summary>
+    public required GitHubClientOptions GitHubOptions { get; init; }
 
     /// <summary>Cancelled on Ctrl+C or host shutdown; handlers must observe it.</summary>
     public required CancellationToken CancellationToken { get; init; }
