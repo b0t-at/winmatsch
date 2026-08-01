@@ -770,6 +770,24 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task Cache_InspectOfPopulatedLegacyCacheDoesNotCreateLockState()
+    {
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        using StubHttpMessageHandler handler = new((request, _) => Ok(request, Payload(100)));
+        using InstallerDownloader downloader = CreateCachedDownloader(handler, cacheDirectory);
+        await downloader.DownloadAsync("https://example.com/setup.exe", Path.Combine(_tempDir, "first"));
+        string lockPath = Path.Combine(cacheDirectory, ".winmatsch-cache.lock");
+        File.Delete(lockPath);
+        string[] before = [.. Directory.EnumerateFiles(cacheDirectory).Order(StringComparer.Ordinal)];
+
+        IReadOnlyList<DownloadCacheEntryInfo> entries = await downloader.Cache!.InspectAsync();
+
+        Assert.Single(entries);
+        Assert.Equal(before, Directory.EnumerateFiles(cacheDirectory).Order(StringComparer.Ordinal));
+        Assert.False(File.Exists(lockPath));
+    }
+
+    [Fact]
     public async Task Cache_InspectOfMissingDirectoryStillHonorsCancellation()
     {
         var cache = new DownloadCache(Path.Combine(_tempDir, "missing-cache"));

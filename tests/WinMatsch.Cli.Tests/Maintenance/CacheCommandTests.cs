@@ -125,6 +125,22 @@ public sealed class CacheCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Clear_dry_run_does_not_add_lock_to_populated_legacy_cache()
+    {
+        await StoreEntryAsync(EntryUrl, "payload-bytes");
+        string lockPath = Path.Combine(_cacheDirectory, ".winmatsch-cache.lock");
+        File.Delete(lockPath);
+        string[] before = [.. Directory.EnumerateFiles(_cacheDirectory).Order(StringComparer.Ordinal)];
+        CliHarness harness = CreateHarness();
+
+        CliRunResult result = await harness.RunAsync(["cache", "clear", "--dry-run"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(before, Directory.EnumerateFiles(_cacheDirectory).Order(StringComparer.Ordinal));
+        Assert.False(File.Exists(lockPath));
+    }
+
+    [Fact]
     public async Task Clear_requires_confirmation_and_honors_decline()
     {
         await StoreEntryAsync(EntryUrl, "payload-bytes");

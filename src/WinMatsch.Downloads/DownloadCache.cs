@@ -204,7 +204,8 @@ public sealed class DownloadCache
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await using FileStream processLock = await AcquireProcessLockAsync(cancellationToken).ConfigureAwait(false);
+            await using FileStream? processLock =
+                await AcquireExistingProcessLockAsync(cancellationToken).ConfigureAwait(false);
             if (!Directory.Exists(_directory))
             {
                 return [];
@@ -679,6 +680,41 @@ public sealed class DownloadCache
             catch (IOException) when (File.Exists(lockPath))
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task<FileStream?> AcquireExistingProcessLockAsync(CancellationToken cancellationToken)
+    {
+        string lockPath = Path.Combine(_directory, LockFileName);
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new FileStream(
+                    lockPath,
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    bufferSize: 1,
+                    FileOptions.Asynchronous);
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return null;
+            }
+            catch (IOException) when (File.Exists(lockPath))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken).ConfigureAwait(false);
+            }
+            catch (IOException) when (!File.Exists(lockPath))
+            {
+                return null;
             }
         }
     }
