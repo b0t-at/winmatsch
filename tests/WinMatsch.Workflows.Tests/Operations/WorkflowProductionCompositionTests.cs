@@ -619,6 +619,7 @@ public sealed class WorkflowProductionCompositionTests
     {
         string output = CreateDirectory();
         string state = CreateDirectory();
+        string snapshot = CreateDirectory();
         try
         {
             var identifier = new PackageIdentifier("Example.Composed");
@@ -644,11 +645,456 @@ public sealed class WorkflowProductionCompositionTests
                     StringComparison.Ordinal));
             File.Delete(metadata);
             Assert.Null(store.Load(output, identifier, version));
+
+            CommittedWorkflowPath[] committedPaths = StageProvenanceSnapshot(snapshot, changes);
+            const string CaptureId = "tampered-record-recapture";
+            store.PrepareCapture(output, CaptureId, snapshot, committedPaths);
+            OriginalSubmissionConflictException exception =
+                await Assert.ThrowsAsync<OriginalSubmissionConflictException>(
+                    () => store.CaptureChangedVersionsAsync(
+                        output,
+                        CaptureId,
+                        snapshot,
+                        committedPaths,
+                        CancellationToken.None));
+
+            Assert.Equal(OriginalSubmissionConflictKind.CorruptExistingRecord, exception.Kind);
+            Assert.Contains("# tampered", await File.ReadAllTextAsync(storedManifest), StringComparison.Ordinal);
+            Assert.Empty(Directory.EnumerateDirectories(state, "*.tmp-*", SearchOption.AllDirectories));
         }
         finally
         {
             Directory.Delete(output, recursive: true);
             Directory.Delete(state, recursive: true);
+            Directory.Delete(snapshot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Provenance_capture_coalesces_a_forced_same_content_publication_collision()
+    {
+        string output = CreateDirectory();
+        string state = CreateDirectory();
+        string snapshot = CreateDirectory();
+        int forcedCollision = 0;
+        var hooks = new OriginalSubmissionCaptureHooks
+        {
+            BeforeFinalizeAsync = (temporary, destination, _) =>
+            {
+                if (Interlocked.CompareExchange(ref forcedCollision, 1, 0) == 0)
+                {
+                    CopyDirectory(temporary, destination);
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+        try
+        {
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> changes) =
+                CreateInitialChanges("Original Publisher");
+            CommittedWorkflowPath[] committedPaths = StageProvenanceSnapshot(snapshot, changes);
+            var store = new FileOriginalSubmissionStore(state, hooks);
+            const string CaptureId = "forced-same-content-collision";
+            store.PrepareCapture(output, CaptureId, snapshot, committedPaths);
+
+            await store.CaptureChangedVersionsAsync(
+                output,
+                CaptureId,
+                snapshot,
+                committedPaths,
+                CancellationToken.None);
+            store.CompleteCapture(output, CaptureId, snapshot, committedPaths);
+
+            Assert.Equal(1, forcedCollision);
+            Assert.Equal(
+                "Original Publisher",
+                store.Load(
+                    output,
+                    new PackageIdentifier("Example.Composed"),
+                    new PackageVersion("1.0.0"))!.DefaultLocale.Publisher);
+            Assert.Empty(Directory.EnumerateDirectories(state, "*.tmp-*", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+            Directory.Delete(state, recursive: true);
+            Directory.Delete(snapshot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Forced_conflicting_provenance_collision_retains_committed_recovery_state()
+    {
+        string output = CreateDirectory();
+        string state = CreateDirectory();
+        int forcedCollision = 0;
+        var hooks = new OriginalSubmissionCaptureHooks
+        {
+            BeforeFinalizeAsync = async (temporary, destination, cancellationToken) =>
+            {
+                if (Interlocked.CompareExchange(ref forcedCollision, 1, 0) == 0)
+                {
+                    CopyDirectory(temporary, destination);
+                    string manifest = Directory.EnumerateFiles(destination, "*.yaml").First();
+                    await File.AppendAllTextAsync(
+                        manifest,
+                        "# conflicting publication",
+                        cancellationToken);
+                }
+            },
+        };
+        try
+        {
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> changes) =
+                CreateInitialChanges("Original Publisher");
+
+            WorkflowCommittedProvenanceException exception =
+                await Assert.ThrowsAsync<WorkflowCommittedProvenanceException>(
+                    () => new AtomicWorkflowFileTransaction(
+                            new FileOriginalSubmissionStore(state, hooks))
+                        .ApplyAsync(
+                            output,
+                            "Example.Composed",
+                            changes,
+                            CancellationToken.None));
+
+            OriginalSubmissionConflictException conflict = Assert.Single(
+                EnumerateExceptions(exception).OfType<OriginalSubmissionConflictException>());
+            Assert.Equal(OriginalSubmissionConflictKind.CorruptExistingRecord, conflict.Kind);
+            Assert.NotEmpty(Directory.EnumerateFiles(output, "*.yaml", SearchOption.AllDirectories));
+            Assert.NotEmpty(Directory.EnumerateDirectories(output, ".winmatsch-transaction-*"));
+            Assert.Contains(
+                "# conflicting publication",
+                await File.ReadAllTextAsync(
+                    Directory.EnumerateFiles(state, "*.yaml", SearchOption.AllDirectories).First()),
+                StringComparison.Ordinal);
+            Assert.Empty(Directory.EnumerateDirectories(state, "*.tmp-*", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+            Directory.Delete(state, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Provenance_capture_retries_a_windows_held_handle_without_overwriting()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string output = CreateDirectory();
+        string state = CreateDirectory();
+        FileStream? heldHandle = null;
+        int handleCreated = 0;
+        int retryCount = 0;
+        var hooks = new OriginalSubmissionCaptureHooks
+        {
+            BeforeFinalizeAsync = (temporary, _, _) =>
+            {
+                if (Interlocked.CompareExchange(ref handleCreated, 1, 0) == 0)
+                {
+                    heldHandle = new FileStream(
+                        Directory.EnumerateFiles(temporary, "*.yaml").First(),
+                        FileMode.Open,
+                        FileAccess.ReadWrite,
+                        FileShare.None);
+                }
+
+                return Task.CompletedTask;
+            },
+            BeforeTransientFinalizationRetryAsync = (_, retry, _) =>
+            {
+                retryCount = retry;
+                heldHandle?.Dispose();
+                heldHandle = null;
+                return Task.CompletedTask;
+            },
+        };
+        try
+        {
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> changes) =
+                CreateInitialChanges("Original Publisher");
+
+            await new AtomicWorkflowFileTransaction(new FileOriginalSubmissionStore(state, hooks))
+                .ApplyAsync(output, "Example.Composed", changes, CancellationToken.None);
+
+            Assert.True(retryCount >= 1);
+            Assert.Empty(Directory.EnumerateDirectories(state, "*.tmp-*", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            heldHandle?.Dispose();
+            Directory.Delete(output, recursive: true);
+            Directory.Delete(state, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Cancelled_provenance_finalization_preserves_committed_recovery_state()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string output = CreateDirectory();
+        string state = CreateDirectory();
+        FileStream? heldHandle = null;
+        int handleCreated = 0;
+        var retryObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hooks = new OriginalSubmissionCaptureHooks
+        {
+            BeforeFinalizeAsync = (temporary, _, _) =>
+            {
+                if (Interlocked.CompareExchange(ref handleCreated, 1, 0) == 0)
+                {
+                    heldHandle = new FileStream(
+                        Directory.EnumerateFiles(temporary, "*.yaml").First(),
+                        FileMode.Open,
+                        FileAccess.ReadWrite,
+                        FileShare.None);
+                }
+
+                return Task.CompletedTask;
+            },
+            BeforeTransientFinalizationRetryAsync = async (_, _, cancellationToken) =>
+            {
+                retryObserved.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            },
+        };
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            var store = new FileOriginalSubmissionStore(state, hooks);
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> changes) =
+                CreateInitialChanges("Original Publisher");
+            Task apply = new AtomicWorkflowFileTransaction(store)
+                .ApplyAsync(output, "Example.Composed", changes, cancellation.Token);
+            await retryObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancellation.Cancel();
+
+            WorkflowCommittedProvenanceException exception =
+                await Assert.ThrowsAsync<WorkflowCommittedProvenanceException>(() => apply);
+            Assert.Contains(
+                EnumerateExceptions(exception),
+                static failure => failure is OperationCanceledException);
+            Assert.NotEmpty(Directory.EnumerateFiles(output, "*.yaml", SearchOption.AllDirectories));
+            Assert.NotEmpty(Directory.EnumerateDirectories(output, ".winmatsch-transaction-*"));
+
+            heldHandle!.Dispose();
+            heldHandle = null;
+            PackageSnapshot recovered = Assert.IsType<PackageSnapshot>(
+                await new LocalManifestSnapshotSource(store).LoadAsync(
+                    output,
+                    new PackageIdentifier("Example.Composed"),
+                    new PackageVersion("1.0.0"),
+                    CancellationToken.None));
+
+            Assert.Equal("Original Publisher", recovered.OriginalBotSubmission!.DefaultLocale.Publisher);
+            Assert.Empty(Directory.EnumerateDirectories(output, ".winmatsch-transaction-*"));
+            Assert.Empty(Directory.EnumerateDirectories(state, "*.tmp-*", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            heldHandle?.Dispose();
+            Directory.Delete(output, recursive: true);
+            Directory.Delete(state, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Concurrent_same_content_provenance_captures_coalesce()
+    {
+        string output = CreateDirectory();
+        string state = CreateDirectory();
+        string snapshot = CreateDirectory();
+        var firstAtFinalize = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstStore = new FileOriginalSubmissionStore(
+            state,
+            new OriginalSubmissionCaptureHooks
+            {
+                BeforeFinalizeAsync = async (_, _, cancellationToken) =>
+                {
+                    firstAtFinalize.TrySetResult();
+                    await releaseFirst.Task.WaitAsync(cancellationToken);
+                },
+            });
+        var secondStore = new FileOriginalSubmissionStore(
+            state,
+            new OriginalSubmissionCaptureHooks
+            {
+                BeforeDestinationLockWait = _ => secondWaiting.TrySetResult(),
+            });
+        try
+        {
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> changes) =
+                CreateInitialChanges("Original Publisher");
+            CommittedWorkflowPath[] committedPaths = StageProvenanceSnapshot(snapshot, changes);
+            const string CaptureId = "concurrent-same-content";
+            firstStore.PrepareCapture(output, CaptureId, snapshot, committedPaths);
+
+            Task first = firstStore.CaptureChangedVersionsAsync(
+                output,
+                CaptureId,
+                snapshot,
+                committedPaths,
+                CancellationToken.None);
+            await firstAtFinalize.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Task second = secondStore.CaptureChangedVersionsAsync(
+                output,
+                CaptureId,
+                snapshot,
+                committedPaths,
+                CancellationToken.None);
+            await secondWaiting.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(second.IsCompleted);
+
+            releaseFirst.TrySetResult();
+            await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
+            firstStore.CompleteCapture(output, CaptureId, snapshot, committedPaths);
+
+            Assert.Equal(
+                "Original Publisher",
+                firstStore.Load(
+                    output,
+                    new PackageIdentifier("Example.Composed"),
+                    new PackageVersion("1.0.0"))!.DefaultLocale.Publisher);
+            Assert.Empty(Directory.EnumerateDirectories(state, "*.tmp-*", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            releaseFirst.TrySetResult();
+            Directory.Delete(output, recursive: true);
+            Directory.Delete(state, recursive: true);
+            Directory.Delete(snapshot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Waiting_provenance_capture_honors_cancellation()
+    {
+        string output = CreateDirectory();
+        string state = CreateDirectory();
+        string snapshot = CreateDirectory();
+        var firstAtFinalize = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstStore = new FileOriginalSubmissionStore(
+            state,
+            new OriginalSubmissionCaptureHooks
+            {
+                BeforeFinalizeAsync = async (_, _, cancellationToken) =>
+                {
+                    firstAtFinalize.TrySetResult();
+                    await releaseFirst.Task.WaitAsync(cancellationToken);
+                },
+            });
+        var secondStore = new FileOriginalSubmissionStore(
+            state,
+            new OriginalSubmissionCaptureHooks
+            {
+                BeforeDestinationLockWait = _ => secondWaiting.TrySetResult(),
+            });
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> changes) =
+                CreateInitialChanges("Original Publisher");
+            CommittedWorkflowPath[] committedPaths = StageProvenanceSnapshot(snapshot, changes);
+            const string CaptureId = "cancelled-waiter";
+            firstStore.PrepareCapture(output, CaptureId, snapshot, committedPaths);
+
+            Task first = firstStore.CaptureChangedVersionsAsync(
+                output,
+                CaptureId,
+                snapshot,
+                committedPaths,
+                CancellationToken.None);
+            await firstAtFinalize.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Task second = secondStore.CaptureChangedVersionsAsync(
+                output,
+                CaptureId,
+                snapshot,
+                committedPaths,
+                cancellation.Token);
+            await secondWaiting.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
+            releaseFirst.TrySetResult();
+            await first.WaitAsync(TimeSpan.FromSeconds(5));
+            firstStore.CompleteCapture(output, CaptureId, snapshot, committedPaths);
+
+            Assert.Empty(Directory.EnumerateDirectories(state, "*.tmp-*", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            releaseFirst.TrySetResult();
+            Directory.Delete(output, recursive: true);
+            Directory.Delete(state, recursive: true);
+            Directory.Delete(snapshot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Conflicting_provenance_capture_fails_without_overwriting_the_original()
+    {
+        string output = CreateDirectory();
+        string state = CreateDirectory();
+        string firstSnapshot = CreateDirectory();
+        string conflictingSnapshot = CreateDirectory();
+        try
+        {
+            var store = new FileOriginalSubmissionStore(state);
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> originalChanges) =
+                CreateInitialChanges("Original Publisher");
+            CommittedWorkflowPath[] originalPaths = StageProvenanceSnapshot(firstSnapshot, originalChanges);
+            store.PrepareCapture(output, "original-content", firstSnapshot, originalPaths);
+            await store.CaptureChangedVersionsAsync(
+                output,
+                "original-content",
+                firstSnapshot,
+                originalPaths,
+                CancellationToken.None);
+            store.CompleteCapture(output, "original-content", firstSnapshot, originalPaths);
+
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> conflictingChanges) =
+                CreateInitialChanges("Conflicting Publisher");
+            CommittedWorkflowPath[] conflictingPaths =
+                StageProvenanceSnapshot(conflictingSnapshot, conflictingChanges);
+            store.PrepareCapture(output, "conflicting-content", conflictingSnapshot, conflictingPaths);
+
+            OriginalSubmissionConflictException exception =
+                await Assert.ThrowsAsync<OriginalSubmissionConflictException>(
+                    () => store.CaptureChangedVersionsAsync(
+                        output,
+                        "conflicting-content",
+                        conflictingSnapshot,
+                        conflictingPaths,
+                        CancellationToken.None));
+
+            Assert.Equal(OriginalSubmissionConflictKind.ContentMismatch, exception.Kind);
+            Assert.Equal(
+                "Original Publisher",
+                store.Load(
+                    output,
+                    new PackageIdentifier("Example.Composed"),
+                    new PackageVersion("1.0.0"))!.DefaultLocale.Publisher);
+            Assert.Empty(Directory.EnumerateDirectories(state, "*.tmp-*", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+            Directory.Delete(state, recursive: true);
+            Directory.Delete(firstSnapshot, recursive: true);
+            Directory.Delete(conflictingSnapshot, recursive: true);
         }
     }
 
@@ -931,6 +1377,59 @@ public sealed class WorkflowProductionCompositionTests
                         provenance: WorkflowChangeProvenance.ToolGenerated)),
             ]);
     }
+
+    private static CommittedWorkflowPath[] StageProvenanceSnapshot(
+        string snapshot,
+        IEnumerable<WorkflowFileChange> changes)
+    {
+        WorkflowFileChange[] materialized = [.. changes];
+        foreach (WorkflowFileChange change in materialized.Where(static change =>
+                     change.Kind != PlannedChangeKind.Delete))
+        {
+            string path = Path.Combine(
+                snapshot,
+                change.RepositoryPath.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllBytes(path, change.Content.ToArray());
+        }
+
+        return
+        [
+            .. materialized.Select(static change => new CommittedWorkflowPath(
+                change.Kind,
+                change.RepositoryPath,
+                change.Provenance)),
+        ];
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string file in Directory.EnumerateFiles(source))
+        {
+            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)));
+        }
+    }
+
+    private static IEnumerable<Exception> EnumerateExceptions(Exception exception)
+    {
+        yield return exception;
+        if (exception is AggregateException aggregate)
+        {
+            foreach (Exception inner in aggregate.InnerExceptions.SelectMany(EnumerateExceptions))
+            {
+                yield return inner;
+            }
+        }
+        else if (exception.InnerException is { } inner)
+        {
+            foreach (Exception nested in EnumerateExceptions(inner))
+            {
+                yield return nested;
+            }
+        }
+    }
+
     private static string CreateDirectory()
     {
         string path = Path.Combine(

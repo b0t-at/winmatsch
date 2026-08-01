@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using WinMatsch.Core;
@@ -30,6 +31,18 @@ public interface IOriginalSubmissionStore
         string snapshotDirectory,
         IReadOnlyList<CommittedWorkflowPath> changes);
 
+    public Task CaptureChangedVersionsAsync(
+        string outputDirectory,
+        string captureId,
+        string snapshotDirectory,
+        IReadOnlyList<CommittedWorkflowPath> changes,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        CaptureChangedVersions(outputDirectory, captureId, snapshotDirectory, changes);
+        return Task.CompletedTask;
+    }
+
     public void CompleteCapture(
         string outputDirectory,
         string captureId,
@@ -42,6 +55,34 @@ public sealed record CommittedWorkflowPath(
     string RepositoryPath,
     WorkflowChangeProvenance Provenance);
 
+public enum OriginalSubmissionConflictKind
+{
+    CorruptExistingRecord,
+    ContentMismatch,
+}
+
+public sealed class OriginalSubmissionConflictException : IOException
+{
+    public OriginalSubmissionConflictException(
+        OriginalSubmissionConflictKind kind,
+        string message)
+        : base(message)
+    {
+        Kind = kind;
+    }
+
+    public OriginalSubmissionConflictKind Kind { get; }
+}
+
+internal sealed class OriginalSubmissionCaptureHooks
+{
+    public Action<string>? BeforeDestinationLockWait { get; init; }
+
+    public Func<string, string, CancellationToken, Task>? BeforeFinalizeAsync { get; init; }
+
+    public Func<string, int, CancellationToken, Task>? BeforeTransientFinalizationRetryAsync { get; init; }
+}
+
 /// <summary>
 /// Persists the first tool-generated manifest set outside the repository so later updates can
 /// distinguish moderator edits from the original generated submission.
@@ -50,11 +91,36 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
 {
     private const string MetadataFileName = ".winmatsch-provenance-v1";
     private const string MetadataHeader = "winmatsch-original-submission-v1";
+    private const int AccessDeniedErrorCode = 5;
+    private const int SharingViolationErrorCode = 32;
+    private const int LockViolationErrorCode = 33;
+    private const int TransientFinalizationRetryCount = 7;
+    private static readonly TimeSpan[] _transientFinalizationRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(5),
+        TimeSpan.FromMilliseconds(10),
+        TimeSpan.FromMilliseconds(20),
+        TimeSpan.FromMilliseconds(40),
+        TimeSpan.FromMilliseconds(80),
+        TimeSpan.FromMilliseconds(160),
+        TimeSpan.FromMilliseconds(320),
+    ];
+    private static readonly ConcurrentDictionary<string, DestinationGate> _destinationGates =
+        new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly string _stateDirectory;
+    private readonly OriginalSubmissionCaptureHooks? _hooks;
 
     public FileOriginalSubmissionStore(string? stateDirectory = null)
+        : this(stateDirectory, hooks: null)
+    {
+    }
+
+    internal FileOriginalSubmissionStore(
+        string? stateDirectory,
+        OriginalSubmissionCaptureHooks? hooks)
     {
         _stateDirectory = Path.GetFullPath(stateDirectory ?? DefaultStateDirectory());
+        _hooks = hooks;
     }
 
     public PackageManifests? Load(
@@ -99,11 +165,27 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
         string captureId,
         string snapshotDirectory,
         IReadOnlyList<CommittedWorkflowPath> changes)
+        => CaptureChangedVersionsAsync(
+                outputDirectory,
+                captureId,
+                snapshotDirectory,
+                changes,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+    public async Task CaptureChangedVersionsAsync(
+        string outputDirectory,
+        string captureId,
+        string snapshotDirectory,
+        IReadOnlyList<CommittedWorkflowPath> changes,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
         ValidateCaptureId(captureId);
         ArgumentException.ThrowIfNullOrWhiteSpace(snapshotDirectory);
         ArgumentNullException.ThrowIfNull(changes);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!IsCapturePrepared(
                 outputDirectory,
                 captureId,
@@ -123,6 +205,7 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
                          StringComparer.Ordinal)
                      .Where(static group => !string.IsNullOrWhiteSpace(group.Key)))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string relativeDirectory = versionChanges.Key;
             string source = Path.GetFullPath(Path.Combine(snapshotRoot, relativeDirectory));
             if (!source.StartsWith(
@@ -135,6 +218,9 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
             }
 
             string destination = Path.Combine(RepositoryStateDirectory(root), relativeDirectory);
+            await using DestinationLease lease = await AcquireDestinationLeaseAsync(
+                destination,
+                cancellationToken).ConfigureAwait(false);
             string[] manifestFiles = Directory.Exists(source)
                 ?
                 [
@@ -149,6 +235,16 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
                         change.Provenance == WorkflowChangeProvenance.ToolGenerated)
                     && Directory.Exists(destination))
                 {
+                    if (!ValidateRecordForRelativeDirectory(
+                            destination,
+                            RepositoryIdentity(root),
+                            relativeDirectory))
+                    {
+                        throw new OriginalSubmissionConflictException(
+                            OriginalSubmissionConflictKind.CorruptExistingRecord,
+                            "The existing original-submission record is corrupt and was retained for recovery.");
+                    }
+
                     Directory.Delete(destination, recursive: true);
                 }
 
@@ -166,26 +262,14 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
             PackageVersion packageVersion = manifests.Version.PackageVersion
                 ?? throw new InvalidDataException("Provenance source is missing PackageVersion.");
             string repositoryIdentity = RepositoryIdentity(root);
-            if (Directory.Exists(destination))
-            {
-                if (ValidateRecord(
-                    destination,
-                    repositoryIdentity,
-                    packageIdentifier,
-                    packageVersion))
-                {
-                    continue;
-                }
-
-                Directory.Delete(destination, recursive: true);
-            }
-
-            CaptureDirectory(
+            await CaptureDirectoryAsync(
                 source,
                 destination,
                 repositoryIdentity,
                 packageIdentifier,
-                packageVersion);
+                packageVersion,
+                captureId,
+                cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -284,6 +368,18 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
             throw new InvalidDataException("Original-submission recovery marker does not match the transaction.");
         }
 
+        string repositoryState = RepositoryStateDirectory(outputDirectory);
+        foreach (string temporary in Directory
+                     .EnumerateDirectories(
+                         repositoryState,
+                         $"*.tmp-{captureId}-*",
+                         SearchOption.AllDirectories)
+                     .OrderByDescending(static path => path.Length)
+                     .ThenBy(static path => path, StringComparer.Ordinal))
+        {
+            Directory.Delete(temporary, recursive: true);
+        }
+
         File.Delete(marker);
         string directory = Path.GetDirectoryName(marker)!;
         if (!Directory.EnumerateFileSystemEntries(directory).Any())
@@ -292,14 +388,16 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
         }
     }
 
-    private static void CaptureDirectory(
+    private async Task CaptureDirectoryAsync(
         string source,
         string destination,
         string repositoryIdentity,
         PackageIdentifier packageIdentifier,
-        PackageVersion packageVersion)
+        PackageVersion packageVersion,
+        string captureId,
+        CancellationToken cancellationToken)
     {
-        string temporary = $"{destination}.tmp-{Guid.NewGuid():N}";
+        string temporary = $"{destination}.tmp-{captureId}-{Guid.NewGuid():N}";
         Directory.CreateDirectory(temporary);
         try
         {
@@ -319,13 +417,45 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
                 packageVersion);
             FlushFile(Path.Combine(temporary, MetadataFileName));
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            try
+            for (int retry = 0; ; retry++)
             {
-                Directory.Move(temporary, destination);
-            }
-            catch (IOException) when (Directory.Exists(destination))
-            {
-                Directory.Delete(temporary, recursive: true);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_hooks?.BeforeFinalizeAsync is { } beforeFinalize)
+                {
+                    await beforeFinalize(temporary, destination, cancellationToken).ConfigureAwait(false);
+                }
+
+                try
+                {
+                    Directory.Move(temporary, destination);
+                    break;
+                }
+                catch (Exception exception) when (
+                    (exception is IOException or UnauthorizedAccessException)
+                    && Directory.Exists(destination))
+                {
+                    ResolveExistingRecord(
+                        temporary,
+                        destination,
+                        repositoryIdentity,
+                        packageIdentifier,
+                        packageVersion);
+                    break;
+                }
+                catch (IOException exception) when (
+                    retry < TransientFinalizationRetryCount
+                    && IsTransientWindowsFinalizationFailure(exception, temporary, destination))
+                {
+                    if (_hooks?.BeforeTransientFinalizationRetryAsync is { } beforeRetry)
+                    {
+                        await beforeRetry(destination, retry + 1, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    await Task.Delay(
+                            _transientFinalizationRetryDelays[retry],
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
             }
         }
         catch (Exception primaryException)
@@ -345,6 +475,175 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
             }
 
             throw;
+        }
+    }
+
+    private static void ResolveExistingRecord(
+        string temporary,
+        string destination,
+        string repositoryIdentity,
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion)
+    {
+        if (!ValidateRecord(
+                destination,
+                repositoryIdentity,
+                packageIdentifier,
+                packageVersion))
+        {
+            throw new OriginalSubmissionConflictException(
+                OriginalSubmissionConflictKind.CorruptExistingRecord,
+                "A corrupt original-submission record won atomic publication and was retained for recovery.");
+        }
+
+        if (!File.ReadAllBytes(Path.Combine(temporary, MetadataFileName))
+                .AsSpan()
+                .SequenceEqual(File.ReadAllBytes(Path.Combine(destination, MetadataFileName))))
+        {
+            throw new OriginalSubmissionConflictException(
+                OriginalSubmissionConflictKind.ContentMismatch,
+                "A conflicting original-submission record already exists and was retained.");
+        }
+
+        Directory.Delete(temporary, recursive: true);
+    }
+
+    private static bool IsTransientWindowsFinalizationFailure(
+        IOException exception,
+        string source,
+        string destination)
+    {
+        if (!OperatingSystem.IsWindows()
+            || Directory.Exists(destination)
+            || !Directory.Exists(source))
+        {
+            return false;
+        }
+
+        int errorCode = exception.HResult & 0xFFFF;
+        if (errorCode is not (
+            AccessDeniedErrorCode
+            or SharingViolationErrorCode
+            or LockViolationErrorCode))
+        {
+            return false;
+        }
+
+        string parent = Path.GetDirectoryName(destination)
+            ?? throw new InvalidDataException("Original-submission destination has no parent directory.");
+        string probe = Path.Combine(parent, $".winmatsch-finalize-probe-{Guid.NewGuid():N}");
+        try
+        {
+            using var stream = new FileStream(
+                probe,
+                FileMode.CreateNew,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                bufferSize: 1,
+                FileOptions.DeleteOnClose | FileOptions.WriteThrough);
+            stream.WriteByte(0);
+            stream.Flush(flushToDisk: true);
+            return true;
+        }
+        catch (Exception probeException) when (
+            probeException is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static bool ValidateRecordForRelativeDirectory(
+        string directory,
+        string repositoryIdentity,
+        string relativeDirectory)
+    {
+        string metadataPath = Path.Combine(directory, MetadataFileName);
+        if (!File.Exists(metadataPath))
+        {
+            return false;
+        }
+
+        string[] lines = File.ReadAllLines(metadataPath);
+        if (lines.Length < 4
+            || !TryReadValue(lines[2], "package=", out string? recordedPackage)
+            || !TryReadValue(lines[3], "version=", out string? recordedVersion)
+            || !PackageIdentifier.TryCreate(recordedPackage, out PackageIdentifier? packageIdentifier)
+            || !PackageVersion.TryCreate(recordedVersion, out PackageVersion? packageVersion))
+        {
+            return false;
+        }
+
+        string expectedRelativeDirectory = ManifestPaths
+            .GetVersionDirectory(packageIdentifier!, packageVersion!)
+            .Replace('/', Path.DirectorySeparatorChar);
+        return string.Equals(
+                expectedRelativeDirectory,
+                relativeDirectory,
+                OperatingSystem.IsWindows()
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal)
+            && ValidateRecord(
+                directory,
+                repositoryIdentity,
+                packageIdentifier!,
+                packageVersion!);
+    }
+
+    private async ValueTask<DestinationLease> AcquireDestinationLeaseAsync(
+        string destination,
+        CancellationToken cancellationToken)
+    {
+        string normalizedDestination = Path.GetFullPath(destination);
+        while (true)
+        {
+            DestinationGate gate = _destinationGates.GetOrAdd(
+                normalizedDestination,
+                static _ => new DestinationGate());
+            lock (gate.SyncRoot)
+            {
+                if (gate.IsRetired)
+                {
+                    continue;
+                }
+
+                gate.ReferenceCount++;
+            }
+
+            try
+            {
+                _hooks?.BeforeDestinationLockWait?.Invoke(normalizedDestination);
+                await gate.Semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+                return new DestinationLease(normalizedDestination, gate);
+            }
+            catch
+            {
+                ReleaseDestinationReference(normalizedDestination, gate, releaseSemaphore: false);
+                throw;
+            }
+        }
+    }
+
+    private static void ReleaseDestinationReference(
+        string destination,
+        DestinationGate gate,
+        bool releaseSemaphore)
+    {
+        if (releaseSemaphore)
+        {
+            gate.Semaphore.Release();
+        }
+
+        lock (gate.SyncRoot)
+        {
+            gate.ReferenceCount--;
+            if (gate.ReferenceCount != 0)
+            {
+                return;
+            }
+
+            gate.IsRetired = true;
+            _ = ((ICollection<KeyValuePair<string, DestinationGate>>)_destinationGates).Remove(
+                new KeyValuePair<string, DestinationGate>(destination, gate));
         }
     }
 
@@ -440,7 +739,12 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
                     .Where(IsManifest)
                     .OrderBy(static path => Path.GetFileName(path), StringComparer.Ordinal),
             ];
-        return manifestFiles.Length > 0
+        string[] allFiles = [.. Directory.EnumerateFiles(directory)];
+        return !Directory.EnumerateDirectories(directory).Any()
+            && manifestFiles.Length > 0
+            && allFiles.Length == manifestFiles.Length + 1
+            && allFiles.Count(static file =>
+                Path.GetFileName(file).Equals(MetadataFileName, StringComparison.Ordinal)) == 1
             && expected.Count == manifestFiles.Length
             && manifestFiles.All(file =>
                 expected.TryGetValue(Path.GetFileName(file), out string? hash)
@@ -577,5 +881,36 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
         }
 
         return Path.Combine(localData, "winmatsch", "original-submissions");
+    }
+
+    private sealed class DestinationGate
+    {
+        public object SyncRoot { get; } = new();
+
+        public SemaphoreSlim Semaphore { get; } = new(1, 1);
+
+        public int ReferenceCount { get; set; }
+
+        public bool IsRetired { get; set; }
+    }
+
+    private sealed class DestinationLease(
+        string destination,
+        DestinationGate gate) : IAsyncDisposable
+    {
+        private int _disposed;
+
+        public ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                ReleaseDestinationReference(
+                    destination,
+                    gate,
+                    releaseSemaphore: true);
+            }
+
+            return ValueTask.CompletedTask;
+        }
     }
 }

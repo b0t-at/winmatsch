@@ -588,7 +588,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
         _originalSubmissions = originalSubmissions ?? new FileOriginalSubmissionStore();
     }
 
-    public Task<PackageSnapshot?> LoadAsync(
+    public async Task<PackageSnapshot?> LoadAsync(
         string outputDirectory,
         PackageIdentifier packageIdentifier,
         PackageVersion packageVersion,
@@ -598,19 +598,20 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
         string root = Path.GetFullPath(outputDirectory);
         if (!Directory.Exists(root))
         {
-            return Task.FromResult<PackageSnapshot?>(null);
+            return null;
         }
 
         using IDisposable operationLock =
             AtomicWorkflowFileTransaction.AcquirePackageLock(root, packageIdentifier.Value);
-        AtomicWorkflowFileTransaction.RecoverPendingUnderLock(
+        await AtomicWorkflowFileTransaction.RecoverPendingUnderLockAsync(
             root,
             packageIdentifier.Value,
-            _originalSubmissions);
-        return Task.FromResult(LoadCore(root, packageIdentifier, packageVersion, cancellationToken));
+            _originalSubmissions,
+            cancellationToken).ConfigureAwait(false);
+        return LoadCore(root, packageIdentifier, packageVersion, cancellationToken);
     }
 
-    public Task<ImmutableArray<PackageSnapshot>> ListVersionsAsync(
+    public async Task<ImmutableArray<PackageSnapshot>> ListVersionsAsync(
         string outputDirectory,
         PackageIdentifier packageIdentifier,
         CancellationToken cancellationToken)
@@ -619,20 +620,21 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
         string root = Path.GetFullPath(outputDirectory);
         if (!Directory.Exists(root))
         {
-            return Task.FromResult(ImmutableArray<PackageSnapshot>.Empty);
+            return ImmutableArray<PackageSnapshot>.Empty;
         }
 
         using IDisposable operationLock =
             AtomicWorkflowFileTransaction.AcquirePackageLock(root, packageIdentifier.Value);
-        AtomicWorkflowFileTransaction.RecoverPendingUnderLock(
+        await AtomicWorkflowFileTransaction.RecoverPendingUnderLockAsync(
             root,
             packageIdentifier.Value,
-            _originalSubmissions);
+            _originalSubmissions,
+            cancellationToken).ConfigureAwait(false);
         string packageDirectory = ManifestPaths.GetPackageDirectory(packageIdentifier);
         string? fullPackageDirectory = SecurePath.ResolveExactExistingDirectory(root, packageDirectory);
         if (fullPackageDirectory is null)
         {
-            return Task.FromResult(ImmutableArray<PackageSnapshot>.Empty);
+            return ImmutableArray<PackageSnapshot>.Empty;
         }
 
         var snapshots = ImmutableArray.CreateBuilder<PackageSnapshot>();
@@ -652,7 +654,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
             }
         }
 
-        return Task.FromResult(snapshots.ToImmutable());
+        return snapshots.ToImmutable();
     }
 
     private PackageSnapshot? LoadCore(
@@ -758,11 +760,12 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             SecurePath.ValidateOutputRoot(root);
             Directory.CreateDirectory(root);
             processLock = RepositoryOperationLock.Acquire(root, operationLockKey);
-            RecoverAbandonedTransactions(
+            await RecoverAbandonedTransactionsAsync(
                 root,
                 transactionPrefix,
                 currentTransaction: "",
-                _originalSubmissions);
+                _originalSubmissions,
+                cancellationToken).ConfigureAwait(false);
             Directory.CreateDirectory(transactionRoot);
             string stageRoot = Path.Combine(transactionRoot, "stage");
             string backupRoot = Path.Combine(transactionRoot, "backup");
@@ -841,11 +844,12 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 WriteJournal(transactionRoot, "manifests-committed", installed);
                 try
                 {
-                    _originalSubmissions.CaptureChangedVersions(
+                    await _originalSubmissions.CaptureChangedVersionsAsync(
                         root,
                         captureId,
                         provenanceRoot,
-                        committedPaths);
+                        committedPaths,
+                        cancellationToken).ConfigureAwait(false);
                     WriteJournal(transactionRoot, "committed", installed);
                     _originalSubmissions.CompleteCapture(
                         root,
@@ -855,7 +859,10 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                     cleanupAllowed = true;
                 }
                 catch (Exception exception) when (
-                    exception is IOException or UnauthorizedAccessException or InvalidDataException)
+                    exception is IOException
+                        or UnauthorizedAccessException
+                        or InvalidDataException
+                        or OperationCanceledException)
                 {
                     committedProvenanceFailure = exception;
                 }
@@ -1118,23 +1125,25 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
     internal static IDisposable AcquirePackageLock(string root, string operationLockKey)
         => RepositoryOperationLock.Acquire(root, operationLockKey);
 
-    internal static void RecoverPendingUnderLock(
+    internal static Task RecoverPendingUnderLockAsync(
         string root,
         string operationLockKey,
-        IOriginalSubmissionStore? originalSubmissions = null)
+        IOriginalSubmissionStore? originalSubmissions,
+        CancellationToken cancellationToken)
     {
         string transactionPrefix =
             $".winmatsch-transaction-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(operationLockKey.ToUpperInvariant())))[..16]}";
         if (!Directory.EnumerateDirectories(root, $"{transactionPrefix}-*").Any())
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        RecoverAbandonedTransactions(
+        return RecoverAbandonedTransactionsAsync(
             root,
             transactionPrefix,
             currentTransaction: "",
-            originalSubmissions);
+            originalSubmissions,
+            cancellationToken);
     }
 
     private static void WriteJournal(
@@ -1171,16 +1180,18 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         File.Move(temporaryPath, journalPath, overwrite: true);
     }
 
-    private static void RecoverAbandonedTransactions(
+    private static async Task RecoverAbandonedTransactionsAsync(
         string root,
         string transactionPrefix,
         string currentTransaction,
-        IOriginalSubmissionStore? originalSubmissions)
+        IOriginalSubmissionStore? originalSubmissions,
+        CancellationToken cancellationToken)
     {
         foreach (string transaction in Directory.EnumerateDirectories(root, $"{transactionPrefix}-*")
                      .Where(path => !string.Equals(path, currentTransaction, StringComparison.OrdinalIgnoreCase))
                      .Order(StringComparer.Ordinal))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var pins = new List<IDisposable>();
             var pinnedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             PinDirectoryChain(root, transaction, pins, pinnedDirectories);
@@ -1228,11 +1239,12 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                                 $"Transaction journal '{journalPath}' has no trusted provenance recovery marker.");
                         }
 
-                        originalSubmissions.CaptureChangedVersions(
+                        await originalSubmissions.CaptureChangedVersionsAsync(
                             root,
                             captureId,
                             Path.Combine(transaction, "provenance"),
-                            committedPaths);
+                            committedPaths,
+                            cancellationToken).ConfigureAwait(false);
                         WriteRecoveredJournalStatus(journalPath, lines, "committed");
                         committed = true;
                     }
