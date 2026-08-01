@@ -738,8 +738,59 @@ public sealed class GitHubLifecycleWorkflowTests
 
         Assert.Equal(GitHubLifecycleResultCode.ValidationFailed, result.Code);
         Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.True(result.RemoteState.PullRequestClosed);
         Assert.Equal(3, client.GetReleasesCalls);
+        Assert.Equal(
+            ["branch", "commit", "pull-request", "comment", "close"],
+            client.Mutations);
         Assert.False(result.Applied);
+    }
+
+    [Fact]
+    public async Task Final_freshness_cleanup_failure_preserves_uncertain_close_state()
+    {
+        var clock = new FakeClock();
+        GitHubRelease safeRelease = new(
+            201,
+            "v2.0.0",
+            "2.0.0",
+            null,
+            new Uri("https://github.invalid/releases/201"),
+            false,
+            false,
+            clock.UtcNow.AddDays(-2),
+            [],
+            clock.UtcNow.AddHours(-2));
+        var client = new FakeGitHubClient
+        {
+            Releases = [safeRelease],
+            FailMutation = "close",
+            OnGetReleases = (fake, call) =>
+            {
+                if (call == 3)
+                {
+                    fake.Releases = [safeRelease with { UpdatedAt = clock.UtcNow }];
+                }
+            },
+        };
+        GitHubSubmissionRequest request = GitHubLifecycleTestSupport.Request() with
+        {
+            Policy = new() { MinimumReleaseFreshness = TimeSpan.FromHours(1) },
+            ReleaseUpdatedAt = clock.UtcNow.AddHours(-2),
+            ReleaseRepository = new RepositoryCoordinates("vendor", "app"),
+            ReleaseId = 201,
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(request);
+
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.True(result.RemoteState.CommentCreated);
+        Assert.Equal(
+            RemoteOperationKind.ClosePullRequest,
+            result.RemoteState.LastAttemptedOperation);
+        Assert.True(result.RemoteState.RemoteOutcomeUncertain);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2030");
     }
 
     [Fact]

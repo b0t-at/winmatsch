@@ -483,7 +483,26 @@ public sealed class GitHubLifecycleWorkflow
                     [new("GH2025", "A later duplicate PR exists; only its proven owner may close it.")]);
             }
 
-            await VerifyLiveReleaseFreshnessAsync(request, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await VerifyLiveReleaseFreshnessAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            catch (FinalArtifactValidationException exception)
+            {
+                return await CloseCreatedPullRequestAfterValidationFailureAsync(
+                    request,
+                    plan,
+                    targetRepository.Coordinates,
+                    branchName,
+                    upstreamDefault,
+                    commit,
+                    pullRequest,
+                    state,
+                    audit,
+                    exception.Diagnostics,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             Audit(audit, "GH2009", $"Created pull request #{pullRequest.Number}.");
             attemptedMutation = null;
             return Result(GitHubLifecycleResultCode.Succeeded, plan, state, audit);
@@ -780,6 +799,96 @@ public sealed class GitHubLifecycleWorkflow
         {
             throw new FinalArtifactValidationException(
                 [new("GH1018", "Current GitHub release metadata has not completed the configured freshness delay.")]);
+        }
+    }
+
+    private async Task<GitHubLifecycleResult> CloseCreatedPullRequestAfterValidationFailureAsync(
+        GitHubSubmissionRequest request,
+        GitHubSubmissionPlan plan,
+        RepositoryCoordinates targetRepository,
+        string branchName,
+        BranchState upstreamDefault,
+        ServerCommitResult commit,
+        PullRequestInfo createdPullRequest,
+        RemoteMutationState state,
+        ImmutableArray<GitHubLifecycleAuditEntry>.Builder audit,
+        ImmutableArray<GitHubLifecycleDiagnostic> validationDiagnostics,
+        CancellationToken cancellationToken)
+    {
+        PullRequestInfo freshPullRequest = await _gitHub.GetPullRequestAsync(
+            request.UpstreamRepository,
+            createdPullRequest.Number,
+            cancellationToken).ConfigureAwait(false);
+        GitReference? freshBranch = await _gitHub.GetReferenceAsync(
+            targetRepository,
+            branchName,
+            cancellationToken).ConfigureAwait(false);
+        if (freshPullRequest.State != PullRequestState.Open
+            || !string.Equals(freshPullRequest.HeadOwner, targetRepository.Owner, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(freshPullRequest.HeadBranch, branchName, StringComparison.Ordinal)
+            || !string.Equals(freshPullRequest.BaseBranch, upstreamDefault.Name, StringComparison.Ordinal)
+            || !string.Equals(freshPullRequest.HeadSha, commit.Sha, StringComparison.Ordinal)
+            || freshBranch is null
+            || !string.Equals(freshBranch.Sha, commit.Sha, StringComparison.Ordinal))
+        {
+            return Result(
+                GitHubLifecycleResultCode.HumanEscalationRequired,
+                plan,
+                state with { RemoteOutcomeUncertain = true },
+                audit,
+                [
+                    .. validationDiagnostics,
+                    new(
+                        "GH2028",
+                        "Final validation failed, but the created PR no longer has the exact proven tool-owned identity required for automatic closure."),
+                ]);
+        }
+
+        RemoteOperationKind attempted = RemoteOperationKind.Comment;
+        try
+        {
+            _ = await _gitHub.CommentOnPullRequestAsync(
+                request.UpstreamRepository,
+                freshPullRequest.Number,
+                "Closing this tool-owned PR because final live artifact freshness validation failed.",
+                Mutation($"{request.IdempotencyKey}:freshness-failure-comment"),
+                cancellationToken).ConfigureAwait(false);
+            state = state with { CommentCreated = true };
+            attempted = RemoteOperationKind.ClosePullRequest;
+            _ = await _gitHub.ClosePullRequestAsync(
+                request.UpstreamRepository,
+                freshPullRequest.Number,
+                Mutation($"{request.IdempotencyKey}:freshness-failure-close"),
+                cancellationToken).ConfigureAwait(false);
+            state = state with { PullRequestClosed = true };
+            Audit(audit, "GH2029", $"Closed PR #{freshPullRequest.Number} after final freshness validation failed.");
+            return Result(
+                GitHubLifecycleResultCode.ValidationFailed,
+                plan,
+                state,
+                audit,
+                validationDiagnostics);
+        }
+        catch (Exception exception) when (exception is GitHubApiException or OperationCanceledException)
+        {
+            return Result(
+                exception is OperationCanceledException
+                    ? GitHubLifecycleResultCode.Cancelled
+                    : GitHubLifecycleResultCode.RemoteFailure,
+                plan,
+                state with
+                {
+                    LastAttemptedOperation = attempted,
+                    RemoteOutcomeUncertain = true,
+                },
+                audit,
+                [
+                    .. validationDiagnostics,
+                    new(
+                        "GH2030",
+                        "Final validation failed and automatic PR closure has an uncertain outcome: " +
+                        GitHubSubmissionFormatter.Redact(exception.Message)),
+                ]);
         }
     }
 
