@@ -229,6 +229,41 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Self_referential_metadata_stream_cannot_create_neutral_evidence()
+    {
+        byte[] pe = DependencyFixtures.BuildPe(Machine.I386);
+        int peOffset = BinaryPrimitives.ReadInt32LittleEndian(pe.AsSpan(0x3C));
+        int optionalOffset = peOffset + 24;
+        int optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(pe.AsSpan(peOffset + 20));
+        int sectionOffset = optionalOffset + optionalSize;
+        uint sectionRva = BinaryPrimitives.ReadUInt32LittleEndian(pe.AsSpan(sectionOffset + 12));
+        int sectionRawOffset = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(pe.AsSpan(sectionOffset + 20)));
+        int metadataOffset = sectionRawOffset + 72;
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 208), sectionRva);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 212), 72);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset), 72);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 8), sectionRva + 72);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 12), 64);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 16), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(metadataOffset), 0x424A5342);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(metadataOffset + 12), 4);
+        "v4\0\0"u8.CopyTo(pe.AsSpan(metadataOffset + 16));
+        BinaryPrimitives.WriteUInt16LittleEndian(pe.AsSpan(metadataOffset + 22), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(metadataOffset + 24), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(metadataOffset + 28), 4);
+        "#~\0\0"u8.CopyTo(pe.AsSpan(metadataOffset + 32));
+        using MemoryStream archive = DependencyFixtures.BuildZip(("forged.exe", pe));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "forged.zip");
+
+        Assert.All(analysis.Evidence, evidence =>
+        {
+            Assert.Equal(Architecture.X86, evidence.Architecture);
+            Assert.Equal(DependencyEvidenceStatus.Ambiguous, evidence.Status);
+        });
+    }
+
+    [Fact]
     public void Forged_clr_header_without_metadata_signature_cannot_create_neutral_evidence()
     {
         byte[] pe = DependencyFixtures.BuildPe(Machine.I386);

@@ -315,6 +315,7 @@ internal static class PeImportReader
         cursor += StorageHeaderSize;
         byte[] nameBuffer = new byte[MaximumStreamNameBytes];
         Span<byte> streamHeader = stackalloc byte[StreamHeaderSize];
+        var streams = new List<MetadataStream>(streamCount);
         for (int i = 0; i < streamCount; i++)
         {
             if (cursor > size - StreamHeaderSize)
@@ -356,11 +357,32 @@ internal static class PeImportReader
                 }
             }
 
+            streams.Add(new MetadataStream(
+                streamOffset,
+                streamSize,
+                Encoding.ASCII.GetString(nameBuffer, 0, terminator)));
             cursor += terminator + 1;
             cursor = (cursor + 3) & ~3L;
         }
 
-        return cursor <= size;
+        if (cursor > size
+            || !streams.Any(static metadataStream => metadataStream.Name is "#~" or "#-"))
+        {
+            return false;
+        }
+
+        long previousEnd = cursor;
+        foreach (MetadataStream metadataStream in streams.OrderBy(static item => item.Offset))
+        {
+            if (metadataStream.Offset < previousEnd)
+            {
+                return false;
+            }
+
+            previousEnd = metadataStream.Offset + (long)metadataStream.Size;
+        }
+
+        return previousEnd <= size;
     }
 
     private static bool ValidateSections(
@@ -516,4 +538,6 @@ internal static class PeImportReader
         uint VirtualAddress,
         uint RawSize,
         uint RawOffset);
+
+    private readonly record struct MetadataStream(uint Offset, uint Size, string Name);
 }
