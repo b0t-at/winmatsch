@@ -353,6 +353,7 @@ public sealed class MutationCommandModule : ICommandModule
         }
 
         WorkflowReleaseProvenance? releaseProvenance = local.Plan.Release;
+        ImmutableHashSet<string> releaseInstallerUrls = InstallerUrls(local.Plan);
         if (local.Code != WorkflowResultCode.Succeeded)
         {
             MutationOutput.Write(context, local, remote: null);
@@ -439,12 +440,18 @@ public sealed class MutationCommandModule : ICommandModule
                 Documents = editedDocuments,
             });
             local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
-            if (releaseProvenance is not null)
+            if (releaseProvenance is not null
+                && releaseInstallerUrls.Count > 0
+                && releaseInstallerUrls.SetEquals(InstallerUrls(local.Plan)))
             {
                 local = local with
                 {
                     Plan = local.Plan with { Release = releaseProvenance },
                 };
+            }
+            else
+            {
+                releaseProvenance = null;
             }
 
             if (local.Code != WorkflowResultCode.Succeeded)
@@ -1087,6 +1094,11 @@ public sealed class MutationCommandModule : ICommandModule
             ReleaseNotesUrl = result.GetValue(options.ReleaseNotesUrl),
         };
     }
+
+    private static ImmutableHashSet<string> InstallerUrls(LocalOperationPlan plan)
+        => plan.Preflight.InstallerArtifacts
+            .Select(static artifact => artifact.InstallerUrl)
+            .ToImmutableHashSet(StringComparer.Ordinal);
 
     private static ReleaseRequest ParseRelease(ParseResult result, MutationOptions options)
         => new(

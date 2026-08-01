@@ -92,7 +92,9 @@ public sealed class MutationCommandModuleTests
         {
             Handler = request =>
             {
-                WorkflowOperationResult result = FakeMutationWorkflow.Result(request);
+                WorkflowOperationResult result = WithInstallerArtifact(
+                    FakeMutationWorkflow.Result(request),
+                    "https://example.test/original.exe");
                 return result with
                 {
                     Plan = result.Plan with
@@ -164,7 +166,9 @@ public sealed class MutationCommandModuleTests
         {
             Handler = request =>
             {
-                WorkflowOperationResult result = FakeMutationWorkflow.Result(request);
+                WorkflowOperationResult result = WithInstallerArtifact(
+                    FakeMutationWorkflow.Result(request),
+                    "https://example.test/original.exe");
                 return request is SubmitOperationRequest
                     ? result
                     : result with
@@ -192,6 +196,47 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(TimeSpan.FromMinutes(42), request.Policy.MinimumReleaseFreshness);
         Assert.Equal(new RepositoryCoordinates("vendor", "app"), request.ReleaseRepository);
         Assert.Equal(42, request.ReleaseId);
+    }
+
+    [Fact]
+    public async Task Editing_installer_urls_clears_stale_release_provenance()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request =>
+            {
+                string installerUrl = request is SubmitOperationRequest
+                    ? "https://example.test/edited.exe"
+                    : "https://example.test/original.exe";
+                WorkflowOperationResult result = WithInstallerArtifact(
+                    FakeMutationWorkflow.Result(request),
+                    installerUrl);
+                return request is SubmitOperationRequest
+                    ? result
+                    : result with
+                    {
+                        Plan = result.Plan with
+                        {
+                            Release = new(
+                                new RepositoryCoordinates("vendor", "app"),
+                                42,
+                                new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero)),
+                        },
+                    };
+            },
+        };
+        var submission = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submission, new FakeEditorRunner());
+        harness.EnvironmentVariables["WINMATSCH_FRESHNESS_DELAY"] = "00:42:00";
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--edit", "--submit", "--yes"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        GitHubSubmissionRequest request = Assert.Single(submission.Requests);
+        Assert.Equal(TimeSpan.Zero, request.Policy.MinimumReleaseFreshness);
+        Assert.Null(request.ReleaseRepository);
+        Assert.Null(request.ReleaseId);
     }
 
     [Theory]
@@ -928,6 +973,38 @@ public sealed class MutationCommandModuleTests
             Plan = plan,
             RemoteState = state,
             Diagnostics = [new("REMOTE", "Manual recovery required.")],
+        };
+    }
+
+    private static WorkflowOperationResult WithInstallerArtifact(
+        WorkflowOperationResult result,
+        string installerUrl)
+    {
+        var download = new DownloadResult
+        {
+            FilePath = "missing.exe",
+            FileName = "setup.exe",
+            Sha256 = new Sha256Hash(
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            SizeInBytes = 1,
+            InitialUrl = installerUrl,
+            FinalUrl = installerUrl,
+        };
+        WorkflowPreflightRequest preflight = result.Plan.Preflight;
+        return result with
+        {
+            Plan = result.Plan with
+            {
+                Preflight = new()
+                {
+                    BeforeDocuments = preflight.BeforeDocuments,
+                    AfterDocuments = preflight.AfterDocuments,
+                    Changes = preflight.Changes,
+                    InstallerArtifacts = [new InstallerArtifact(installerUrl, download)],
+                    ExistingVersions = preflight.ExistingVersions,
+                    Options = preflight.Options,
+                },
+            },
         };
     }
 }
