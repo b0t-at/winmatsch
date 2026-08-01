@@ -17,6 +17,8 @@
     <Project Path="tests/WinMatsch.E2E.Tests/WinMatsch.E2E.Tests.csproj" />
     <Project Path="tests/WinMatsch.GitHub.Tests/WinMatsch.GitHub.Tests.csproj" />
     <Project Path="tests/WinMatsch.Rules.Tests/WinMatsch.Rules.Tests.csproj" />
+    <Project Path="tests/WinMatsch.Testing/WinMatsch.Testing.csproj" />
+    <Project Path="tests/WinMatsch.Testing.Tests/WinMatsch.Testing.Tests.csproj" />
     <Project Path="tests/WinMatsch.Validation.Tests/WinMatsch.Validation.Tests.csproj" />
     <Project Path="tests/WinMatsch.Workflows.Tests/WinMatsch.Workflows.Tests.csproj" />
   </Folder>

@@ -35,23 +35,18 @@ jobs:
         with:
           global-json-file: global.json
 
-      # The CLI project lands in a later milestone; publish is wired up front so the
-      # release pipeline is exercised from day one. Skips gracefully until it exists.
       - name: Publish
         shell: bash
         run: |
-          if [ -f src/WinMatsch.Cli/WinMatsch.Cli.csproj ]; then
-            dotnet publish src/WinMatsch.Cli/WinMatsch.Cli.csproj \
-              --configuration Release \
-              --runtime ${{ matrix.rid }} \
-              --self-contained \
-              -p:PublishSingleFile=true \
-              -p:PublishTrimmed=true \
-              -p:Version=${GITHUB_REF_NAME#v} \
-              --output artifacts/${{ matrix.rid }}
-          else
-            echo "CLI project not present yet; nothing to publish."
-          fi
+          dotnet publish src/WinMatsch.Cli/WinMatsch.Cli.csproj \
+            --configuration Release \
+            --runtime ${{ matrix.rid }} \
+            --self-contained \
+            -p:PublishSingleFile=true \
+            -p:PublishTrimmed=true \
+            -p:SuppressTrimAnalysisWarnings=false \
+            -p:Version=${GITHUB_REF_NAME#v} \
+            --output artifacts/${{ matrix.rid }}
 
       - name: Upload artifacts
         if: hashFiles('artifacts/**') != ''

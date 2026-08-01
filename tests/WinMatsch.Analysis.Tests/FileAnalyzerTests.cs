@@ -30,6 +30,16 @@ public class FileAnalyzerTests
     }
 
     [Fact]
+    public void Analyze_dispatches_specialized_exe_content_through_the_production_registry()
+    {
+        using var stream = new MemoryStream(InnoFixtures.BuildInstaller());
+
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(stream, "setup.exe");
+
+        Assert.Equal(DetectedInstallerFormat.InnoSetup, analysis.Format);
+    }
+
+    [Fact]
     public void Analyze_dispatches_to_the_msi_analyzer()
     {
         using var stream = new MemoryStream(MsiFixtures.BuildMsi([("ProductName", "Contoso")]));

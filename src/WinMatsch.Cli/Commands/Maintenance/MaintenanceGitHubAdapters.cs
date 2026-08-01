@@ -29,7 +29,7 @@ public sealed class GitHubTokenValidator : ITokenValidator
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(token);
-        IGitHubRepositoryClient client = _clientFactory(token.RevealValue());
+        using IGitHubRepositoryClient client = _clientFactory(token.RevealValue());
         try
         {
             GitHubUser user = await client
@@ -106,8 +106,13 @@ public sealed class ToolPullRequestObservationSource : IPullRequestFeedbackSourc
 }
 
 /// <summary>Probes one installer URL and classifies the artifact's liveness.</summary>
-public interface IInstallerUrlProber
+public interface IInstallerUrlProber : IDisposable
 {
+    void IDisposable.Dispose()
+    {
+        GC.SuppressFinalize(this);
+    }
+
     public Task<DeadArtifactState> ProbeAsync(string url, CancellationToken cancellationToken);
 }
 
@@ -122,15 +127,27 @@ public interface IInstallerUrlProber
 public sealed class HttpInstallerUrlProber : IInstallerUrlProber
 {
     private readonly InstallerDownloader _downloader;
+    private readonly bool _ownsDownloader;
     private readonly Func<HttpMessageHandler> _confirmationHandlerFactory;
 
     public HttpInstallerUrlProber(
         InstallerDownloader? downloader = null,
         Func<HttpMessageHandler>? confirmationHandlerFactory = null)
     {
+        _ownsDownloader = downloader is null;
         _downloader = downloader ?? new InstallerDownloader();
         _confirmationHandlerFactory = confirmationHandlerFactory
             ?? (static () => new HttpClientHandler());
+    }
+
+    public void Dispose()
+    {
+        if (_ownsDownloader)
+        {
+            _downloader.Dispose();
+        }
+
+        GC.SuppressFinalize(this);
     }
 
     public async Task<DeadArtifactState> ProbeAsync(string url, CancellationToken cancellationToken)
@@ -219,6 +236,12 @@ public sealed class GitHubDeadVersionInspector : IDeadVersionInspector
         ArgumentNullException.ThrowIfNull(prober);
         _gitHub = gitHub;
         _prober = prober;
+    }
+
+    public void Dispose()
+    {
+        _prober.Dispose();
+        GC.SuppressFinalize(this);
     }
 
     public async Task<DeadVersionInspection> InspectAsync(

@@ -2,7 +2,9 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <AssemblyName>winmatsch</AssemblyName>
     <Description>Cross-platform command-line host for WinMatsch workflows.</Description>
+    <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL3000;IL3002;IL3050</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,6 +19,13 @@
   <ItemGroup>
     <ProjectReference Include="..\WinMatsch.GitHub\WinMatsch.GitHub.csproj" />
     <ProjectReference Include="..\WinMatsch.Workflows\WinMatsch.Workflows.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\WinMatsch.Validation\THIRD-PARTY-NOTICES.txt"
+          Link="THIRD-PARTY-NOTICES.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

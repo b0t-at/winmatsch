@@ -71,7 +71,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
         registry.SetHandler(command, async context =>
         {
             RepositoryCoordinates upstream = context.Configuration.Repository;
-            IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
+            using IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
             RepositoryCoordinates forkRepository = await ResolveForkAsync(context, client, fork, upstream)
                 .ConfigureAwait(false);
             BranchState upstreamBranch = await MaintenanceCommandHelpers.RunRemoteAsync(
@@ -157,7 +157,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
         registry.SetHandler(command, async context =>
         {
             RepositoryCoordinates upstream = context.Configuration.Repository;
-            IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
+            using IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
             RepositoryCoordinates forkRepository = await ResolveForkAsync(context, client, fork, upstream)
                 .ConfigureAwait(false);
             string prefix = context.ParseResult.GetValue(branchPrefix)
@@ -243,7 +243,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
         registry.SetHandler(command, async context =>
         {
             RepositoryCoordinates upstream = context.Configuration.Repository;
-            IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
+            using IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
             RepositoryCoordinates forkRepository = await ResolveForkAsync(context, client, fork, upstream)
                 .ConfigureAwait(false);
             IPullRequestFeedbackSource source = _sourceFactory(client, forkRepository.Owner);
@@ -334,8 +334,9 @@ public sealed class MaintenanceCommandModule : ICommandModule
             ];
 
             RepositoryCoordinates upstream = context.Configuration.Repository;
-            IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
-            var workflow = new RemoveDeadVersionsWorkflow(_inspectorFactory(client));
+            using IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
+            using IDeadVersionInspector inspector = _inspectorFactory(client);
+            var workflow = new RemoveDeadVersionsWorkflow(inspector);
             var request = new RemoveDeadVersionsRequest(upstream, requested);
             ImmutableArray<RemoveDeadVersionPlan> plans = await MaintenanceCommandHelpers.RunRemoteAsync(
                 context,

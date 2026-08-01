@@ -36,7 +36,7 @@ public sealed class RealProcessTests
     }
 
     [Fact]
-    public async Task Help_exposes_read_only_diagnostic_commands()
+    public async Task Help_exposes_the_complete_production_command_root()
     {
         ProcessResult result = await RunCliAsync("--help");
 
@@ -45,6 +45,82 @@ public sealed class RealProcessTests
         Assert.Contains("validate", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("show", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("list-versions", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("new", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("update", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("remove", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("submit", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("new-locale", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("update-locale", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("sync", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("cleanup", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("complete", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("token", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("config", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("cache", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("completion", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("token")]
+    [InlineData("config")]
+    [InlineData("cache")]
+    [InlineData("completion")]
+    [InlineData("new")]
+    [InlineData("update")]
+    [InlineData("remove")]
+    [InlineData("submit")]
+    [InlineData("new-locale")]
+    [InlineData("update-locale")]
+    [InlineData("sync")]
+    [InlineData("cleanup")]
+    [InlineData("complete")]
+    public async Task Every_production_command_help_loads_without_credentials_or_network(string command)
+    {
+        ProcessResult result = await RunCliAsync(command, "--help");
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Usage:", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, result.StandardError);
+    }
+
+    [Fact]
+    public async Task Completion_and_config_path_are_safe_without_credentials_or_network()
+    {
+        ProcessResult completion = await RunCliAsync("completion", "powershell");
+        ProcessResult configPath = await RunCliAsync("config", "path");
+
+        Assert.Equal(ExitCodes.Success, completion.ExitCode);
+        Assert.Contains("Register-ArgumentCompleter", completion.StandardOutput, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, completion.StandardError);
+        Assert.Equal(ExitCodes.Success, configPath.ExitCode);
+        Assert.Contains("config.yaml", configPath.StandardOutput, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(string.Empty, configPath.StandardError);
+    }
+
+    [Fact]
+    public async Task Local_analyze_runs_through_the_real_process_without_network()
+    {
+        string source = Path.Combine(AppContext.BaseDirectory, "winmatsch.dll");
+        string installer = Path.Combine(Path.GetTempPath(), $"winmatsch-{Guid.NewGuid():N}.exe");
+        File.Copy(source, installer);
+        try
+        {
+            ProcessResult result = await RunCliAsync(
+                "analyze",
+                installer,
+                "--format",
+                "json",
+                "--interaction",
+                "never");
+
+            Assert.Equal(ExitCodes.Success, result.ExitCode);
+            Assert.Contains("\"format\":\"portableExe\"", result.StandardOutput, StringComparison.Ordinal);
+            Assert.Equal(string.Empty, result.StandardError);
+        }
+        finally
+        {
+            File.Delete(installer);
+        }
     }
 
     [Fact]
@@ -81,7 +157,7 @@ public sealed class RealProcessTests
 
     private static async Task<ProcessResult> RunCliAsync(params string[] args)
     {
-        string cliAssembly = Path.Combine(AppContext.BaseDirectory, "WinMatsch.Cli.dll");
+        string cliAssembly = Path.Combine(AppContext.BaseDirectory, "winmatsch.dll");
         Assert.True(File.Exists(cliAssembly), $"CLI assembly not found at '{cliAssembly}'.");
 
         var runner = new PhysicalProcessRunner();

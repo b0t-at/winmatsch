@@ -1,6 +1,9 @@
+using WinMatsch.Analysis.Advanced;
 using WinMatsch.Analysis.Burn;
+using WinMatsch.Analysis.Inno;
 using WinMatsch.Analysis.Nsis;
 using WinMatsch.Analysis.Pe;
+using WinMatsch.Analysis.Squirrel;
 using WinMatsch.Core;
 
 namespace WinMatsch.Analysis;
@@ -12,13 +15,21 @@ namespace WinMatsch.Analysis;
 /// </summary>
 public sealed class ExeAnalyzer : IInstallerAnalyzer
 {
-    // Intended probe order once later waves add them, most specific first:
-    // AdvancedInstaller → Burn → Inno → Nsis → Squirrel → generic fallback below.
-    private static readonly IReadOnlyList<IExeFormatProbe> _probes = [new BurnProbe(), new NsisProbe()];
+    private static readonly IReadOnlyList<IExeFormatProbe> _probes =
+    [
+        new AdvancedInstallerProbe(),
+        new BurnProbe(),
+        new InnoProbe(),
+        new NsisProbe(),
+        new SquirrelProbe(),
+    ];
 
     // An EXE whose OriginalFilename or FileDescription contains one of these is treated as an
     // installer; everything else is portable. "7zs.sfx"/"7zsd.sfx" are 7-Zip self-extractor stubs.
     private static readonly string[] _installerKeywords = ["installer", "setup", "7zs.sfx", "7zsd.sfx"];
+
+    /// <summary>The explicit production probe order, exposed internally for registry tests.</summary>
+    internal static IReadOnlyList<IExeFormatProbe> Probes => _probes;
 
     public bool CanAnalyze(string fileName)
     {

@@ -90,20 +90,35 @@ internal static partial class InnoFormatReader
         byte[] scan = new byte[scanLength];
         stream.Position = 0;
         stream.ReadExactly(scan);
-        int magicOffset = IndexOfLoaderMagic(scan);
-        return magicOffset < 0 ? null : ReadOffsetTable(stream, magicOffset);
-    }
-
-    private static int IndexOfLoaderMagic(ReadOnlySpan<byte> data)
-    {
-        int first = data.IndexOf(ModernLoaderMagic);
-        int second = data.IndexOf(AlternateModernLoaderMagic);
-        if (first < 0)
+        int searchOffset = 0;
+        while (searchOffset <= scan.Length - ModernLoaderMagic.Length)
         {
-            return second;
+            int first = scan.AsSpan(searchOffset).IndexOf(ModernLoaderMagic);
+            int second = scan.AsSpan(searchOffset).IndexOf(AlternateModernLoaderMagic);
+            if (first < 0 && second < 0)
+            {
+                break;
+            }
+
+            int relative = first < 0
+                ? second
+                : second < 0
+                    ? first
+                    : Math.Min(first, second);
+            int candidate = searchOffset + relative;
+            try
+            {
+                return ReadOffsetTable(stream, candidate);
+            }
+            catch (InvalidDataException)
+            {
+                // The signatures can occur in payload bytes (including a single-file app that
+                // embeds this reader). Only a structurally valid table claims the executable.
+                searchOffset = candidate + 1;
+            }
         }
 
-        return second < 0 ? first : Math.Min(first, second);
+        return null;
     }
 
     private static InnoLoaderOffsets ReadOffsetTable(Stream stream, long offset)

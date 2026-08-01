@@ -42,6 +42,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         """;
 
     private readonly GitHubHttpTransport _transport;
+    private readonly HttpClient _httpClient;
     private readonly GitHubClientOptions _options;
     private readonly ConcurrentDictionary<string, MutationEntry> _mutations =
         new(StringComparer.Ordinal);
@@ -52,14 +53,22 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         string accessToken,
         GitHubClientOptions? options = null)
     {
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _options = options ?? new GitHubClientOptions();
-        _transport = new GitHubHttpTransport(httpClient, accessToken, _options);
+        _transport = new GitHubHttpTransport(_httpClient, accessToken, _options);
         _transport.RateLimitObserved += OnRateLimitObserved;
     }
 
     public RateLimitInfo? LastRateLimit => Volatile.Read(ref _lastRateLimit);
 
     public event EventHandler<RateLimitInfo>? RateLimitObserved;
+
+    public void Dispose()
+    {
+        _transport.RateLimitObserved -= OnRateLimitObserved;
+        _httpClient.Dispose();
+        GC.SuppressFinalize(this);
+    }
 
     public async Task<GitHubUser> GetAuthenticatedUserAsync(
         CancellationToken cancellationToken = default)

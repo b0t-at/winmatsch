@@ -1,8 +1,13 @@
 namespace WinMatsch.GitHub;
 
 /// <summary>GitHub repository operations used by WinMatsch workflows.</summary>
-public interface IGitHubRepositoryClient
+public interface IGitHubRepositoryClient : IDisposable
 {
+    void IDisposable.Dispose()
+    {
+        GC.SuppressFinalize(this);
+    }
+
     public RateLimitInfo? LastRateLimit { get; }
 
     public event EventHandler<RateLimitInfo>? RateLimitObserved;

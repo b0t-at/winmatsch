@@ -71,6 +71,37 @@ public sealed class GitHubWorkflowReleaseSource(
     }
 }
 
+/// <summary>Creates release assets from explicit installer URLs without network discovery.</summary>
+public sealed class DirectWorkflowReleaseSource : IWorkflowReleaseSource
+{
+    public Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
+        PackageIdentifier packageIdentifier,
+        ReleaseRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(packageIdentifier);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(
+            request.InstallerUrls
+                .OrderBy(static uri => uri.AbsoluteUri, StringComparer.Ordinal)
+                .Select((uri, index) => new DiscoveredAsset
+                {
+                    ReleaseId = 0,
+                    ReleaseTag = request.Release ?? "",
+                    ReleaseName = request.Release ?? "direct URL",
+                    ReleaseUri = request.ReleaseUrls.FirstOrDefault() ?? uri,
+                    IsPrerelease = false,
+                    AssetId = index,
+                    AssetName = Path.GetFileName(uri.LocalPath),
+                    DownloadUri = uri,
+                    DeclaredContentType = "application/octet-stream",
+                    DeclaredSize = 0,
+                    AssetCreatedAt = DateTimeOffset.UnixEpoch,
+                })
+                .ToImmutableArray());
+    }
+}
+
 public sealed class InstallerWorkflowArtifactProcessor(
     InstallerDownloader downloader,
     PayloadDependencyAnalyzer? dependencyAnalyzer = null) : IWorkflowArtifactProcessor

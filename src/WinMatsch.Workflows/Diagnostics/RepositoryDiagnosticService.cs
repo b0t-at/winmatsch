@@ -4,8 +4,13 @@ using WinMatsch.GitHub;
 
 namespace WinMatsch.Workflows.Diagnostics;
 
-public interface IRepositoryDiagnosticService
+public interface IRepositoryDiagnosticService : IDisposable
 {
+    void IDisposable.Dispose()
+    {
+        GC.SuppressFinalize(this);
+    }
+
     public Task<PackageVersionResult> GetPackageVersionAsync(
         RepositoryCoordinates repository,
         PackageIdentifier identifier,
@@ -28,6 +33,12 @@ public sealed class RepositoryDiagnosticService : IRepositoryDiagnosticService
     public RepositoryDiagnosticService(IGitHubRepositoryClient client)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+    }
+
+    public void Dispose()
+    {
+        _client.Dispose();
+        GC.SuppressFinalize(this);
     }
 
     public async Task<PackageVersionResult> GetPackageVersionAsync(

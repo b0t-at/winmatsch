@@ -720,7 +720,7 @@ public sealed class MutationCommandModule : ICommandModule
         MutationOptions options,
         WorkflowOperationRequest request)
     {
-        RuleRuntimeConfiguration runtime = ParseRuleRuntime(context.ParseResult, options);
+        RuleRuntimeConfiguration runtime = ParseRuleRuntime(context, options);
         OverridePackSet packs = ParseOverridePacks(context.ParseResult, options);
         string createdWith = context.ParseResult.GetValue(options.CreatedWith) ?? "winmatsch";
         string? createdWithUrl = context.ParseResult.GetValue(options.CreatedWithUrl);
@@ -1115,9 +1115,10 @@ public sealed class MutationCommandModule : ICommandModule
     }
 
     private static RuleRuntimeConfiguration ParseRuleRuntime(
-        ParseResult result,
+        CommandContext context,
         MutationOptions options)
     {
+        ParseResult result = context.ParseResult;
         RuleMode defaultMode = ParseRuleMode(result.GetValue(options.DefaultRuleMode) ?? "apply");
         var overrides = new Dictionary<string, RuleMode>(StringComparer.OrdinalIgnoreCase);
         foreach (string entry in result.GetValue(options.RuleModes) ?? [])
@@ -1131,7 +1132,18 @@ public sealed class MutationCommandModule : ICommandModule
             overrides.Add(entry[..separator], ParseRuleMode(entry[(separator + 1)..]));
         }
 
-        return new(defaultMode, commandOverrides: overrides);
+        var userOverrides = new Dictionary<string, RuleMode>(StringComparer.OrdinalIgnoreCase);
+        foreach (string ruleId in context.Configuration.EnabledRules)
+        {
+            userOverrides[ruleId] = RuleMode.Apply;
+        }
+
+        foreach (string ruleId in context.Configuration.DisabledRules)
+        {
+            userOverrides[ruleId] = RuleMode.Disabled;
+        }
+
+        return new(defaultMode, userOverrides, overrides);
     }
 
     private static RuleMode ParseRuleMode(string value)

@@ -96,8 +96,13 @@ public sealed record DeadVersionInspection(
     bool ExistsUpstream,
     ImmutableArray<DeadArtifactState> ArtifactStates);
 
-public interface IDeadVersionInspector
+public interface IDeadVersionInspector : IDisposable
 {
+    void IDisposable.Dispose()
+    {
+        GC.SuppressFinalize(this);
+    }
+
     public Task<DeadVersionInspection> InspectAsync(
         RepositoryCoordinates upstream,
         PackageIdentifier packageIdentifier,

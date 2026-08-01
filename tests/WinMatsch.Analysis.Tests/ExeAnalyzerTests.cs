@@ -1,4 +1,9 @@
 using System.Reflection.PortableExecutable;
+using WinMatsch.Analysis.Advanced;
+using WinMatsch.Analysis.Burn;
+using WinMatsch.Analysis.Inno;
+using WinMatsch.Analysis.Nsis;
+using WinMatsch.Analysis.Squirrel;
 using WinMatsch.Core;
 using Xunit;
 
@@ -7,6 +12,68 @@ namespace WinMatsch.Analysis.Tests;
 public class ExeAnalyzerTests
 {
     private readonly ExeAnalyzer _analyzer = new();
+
+    [Fact]
+    public void Production_probe_order_is_stable_and_most_specific_first()
+    {
+        Type[] probeTypes = [.. ExeAnalyzer.Probes.Select(static probe => probe.GetType())];
+
+        Assert.Equal(
+            [
+                typeof(AdvancedInstallerProbe),
+                typeof(BurnProbe),
+                typeof(InnoProbe),
+                typeof(NsisProbe),
+                typeof(SquirrelProbe),
+            ],
+            probeTypes);
+    }
+
+    [Fact]
+    public void Advanced_installer_fixture_is_detected_end_to_end()
+        => AssertFormat(
+            AdvancedInstallerFixtures.BuildInstaller(TypicalMsiProperties()),
+            DetectedInstallerFormat.AdvancedInstaller);
+
+    [Fact]
+    public void Burn_fixture_is_detected_end_to_end()
+        => AssertFormat(
+            BurnFixtures.BuildBundle(BurnFixtures.ManifestXml()),
+            DetectedInstallerFormat.Burn);
+
+    [Fact]
+    public void Inno_fixture_is_detected_end_to_end()
+        => AssertFormat(InnoFixtures.BuildInstaller(), DetectedInstallerFormat.InnoSetup);
+
+    [Fact]
+    public void Nsis_fixture_is_detected_end_to_end()
+        => AssertFormat(NsisFixtures.BuildInstaller(), DetectedInstallerFormat.Nullsoft);
+
+    [Fact]
+    public void Squirrel_fixture_is_detected_end_to_end()
+        => AssertFormat(
+            SquirrelFixtures.BuildClassicSetup(
+                SquirrelFixtures.BuildNupkg(SquirrelFixtures.NuspecXml())),
+            DetectedInstallerFormat.Squirrel);
+
+    [Fact]
+    public void Advanced_installer_wins_when_the_stub_also_has_squirrel_markers()
+        => AssertFormat(
+            AdvancedInstallerFixtures.BuildInstaller(
+                TypicalMsiProperties(),
+                version: SquirrelFixtures.BrandedStub),
+            DetectedInstallerFormat.AdvancedInstaller);
+
+    [Fact]
+    public void Embedded_probe_magic_in_a_managed_wrapper_does_not_claim_inno()
+    {
+        using FileStream stream = File.OpenRead(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Analysis.dll"));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "single-file-wrapper.exe");
+
+        Assert.NotEqual(DetectedInstallerFormat.InnoSetup, analysis.Format);
+    }
 
     [Theory]
     [InlineData("app.exe", true)]
@@ -129,4 +196,23 @@ public class ExeAnalyzerTests
         Assert.Equal("1.2.3", analysis.ProductVersion);
         Assert.Equal("© Foo Corp", analysis.Copyright);
     }
+
+    private void AssertFormat(byte[] content, DetectedInstallerFormat expected)
+    {
+        using var stream = new MemoryStream(content);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "fixture.exe");
+
+        Assert.Equal(expected, analysis.Format);
+    }
+
+    private static (string Name, string Value)[] TypicalMsiProperties() =>
+    [
+        ("ProductCode", "{5A2FEA1B-0F30-4F86-9F92-01A45C5A1E30}"),
+        ("ProductName", "Contoso Editor"),
+        ("ProductVersion", "2.5.0"),
+        ("Manufacturer", "Contoso Ltd"),
+        ("ProductLanguage", "1033"),
+        ("ALLUSERS", "1"),
+    ];
 }

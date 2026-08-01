@@ -186,7 +186,7 @@ public sealed class DiagnosticsCommandModule : ICommandModule
         {
             PackageIdentifier package = ParseIdentifier(context.ParseResult.GetValue(identifier));
             PackageVersion packageVersion = ParseVersion(context.ParseResult.GetValue(version));
-            IRepositoryDiagnosticService service = await CreateRepositoryServiceAsync(context)
+            using IRepositoryDiagnosticService service = await CreateRepositoryServiceAsync(context)
                 .ConfigureAwait(false);
             try
             {
@@ -261,7 +261,7 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                 throw new CliUsageException("--limit must be between 1 and 1000.");
             }
 
-            IRepositoryDiagnosticService service = await CreateRepositoryServiceAsync(context)
+            using IRepositoryDiagnosticService service = await CreateRepositoryServiceAsync(context)
                 .ConfigureAwait(false);
             try
             {
