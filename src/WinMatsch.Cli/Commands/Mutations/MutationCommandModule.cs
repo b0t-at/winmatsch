@@ -1720,7 +1720,9 @@ public sealed class MutationCommandModule : ICommandModule
         foreach (var review in plan.Rules.Reviews)
         {
             context.Interaction.ReportStatus(
-                $"  Review: {review.ManifestPath}:{review.FieldPath}");
+                $"  Review: {review.ManifestPath}:{review.FieldPath} "
+                + $"human={MutationRedact(review.HumanValue ?? "(null)")} "
+                + $"generated={MutationRedact(review.GeneratedValue ?? "(null)")}");
         }
 
         foreach (ValidationFinding finding in plan.Validation.Findings)

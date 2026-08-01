@@ -264,6 +264,22 @@ public sealed class ParsingTests
     }
 
     [Fact]
+    public async Task Ghes_graphql_derivation_preserves_tenant_path_prefix()
+    {
+        var harness = new CliHarness();
+        var probe = new ProbeModule();
+        harness.Modules.Add(probe);
+
+        CliRunResult result = await harness.RunAsync(
+            ["probe", "--github-api-url", "https://ghe.example.test/tenant/api/v3/"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(
+            "https://ghe.example.test/tenant/api/graphql",
+            probe.LastContext!.GitHubOptions.GraphQlUri!.AbsoluteUri);
+    }
+
+    [Fact]
     public async Task Ghes_rest_and_graphql_authorities_must_match()
     {
         var harness = new CliHarness();

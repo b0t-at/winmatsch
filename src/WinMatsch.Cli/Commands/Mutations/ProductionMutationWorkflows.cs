@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
@@ -110,13 +111,25 @@ internal sealed class ProductionMutationWorkflow(
                 .ConfigureAwait(false);
             return AttachTrustedReleaseProvenance(result, request, gitHubOptions);
         }
-        catch
+        catch (Exception primaryFailure)
         {
-            if (!usePrepared)
+            try
             {
-                CleanupArtifactDirectory();
+                if (!usePrepared)
+                {
+                    CleanupArtifactDirectory();
+                }
+            }
+            catch (Exception cleanupFailure) when (
+                cleanupFailure is IOException or UnauthorizedAccessException)
+            {
+                throw new IOException(
+                    $"{primaryFailure.Message} Cleanup of the mutation artifact directory also "
+                    + $"failed: {cleanupFailure.Message}",
+                    new AggregateException(primaryFailure, cleanupFailure));
             }
 
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
             throw;
         }
     }
@@ -153,14 +166,38 @@ internal sealed class ProductionMutationWorkflow(
 
     public void Dispose()
     {
-        CleanupArtifactDirectory();
-        if (_submitCacheDirectory is not null
-            && Directory.Exists(_submitCacheDirectory))
+        var failures = new List<Exception>();
+        try
         {
-            Directory.Delete(_submitCacheDirectory, recursive: true);
+            CleanupArtifactDirectory();
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            failures.Add(exception);
+        }
+
+        try
+        {
+            if (_submitCacheDirectory is not null
+                && Directory.Exists(_submitCacheDirectory))
+            {
+                Directory.Delete(_submitCacheDirectory, recursive: true);
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            failures.Add(exception);
         }
         GC.SuppressFinalize(this);
         GC.SuppressFinalize(this);
+        if (failures.Count > 0)
+        {
+            throw new AggregateException(
+                "One or more mutation temporary directories could not be removed.",
+                failures);
+        }
     }
 
     private static IWorkflowReleaseSource? CreateReleaseSource(
@@ -460,8 +497,9 @@ internal sealed class ProductionMutationWorkflow(
             return (request, null);
         }
 
-        string artifactDirectory = Directory.CreateTempSubdirectory(
+        _artifactDirectory = Directory.CreateTempSubdirectory(
             "winmatsch-mutation-artifacts-").FullName;
+        string artifactDirectory = _artifactDirectory;
         if (!OperatingSystem.IsWindows())
         {
             File.SetUnixFileMode(

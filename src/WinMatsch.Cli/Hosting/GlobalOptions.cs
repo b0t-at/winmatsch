@@ -345,9 +345,16 @@ public sealed class GlobalOptions
             return new Uri("https://api.github.com/graphql");
         }
 
+        string prefix = api.AbsolutePath.TrimEnd('/');
+        const string restSuffix = "/api/v3";
+        if (prefix.EndsWith(restSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            prefix = prefix[..^restSuffix.Length];
+        }
+
         var builder = new UriBuilder(api)
         {
-            Path = "/api/graphql",
+            Path = prefix + "/api/graphql",
         };
         return builder.Uri;
     }

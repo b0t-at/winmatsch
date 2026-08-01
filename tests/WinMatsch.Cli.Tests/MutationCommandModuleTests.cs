@@ -501,6 +501,11 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(4, workflow.Requests.Count);
         Assert.False(workflow.Requests[0].ApproveReview);
         Assert.True(workflow.Requests[1].ApproveReview);
+        Assert.Contains(
+            harness.Interaction.StatusMessages,
+            message => message.Contains(
+                "human=human generated=bot",
+                StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1532,6 +1537,41 @@ public sealed class MutationCommandModuleTests
         Assert.DoesNotContain("trace-secret", result.StandardOutput, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Recovery_details_are_visible_and_redacted(bool json)
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => FakeMutationWorkflow.Result(
+                request,
+                WorkflowResultCode.ApplyFailed,
+                recovery: new(
+                    "token=primary-secret",
+                    ["https://example.test/recover?key=recovery-secret"],
+                    JournalRetained: true)),
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "update",
+            "Example.App",
+            "1.0",
+            "--format",
+            json ? "json" : "text",
+        ]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains(
+            json ? "\"journalRetained\":true" : "Recovery journal retained: true",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("primary-secret", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("recovery-secret", result.StandardOutput, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Factory_composes_real_local_workflow_for_golden_new_apply()
     {
@@ -1761,6 +1801,7 @@ internal sealed class FakeMutationWorkflow : IMutationWorkflow
         ImmutableArray<WorkflowQuestion> questions = default,
         ImmutableArray<HumanCorrectionReview> reviews = default,
         ImmutableArray<RuleTraceEntry> trace = default,
+        WorkflowRecoveryDetails? recovery = null,
         string content = "PackageIdentifier: Example.App\nPackageVersion: 1.0\n",
         ImmutableArray<WorkflowAuditEntry> audit = default)
     {
@@ -1805,6 +1846,7 @@ internal sealed class FakeMutationWorkflow : IMutationWorkflow
             Plan = plan,
             Applied = request.ExecutionMode == WorkflowExecutionMode.Apply
                 && code == WorkflowResultCode.Succeeded,
+            Recovery = recovery,
         };
     }
 

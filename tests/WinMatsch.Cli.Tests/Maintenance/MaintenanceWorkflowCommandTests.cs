@@ -431,6 +431,40 @@ public sealed class MaintenanceWorkflowCommandTests
     }
 
     [Fact]
+    public async Task Queued_allowlisted_repair_remains_pending_and_unapplied()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        PullRequestInfo pullRequest = MaintenancePullRequests.ToolOwned(41);
+        client.PullRequests.Add(pullRequest);
+        var source = new ScriptedFeedbackSource(
+        [
+            Assert.Single(MaintenancePullRequests.Observe(pullRequest)) with
+            {
+                Labels = ["hash-mismatch"],
+            },
+        ]);
+        var store = new InMemoryFeedbackStateStore();
+        CliHarness harness = CreateHarness(client, source, store);
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--apply-safe", "--yes", "--format", "json"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains(
+            "\"appliedKnownSafeResponses\":false",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"state\":\"awaitingApprovedRepair\"",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            FeedbackWorkState.AwaitingApprovedRepair,
+            Assert.Single(store.Pending).State);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
     public async Task Complete_apply_safe_cancellation_maps_to_the_cancelled_exit_code()
     {
         FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
@@ -513,6 +547,27 @@ public sealed class MaintenanceWorkflowCommandTests
         Assert.Contains("#41", result.StandardOutput, StringComparison.Ordinal);
         Assert.Empty(client.Mutations);
         Assert.Empty(harness.Interaction.Questions);
+    }
+
+    [Fact]
+    public async Task Schedule_persistence_failure_returns_operation_failure()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
+        var store = new InMemoryFeedbackStateStore
+        {
+            PersistFailure = new IOException("state unavailable"),
+        };
+        CliHarness harness = CreateHarness(
+            client,
+            TransientFeedbackSource(41),
+            store);
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--schedule-pending", "--yes", "--format", "json"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains("GH3208", result.StandardOutput, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -817,11 +872,18 @@ public sealed class MaintenanceWorkflowCommandTests
     {
         public ImmutableArray<FeedbackWorkItem> Pending { get; set; } = [];
 
+        public Exception? PersistFailure { get; init; }
+
         public Task PersistAsync(
             FeedbackWorkItem item,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (PersistFailure is not null)
+            {
+                return Task.FromException(PersistFailure);
+            }
+
             Pending =
             [
                 .. Pending.Where(existing =>

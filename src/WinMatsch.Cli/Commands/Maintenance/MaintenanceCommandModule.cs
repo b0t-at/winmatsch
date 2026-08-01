@@ -518,7 +518,11 @@ public sealed class MaintenanceCommandModule : ICommandModule
                     [.. lifecycle.Diagnostics, .. inspection.Diagnostics],
                     applied: false,
                     pending: displayedPending);
-                return ExitCodes.Success;
+                return schedule
+                    && inspection.Diagnostics.Any(static diagnostic =>
+                        diagnostic.Code == "GH3208")
+                    ? ExitCodes.OperationFailed
+                    : ExitCodes.Success;
             }
 
             bool confirmed = await MaintenanceCommandHelpers.ConfirmMutationAsync(
@@ -570,8 +574,12 @@ public sealed class MaintenanceCommandModule : ICommandModule
                 pending,
                 result);
             bool appliedKnownSafeResponse = result.Statuses.Any(static status =>
-                status.RecommendedAction is PullRequestLifecycleAction.RerunChecks
-                    or PullRequestLifecycleAction.RepairManifest);
+                    status.RecommendedAction == PullRequestLifecycleAction.RerunChecks)
+                || result.Statuses.Any(status =>
+                    status.RecommendedAction == PullRequestLifecycleAction.RepairManifest
+                    && result.RemoteStates.Any(remote =>
+                        remote.PullRequestNumber == status.PullRequestNumber
+                        && !remote.State.RemoteOutcomeUncertain));
             WriteCompleteResult(
                 context,
                 upstream,
@@ -755,13 +763,19 @@ public sealed class MaintenanceCommandModule : ICommandModule
         ImmutableArray<FeedbackWorkItem> stored,
         FeedbackResult result)
     {
+        HashSet<long> completedRepairs =
+        [
+            .. result.RemoteStates
+                .Where(static remote => !remote.State.RemoteOutcomeUncertain)
+                .Select(static remote => remote.PullRequestNumber),
+        ];
         HashSet<long> terminal =
         [
             .. result.Statuses
                 .Where(static status =>
-                    status.RecommendedAction is PullRequestLifecycleAction.RepairManifest
-                        or PullRequestLifecycleAction.EscalateToHuman)
+                    status.RecommendedAction == PullRequestLifecycleAction.EscalateToHuman)
                 .Select(static status => status.PullRequestNumber),
+            .. completedRepairs,
         ];
         Dictionary<long, FeedbackWorkItem> projected = stored
             .Where(item => !terminal.Contains(item.PullRequestNumber))

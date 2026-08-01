@@ -279,8 +279,10 @@ public static partial class CliRedactor
                 backslashes++;
             }
 
-            bool escaped = (backslashes & 1) == 1;
-            if (escaped == escapedDelimiter)
+            bool closes = escapedDelimiter
+                ? backslashes == 1
+                : (backslashes & 1) == 0;
+            if (closes)
             {
                 return index - (escapedDelimiter ? 1 : 0);
             }

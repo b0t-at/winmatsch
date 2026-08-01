@@ -36,6 +36,7 @@ internal static class MutationOutput
             writer.WriteLine($"Warning: {Redact(local.ErrorMessage)}");
         }
 
+        WriteRecovery(writer, local.Recovery);
         writer.WriteLine($"Output: {plan.OutputDirectory}");
         writer.WriteLine("Changes:");
         foreach (WorkflowFileChange change in plan.FileChanges.OrderBy(
@@ -179,6 +180,26 @@ internal static class MutationOutput
         }
     }
 
+    private static void WriteRecovery(
+        TextWriter writer,
+        WorkflowRecoveryDetails? recovery)
+    {
+        if (recovery is null)
+        {
+            return;
+        }
+
+        writer.WriteLine($"Recovery primary error: {Redact(recovery.PrimaryError)}");
+        foreach (string error in recovery.RecoveryErrors)
+        {
+            writer.WriteLine($"  recovery error: {Redact(error)}");
+        }
+
+        writer.WriteLine(
+            $"Recovery journal retained: "
+            + recovery.JournalRetained.ToString().ToLowerInvariant());
+    }
+
     private static void WriteRemoteState(TextWriter writer, RemoteMutationState state)
     {
         if (state.Fork is not null)
@@ -227,6 +248,7 @@ internal static class MutationOutput
             json.WriteString("warning", Redact(local.ErrorMessage));
         }
 
+        WriteRecovery(json, local.Recovery);
         json.WriteString("outputDirectory", plan.OutputDirectory);
         json.WriteBoolean("reviewApproved", plan.ReviewApproved);
         json.WriteBoolean("requiresReview", plan.RequiresReview);
@@ -392,6 +414,30 @@ internal static class MutationOutput
         }
 
         json.WriteEndArray();
+    }
+
+    private static void WriteRecovery(
+        Utf8JsonWriter json,
+        WorkflowRecoveryDetails? recovery)
+    {
+        json.WritePropertyName("recovery");
+        if (recovery is null)
+        {
+            json.WriteNullValue();
+            return;
+        }
+
+        json.WriteStartObject();
+        json.WriteString("primaryError", Redact(recovery.PrimaryError));
+        json.WriteStartArray("errors");
+        foreach (string error in recovery.RecoveryErrors)
+        {
+            json.WriteStringValue(Redact(error));
+        }
+
+        json.WriteEndArray();
+        json.WriteBoolean("journalRetained", recovery.JournalRetained);
+        json.WriteEndObject();
     }
 
     private static void WriteRemote(Utf8JsonWriter json, GitHubLifecycleResult remote)
