@@ -1,0 +1,595 @@
+using System.Collections.Immutable;
+using WinMatsch.Analysis;
+using WinMatsch.Core;
+using WinMatsch.Core.Yaml;
+using WinMatsch.Downloads;
+using WinMatsch.Rules;
+using WinMatsch.Validation;
+using WinMatsch.Workflows.Discovery;
+using WinMatsch.Workflows.Mapping;
+using WinMatsch.Workflows.Operations;
+using Xunit;
+
+namespace WinMatsch.Workflows.Tests.Operations;
+
+public sealed class LocalWorkflowEngineTests
+{
+    [Fact]
+    public async Task New_plan_is_deterministic_and_does_not_publish()
+    {
+        using var temporary = new TemporaryDirectory();
+        var transaction = new RecordingTransaction();
+        LocalWorkflowEngine engine = CreateEngine(new DictionarySnapshotSource(), transaction);
+        NewOperationRequest request = NewRequest(temporary.Path, WorkflowExecutionMode.Plan);
+
+        WorkflowOperationResult first = await engine.NewAsync(request);
+        WorkflowOperationResult second = await engine.NewAsync(request);
+
+        Assert.Equal(WorkflowResultCode.Succeeded, first.Code);
+        Assert.False(first.Applied);
+        Assert.Equal(0, transaction.Calls);
+        Assert.Equal(
+            first.Plan.FileChanges.Select(static change => Convert.ToHexString(change.Content.AsSpan())),
+            second.Plan.FileChanges.Select(static change => Convert.ToHexString(change.Content.AsSpan())));
+        Assert.True(first.Plan.Audit.SequenceEqual(second.Plan.Audit));
+        Assert.False(Directory.Exists(Path.Combine(temporary.Path, "manifests")));
+    }
+
+    [Fact]
+    public async Task New_apply_publishes_complete_valid_manifest_set()
+    {
+        using var temporary = new TemporaryDirectory();
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(),
+            new AtomicWorkflowFileTransaction());
+        NewOperationRequest request = NewRequest(temporary.Path, WorkflowExecutionMode.Apply);
+
+        WorkflowOperationResult result = await engine.NewAsync(request);
+
+        Assert.True(result.Applied);
+        string directory = Path.Combine(
+            temporary.Path,
+            ManifestPaths.GetVersionDirectory(new PackageIdentifier("Example.App"), new PackageVersion("2.0.0"))
+                .Replace('/', Path.DirectorySeparatorChar));
+        PackageManifests manifests = PackageManifestIO.LoadDirectory(directory);
+        Assert.Equal("Example.App", manifests.Version.PackageIdentifier!.Value);
+        Assert.Equal("2.0.0", manifests.Version.PackageVersion!.Value);
+        Assert.Equal(3, Directory.EnumerateFiles(directory, "*.yaml").Count());
+    }
+
+    [Fact]
+    public async Task Remove_deletes_only_the_exact_version()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests oldPackage = CreatePackage("1.0.0", "A");
+        PackageManifests retainedPackage = CreatePackage("2.0.0", "B");
+        WritePackage(temporary.Path, oldPackage);
+        WritePackage(temporary.Path, retainedPackage);
+        LocalWorkflowEngine engine = CreateEngine(
+            new LocalManifestSnapshotSource(),
+            new AtomicWorkflowFileTransaction());
+
+        WorkflowOperationResult result = await engine.RemoveAsync(new RemoveOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            ExecutionMode = WorkflowExecutionMode.Apply,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PackageVersion = new PackageVersion("1.0.0"),
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        });
+
+        Assert.True(result.Applied);
+        Assert.False(Directory.Exists(VersionDirectory(temporary.Path, "1.0.0")));
+        Assert.True(Directory.Exists(VersionDirectory(temporary.Path, "2.0.0")));
+    }
+
+    [Fact]
+    public async Task Submit_preserves_raw_bytes_when_normalization_is_not_requested()
+    {
+        using var temporary = new TemporaryDirectory();
+        ImmutableArray<RawManifestDocument> documents = Documents(CreatePackage("1.0.0", "A"), "custom tool");
+        var preflight = new CapturingPreflight();
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(),
+            new RecordingTransaction(),
+            preflight);
+
+        WorkflowOperationResult result = await engine.SubmitAsync(new SubmitOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            Documents = documents,
+            Normalize = false,
+        });
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.Equal(
+            documents.Select(static document => Convert.ToHexString(document.Content.AsSpan())),
+            preflight.Last!.AfterDocuments.Select(static document => Convert.ToHexString(document.Content.AsSpan())));
+    }
+
+    [Fact]
+    public async Task New_locale_changes_one_file_and_preserves_unrelated_bytes()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        WritePackage(temporary.Path, package);
+        string installerPath = Path.Combine(
+            VersionDirectory(temporary.Path, "1.0.0"),
+            ManifestPaths.GetInstallerFileName(new PackageIdentifier("Example.App")));
+        byte[] installerBefore = await File.ReadAllBytesAsync(installerPath);
+        LocalWorkflowEngine engine = CreateEngine(
+            new LocalManifestSnapshotSource(),
+            new AtomicWorkflowFileTransaction());
+
+        WorkflowOperationResult result = await engine.NewLocaleAsync(new NewLocaleOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            ExecutionMode = WorkflowExecutionMode.Apply,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PackageVersion = new PackageVersion("1.0.0"),
+            Locale = new PackageLocaleMetadata
+            {
+                PackageLocale = new LanguageTag("de-DE"),
+                Publisher = "Example",
+                PackageName = "Anwendung",
+                License = "MIT",
+                ShortDescription = "Beschreibung",
+            },
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        });
+
+        Assert.True(result.Applied);
+        Assert.Single(result.Plan.FileChanges);
+        Assert.Equal(installerBefore, await File.ReadAllBytesAsync(installerPath));
+        Assert.True(File.Exists(Path.Combine(
+            VersionDirectory(temporary.Path, "1.0.0"),
+            "Example.App.locale.de-DE.yaml")));
+    }
+
+    [Fact]
+    public async Task Update_locale_preserves_unspecified_fields_and_unrelated_files()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        package.Locales.Add(new LocaleManifest
+        {
+            PackageIdentifier = package.Version.PackageIdentifier,
+            PackageVersion = package.Version.PackageVersion,
+            PackageLocale = new LanguageTag("de-DE"),
+            PackageName = "Alt",
+            Description = "Hand-maintained description",
+            Tags = ["eins", "zwei"],
+        });
+        WritePackage(temporary.Path, package);
+        string installerPath = Path.Combine(
+            VersionDirectory(temporary.Path, "1.0.0"),
+            ManifestPaths.GetInstallerFileName(new PackageIdentifier("Example.App")));
+        byte[] installerBefore = await File.ReadAllBytesAsync(installerPath);
+        LocalWorkflowEngine engine = CreateEngine(
+            new LocalManifestSnapshotSource(),
+            new AtomicWorkflowFileTransaction());
+
+        WorkflowOperationResult result = await engine.UpdateLocaleAsync(new UpdateLocaleOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            ExecutionMode = WorkflowExecutionMode.Apply,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PackageVersion = new PackageVersion("1.0.0"),
+            Locale = new PackageLocaleMetadata
+            {
+                PackageLocale = new LanguageTag("de-DE"),
+                PackageName = "Neu",
+            },
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        });
+
+        PackageManifests updated = PackageManifestIO.LoadDirectory(VersionDirectory(temporary.Path, "1.0.0"));
+        LocaleManifest locale = Assert.Single(updated.Locales);
+        Assert.True(result.Applied);
+        Assert.Equal("Neu", locale.PackageName);
+        Assert.Equal("Hand-maintained description", locale.Description);
+        Assert.Equal(["eins", "zwei"], locale.Tags);
+        Assert.Equal(installerBefore, await File.ReadAllBytesAsync(installerPath));
+    }
+
+    [Fact]
+    public async Task Local_source_rejects_non_exact_package_path_casing()
+    {
+        using var temporary = new TemporaryDirectory();
+        WritePackage(temporary.Path, CreatePackage("1.0.0", "A"));
+        string canonical = Path.Combine(temporary.Path, "manifests", "e", "Example");
+        string intermediate = Path.Combine(temporary.Path, "manifests", "e", "rename-temp");
+        string incorrect = Path.Combine(temporary.Path, "manifests", "e", "example");
+        Directory.Move(canonical, intermediate);
+        Directory.Move(intermediate, incorrect);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => new LocalManifestSnapshotSource().LoadAsync(
+                temporary.Path,
+                new PackageIdentifier("Example.App"),
+                new PackageVersion("1.0.0"),
+                CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Atomic_transaction_rolls_back_after_partial_install_failure()
+    {
+        using var temporary = new TemporaryDirectory();
+        string original = Path.Combine(temporary.Path, "a.txt");
+        await File.WriteAllTextAsync(original, "before");
+        await File.WriteAllTextAsync(Path.Combine(temporary.Path, "blocked"), "not-a-directory");
+        var transaction = new AtomicWorkflowFileTransaction();
+        ImmutableArray<WorkflowFileChange> changes =
+        [
+            new(PlannedChangeKind.Update, "a.txt", "after"u8),
+            new(PlannedChangeKind.Add, "blocked/file.txt", "new"u8),
+        ];
+
+        await Assert.ThrowsAnyAsync<IOException>(
+            () => transaction.ApplyAsync(temporary.Path, "Example.App", changes, CancellationToken.None));
+
+        Assert.Equal("before", await File.ReadAllTextAsync(original));
+        Assert.False(File.Exists(Path.Combine(temporary.Path, "blocked", "file.txt")));
+        Assert.Empty(Directory.EnumerateDirectories(temporary.Path, ".winmatsch-transaction-*"));
+    }
+
+    [Fact]
+    public async Task Transaction_rejects_traversal_without_writing()
+    {
+        using var temporary = new TemporaryDirectory();
+
+        Assert.Throws<ArgumentException>(
+            () => new WorkflowFileChange(PlannedChangeKind.Add, "../escape.txt", "bad"u8));
+        await new AtomicWorkflowFileTransaction().ApplyAsync(
+            temporary.Path,
+            "Example.App",
+            [],
+            CancellationToken.None);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(temporary.Path));
+    }
+
+    [Fact]
+    public async Task Update_with_unchanged_url_and_hash_is_a_no_op()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        PackageSnapshot snapshot = Snapshot(package);
+        var source = new DictionarySnapshotSource(snapshot);
+        LocalWorkflowEngine engine = CreateEngine(source, new RecordingTransaction());
+        DiscoveredAsset asset = Asset("1.0.0", "A");
+
+        WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PreviousVersion = new PackageVersion("1.0.0"),
+            PackageVersion = "1.0.0",
+            Assets = [asset],
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        });
+
+        Assert.Equal(WorkflowResultCode.NoChanges, result.Code);
+        Assert.Empty(result.Plan.FileChanges);
+    }
+
+    [Fact]
+    public async Task Blocking_rule_finding_stops_apply_at_the_transaction_boundary()
+    {
+        using var temporary = new TemporaryDirectory();
+        var transaction = new RecordingTransaction();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new FindingRuleRunner(
+                new RuleRunSummary(
+                    [],
+                    [],
+                    [new RuleFinding("TEST001", RuleSeverity.Error, "blocked")],
+                    [],
+                    [])),
+            new CapturingPreflight(),
+            transaction,
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.NewAsync(
+            NewRequest(temporary.Path, WorkflowExecutionMode.Apply));
+
+        Assert.Equal(WorkflowResultCode.ValidationFailed, result.Code);
+        Assert.Equal(0, transaction.Calls);
+        Assert.Contains(result.Plan.Validation.Findings, static finding => finding.Code == "RULE_TEST001");
+    }
+
+    [Fact]
+    public async Task Human_correction_review_requires_explicit_approval()
+    {
+        using var temporary = new TemporaryDirectory();
+        var transaction = new RecordingTransaction();
+        RuleRunSummary review = new(
+            [],
+            [],
+            [],
+            [new HumanCorrectionReview("installer.yaml", "Installers[0].Scope", "User", "Machine", "User")],
+            []);
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new FindingRuleRunner(review),
+            new CapturingPreflight(),
+            transaction,
+            clock: new FixedClock());
+
+        WorkflowOperationResult blocked = await engine.NewAsync(
+            NewRequest(temporary.Path, WorkflowExecutionMode.Apply));
+        WorkflowOperationResult approved = await engine.NewAsync(
+            NewRequest(temporary.Path, WorkflowExecutionMode.Apply) with { ApproveReview = true });
+
+        Assert.Equal(WorkflowResultCode.ReviewRequired, blocked.Code);
+        Assert.False(blocked.Applied);
+        Assert.True(approved.Applied);
+        Assert.Equal(1, transaction.Calls);
+    }
+
+    [Fact]
+    public async Task Cancellation_before_transaction_keeps_destination_unchanged()
+    {
+        using var temporary = new TemporaryDirectory();
+        string original = Path.Combine(temporary.Path, "a.txt");
+        await File.WriteAllTextAsync(original, "before");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => new AtomicWorkflowFileTransaction().ApplyAsync(
+                temporary.Path,
+                "Example.App",
+                [new WorkflowFileChange(PlannedChangeKind.Update, "a.txt", "after"u8)],
+                cancellation.Token));
+
+        Assert.Equal("before", await File.ReadAllTextAsync(original));
+    }
+
+    private static LocalWorkflowEngine CreateEngine(
+        IManifestSnapshotSource source,
+        IWorkflowFileTransaction transaction,
+        IWorkflowPreflight? preflight = null)
+        => new(
+            source,
+            new PassThroughRuleRunner(),
+            preflight ?? new CapturingPreflight(),
+            transaction,
+            clock: new FixedClock());
+
+    private static NewOperationRequest NewRequest(string output, WorkflowExecutionMode mode)
+        => new()
+        {
+            OutputDirectory = output,
+            ExecutionMode = mode,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PackageVersion = "2.0.0",
+            Assets = [Asset("2.0.0", "A")],
+            Locale = new PackageLocaleMetadata
+            {
+                PackageLocale = new LanguageTag("en-US"),
+                Publisher = "Example",
+                PackageName = "App",
+                License = "MIT",
+                ShortDescription = "Example application",
+            },
+            CreatedWith = "winmatsch test",
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        };
+
+    private static DiscoveredAsset Asset(string version, string hashSeed)
+    {
+        string hash = string.Concat(Enumerable.Repeat(hashSeed, 64));
+        var identity = new DownloadContentIdentity(new Sha256Hash(hash), 42);
+        return new DiscoveredAsset
+        {
+            ReleaseId = 1,
+            ReleaseTag = $"v{version}",
+            ReleaseName = version,
+            ReleaseUri = new Uri($"https://example.test/releases/{version}"),
+            IsPrerelease = false,
+            ReleasePublishedAt = new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero),
+            AssetId = 2,
+            AssetName = "app-x64.exe",
+            DownloadUri = new Uri("https://example.test/app-x64.exe"),
+            DeclaredContentType = "application/octet-stream",
+            DeclaredSize = 42,
+            AssetCreatedAt = new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero),
+            Content = new(
+                identity,
+                "https://example.test/app-x64.exe",
+                "https://example.test/app-x64.exe",
+                "application/octet-stream",
+                new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero)),
+            Analysis = new AssetAnalysisEvidence
+            {
+                Format = DetectedInstallerFormat.GenericInstallerExe,
+                AnalyzedContentIdentity = identity,
+                AnalyzedUrl = "https://example.test/app-x64.exe",
+                ProductVersion = version,
+                IsProductVersionTrustworthy = true,
+                InstallerShapes =
+                [
+                    new AnalyzedInstallerShape
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Exe,
+                    },
+                ],
+            },
+        };
+    }
+
+    private static PackageManifests CreatePackage(string versionValue, string hashSeed)
+    {
+        var identifier = new PackageIdentifier("Example.App");
+        var version = new PackageVersion(versionValue);
+        var locale = new LanguageTag("en-US");
+        return new()
+        {
+            Version = new VersionManifest
+            {
+                PackageIdentifier = identifier,
+                PackageVersion = version,
+                DefaultLocale = locale,
+            },
+            Installer = new InstallerManifest
+            {
+                PackageIdentifier = identifier,
+                PackageVersion = version,
+                Installers =
+                [
+                    new Installer
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Exe,
+                        InstallerUrl = "https://example.test/app-x64.exe",
+                        InstallerSha256 = new Sha256Hash(string.Concat(Enumerable.Repeat(hashSeed, 64))),
+                    },
+                ],
+            },
+            DefaultLocale = new DefaultLocaleManifest
+            {
+                PackageIdentifier = identifier,
+                PackageVersion = version,
+                PackageLocale = locale,
+                Publisher = "Example",
+                PackageName = "App",
+                License = "MIT",
+                ShortDescription = "Example application",
+            },
+            Locales = [],
+        };
+    }
+
+    private static PackageSnapshot Snapshot(PackageManifests package)
+        => new()
+        {
+            PackageIdentifier = package.Version.PackageIdentifier!,
+            PackageVersion = package.Version.PackageVersion!,
+            VersionDirectory = ManifestPaths.GetVersionDirectory(
+                package.Version.PackageIdentifier!,
+                package.Version.PackageVersion!),
+            Manifests = package,
+            Documents = Documents(package, null),
+        };
+
+    private static ImmutableArray<RawManifestDocument> Documents(
+        PackageManifests package,
+        string? createdWith)
+    {
+        string directory = ManifestPaths.GetVersionDirectory(
+            package.Version.PackageIdentifier!,
+            package.Version.PackageVersion!);
+        return
+        [
+            .. PackageManifestIO.SerializeFiles(
+                    package,
+                    new ManifestWriteOptions { CreatedWith = createdWith })
+                .Select(pair => new RawManifestDocument(
+                    $"{directory}/{pair.Key}",
+                    System.Text.Encoding.UTF8.GetBytes(pair.Value)))
+                .OrderBy(static document => document.RepositoryPath, StringComparer.Ordinal),
+        ];
+    }
+
+    private static void WritePackage(string root, PackageManifests package)
+    {
+        string directory = VersionDirectory(root, package.Version.PackageVersion!.Value);
+        PackageManifestIO.WriteDirectory(directory, package);
+    }
+
+    private static string VersionDirectory(string root, string version)
+        => Path.Combine(
+            root,
+            ManifestPaths.GetVersionDirectory(
+                    new PackageIdentifier("Example.App"),
+                    new PackageVersion(version))
+                .Replace('/', Path.DirectorySeparatorChar));
+
+    private sealed class DictionarySnapshotSource(params PackageSnapshot[] snapshots) : IManifestSnapshotSource
+    {
+        private readonly IReadOnlyList<PackageSnapshot> _snapshots = snapshots;
+
+        public Task<PackageSnapshot?> LoadAsync(
+            string outputDirectory,
+            PackageIdentifier packageIdentifier,
+            PackageVersion packageVersion,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(_snapshots.SingleOrDefault(snapshot =>
+                snapshot.PackageIdentifier.Equals(packageIdentifier)
+                && snapshot.PackageVersion.Equals(packageVersion)));
+        }
+    }
+
+    private sealed class PassThroughRuleRunner : IWorkflowRuleRunner
+    {
+        public WorkflowRuleResult Run(WorkflowRuleRequest request)
+            => new(request.Manifests, RuleRunSummary.Empty);
+    }
+
+    private sealed class FindingRuleRunner(RuleRunSummary summary) : IWorkflowRuleRunner
+    {
+        public WorkflowRuleResult Run(WorkflowRuleRequest request)
+            => new(request.Manifests, summary);
+    }
+
+    private sealed class CapturingPreflight : IWorkflowPreflight
+    {
+        public WorkflowPreflightRequest? Last { get; private set; }
+
+        public Task<ValidationReport> ValidateAsync(
+            WorkflowPreflightRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Last = request;
+            return Task.FromResult(new ValidationReport());
+        }
+    }
+
+    private sealed class RecordingTransaction : IWorkflowFileTransaction
+    {
+        public int Calls { get; private set; }
+
+        public Task ApplyAsync(
+            string outputDirectory,
+            string operationLockKey,
+            ImmutableArray<WorkflowFileChange> changes,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FixedClock : IWorkflowClock
+    {
+        public DateTimeOffset UtcNow { get; } =
+            new(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+    }
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public TemporaryDirectory()
+        {
+            Path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                "winmatsch-workflows-tests",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Path))
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+        }
+    }
+}
