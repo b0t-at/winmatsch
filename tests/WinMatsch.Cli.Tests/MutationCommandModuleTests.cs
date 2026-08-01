@@ -622,7 +622,9 @@ public sealed class MutationCommandModuleTests
                     new(
                         "SECRET",
                         ValidationSeverity.Warning,
-                        $"token={token}; password: hunter2; Authorization: Bearer bearer-secret"),
+                        $"token={token}; password: hunter2; client_secret: oauth-secret; "
+                        + "access_token=access-secret; refresh-token: refresh-secret; "
+                        + "Authorization: Bearer bearer-secret"),
                 ]),
                 content: $"value: {token}\n"
                     + "InstallerUrl: https://user:password@example.test/app.exe?sig=secret"
@@ -637,6 +639,9 @@ public sealed class MutationCommandModuleTests
         Assert.DoesNotContain(token, result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("user:password@", result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("hunter2", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("oauth-secret", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("access-secret", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("refresh-secret", result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("bearer-secret", result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("signature", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("[REDACTED]", result.StandardOutput, StringComparison.Ordinal);

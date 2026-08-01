@@ -416,7 +416,7 @@ internal static partial class MutationOutput
     private static partial Regex GitHubTokenPattern();
 
     [GeneratedRegex(
-        @"(?i)\b(password|token|secret|api[-_]?key|signature|sig|credential)(\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\s,;]+)")]
+        @"(?i)\b(password|client[-_]?secret|access[-_]?token|refresh[-_]?token|token|secret|api[-_]?key|signature|sig|credential)(\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\s,;]+)")]
     private static partial Regex SecretAssignmentPattern();
 
     [GeneratedRegex(
