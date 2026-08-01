@@ -131,3 +131,10 @@ Parallelizable: P2 ∥ P3 after P1; P4 ∥ P5 ∥ P6 mostly independent after P3
 - Then merge P5 rules branch into main
 - Remember: any new project needs <IsTestProject> handling or IsAotCompatible applies
 
+
+### Session 2026-08-01: H1 release-docs DONE
+- LICENSE (MIT, winmatsch contributors 2026) + THIRD-PARTY-NOTICES.txt moved to repo root (single source; Validation + Cli link it, copied into every output/publish; LicenseNoticeTests still green); Directory.Build.props: PackageLicenseExpression=MIT, Copyright, PackageProjectUrl; Cli Description user-facing
+- README rewritten + docs/: commands (full reference incl. hidden remove-dead-versions, exit codes, JSON contract, partial remote states), configuration, rules (full catalogue WM/ARP/SCOPE/META/DEP/PIPE + override-pack schema), analyzers (support matrix + limits), security, architecture, troubleshooting, release; CONTRIBUTING/SECURITY/CHANGELOG
+- release.yml hardened: tag validation, fail-if-CLI/artifact-missing (silent hashFiles skip removed), single full test gate, per-RID verify (exe+LICENSE+notices), host-matching smoke (--version==tag, help, completion, config path), deterministic winmatsch-<tag>-<rid> names, checked SHA256SUMS (no || true), archive test-extract, draft release fail_on_unmatched_files; ci.yml uploads trx on failure
+- Verified: 1781 tests green (3 skipped opt-in live), format clean, all six RID trimmed publishes locally + artifact inspection, win-x64 smoke (version/help/analyze/validate exit 5/completion/config path), workflow YAML parsed, relative doc links checked
+- Gotcha: PowerShell 'native | Select-Object -First N' truncation corrupts $LASTEXITCODE — retest exit codes without early pipeline stops
