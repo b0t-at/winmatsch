@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using WinMatsch.Analysis;
+using WinMatsch.Core;
 
 namespace WinMatsch.Workflows.Mapping;
 
@@ -18,8 +19,15 @@ internal static class NestedInstallerPathResolver
                 : NestedPathResolution.Empty;
         }
 
+        if (analysis.Format != DetectedInstallerFormat.Zip
+            && shape?.InstallerType != InstallerType.Zip)
+        {
+            return NestedPathResolution.Empty;
+        }
+
         string[] actualPaths = analysis.ArchiveEntries
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .GroupBy(static path => path, StringComparer.OrdinalIgnoreCase)
+            .Select(static group => group.Order(StringComparer.Ordinal).First())
             .Order(StringComparer.Ordinal)
             .ToArray();
         if (actualPaths.Length == 0)
@@ -64,9 +72,12 @@ internal static class NestedInstallerPathResolver
             string[] exact = actualPaths
                 .Where(path => string.Equals(path, nested.RelativeFilePath, StringComparison.OrdinalIgnoreCase))
                 .ToArray();
-            string templatedPath = ReplaceVersion(nested.RelativeFilePath, previous.PackageVersion.Value, newVersion);
+            string[] templatedPaths = GenerateVersionTemplates(
+                nested.RelativeFilePath,
+                previous.PackageVersion.Value,
+                newVersion);
             string[] templated = actualPaths
-                .Where(path => string.Equals(path, templatedPath, StringComparison.OrdinalIgnoreCase))
+                .Where(path => templatedPaths.Contains(path, StringComparer.OrdinalIgnoreCase))
                 .ToArray();
             string[] matches = exact.Concat(templated).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (matches.Length != 1)
@@ -122,17 +133,38 @@ internal static class NestedInstallerPathResolver
         return new(files, null, null);
     }
 
-    private static string ReplaceVersion(string path, string oldVersion, string newVersion)
+    private static string[] GenerateVersionTemplates(string path, string oldVersion, string newVersion)
     {
         if (string.IsNullOrEmpty(oldVersion))
         {
-            return path;
+            return [];
         }
 
-        string replaced = path.Replace(oldVersion, newVersion, StringComparison.OrdinalIgnoreCase);
-        string underscoredOld = oldVersion.Replace('.', '_');
-        string underscoredNew = newVersion.Replace('.', '_');
-        return replaced.Replace(underscoredOld, underscoredNew, StringComparison.OrdinalIgnoreCase);
+        (string Old, string New)[] representations =
+        [
+            (oldVersion, newVersion),
+            (oldVersion.Replace('.', '_'), newVersion.Replace('.', '_')),
+            (oldVersion.Replace('.', '-'), newVersion.Replace('.', '-')),
+        ];
+        var templates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach ((string oldToken, string newToken) in representations)
+        {
+            int index = path.IndexOf(oldToken, StringComparison.OrdinalIgnoreCase);
+            while (index >= 0)
+            {
+                int end = index + oldToken.Length;
+                bool boundedBefore = index == 0 || !char.IsAsciiLetterOrDigit(path[index - 1]);
+                bool boundedAfter = end == path.Length || !char.IsAsciiLetterOrDigit(path[end]);
+                if (boundedBefore && boundedAfter)
+                {
+                    templates.Add(string.Concat(path.AsSpan(0, index), newToken.AsSpan(), path.AsSpan(end)));
+                }
+
+                index = path.IndexOf(oldToken, index + 1, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        return [.. templates.Order(StringComparer.Ordinal)];
     }
 }
 

@@ -48,6 +48,10 @@ public sealed record AssetAnalysisEvidence
 
     public const int MaximumArchivePathLength = 1_024;
 
+    public const int MaximumEvidenceItems = 10_000;
+
+    public const int MaximumEvidenceTextLength = 65_536;
+
     public required DetectedInstallerFormat Format { get; init; }
 
     /// <summary>The exact downloaded bytes this analysis was derived from.</summary>
@@ -78,6 +82,18 @@ public sealed record AssetAnalysisEvidence
     public ImmutableArray<string> Validate()
     {
         var errors = ImmutableArray.CreateBuilder<string>();
+        long totalItems = ArchiveEntries.Length
+            + NestedInstallerCandidates.Length
+            + InstallerShapes.Length
+            + PayloadEvidence.Length
+            + Diagnostics.Length
+            + InstallerShapes.Sum(static shape => (long)shape.NestedInstallerFiles.Length)
+            + PayloadEvidence.Sum(static evidence => (long)evidence.Signals.Length);
+        if (totalItems > MaximumEvidenceItems)
+        {
+            errors.Add($"Total analysis evidence count exceeds {MaximumEvidenceItems}.");
+        }
+
         if (ArchiveEntries.Length > MaximumArchiveEntries)
         {
             errors.Add($"Archive entry count exceeds {MaximumArchiveEntries}.");
@@ -102,6 +118,20 @@ public sealed record AssetAnalysisEvidence
             if (!IsSafeArchivePath(path))
             {
                 errors.Add($"Archive path '{path}' is absolute, traversing, empty, or exceeds {MaximumArchivePathLength} characters.");
+            }
+        }
+
+        if (HasCaseCollision(ArchiveEntries) || HasCaseCollision(NestedInstallerCandidates))
+        {
+            errors.Add("Archive paths contain case-insensitive collisions with different spelling.");
+        }
+
+        foreach (string text in Diagnostics.Concat(
+                     PayloadEvidence.SelectMany(static evidence => evidence.Signals)))
+        {
+            if (text.Length > MaximumEvidenceTextLength)
+            {
+                errors.Add($"Analysis evidence text exceeds {MaximumEvidenceTextLength} characters.");
             }
         }
 
@@ -154,14 +184,34 @@ public sealed record AssetAnalysisEvidence
         ArgumentNullException.ThrowIfNull(analysis);
         ArgumentNullException.ThrowIfNull(content);
 
+        if (analysis.Installers.Count > MaximumEvidenceItems
+            || (analysis.Zip?.NestedInstallerCandidates.Count ?? 0) > MaximumEvidenceItems
+            || (dependencyAnalysis?.Evidence.Count ?? 0) > MaximumEvidenceItems
+            || analysis.Diagnostics.Count > MaximumEvidenceItems)
+        {
+            throw new InvalidDataException($"Analysis evidence exceeds {MaximumEvidenceItems} items.");
+        }
+
         Installer[] installers = analysis.Installers.ToArray();
+        long aggregateItems = installers.Sum(
+                static installer => (long)(installer.NestedInstallerFiles?.Count ?? 0))
+            + (analysis.Zip?.NestedInstallerCandidates.Count ?? 0)
+            + (dependencyAnalysis?.Evidence.Sum(static evidence => (long)evidence.Signals.Count) ?? 0)
+            + installers.Length
+            + (dependencyAnalysis?.Evidence.Count ?? 0)
+            + analysis.Diagnostics.Count;
+        if (aggregateItems > MaximumEvidenceItems)
+        {
+            throw new InvalidDataException($"Aggregate analysis evidence exceeds {MaximumEvidenceItems} items.");
+        }
+
         bool?[] pathDependencyValues = installers
             .Select(static installer => installer.ArchiveBinariesDependOnPath)
             .Where(static value => value is not null)
             .Distinct()
             .ToArray();
         bool hasPathDependencyConflict = pathDependencyValues.Length > 1;
-        return new AssetAnalysisEvidence
+        var result = new AssetAnalysisEvidence
         {
             Format = analysis.Format,
             AnalyzedContentIdentity = content.Identity,
@@ -177,6 +227,7 @@ public sealed record AssetAnalysisEvidence
                         InstallerType = installer.InstallerType,
                         NestedInstallerType = installer.NestedInstallerType,
                         Scope = installer.Scope,
+                        InstallerLocale = installer.InstallerLocale,
                         NestedInstallerFiles =
                         [
                             .. (installer.NestedInstallerFiles ?? [])
@@ -192,13 +243,8 @@ public sealed record AssetAnalysisEvidence
                     .ThenBy(static shape => shape.Scope),
             ],
             ArchiveEntries = SnapshotArchivePaths(boundedArchiveEntries ?? []),
-            NestedInstallerCandidates =
-            [
-                .. (analysis.Zip?.NestedInstallerCandidates ?? [])
-                    .Select(NormalizeArchivePath)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .Order(StringComparer.Ordinal),
-            ],
+            NestedInstallerCandidates = SnapshotArchivePaths(
+                analysis.Zip?.NestedInstallerCandidates ?? []),
             PayloadEvidence =
             [
                 .. (dependencyAnalysis?.Evidence ?? [])
@@ -222,6 +268,13 @@ public sealed record AssetAnalysisEvidence
                     .Order(StringComparer.Ordinal),
             ],
         };
+        ImmutableArray<string> validationErrors = result.Validate();
+        if (!validationErrors.IsEmpty)
+        {
+            throw new InvalidDataException(string.Join(" ", validationErrors));
+        }
+
+        return result;
     }
 
     private static ImmutableArray<string> SnapshotArchivePaths(IEnumerable<string> paths)
@@ -229,8 +282,6 @@ public sealed record AssetAnalysisEvidence
         string[] snapshot = paths
             .Take(MaximumArchiveEntries + 1)
             .Select(NormalizeArchivePath)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Order(StringComparer.Ordinal)
             .ToArray();
         if (snapshot.Length > MaximumArchiveEntries)
         {
@@ -245,7 +296,17 @@ public sealed record AssetAnalysisEvidence
             }
         }
 
-        return [.. snapshot];
+        if (HasCaseCollision(snapshot))
+        {
+            throw new InvalidDataException("Archive paths contain a case-insensitive collision.");
+        }
+
+        return
+        [
+            .. snapshot
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal),
+        ];
     }
 
     private static string NormalizeArchivePath(string path) => path.Replace('\\', '/');
@@ -260,6 +321,11 @@ public sealed record AssetAnalysisEvidence
                 && path[2] == '/')
             && !Path.IsPathFullyQualified(path)
             && !path.Split('/').Contains("..", StringComparer.Ordinal);
+
+    private static bool HasCaseCollision(IEnumerable<string> paths)
+        => paths
+            .GroupBy(static path => path, StringComparer.OrdinalIgnoreCase)
+            .Any(static group => group.Distinct(StringComparer.Ordinal).Skip(1).Any());
 }
 
 /// <summary>One correlated architecture/type/scope variant emitted for an analyzed asset.</summary>
@@ -272,6 +338,8 @@ public sealed record AnalyzedInstallerShape
     public InstallerType? NestedInstallerType { get; init; }
 
     public Scope? Scope { get; init; }
+
+    public LanguageTag? InstallerLocale { get; init; }
 
     public ImmutableArray<PlannedNestedInstallerFile> NestedInstallerFiles { get; init; } = [];
 

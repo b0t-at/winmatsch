@@ -40,10 +40,14 @@ public static class AssetMappingPlanner
 
         AddMissingUrlOverrides(request, candidates, diagnostics, questions);
         ApplySiblingCoverage(candidates, request.PreviousInstallers, diagnostics);
-        DiagnoseContentIdentityConsistency(candidates, diagnostics, questions);
+        DiagnoseContentIdentityConsistency(
+            candidates,
+            request.AllowSharedContentAcrossUrls,
+            diagnostics,
+            questions);
 
         var usedByPosition = new Dictionary<int, Candidate>();
-        var positionsByCandidate = new Dictionary<Candidate, List<PreviousInstallerEntry>>();
+        var positionsByPhysicalAsset = new Dictionary<string, List<PreviousInstallerEntry>>(StringComparer.Ordinal);
         foreach (PreviousInstallerEntry previous in request.PreviousInstallers.OrderBy(static entry => entry.Position))
         {
             Candidate[] exactByUrl = candidates
@@ -105,19 +109,23 @@ public static class AssetMappingPlanner
             }
 
             Candidate candidate = matches[0];
-            if (!positionsByCandidate.TryGetValue(candidate, out List<PreviousInstallerEntry>? priorUsers))
+            string physicalAssetKey = GetPhysicalAssetKey(candidate.Asset);
+            if (!positionsByPhysicalAsset.TryGetValue(
+                    physicalAssetKey,
+                    out List<PreviousInstallerEntry>? priorUsers))
             {
                 priorUsers = [];
-                positionsByCandidate.Add(candidate, priorUsers);
+                positionsByPhysicalAsset.Add(physicalAssetKey, priorUsers);
             }
 
             if (priorUsers.Count > 0
-                && priorUsers.Any(other => !UriEquals(other.Url, previous.Url)))
+                && priorUsers.Any(other => !UriEquals(other.Url, previous.Url))
+                && !request.AllowStructuralRewrite)
             {
                 diagnostics.Add(new(
                     "MAP_DUPLICATE_ASSET",
                     AssetMappingDiagnosticSeverity.Error,
-                    "Distinct previous URLs cannot collapse onto one asset without an explicit structural override.",
+                    "Distinct previous URLs cannot collapse onto one physical asset without explicit structural approval.",
                     candidate.Asset.DownloadUri.AbsoluteUri,
                     previous.Position));
                 questions.Add(new(
@@ -212,6 +220,7 @@ public static class AssetMappingPlanner
         }
 
         DiagnoseIncompatibleDuplicateUrls(decisions, diagnostics, questions);
+        DiagnoseDuplicateInstallerKeys(decisions, diagnostics, questions);
         if (!request.Version.IsResolved)
         {
             diagnostics.Add(new(
@@ -483,6 +492,7 @@ public static class AssetMappingPlanner
             type,
             shape?.NestedInstallerType,
             scope,
+            shape?.InstallerLocale,
             urlOverride?.DisplayVersion,
             mapping?.Entry,
             explicitArchitecture is not null,
@@ -548,6 +558,9 @@ public static class AssetMappingPlanner
             && TypesCompatible(previous.InstallerType, candidate.Type)
             && (candidate.NestedType is null || candidate.NestedType == previous.NestedInstallerType)
             && (candidate.Scope is null || previous.Scope is null || candidate.Scope == previous.Scope)
+            && (candidate.InstallerLocale is null
+                || previous.InstallerLocale is null
+                || candidate.InstallerLocale == previous.InstallerLocale)
             && EntryMatches(previous, candidate.Entry);
 
     private static bool EntryMatches(PreviousInstallerEntry previous, string? entry)
@@ -602,7 +615,11 @@ public static class AssetMappingPlanner
 
         bool exactUrl = UriEquals(previous.Url, candidate.Asset.DownloadUri);
         bool preserveIntentionalLayout = request.PreviousInstallers.Count(
-            entry => UriEquals(entry.Url, previous.Url)) > 1;
+                entry => UriEquals(entry.Url, previous.Url)) > 1
+            && !request.AllowStructuralRewrite
+            && !candidate.HasExplicitArchitecture
+            && !candidate.HasExplicitType
+            && !candidate.HasExplicitScope;
         bool packagingChanged = !string.Equals(
                 Path.GetExtension(previous.Url.AbsolutePath),
                 Path.GetExtension(candidate.Asset.DownloadUri.AbsolutePath),
@@ -662,7 +679,9 @@ public static class AssetMappingPlanner
             && ((candidate.Architecture is not null && previous.Architecture != candidate.Architecture)
             || (candidate.Type is not null && previous.InstallerType != candidate.Type)
             || (candidate.NestedType is not null && previous.NestedInstallerType != candidate.NestedType)
-            || (candidate.Scope is not null && previous.Scope != candidate.Scope));
+            || (candidate.Scope is not null && previous.Scope != candidate.Scope)
+            || (candidate.InstallerLocale is not null && previous.InstallerLocale != candidate.InstallerLocale)
+            || (candidate.ClearsNestedState && previous.NestedInstallerType is not null));
         bool unauthorizedArchitectureChange = candidate.Architecture is not null
             && previous.Architecture != candidate.Architecture
             && !candidate.HasExplicitArchitecture;
@@ -674,12 +693,18 @@ public static class AssetMappingPlanner
         bool unauthorizedScopeChange = candidate.Scope is not null
             && previous.Scope != candidate.Scope
             && !candidate.HasExplicitScope;
+        bool unauthorizedLocaleChange = candidate.InstallerLocale is not null
+            && previous.InstallerLocale != candidate.InstallerLocale;
+        bool unauthorizedNestedClear = candidate.ClearsNestedState
+            && previous.NestedInstallerType is not null;
         if (structureChanged
             && !request.AllowStructuralRewrite
             && (unauthorizedArchitectureChange
                 || unauthorizedTypeChange
                 || unauthorizedNestedTypeChange
-                || unauthorizedScopeChange))
+                || unauthorizedScopeChange
+                || unauthorizedLocaleChange
+                || unauthorizedNestedClear))
         {
             diagnostics.Add(new(
                 "MAP_STRUCTURAL_REWRITE",
@@ -813,16 +838,23 @@ public static class AssetMappingPlanner
                 : candidate.Type ?? previous?.InstallerType,
             NestedInstallerType = preservePreviousStructure
                 ? previous!.NestedInstallerType
-                : candidate.NestedType ?? previous?.NestedInstallerType,
+                : candidate.ClearsNestedState
+                    ? null
+                    : candidate.NestedType ?? previous?.NestedInstallerType,
             Scope = preservePreviousStructure
                 ? previous!.Scope
                 : candidate.Scope ?? previous?.Scope,
+            InstallerLocale = preservePreviousStructure
+                ? previous!.InstallerLocale
+                : candidate.InstallerLocale ?? previous?.InstallerLocale,
             DisplayVersion = candidate.DisplayVersion ?? previous?.DisplayVersion,
             NestedInstallerFiles = nested.Files,
             ArchiveBinariesDependOnPath =
-                candidate.AnalyzedShape?.ArchiveBinariesDependOnPath
-                ?? candidate.Asset.Analysis?.ArchiveBinariesDependOnPath
-                ?? previous?.ArchiveBinariesDependOnPath,
+                candidate.ClearsNestedState
+                    ? null
+                    : candidate.AnalyzedShape?.ArchiveBinariesDependOnPath
+                        ?? candidate.Asset.Analysis?.ArchiveBinariesDependOnPath
+                        ?? previous?.ArchiveBinariesDependOnPath,
         };
     }
 
@@ -949,6 +981,7 @@ public static class AssetMappingPlanner
 
     private static void DiagnoseContentIdentityConsistency(
         IEnumerable<Candidate> candidates,
+        bool allowSharedContentAcrossUrls,
         List<AssetMappingDiagnostic> diagnostics,
         List<AssetMappingQuestion> questions)
     {
@@ -977,7 +1010,76 @@ public static class AssetMappingPlanner
                 [],
                 group.Key));
         }
+
+        if (allowSharedContentAcrossUrls)
+        {
+            return;
+        }
+
+        foreach (IGrouping<DownloadContentIdentity, Candidate> group in candidates
+                     .Where(static candidate => candidate.Asset.Content is not null)
+                     .GroupBy(static candidate => candidate.Asset.Content!.Identity))
+        {
+            string[] urls = group
+                .Select(static candidate => candidate.Asset.DownloadUri.AbsoluteUri)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            if (urls.Length <= 1)
+            {
+                continue;
+            }
+
+            diagnostics.Add(new(
+                "CONTENT_SHARED_ACROSS_URLS",
+                AssetMappingDiagnosticSeverity.Error,
+                "Distinct asset URLs resolve to identical SHA-256 and byte-length identities.",
+                urls[0]));
+            questions.Add(new(
+                "CONTENT_SHARED_ACROSS_URLS",
+                "Confirm that these URLs intentionally mirror the same bytes.",
+                [.. urls],
+                urls[0]));
+        }
     }
+
+    private static void DiagnoseDuplicateInstallerKeys(
+        IEnumerable<AssetMappingDecision> decisions,
+        List<AssetMappingDiagnostic> diagnostics,
+        List<AssetMappingQuestion> questions)
+    {
+        foreach (IGrouping<string, PlannedInstaller> group in decisions
+                     .Select(static decision => decision.Installer)
+                     .OfType<PlannedInstaller>()
+                     .GroupBy(
+                         static installer =>
+                             $"{installer.Architecture}|{installer.InstallerType}|{installer.Scope}|{installer.InstallerLocale}",
+                         StringComparer.Ordinal))
+        {
+            if (group.Count() <= 1)
+            {
+                continue;
+            }
+
+            string[] urls = group
+                .Select(static installer => installer.Url.AbsoluteUri)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            diagnostics.Add(new(
+                "MAP_DUPLICATE_INSTALLER_KEY",
+                AssetMappingDiagnosticSeverity.Error,
+                $"Multiple entries share effective installer key '{group.Key}'.",
+                urls[0]));
+            questions.Add(new(
+                "MAP_DUPLICATE_INSTALLER_KEY",
+                "Remove or explicitly differentiate duplicate architecture/type/scope/locale entries.",
+                [.. urls],
+                urls[0]));
+        }
+    }
+
+    private static string GetPhysicalAssetKey(DiscoveredAsset asset)
+        => $"{asset.DownloadUri.AbsoluteUri}|{asset.Content?.Identity.Sha256}|{asset.Content?.Identity.SizeInBytes}";
 
     private static bool PatternMatches(string pattern, string value)
     {
@@ -1012,6 +1114,7 @@ public static class AssetMappingPlanner
         InstallerType? type,
         InstallerType? nestedType,
         Scope? scope,
+        LanguageTag? installerLocale,
         string? displayVersion,
         string? entry,
         bool hasExplicitArchitecture,
@@ -1030,6 +1133,8 @@ public static class AssetMappingPlanner
 
         public Scope? Scope { get; } = scope;
 
+        public LanguageTag? InstallerLocale { get; } = installerLocale;
+
         public string? DisplayVersion { get; } = displayVersion;
 
         public string? Entry { get; } = entry;
@@ -1043,5 +1148,9 @@ public static class AssetMappingPlanner
         public EvidenceConfidence Confidence { get; } = confidence;
 
         public AnalyzedInstallerShape? AnalyzedShape { get; } = analyzedShape;
+
+        public bool ClearsNestedState => Asset.Analysis is not null
+            && Asset.Analysis.Format != DetectedInstallerFormat.Zip
+            && Type != InstallerType.Zip;
     }
 }

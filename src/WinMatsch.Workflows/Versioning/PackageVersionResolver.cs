@@ -107,12 +107,8 @@ public static partial class PackageVersionResolver
         PackageVersionSource[] precedence = GetPrecedence(pack?.VersionSource);
         foreach (PackageVersionSource source in precedence)
         {
-            PackageVersionCandidate[] tier = candidates
-                .Where(candidate => candidate.Source == source)
-                .GroupBy(static candidate => candidate.Version.Value, StringComparer.OrdinalIgnoreCase)
-                .Select(static group => group.First())
-                .OrderBy(static candidate => candidate.Version.Value, StringComparer.Ordinal)
-                .ToArray();
+            PackageVersionCandidate[] tier = CollapseEquivalentCandidates(
+                candidates.Where(candidate => candidate.Source == source));
             if (tier.Length == 0)
             {
                 continue;
@@ -238,7 +234,7 @@ public static partial class PackageVersionResolver
     private static string? FindContextualVersion(string value)
     {
         MatchCollection matches = UrlVersionRegex().Matches(value);
-        foreach (Match match in matches.Cast<Match>().Reverse())
+        foreach (Match match in matches.Cast<Match>())
         {
             string prefix = value[..match.Index].TrimEnd('-', '_', '.');
             string context = (prefix.Split(['-', '_', '.'], StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "")
@@ -274,7 +270,7 @@ public static partial class PackageVersionResolver
         }
 
         if (source == PackageVersionSource.ReleaseTag
-            && CalendarDateRegex().IsMatch(normalized))
+            && (CalendarDateRegex().IsMatch(normalized) || ReleaseBuildTagRegex().IsMatch(normalized)))
         {
             diagnostics.Add($"VERSION_INVALID:{source}:{normalized}");
             return;
@@ -304,6 +300,24 @@ public static partial class PackageVersionResolver
         }
 
         return null;
+    }
+
+    private static PackageVersionCandidate[] CollapseEquivalentCandidates(
+        IEnumerable<PackageVersionCandidate> candidates)
+    {
+        var representatives = new List<PackageVersionCandidate>();
+        foreach (PackageVersionCandidate candidate in candidates
+                     .OrderBy(static item => item.Version.Value.Length)
+                     .ThenBy(static item => item.Version.Value, StringComparer.Ordinal)
+                     .ThenBy(static item => item.Provenance, StringComparer.Ordinal))
+        {
+            if (!representatives.Any(existing => existing.Version.IsEquivalentTo(candidate.Version)))
+            {
+                representatives.Add(candidate);
+            }
+        }
+
+        return [.. representatives];
     }
 
     private static PackageVersionSource[] GetPrecedence(string? versionSource)
@@ -345,4 +359,9 @@ public static partial class PackageVersionResolver
 
     [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}(?:[T ].*)?$", RegexOptions.CultureInvariant)]
     private static partial Regex CalendarDateRegex();
+
+    [GeneratedRegex(
+        @"(?:^|[-_.])(?:build|nightly|snapshot)(?:[-_.]|$)|\d{4}-\d{2}-\d{2}",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ReleaseBuildTagRegex();
 }

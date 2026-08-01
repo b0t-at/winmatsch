@@ -44,6 +44,8 @@ public sealed record PlannedInstaller
 
     public Scope? Scope { get; init; }
 
+    public LanguageTag? InstallerLocale { get; init; }
+
     public string? DisplayVersion { get; init; }
 
     public ImmutableArray<PlannedNestedInstallerFile> NestedInstallerFiles { get; init; } = [];
@@ -84,7 +86,7 @@ public sealed record AssetMappingPlan(
         [
             $"version|{Version.Version?.Value}|{Version.Source}|{Version.Confidence}|{Version.IsAmbiguous}",
             .. Decisions.Select(static decision =>
-                $"decision|{decision.Kind}|{decision.PreviousPosition}|{decision.Installer?.Url.AbsoluteUri}|{decision.Installer?.Sha256}|{decision.Installer?.Architecture}|{decision.Installer?.InstallerType}|{decision.Installer?.NestedInstallerType}|{decision.Installer?.Scope}|{decision.Installer?.DisplayVersion}|{decision.Confidence}|{decision.Reason}|{FormatNested(decision.Installer)}"),
+                $"decision|{decision.Kind}|{decision.PreviousPosition}|{decision.Installer?.Url.AbsoluteUri}|{decision.Installer?.Sha256}|{decision.Installer?.Architecture}|{decision.Installer?.InstallerType}|{decision.Installer?.NestedInstallerType}|{decision.Installer?.Scope}|{decision.Installer?.InstallerLocale}|{decision.Installer?.DisplayVersion}|{decision.Confidence}|{decision.Reason}|{FormatNested(decision.Installer)}"),
             .. Diagnostics.Select(static diagnostic =>
                 $"diagnostic|{diagnostic.Code}|{diagnostic.Severity}|{diagnostic.AssetUrl}|{diagnostic.PreviousPosition}|{diagnostic.Message}"),
             .. UnresolvedQuestions.Select(static question =>
@@ -120,6 +122,8 @@ public sealed record PreviousInstallerEntry
 
     public Scope? Scope { get; init; }
 
+    public LanguageTag? InstallerLocale { get; init; }
+
     public string? DisplayVersion { get; init; }
 
     public required PackageVersion PackageVersion { get; init; }
@@ -152,6 +156,7 @@ public sealed record PreviousInstallerEntry
                     InstallerType = installer.InstallerType ?? manifest.InstallerType,
                     NestedInstallerType = installer.NestedInstallerType ?? manifest.NestedInstallerType,
                     Scope = installer.Scope ?? manifest.Scope,
+                    InstallerLocale = installer.InstallerLocale ?? manifest.InstallerLocale,
                     DisplayVersion = (installer.AppsAndFeaturesEntries ?? manifest.AppsAndFeaturesEntries)?
                         .Select(static entry => entry.DisplayVersion)
                         .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value)),
@@ -190,4 +195,7 @@ public sealed record AssetMappingRequest
 
     /// <summary>Explicit approval for a stable URL whose downloaded SHA-256 changed.</summary>
     public bool AllowStableUrlContentChange { get; init; }
+
+    /// <summary>Explicit approval for distinct URLs that resolve to identical downloaded bytes.</summary>
+    public bool AllowSharedContentAcrossUrls { get; init; }
 }

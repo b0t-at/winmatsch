@@ -64,6 +64,16 @@ public static class ReleaseAssetDiscovery
         "mingw",
     ];
 
+    private static readonly string[] _nonWindowsTokens =
+    [
+        "android",
+        "darwin",
+        "freebsd",
+        "linux",
+        "macos",
+        "osx",
+    ];
+
     public static async Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
         Func<CancellationToken, Task<IReadOnlyList<GitHubRelease>>> releaseSource,
         IReadOnlyDictionary<string, ReleaseAssetEvidence>? evidenceByUrl = null,
@@ -120,17 +130,25 @@ public static class ReleaseAssetDiscovery
 
     private static bool IsWindowsAsset(ReleaseAsset asset)
     {
-        bool hasWindowsSignal = _windowsTokens.Any(token => ContainsBounded(asset.Name, token))
-            || ArchitectureTokenClassifier.Classify(asset.Name).Architecture is not null;
-        if ((ContainsBounded(asset.Name, "source") || ContainsBounded(asset.Name, "symbols"))
-            && !hasWindowsSignal)
+        string extension = Path.GetExtension(asset.Name);
+        if (_windowsExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        bool hasWindowsSignal = _windowsTokens.Any(token => ContainsBounded(asset.Name, token));
+        if (hasWindowsSignal)
+        {
+            return true;
+        }
+
+        if (_nonWindowsTokens.Any(token => ContainsBounded(asset.Name, token)))
         {
             return false;
         }
 
-        string extension = Path.GetExtension(asset.Name);
-        return _windowsExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase)
-            || hasWindowsSignal;
+        ArchitectureTokenEvidence architecture = ArchitectureTokenClassifier.Classify(asset.Name);
+        return architecture.Architecture is not null || architecture.IsAmbiguous;
     }
 
     private static bool ContainsBounded(string value, string token)

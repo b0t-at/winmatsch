@@ -83,6 +83,63 @@ public sealed class ReleaseAssetDiscoveryTests
         Assert.Equal("Resource-Editor-source-x64.zip", asset.AssetName);
     }
 
+    [Fact]
+    public void Linux_architecture_asset_is_not_classified_as_windows()
+    {
+        GitHubRelease release = CreateRelease(
+            1,
+            "v1.0.0",
+            DateTimeOffset.UnixEpoch,
+            new ReleaseAsset(
+                1,
+                "tool-linux-x64.tar.gz",
+                new("https://example.test/tool-linux-x64.tar.gz"),
+                "application/gzip",
+                1,
+                0,
+                DateTimeOffset.UnixEpoch));
+
+        Assert.Empty(ReleaseAssetDiscovery.Discover([release]));
+    }
+
+    [Fact]
+    public void Ambiguous_architecture_archive_is_retained_for_mapping_review()
+    {
+        GitHubRelease release = CreateRelease(
+            1,
+            "v1.0.0",
+            DateTimeOffset.UnixEpoch,
+            new ReleaseAsset(
+                1,
+                "tool-x64-arm64.zip",
+                new("https://example.test/tool-x64-arm64.zip"),
+                "application/zip",
+                1,
+                0,
+                DateTimeOffset.UnixEpoch));
+
+        Assert.Single(ReleaseAssetDiscovery.Discover([release]));
+    }
+
+    [Fact]
+    public void Windows_only_extension_is_retained_even_when_product_name_contains_source()
+    {
+        GitHubRelease release = CreateRelease(
+            1,
+            "v1.0.0",
+            DateTimeOffset.UnixEpoch,
+            new ReleaseAsset(
+                1,
+                "Open-Source-Setup.exe",
+                new("https://example.test/Open-Source-Setup.exe"),
+                "application/octet-stream",
+                1,
+                0,
+                DateTimeOffset.UnixEpoch));
+
+        Assert.Single(ReleaseAssetDiscovery.Discover([release]));
+    }
+
     private static GitHubRelease CreateRelease(
         long id,
         string tag,

@@ -150,6 +150,44 @@ public sealed class PackageVersionResolverTests
         Assert.Equal(PackageVersionSource.InstallerProductVersion, result.Source);
     }
 
+    [Fact]
+    public void Package_version_token_wins_over_trailing_dependency_version()
+    {
+        Assert.Equal(
+            "2.0.0",
+            PackageVersionResolver.ExtractUrlVersion(
+                new Uri("https://example.test/tool-v2.0.0-jre-17.0.exe")));
+    }
+
+    [Fact]
+    public void Nightly_date_tag_is_not_selected_as_release_version()
+    {
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = new("Vendor.Product"),
+            Assets = [CreateAsset("release-nightly-2025-01-01", "https://example.test/tool.exe")],
+        });
+
+        Assert.False(result.IsResolved);
+    }
+
+    [Fact]
+    public void Equivalent_version_spellings_are_not_ambiguous()
+    {
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = new("Vendor.Product"),
+            Assets =
+            [
+                CreateAsset("latest", "https://example.test/tool-x64.exe", "1.0", true),
+                CreateAsset("latest", "https://example.test/tool-arm64.exe", "1.0.0", true),
+            ],
+        });
+
+        Assert.False(result.IsAmbiguous);
+        Assert.Equal("1.0", result.Version?.Value);
+    }
+
     private static DiscoveredAsset CreateAsset(
         string tag,
         string url,

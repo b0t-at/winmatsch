@@ -578,6 +578,215 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
+    public void Duplicate_effective_installer_keys_block_apply()
+    {
+        DiscoveredAsset first = Asset("tool-one-x64.exe", InstallerType.Exe, Architecture.X64);
+        DiscoveredAsset second = Asset("tool-two-long-x64.exe", InstallerType.Exe, Architecture.X64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([first, second]));
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_DUPLICATE_INSTALLER_KEY");
+    }
+
+    [Fact]
+    public void Distinct_previous_urls_cannot_collapse_to_one_bundle_without_approval()
+    {
+        PreviousInstallerEntry x86 = Previous(
+            0,
+            "https://old.test/tool-x86.msix",
+            Architecture.X86,
+            InstallerType.Msix);
+        PreviousInstallerEntry x64 = Previous(
+            1,
+            "https://old.test/tool-x64.msix",
+            Architecture.X64,
+            InstallerType.Msix);
+        DiscoveredAsset bundle = Asset("tool.msixbundle", InstallerType.Msix, Architecture.X64);
+        bundle = bundle with
+        {
+            Analysis = bundle.Analysis! with
+            {
+                InstallerShapes =
+                [
+                    new() { Architecture = Architecture.X86, InstallerType = InstallerType.Msix },
+                    new() { Architecture = Architecture.X64, InstallerType = InstallerType.Msix },
+                ],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([bundle], [x86, x64]));
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_DUPLICATE_ASSET");
+    }
+
+    [Fact]
+    public void Explicit_rewrite_can_replace_preserved_same_url_layout()
+    {
+        Uri shared = new("https://example.test/2.0.0/tool-x64.exe");
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            Previous(0, shared.AbsoluteUri, Architecture.X86, InstallerType.Exe),
+            Previous(1, shared.AbsoluteUri, Architecture.X64, InstallerType.Exe),
+        ];
+        DiscoveredAsset asset = Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], previous) with
+        {
+            AllowStructuralRewrite = true,
+        });
+
+        Assert.All(
+            plan.Decisions.Where(static decision => decision.Installer is not null),
+            static decision => Assert.Equal(Architecture.X64, decision.Installer!.Architecture));
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_DUPLICATE_INSTALLER_KEY");
+    }
+
+    [Fact]
+    public void Approved_zip_to_exe_transition_clears_nested_state()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/1.0.0/tool-x64.zip",
+            Architecture.X64,
+            InstallerType.Zip) with
+        {
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new("bin/tool.exe", "tool")],
+            ArchiveBinariesDependOnPath = true,
+        };
+        DiscoveredAsset asset = Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]) with
+        {
+            AllowStructuralRewrite = true,
+        });
+
+        PlannedInstaller installer = Assert.Single(plan.Decisions).Installer!;
+        Assert.True(plan.CanApply);
+        Assert.Null(installer.NestedInstallerType);
+        Assert.Empty(installer.NestedInstallerFiles);
+        Assert.Null(installer.ArchiveBinariesDependOnPath);
+    }
+
+    [Fact]
+    public void Distinct_urls_with_identical_content_require_approval()
+    {
+        DiscoveredAsset first = Asset("tool-x86.exe", InstallerType.Exe, Architecture.X86);
+        DiscoveredAsset second = Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64);
+        second = second with
+        {
+            Content = first.Content! with
+            {
+                InitialUrl = second.DownloadUri.AbsoluteUri,
+                FinalUrl = second.DownloadUri.AbsoluteUri,
+            },
+        };
+        second = second with
+        {
+            Analysis = second.Analysis! with
+            {
+                AnalyzedContentIdentity = second.Content!.Identity,
+                AnalyzedUrl = second.Content.FinalUrl,
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([first, second]));
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "CONTENT_SHARED_ACROSS_URLS");
+    }
+
+    [Fact]
+    public void Case_colliding_archive_paths_are_rejected()
+    {
+        DiscoveredAsset asset = Asset("tool-x64.zip", InstallerType.Zip, Architecture.X64);
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                ArchiveEntries = ["Bin/tool.exe", "bin/tool.exe"],
+                NestedInstallerCandidates = ["bin/tool.exe"],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset]));
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "ANALYSIS_EVIDENCE_INVALID");
+    }
+
+    [Fact]
+    public void Nested_version_templating_does_not_replace_embedded_dependency_version()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/2.0/tool-x64.zip",
+            Architecture.X64,
+            InstallerType.Zip) with
+        {
+            PackageVersion = new("2.0"),
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new("runtime-12.0/tool-2.0.exe", "tool")],
+        };
+        DiscoveredAsset asset = Asset("tool-3.0-x64.zip", InstallerType.Zip, Architecture.X64);
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Zip,
+                        NestedInstallerType = InstallerType.Portable,
+                    },
+                ],
+                ArchiveEntries = ["runtime-12.0/tool-3.0.exe"],
+                NestedInstallerCandidates = ["runtime-12.0/tool-3.0.exe"],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous], "3.0"));
+
+        Assert.Equal(
+            "runtime-12.0/tool-3.0.exe",
+            Assert.Single(Assert.Single(plan.Decisions).Installer!.NestedInstallerFiles).RelativeFilePath);
+    }
+
+    [Fact]
+    public void Aggregate_analysis_evidence_is_bounded()
+    {
+        DiscoveredAsset asset = Asset("tool-x64.zip", InstallerType.Zip, Architecture.X64);
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Zip,
+                        NestedInstallerFiles =
+                        [
+                            .. Enumerable.Range(0, AssetAnalysisEvidence.MaximumEvidenceItems + 1)
+                                .Select(index => new PlannedNestedInstallerFile($"bin/tool-{index}.exe", null)),
+                        ],
+                    },
+                ],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset]));
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "ANALYSIS_EVIDENCE_INVALID");
+    }
+
+    [Fact]
     public void Same_url_with_incompatible_types_is_rejected()
     {
         Uri shared = new("https://example.test/tool.exe");
