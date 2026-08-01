@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.Text;
@@ -14,6 +15,9 @@ namespace WinMatsch.Rules.OverridePacks;
 /// </summary>
 public static class OverridePackYaml
 {
+    private static readonly ConcurrentDictionary<string, object> _writeLocks =
+        new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+
     public const int MaximumDocumentLength = 1_048_576;
     public const int MaximumDepth = 32;
     public const int MaximumNodeCount = 10_000;
@@ -126,45 +130,51 @@ public static class OverridePackYaml
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(pack);
-        string yaml = Write(pack);
-        string? directory = Path.GetDirectoryName(Path.GetFullPath(path));
-        Directory.CreateDirectory(directory!);
-        string temporaryPath = Path.Combine(directory!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
-        try
+        string fullPath = Path.GetFullPath(path);
+        lock (_writeLocks.GetOrAdd(fullPath, static _ => new object()))
         {
-            using (FileStream stream = new(
-                       temporaryPath,
-                       FileMode.CreateNew,
-                       FileAccess.Write,
-                       FileShare.None,
-                       bufferSize: 4096,
-                       FileOptions.WriteThrough))
-            using (var writer = new StreamWriter(
-                       stream,
-                       new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-                       bufferSize: 4096,
-                       leaveOpen: true))
+            string yaml = Write(pack);
+            string? directory = Path.GetDirectoryName(fullPath);
+            Directory.CreateDirectory(directory!);
+            string temporaryPath = Path.Combine(
+                directory!,
+                $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
+            try
             {
-                writer.Write(yaml);
-                writer.Flush();
-                stream.Flush(flushToDisk: true);
-            }
+                using (FileStream stream = new(
+                           temporaryPath,
+                           FileMode.CreateNew,
+                           FileAccess.Write,
+                           FileShare.None,
+                           bufferSize: 4096,
+                           FileOptions.WriteThrough))
+                using (var writer = new StreamWriter(
+                           stream,
+                           new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                           bufferSize: 4096,
+                           leaveOpen: true))
+                {
+                    writer.Write(yaml);
+                    writer.Flush();
+                    stream.Flush(flushToDisk: true);
+                }
 
-            DurableFileSystem.ReplaceFile(temporaryPath, path);
-            using FileStream committed = new(
-                path,
-                FileMode.Open,
-                FileAccess.ReadWrite,
-                FileShare.Read,
-                bufferSize: 1,
-                FileOptions.WriteThrough);
-            committed.Flush(flushToDisk: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
+                DurableFileSystem.ReplaceFile(temporaryPath, fullPath);
+                using FileStream committed = new(
+                    fullPath,
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.Read,
+                    bufferSize: 1,
+                    FileOptions.WriteThrough);
+                committed.Flush(flushToDisk: true);
+            }
+            finally
             {
-                File.Delete(temporaryPath);
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
             }
         }
     }

@@ -223,7 +223,7 @@ internal static class ManifestSemanticValidator
             switches?.Repair);
         string url = uri.AbsoluteUri;
         if (urlSemantics.TryGetValue(url, out (InstallerSemantics Semantics, int Index) previous)
-            && previous.Semantics != semantics)
+            && !HaveCompatibleUrlSemantics(previous.Semantics, semantics))
         {
             findings.Add(Error(
                 "VLD3002",
@@ -233,6 +233,64 @@ internal static class ManifestSemanticValidator
         else
         {
             urlSemantics.TryAdd(url, (semantics, index));
+        }
+    }
+
+    private static bool HaveCompatibleUrlSemantics(
+        InstallerSemantics first,
+        InstallerSemantics second)
+    {
+        if (first == second)
+        {
+            return true;
+        }
+
+        if (first.InstallerType != second.InstallerType
+            || first.Scope is null
+            || second.Scope is null
+            || first.Scope == second.Scope
+            || first with { Scope = null, Custom = null } != second with { Scope = null, Custom = null })
+        {
+            return false;
+        }
+
+        return ClassifyScopeSwitch(first.Custom) == first.Scope
+            && ClassifyScopeSwitch(second.Custom) == second.Scope;
+    }
+
+    private static Scope? ClassifyScopeSwitch(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        string[] userTokens = ["/CURRENTUSER", "MSIINSTALLPERUSER=1", "ALLUSERS=\"\"", "ALLUSERS=2"];
+        string[] machineTokens = ["/ALLUSERS", "ALLUSERS=1"];
+        bool user = userTokens.Any(token => ContainsSwitchToken(value, token));
+        bool machine = machineTokens.Any(token => ContainsSwitchToken(value, token));
+        return user == machine ? null : user ? Scope.User : Scope.Machine;
+    }
+
+    private static bool ContainsSwitchToken(string value, string token)
+    {
+        int start = 0;
+        while (true)
+        {
+            int index = value.IndexOf(token, start, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            int end = index + token.Length;
+            if ((index == 0 || !char.IsLetterOrDigit(value[index - 1]))
+                && (end == value.Length || !char.IsLetterOrDigit(value[end])))
+            {
+                return true;
+            }
+
+            start = index + 1;
         }
     }
 

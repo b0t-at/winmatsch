@@ -1314,6 +1314,51 @@ public class RuleRuntimeTests
         Assert.Equal("WM0201", RuleIds.ApplyPackageQuirks);
     }
 
+    [Fact]
+    public void One_to_two_same_url_twins_do_not_collide_in_human_correction_keys()
+    {
+        const string Url = "https://example.test/scope-twin.exe";
+        static Installer Original()
+        {
+            Installer installer = TestManifests.CreateInstaller(
+                Architecture.X64,
+                url: Url,
+                scope: Scope.User);
+            installer.ProductCode = "BOT";
+            return installer;
+        }
+
+        PackageManifests original = TestManifests.Create(Original());
+        PackageManifests merged = TestManifests.Create(Original());
+        original.DefaultLocale.Publisher = "BOT";
+        merged.DefaultLocale.Publisher = "HUMAN";
+        Installer generatedUser = Original();
+        generatedUser.InstallerSwitches = new InstallerSwitches { Custom = "/CURRENTUSER" };
+        generatedUser.ProductCode = "GENERATED";
+        Installer generatedMachine = TestManifests.CreateInstaller(
+            Architecture.X64,
+            url: Url,
+            scope: Scope.Machine);
+        generatedMachine.InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" };
+        generatedMachine.ProductCode = "GENERATED";
+        PackageManifests generated = TestManifests.Create(generatedUser, generatedMachine);
+        generated.DefaultLocale.Publisher = "BOT";
+        var context = new ManifestContext
+        {
+            OriginalBotSubmission = original,
+            Previous = merged,
+            Manifests = generated,
+        };
+
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+
+        Assert.Contains(
+            context.HumanCorrectionReviews,
+            static review => review.FieldPath == "Publisher"
+                && review.HumanValue == "HUMAN"
+                && review.GeneratedValue == "BOT");
+    }
+
     [Theory]
     [InlineData("Authorization: Bearer abcdefghijklmnopqrstuvwxyz")]
     [InlineData("Authorization: Bearer abc.def~ghi+jkl/mno")]

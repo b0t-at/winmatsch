@@ -132,6 +132,50 @@ public class OverridePackYamlTests
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Concurrent_learned_memory_writes_leave_one_complete_parseable_pack(int iteration)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-rules-memory-{iteration}-{Guid.NewGuid():N}");
+        string path = Path.Combine(directory, "Example.Memory.yaml");
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            Task[] writers =
+            [
+                .. Enumerable.Range(0, 16).Select(index => Task.Run(async () =>
+                {
+                    await start.Task;
+                    OverridePackYaml.WriteFile(path, new OverridePack
+                    {
+                        PackageIdentifier = new PackageIdentifier("Example.Memory"),
+                        VersionSource = $"literal:{index}.0.0",
+                    });
+                })),
+            ];
+
+            start.SetResult();
+            await Task.WhenAll(writers);
+
+            OverridePack loaded = OverridePackYaml.ReadFile(path);
+            Assert.Equal("Example.Memory", loaded.PackageIdentifier.Value);
+            Assert.StartsWith("literal:", loaded.VersionSource, StringComparison.Ordinal);
+            Assert.Empty(Directory.EnumerateFiles(directory, "*.tmp"));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Theory]
     [InlineData("formatVersion: 1\npackageIdentifier: Test.App\nunknown: true\n")]
     [InlineData("formatVersion: one\npackageIdentifier: Test.App\n")]
     [InlineData("formatVersion: 1\npackageIdentifier: Test.App\nmanualOnly: perhaps\n")]

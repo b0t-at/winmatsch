@@ -214,6 +214,31 @@ public sealed class PreflightGateTests
     }
 
     [Fact]
+    public async Task Same_url_user_machine_switch_twins_are_valid()
+    {
+        PackageManifests manifests = TestPackageFactory.CreateManifests();
+        manifests.Installer.Scope = null;
+        List<Installer> installers = manifests.Installer.Installers!;
+        Installer user = Assert.Single(installers);
+        user.Scope = Scope.User;
+        user.InstallerSwitches = new InstallerSwitches { Custom = "/CURRENTUSER" };
+        installers.Add(new Installer
+        {
+            Architecture = Architecture.Arm64,
+            Scope = Scope.Machine,
+            InstallerUrl = TestPackageFactory.InstallerUrl,
+            InstallerSha256 = new Sha256Hash(TestPackageFactory.Hash),
+            InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" },
+        });
+
+        ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+            .ValidateAsync(TestPackageFactory.CreateRequest(manifests));
+
+        Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD3002");
+        Assert.True(report.IsValid, report.ToText());
+    }
+
+    [Fact]
     public async Task Nested_paths_are_safe_and_aliases_may_repeat_across_alternative_installers()
     {
         PackageManifests manifests = TestPackageFactory.CreateManifests();
