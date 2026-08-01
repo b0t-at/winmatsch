@@ -712,6 +712,56 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
+    public void Entry_targeted_retirement_does_not_approve_unrelated_removal()
+    {
+        PackageIdentifier package = new("Vendor.Product");
+        Uri shared = new("https://example.test/1.0.0/tool-x64.exe");
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            Previous(0, shared.AbsoluteUri, Architecture.X86, InstallerType.Exe),
+            Previous(1, shared.AbsoluteUri, Architecture.X64, InstallerType.Exe),
+            Previous(
+                2,
+                "https://example.test/1.0.0/tool-arm64.exe",
+                Architecture.Arm64,
+                InstallerType.Exe),
+        ];
+        DiscoveredAsset asset = Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64);
+        var packs = new OverridePackSet(
+        [
+            new OverridePack
+            {
+                PackageIdentifier = package,
+                AssetMappings =
+                [
+                    new()
+                    {
+                        AssetPattern = "*",
+                        Entry = "x64",
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Exe,
+                    },
+                ],
+            },
+        ]);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], previous) with
+        {
+            PackageIdentifier = package,
+            OverridePacks = packs,
+        });
+
+        Assert.False(plan.CanApply);
+        Assert.DoesNotContain(
+            plan.UnresolvedQuestions,
+            static question => question.PreviousPosition == 0);
+        Assert.Contains(
+            plan.UnresolvedQuestions,
+            static question => question.Code == "MAP_REMOVED"
+                && question.PreviousPosition == 2);
+    }
+
+    [Fact]
     public void Approved_zip_to_exe_transition_clears_nested_state()
     {
         PreviousInstallerEntry previous = Previous(

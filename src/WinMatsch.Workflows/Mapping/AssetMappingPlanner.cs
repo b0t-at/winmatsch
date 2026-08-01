@@ -50,6 +50,7 @@ public static class AssetMappingPlanner
         var positionsByPhysicalAsset = new Dictionary<string, List<PreviousInstallerEntry>>(StringComparer.Ordinal);
         var assignedCandidates = new HashSet<Candidate>();
         Dictionary<string, Candidate[]> preservedSharedGroups = BuildPreservedSharedGroups(request, candidates);
+        HashSet<int> entryTargetedRetirements = BuildEntryTargetedRetirements(request, candidates);
         foreach (PreviousInstallerEntry previous in request.PreviousInstallers.OrderBy(static entry => entry.Position))
         {
             Candidate[] availableCandidates = request.AllowStructuralRewrite
@@ -104,13 +105,8 @@ public static class AssetMappingPlanner
             if (matches.Length != 1)
             {
                 string code = matches.Length == 0 ? "MAP_REMOVED" : "MAP_AMBIGUOUS";
-                Candidate[] entryTargetedCandidates = availableCandidates
-                    .Where(static candidate => candidate.Entry is not null)
-                    .ToArray();
                 bool retiredByEntryOverride = matches.Length == 0
-                    && entryTargetedCandidates.Length > 0
-                    && entryTargetedCandidates.All(candidate =>
-                        candidate.Entry is not null && !EntryMatches(previous, candidate.Entry));
+                    && entryTargetedRetirements.Contains(previous.Position);
                 bool approvedRemoval = matches.Length == 0
                     && (request.AllowStructuralRewrite || retiredByEntryOverride);
                 diagnostics.Add(new(
@@ -1203,6 +1199,37 @@ public static class AssetMappingPlanner
         }
 
         return result;
+    }
+
+    private static HashSet<int> BuildEntryTargetedRetirements(
+        AssetMappingRequest request,
+        Candidate[] candidates)
+    {
+        var retirements = new HashSet<int>();
+        foreach (IGrouping<string, PreviousInstallerEntry> group in request.PreviousInstallers
+                     .GroupBy(static previous => previous.Url.AbsoluteUri, StringComparer.Ordinal)
+                     .Where(static group => group.Count() > 1))
+        {
+            PreviousInstallerEntry[] previousEntries = [.. group];
+            Candidate[] targetedCandidates = candidates
+                .Where(static candidate => candidate.Entry is not null)
+                .Where(candidate => previousEntries.Any(previous => IsCompatible(previous, candidate)))
+                .ToArray();
+            if (targetedCandidates.Length == 0)
+            {
+                continue;
+            }
+
+            foreach (PreviousInstallerEntry previous in previousEntries)
+            {
+                if (targetedCandidates.All(candidate => !IsCompatible(previous, candidate)))
+                {
+                    retirements.Add(previous.Position);
+                }
+            }
+        }
+
+        return retirements;
     }
 
     private static string FormatNestedInstaller(PlannedInstaller? installer)
