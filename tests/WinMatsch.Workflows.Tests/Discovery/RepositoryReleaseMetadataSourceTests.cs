@@ -1,5 +1,5 @@
-using System.Net;
 using System.Collections.Immutable;
+using System.Net;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.Discovery;

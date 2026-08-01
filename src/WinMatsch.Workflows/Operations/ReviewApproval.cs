@@ -1,5 +1,5 @@
-using System.Collections.Immutable;
 using System.Buffers.Binary;
+using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using WinMatsch.Rules;
