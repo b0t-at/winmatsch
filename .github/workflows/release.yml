@@ -5,14 +5,20 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   gate:
     name: Validate tag and run full test gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Validate tag format
         shell: bash
@@ -31,7 +37,7 @@ jobs:
           fi
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           global-json-file: global.json
 
@@ -73,11 +79,15 @@ jobs:
             rid: osx-arm64
             smoke: true
     runs-on: ${{ matrix.os }}
+    env:
+      RID: ${{ matrix.rid }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           global-json-file: global.json
 
@@ -88,20 +98,20 @@ jobs:
           test -f src/WinMatsch.Cli/WinMatsch.Cli.csproj
           dotnet publish src/WinMatsch.Cli/WinMatsch.Cli.csproj \
             --configuration Release \
-            --runtime ${{ matrix.rid }} \
+            --runtime "$RID" \
             --self-contained \
             -p:PublishSingleFile=true \
             -p:PublishTrimmed=true \
             -p:SuppressTrimAnalysisWarnings=false \
             -p:Version=${GITHUB_REF_NAME#v} \
-            --output publish/${{ matrix.rid }}
+            --output "publish/$RID"
 
       - name: Verify publish output
         shell: bash
         run: |
           set -euo pipefail
-          dir=publish/${{ matrix.rid }}
-          case "${{ matrix.rid }}" in
+          dir="publish/$RID"
+          case "$RID" in
             win-*) exe="$dir/winmatsch.exe" ;;
             *)     exe="$dir/winmatsch" ;;
           esac
@@ -117,9 +127,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          case "${{ matrix.rid }}" in
-            win-*) exe=publish/${{ matrix.rid }}/winmatsch.exe ;;
-            *)     exe=publish/${{ matrix.rid }}/winmatsch ;;
+          case "$RID" in
+            win-*) exe="publish/$RID/winmatsch.exe" ;;
+            *)     exe="publish/$RID/winmatsch" ;;
           esac
           version=$("$exe" --version)
           echo "winmatsch --version: $version"
@@ -137,7 +147,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path "publish/${{ matrix.rid }}/*" -DestinationPath "dist/winmatsch-${env:GITHUB_REF_NAME}-${{ matrix.rid }}.zip"
+          Compress-Archive -Path "publish/${env:RID}/*" -DestinationPath "dist/winmatsch-${env:GITHUB_REF_NAME}-${env:RID}.zip"
 
       - name: Package (tar.gz)
         if: ${{ !startsWith(matrix.rid, 'win-') }}
@@ -145,10 +155,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          tar -czf "dist/winmatsch-${GITHUB_REF_NAME}-${{ matrix.rid }}.tar.gz" -C "publish/${{ matrix.rid }}" .
+          tar -czf "dist/winmatsch-${GITHUB_REF_NAME}-${RID}.tar.gz" -C "publish/${RID}" .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: winmatsch-${{ matrix.rid }}
           path: dist/*
@@ -158,9 +168,11 @@ jobs:
     name: Create draft release
     needs: publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Create the draft release and upload its assets.
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
@@ -192,7 +204,7 @@ jobs:
           sha256sum -c SHA256SUMS.txt
 
       - name: Create draft GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: true
           files: dist/*
