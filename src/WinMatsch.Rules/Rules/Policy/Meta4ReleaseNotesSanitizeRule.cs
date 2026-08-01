@@ -51,12 +51,13 @@ public sealed class Meta4ReleaseNotesSanitizeRule : IRule
 
         foreach ((LocaleManifest locale, string documentName) in PolicyValues.EnumerateLocales(context.Manifests))
         {
-            locale.ReleaseNotes = SanitizeNotes(context, locale.ReleaseNotes, documentName);
-            locale.ReleaseNotesUrl = CheckReleaseNotesUrl(context, locale.ReleaseNotesUrl, oldVersion, newVersion, documentName);
+            string manifestPath = PolicyValues.GetLocaleManifestPath(context.Manifests, locale);
+            locale.ReleaseNotes = SanitizeNotes(context, locale.ReleaseNotes, documentName, manifestPath);
+            locale.ReleaseNotesUrl = CheckReleaseNotesUrl(context, locale.ReleaseNotesUrl, oldVersion, newVersion, documentName, manifestPath);
         }
     }
 
-    private string? SanitizeNotes(ManifestContext context, string? notes, string documentName)
+    private string? SanitizeNotes(ManifestContext context, string? notes, string documentName, string manifestPath)
     {
         if (notes is null)
         {
@@ -77,6 +78,16 @@ public sealed class Meta4ReleaseNotesSanitizeRule : IRule
 
             sanitized = sanitized[..boundary];
             context.AddTrace(this, $"{documentName}: truncated ReleaseNotes at the last paragraph boundary before {_maximumLength} characters.");
+        }
+
+        if (!string.Equals(sanitized, notes, StringComparison.Ordinal))
+        {
+            context.AddChangeEvidence(
+                this,
+                manifestPath,
+                "ReleaseNotes",
+                "bounded release-notes sanitization (bullets, key-value colons, maximum length)",
+                RuleChangeConfidence.High);
         }
 
         return sanitized;
@@ -158,7 +169,8 @@ public sealed class Meta4ReleaseNotesSanitizeRule : IRule
         string? url,
         string? oldVersion,
         string? newVersion,
-        string documentName)
+        string documentName,
+        string manifestPath)
     {
         if (url is null || oldVersion is null || newVersion is null
             || string.Equals(oldVersion, newVersion, StringComparison.Ordinal)
@@ -171,6 +183,12 @@ public sealed class Meta4ReleaseNotesSanitizeRule : IRule
         string candidate = url.Replace(oldVersion, newVersion, StringComparison.Ordinal);
         if (_evidence.IsUrlConfirmed(candidate))
         {
+            context.AddChangeEvidence(
+                this,
+                manifestPath,
+                "ReleaseNotesUrl",
+                $"confirmed-URL evidence for the {newVersion} release-notes page",
+                RuleChangeConfidence.High);
             context.AddTrace(this, $"{documentName}: retargeted ReleaseNotesUrl from version {oldVersion} to {newVersion} (confirmed URL evidence).");
             return candidate;
         }

@@ -36,13 +36,17 @@ public sealed class Pipe2ManifestVersionPinRule : IRule
         PackageManifests manifests = context.Manifests;
         ManifestVersion target = ManifestVersion.Default;
 
-        Pin(context, manifests.Version.ManifestVersion, v => manifests.Version.ManifestVersion = v, target, "Version");
-        Pin(context, manifests.Installer.ManifestVersion, v => manifests.Installer.ManifestVersion = v, target, "Installer");
-        Pin(context, manifests.DefaultLocale.ManifestVersion, v => manifests.DefaultLocale.ManifestVersion = v, target, "DefaultLocale");
+        Pin(context, manifests.Version.ManifestVersion, v => manifests.Version.ManifestVersion = v, target,
+            "Version", PolicyValues.GetVersionManifestPath(manifests));
+        Pin(context, manifests.Installer.ManifestVersion, v => manifests.Installer.ManifestVersion = v, target,
+            "Installer", ManifestContext.GetInstallerManifestPath(manifests));
+        Pin(context, manifests.DefaultLocale.ManifestVersion, v => manifests.DefaultLocale.ManifestVersion = v, target,
+            "DefaultLocale", PolicyValues.GetLocaleManifestPath(manifests, manifests.DefaultLocale));
         for (int i = 0; i < manifests.Locales.Count; i++)
         {
             LocaleManifest locale = manifests.Locales[i];
-            Pin(context, locale.ManifestVersion, v => locale.ManifestVersion = v, target, $"Locales[{i}]");
+            Pin(context, locale.ManifestVersion, v => locale.ManifestVersion = v, target,
+                $"Locales[{i}]", PolicyValues.GetLocaleManifestPath(manifests, locale));
         }
 
         CheckSuppliedHeaders(context, target);
@@ -53,7 +57,8 @@ public sealed class Pipe2ManifestVersionPinRule : IRule
         ManifestVersion current,
         Action<ManifestVersion> set,
         ManifestVersion target,
-        string documentName)
+        string documentName,
+        string manifestPath)
     {
         if (current == target)
         {
@@ -61,6 +66,12 @@ public sealed class Pipe2ManifestVersionPinRule : IRule
         }
 
         set(target);
+        context.AddChangeEvidence(
+            this,
+            manifestPath,
+            "ManifestVersion",
+            $"pinned to the single source-of-truth manifest schema version {target.Value}",
+            RuleChangeConfidence.High);
         context.AddTrace(this,
             $"{documentName}: upgraded ManifestVersion {current} to the pinned {target}; the $schema comment is regenerated from the same constant on write.");
     }

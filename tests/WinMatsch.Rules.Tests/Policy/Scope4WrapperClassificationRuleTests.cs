@@ -101,6 +101,37 @@ public class Scope4WrapperClassificationRuleTests
     }
 
     [Fact]
+    public void Root_product_code_is_cleared_when_every_entry_is_reclassified()
+    {
+        Installer installer = TestManifests.CreateInstaller(installerType: InstallerType.Wix, url: Url);
+        PackageManifests manifests = TestManifests.Create(installer);
+        manifests.Installer.ProductCode = "{56C3E1E0-1111-2222-3333-444455556666}";
+        ManifestContext context = TestManifests.CreateContext(
+            manifests, evidence: [Evidence(DetectedInstallerFormat.Burn)]);
+
+        _rule.Apply(context);
+
+        Assert.Null(manifests.Installer.ProductCode);
+        Assert.Contains(context.Findings, f => f.Message.Contains("root ProductCode", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Root_product_code_shared_with_genuine_msi_entries_is_flagged_not_cleared()
+    {
+        Installer wrapper = TestManifests.CreateInstaller(installerType: InstallerType.Wix, url: Url);
+        Installer genuineMsi = TestManifests.CreateInstaller(Architecture.X86, InstallerType.Msi, "https://example.com/app-x86.msi");
+        PackageManifests manifests = TestManifests.Create(wrapper, genuineMsi);
+        manifests.Installer.ProductCode = "{56C3E1E0-1111-2222-3333-444455556666}";
+        ManifestContext context = TestManifests.CreateContext(
+            manifests, evidence: [Evidence(DetectedInstallerFormat.Burn)]);
+
+        _rule.Apply(context);
+
+        Assert.Equal("{56C3E1E0-1111-2222-3333-444455556666}", manifests.Installer.ProductCode);
+        Assert.Contains(context.Findings, f => f.Message.Contains("review whether it belongs", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Log_only_mode_proposes_without_mutating()
     {
         Installer installer = TestManifests.CreateInstaller(installerType: InstallerType.Wix, url: Url);

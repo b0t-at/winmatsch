@@ -3,12 +3,15 @@ using System.Text.RegularExpressions;
 namespace WinMatsch.Rules.Policy;
 
 /// <summary>
-/// DEP-2: classifies supplied validation-pipeline log lines that match known dependency-outage
-/// signatures ("No suitable installer found for manifest … with version …" — the winget-pkgs
-/// VCRedist index outage, issue #152555) as <em>infrastructure</em> findings. The manifest is
-/// never mutated in response: chasing an infra error by editing the manifest is exactly the
-/// failure mode this rule exists to prevent. Keeping the PR alive / re-running validation is
-/// the workflow layer's job; this rule only supplies the deterministic classification.
+/// DEP-2: classifies supplied validation-pipeline log lines that match the known
+/// dependency-index outage signature ("No suitable installer found for manifest
+/// Microsoft.VCRedist… / Microsoft.DotNet… with version …" — the winget-pkgs VCRedist index
+/// outage, issue #152555) as <em>infrastructure</em> findings. Only the well-known runtime
+/// dependency identifiers match, so a genuinely wrong dependency in the manifest is never
+/// waved through as infra. The manifest is never mutated in response: chasing an infra error
+/// by editing the manifest is exactly the failure mode this rule exists to prevent. Keeping
+/// the PR alive / re-running validation is the workflow layer's job; this rule only supplies
+/// the deterministic classification.
 /// </summary>
 public sealed partial class Dep2DependencyOutageRule : IRule
 {
@@ -44,6 +47,6 @@ public sealed partial class Dep2DependencyOutageRule : IRule
         }
     }
 
-    [GeneratedRegex(@"No suitable installer found for manifest\s+\S+\s+with version\s+\S+", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"No suitable installer found for manifest\s+Microsoft\.(VCRedist|DotNet)\S*\s+with version\s+\S+", RegexOptions.IgnoreCase)]
     private static partial Regex OutageSignature();
 }

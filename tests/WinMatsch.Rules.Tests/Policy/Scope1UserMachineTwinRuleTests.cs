@@ -103,6 +103,20 @@ public class Scope1UserMachineTwinRuleTests
     }
 
     [Fact]
+    public void User_token_matching_requires_boundaries_too()
+    {
+        // "/CURRENTUSERPROFILE" and "MSIINSTALLPERUSER=10" are not the user tokens.
+        PackageManifests manifests = TestManifests.Create(
+            Twin("/CURRENTUSERPROFILE"), Twin("MSIINSTALLPERUSER=10"));
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Null(manifests.Installer.Installers![0].Scope);
+        Assert.Null(manifests.Installer.Installers[1].Scope);
+    }
+
+    [Fact]
     public void Log_only_mode_proposes_without_mutating()
     {
         PackageManifests manifests = TestManifests.Create(Twin("ALLUSERS=1"), Twin("/CURRENTUSER"));

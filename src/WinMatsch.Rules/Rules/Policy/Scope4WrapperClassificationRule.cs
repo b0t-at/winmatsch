@@ -31,21 +31,26 @@ public sealed class Scope4WrapperClassificationRule : IRule
             return;
         }
 
+        bool anyReclassified = false;
+        bool allReclassified = true;
         for (int i = 0; i < installers.Count; i++)
         {
             Installer installer = installers[i];
             InstallerType? declared = EffectiveInstallerValues.GetInstallerType(manifest, installer);
             if (declared is not (InstallerType.Msi or InstallerType.Wix))
             {
+                allReclassified = false;
                 continue;
             }
 
             DetectedInstallerFormat? format = context.FindEvidence(installer.InstallerUrl)?.Analysis?.Format;
             if (format is null || !TryMapWrapperFormat(format.Value, out InstallerType outerType))
             {
+                allReclassified = false;
                 continue;
             }
 
+            anyReclassified = true;
             installer.InstallerType = outerType;
             context.AddChangeEvidence(
                 this,
@@ -76,6 +81,30 @@ public sealed class Scope4WrapperClassificationRule : IRule
                 context.AddFinding(this, RuleSeverity.Warning,
                     "Squirrel installers install per-user; the declared machine scope likely comes from embedded-MSI metadata and should be reviewed.",
                     $"Installers[{i}]");
+            }
+        }
+
+        // A ProductCode hoisted to the manifest root would still be inherited by the corrected
+        // entries. Clear it only when every entry was reclassified (nobody legitimately needs
+        // it); otherwise the mixed layout needs review, not a silent mutation.
+        if (anyReclassified && manifest.ProductCode is { } rootProductCode)
+        {
+            if (allReclassified)
+            {
+                manifest.ProductCode = null;
+                context.AddChangeEvidence(
+                    this,
+                    ManifestContext.GetInstallerManifestPath(context.Manifests),
+                    "ProductCode",
+                    $"root ProductCode '{rootProductCode}' belongs to an MSI embedded inside the reclassified wrapper installers",
+                    RuleChangeConfidence.High);
+                context.AddFinding(this, RuleSeverity.Warning,
+                    $"Dropped root ProductCode '{rootProductCode}': it was read from an MSI embedded inside a wrapper and does not identify any outer installer.");
+            }
+            else
+            {
+                context.AddFinding(this, RuleSeverity.Warning,
+                    $"The root ProductCode '{rootProductCode}' is inherited by wrapper entries that were reclassified away from msi/wix; review whether it belongs only to the remaining MSI entries.");
             }
         }
     }

@@ -147,8 +147,8 @@ public sealed class Scope1UserMachineTwinRule : IRule
                 continue;
             }
 
-            user |= _userTokens.Any(t => value.Contains(t, StringComparison.OrdinalIgnoreCase));
-            machine |= _machineTokens.Any(t => ContainsMachineToken(value, t));
+            user |= _userTokens.Any(t => ContainsToken(value, t));
+            machine |= _machineTokens.Any(t => ContainsToken(value, t));
         }
 
         if (user == machine)
@@ -160,10 +160,11 @@ public sealed class Scope1UserMachineTwinRule : IRule
     }
 
     /// <summary>
-    /// Machine tokens need boundary care: "ALLUSERS=1" must not match inside "ALLUSERS=1x"
-    /// nor "/ALLUSERS" inside "/CURRENTUSER /ALLUSERSX".
+    /// Token matching requires a boundary on both sides: "ALLUSERS=1" must not match inside
+    /// "ALLUSERS=12", "/CURRENTUSER" not inside "/CURRENTUSERPROFILE", and
+    /// "MSIINSTALLPERUSER=1" not inside "MSIINSTALLPERUSER=10".
     /// </summary>
-    private static bool ContainsMachineToken(string value, string token)
+    private static bool ContainsToken(string value, string token)
     {
         int start = 0;
         while (true)
@@ -174,8 +175,10 @@ public sealed class Scope1UserMachineTwinRule : IRule
                 return false;
             }
 
+            bool leftOk = index == 0 || !char.IsLetterOrDigit(value[index - 1]);
             int end = index + token.Length;
-            if (end == value.Length || !char.IsLetterOrDigit(value[end]))
+            bool rightOk = end == value.Length || !char.IsLetterOrDigit(value[end]);
+            if (leftOk && rightOk)
             {
                 return true;
             }

@@ -72,6 +72,19 @@ public class Meta3GitHubLicenseUrlRuleTests
     }
 
     [Fact]
+    public void Short_hex_refs_are_left_alone()
+    {
+        // A 7-hex ref could legally be a branch name; only unambiguous full-40-hex commit
+        // pins are normalized.
+        PackageManifests manifests = CreateWithLicenseUrl("https://github.com/owner/repo/blob/cafe123/LICENSE");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Equal("https://github.com/owner/repo/blob/cafe123/LICENSE", manifests.DefaultLocale.LicenseUrl);
+    }
+
+    [Fact]
     public void Non_github_urls_are_untouched()
     {
         // Nonmatching control.

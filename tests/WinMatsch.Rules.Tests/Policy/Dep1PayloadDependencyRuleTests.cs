@@ -120,6 +120,30 @@ public class Dep1PayloadDependencyRuleTests
     }
 
     [Fact]
+    public void Root_dependencies_are_cloned_before_adding_a_per_installer_dependency()
+    {
+        // Creating a bare per-installer Dependencies object must not mask the manifest-root
+        // defaults (WindowsFeatures etc.) that applied to this installer.
+        PackageManifests manifests = CreateManifests();
+        manifests.Installer.Dependencies = new Dependencies
+        {
+            WindowsFeatures = ["NetFx3"],
+            PackageDependencies = [new PackageDependency { PackageIdentifier = new PackageIdentifier("Some.Base") }],
+        };
+        Dep1PayloadDependencyRule rule = CreateRule(
+            Evidence(DependencyEvidenceKind.VisualCppRuntime, DependencyEvidenceStatus.Detected));
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        rule.Apply(context);
+
+        Dependencies dependencies = manifests.Installer.Installers![0].Dependencies!;
+        Assert.Equal(["NetFx3"], dependencies.WindowsFeatures);
+        Assert.Equal(2, dependencies.PackageDependencies!.Count);
+        Assert.Contains(dependencies.PackageDependencies, d => d.PackageIdentifier?.Value == "Some.Base");
+        Assert.Contains(dependencies.PackageDependencies, d => d.PackageIdentifier?.Value == "Microsoft.VCRedist.2015+.x64");
+    }
+
+    [Fact]
     public void Previous_dotnet_major_change_is_flagged_for_verification()
     {
         // Motivating regression: FamiStudio .NET 5 -> 8 major bump (#203022).

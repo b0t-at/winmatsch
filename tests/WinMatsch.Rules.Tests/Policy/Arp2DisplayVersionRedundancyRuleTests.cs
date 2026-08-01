@@ -26,6 +26,19 @@ public class Arp2DisplayVersionRedundancyRuleTests
     }
 
     [Fact]
+    public void Display_version_equivalent_by_winget_ordering_is_removed()
+    {
+        // KONNEKT: PackageVersion 1.2.3 with DisplayVersion 1.2.3.0 — trailing zero parts are
+        // insignificant in WinGet ordering, so the value is redundant.
+        PackageManifests manifests = CreateWithDisplayVersion(TestManifests.DefaultVersion + ".0");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        new Arp2DisplayVersionRedundancyRule().Apply(context);
+
+        Assert.Null(manifests.Installer.Installers![0].AppsAndFeaturesEntries![0].DisplayVersion);
+    }
+
+    [Fact]
     public void Overlapping_display_version_is_dropped_with_a_finding()
     {
         // Motivating regression: static "1.0" DisplayVersion overlap killed Sonarr/CloudDrive2 PRs (#267360, #287069).

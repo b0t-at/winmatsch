@@ -77,6 +77,33 @@ public class Meta1HttpsUpgradeRuleTests
     }
 
     [Fact]
+    public void Nested_documentation_icon_and_agreement_urls_are_covered()
+    {
+        PackageManifests manifests = TestManifests.Create(TestManifests.CreateInstaller());
+        manifests.DefaultLocale.Documentations = [new Documentation { DocumentUrl = "http://example.com/docs" }];
+        manifests.DefaultLocale.Icons = [new Icon { IconUrl = "http://example.com/icon.png" }];
+        manifests.DefaultLocale.Agreements = [new PackageAgreement { AgreementUrl = "http://example.com/eula" }];
+        var rule = new Meta1HttpsUpgradeRule(new PolicyEvidence
+        {
+            HttpsUpgradeConfirmations =
+            [
+                "http://example.com/docs",
+                "http://example.com/icon.png",
+            ],
+        });
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        rule.Apply(context);
+
+        Assert.Equal("https://example.com/docs", manifests.DefaultLocale.Documentations[0].DocumentUrl);
+        Assert.Equal("https://example.com/icon.png", manifests.DefaultLocale.Icons[0].IconUrl);
+        // Unconfirmed nested URL stays and is reported.
+        Assert.Equal("http://example.com/eula", manifests.DefaultLocale.Agreements[0].AgreementUrl);
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Contains("Agreements[0].AgreementUrl", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Evidence_for_a_different_url_does_not_apply()
     {
         PackageManifests manifests = TestManifests.Create(TestManifests.CreateInstaller());

@@ -31,7 +31,7 @@ public sealed class Arp2DisplayVersionRedundancyRule : IRule
         ArgumentNullException.ThrowIfNull(context);
 
         InstallerManifest manifest = context.Manifests.Installer;
-        string? packageVersion = manifest.PackageVersion?.Value;
+        PackageVersion? packageVersion = manifest.PackageVersion;
 
         if (manifest.AppsAndFeaturesEntries is { } rootEntries)
         {
@@ -55,7 +55,7 @@ public sealed class Arp2DisplayVersionRedundancyRule : IRule
     private void Process(
         ManifestContext context,
         List<AppsAndFeaturesEntry> entries,
-        string? packageVersion,
+        PackageVersion? packageVersion,
         string location,
         string fieldPrefix)
     {
@@ -67,16 +67,16 @@ public sealed class Arp2DisplayVersionRedundancyRule : IRule
                 continue;
             }
 
-            if (packageVersion is not null
-                && string.Equals(displayVersion, packageVersion, StringComparison.Ordinal))
+            if (packageVersion is not null && IsRedundant(displayVersion, packageVersion))
             {
                 Drop(context, entries[e], e, location, fieldPrefix,
-                    $"DisplayVersion '{displayVersion}' equals the PackageVersion and is redundant");
+                    $"DisplayVersion '{displayVersion}' is equivalent to the PackageVersion '{packageVersion.Value}' and is redundant");
                 continue;
             }
 
             bool overlaps = _evidence.ExistingDisplayVersions
-                .Any(existing => string.Equals(existing, displayVersion, StringComparison.Ordinal));
+                .Any(existing => string.Equals(existing, displayVersion, StringComparison.Ordinal)
+                    || AreEquivalentVersions(existing, displayVersion));
             if (overlaps)
             {
                 Drop(context, entries[e], e, location, fieldPrefix,
@@ -87,6 +87,21 @@ public sealed class Arp2DisplayVersionRedundancyRule : IRule
             }
         }
     }
+
+    /// <summary>
+    /// Redundancy uses WinGet version-order equivalence, so <c>2.10.1.0</c> is redundant next
+    /// to PackageVersion <c>2.10.1</c> (trailing zero parts are insignificant) — the KONNEKT
+    /// case moderators fixed by hand.
+    /// </summary>
+    private static bool IsRedundant(string displayVersion, PackageVersion packageVersion)
+        => string.Equals(displayVersion, packageVersion.Value, StringComparison.Ordinal)
+            || (PackageVersion.TryCreate(displayVersion, out PackageVersion? parsed)
+                && parsed!.IsEquivalentTo(packageVersion));
+
+    private static bool AreEquivalentVersions(string left, string right)
+        => PackageVersion.TryCreate(left, out PackageVersion? parsedLeft)
+            && PackageVersion.TryCreate(right, out PackageVersion? parsedRight)
+            && parsedLeft!.IsEquivalentTo(parsedRight!);
 
     private void Drop(
         ManifestContext context,

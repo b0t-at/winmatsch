@@ -6,11 +6,13 @@ namespace WinMatsch.Rules.Policy;
 /// <summary>
 /// PIPE-1: canonical serializer-invariant regression guard. Serializes every manifest through
 /// the owning <c>ManifestYamlWriter</c> and asserts the byte-level invariants the repository
-/// relies on: LF-only line endings (no CR anywhere) and exactly one trailing newline. Core
-/// already emits LF; this rule exists so a CRLF/mixed-endings regression (the "fix line
-/// endings" fix-commit class) surfaces as a pipeline finding instead of a rejected PR.
-/// Field values that smuggle a raw CR into the output are reported with their document name.
-/// Findings only — serialization problems are never "fixed" here.
+/// relies on: LF-only line endings (no CR anywhere) and exactly one trailing newline.
+/// Note the catalogue text (§11) describes the legacy tool's CRLF convention; WinMatsch.Core's
+/// emitter canonicalizes on LF with a single trailing newline, and this project's decision is
+/// to guard <em>that</em> invariant — the failure class being prevented is mixed/regressed
+/// line endings ("fix line endings" fix commits), not one specific ending. Field values that
+/// smuggle a raw CR into the output are reported with their document name. Findings only —
+/// serialization problems are never "fixed" here.
 /// </summary>
 public sealed class Pipe1SerializerInvariantsRule : IRule
 {

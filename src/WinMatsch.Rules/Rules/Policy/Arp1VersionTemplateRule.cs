@@ -114,7 +114,7 @@ public sealed class Arp1VersionTemplateRule : IRule
         string location,
         string fieldPath)
     {
-        if (value is null || !value.Contains(oldVersion, StringComparison.Ordinal))
+        if (value is null || !PolicyValues.ContainsVersionToken(value, oldVersion))
         {
             return value;
         }
@@ -130,7 +130,7 @@ public sealed class Arp1VersionTemplateRule : IRule
         }
         else
         {
-            replacement = value.Replace(oldVersion, newVersion, StringComparison.Ordinal);
+            replacement = PolicyValues.ReplaceVersionToken(value, oldVersion, newVersion);
             source = $"templated previous version token '{oldVersion}' to '{newVersion}'";
             confidence = RuleChangeConfidence.Medium;
         }
@@ -161,8 +161,8 @@ public sealed class Arp1VersionTemplateRule : IRule
         Func<AppsAndFeaturesEntry, string?> selector)
     {
         if (value is null
-            || value.Contains(newVersion, StringComparison.Ordinal)
-            || value.Contains(oldVersion, StringComparison.Ordinal)
+            || PolicyValues.ContainsVersionToken(value, newVersion)
+            || PolicyValues.ContainsVersionToken(value, oldVersion)
             || !PolicyValues.ContainsVersionLikeToken(value))
         {
             return;

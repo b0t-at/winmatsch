@@ -15,7 +15,7 @@ public sealed class Pipe5ContentPolicyAnnotationRule : IRule
 {
     public const string BlockedInstallerType = "blocked-installer-type";
     public const string ManualOnly = "manual-only";
-    public const string NetworkBlocked = "network-blocked";
+    public const string NetworkBlocked = "network-blocked-publishers";
     public const string DefenderFalsePositiveRisk = "defender-fp-risk";
     public const string NeedsElevation = "needs-elevation";
 

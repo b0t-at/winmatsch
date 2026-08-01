@@ -34,18 +34,46 @@ public sealed class Meta1HttpsUpgradeRule : IRule
 
         foreach ((LocaleManifest locale, string documentName) in PolicyValues.EnumerateLocales(context.Manifests))
         {
-            locale.PublisherUrl = Process(context, locale.PublisherUrl, documentName, nameof(locale.PublisherUrl));
-            locale.PublisherSupportUrl = Process(context, locale.PublisherSupportUrl, documentName, nameof(locale.PublisherSupportUrl));
-            locale.PrivacyUrl = Process(context, locale.PrivacyUrl, documentName, nameof(locale.PrivacyUrl));
-            locale.PackageUrl = Process(context, locale.PackageUrl, documentName, nameof(locale.PackageUrl));
-            locale.LicenseUrl = Process(context, locale.LicenseUrl, documentName, nameof(locale.LicenseUrl));
-            locale.CopyrightUrl = Process(context, locale.CopyrightUrl, documentName, nameof(locale.CopyrightUrl));
-            locale.ReleaseNotesUrl = Process(context, locale.ReleaseNotesUrl, documentName, nameof(locale.ReleaseNotesUrl));
-            locale.PurchaseUrl = Process(context, locale.PurchaseUrl, documentName, nameof(locale.PurchaseUrl));
+            string manifestPath = PolicyValues.GetLocaleManifestPath(context.Manifests, locale);
+            locale.PublisherUrl = Process(context, locale.PublisherUrl, documentName, manifestPath, nameof(locale.PublisherUrl));
+            locale.PublisherSupportUrl = Process(context, locale.PublisherSupportUrl, documentName, manifestPath, nameof(locale.PublisherSupportUrl));
+            locale.PrivacyUrl = Process(context, locale.PrivacyUrl, documentName, manifestPath, nameof(locale.PrivacyUrl));
+            locale.PackageUrl = Process(context, locale.PackageUrl, documentName, manifestPath, nameof(locale.PackageUrl));
+            locale.LicenseUrl = Process(context, locale.LicenseUrl, documentName, manifestPath, nameof(locale.LicenseUrl));
+            locale.CopyrightUrl = Process(context, locale.CopyrightUrl, documentName, manifestPath, nameof(locale.CopyrightUrl));
+            locale.ReleaseNotesUrl = Process(context, locale.ReleaseNotesUrl, documentName, manifestPath, nameof(locale.ReleaseNotesUrl));
+            locale.PurchaseUrl = Process(context, locale.PurchaseUrl, documentName, manifestPath, nameof(locale.PurchaseUrl));
+
+            if (locale.Agreements is { } agreements)
+            {
+                for (int i = 0; i < agreements.Count; i++)
+                {
+                    agreements[i].AgreementUrl = Process(
+                        context, agreements[i].AgreementUrl, documentName, manifestPath, $"Agreements[{i}].AgreementUrl");
+                }
+            }
+
+            if (locale.Documentations is { } documentations)
+            {
+                for (int i = 0; i < documentations.Count; i++)
+                {
+                    documentations[i].DocumentUrl = Process(
+                        context, documentations[i].DocumentUrl, documentName, manifestPath, $"Documentations[{i}].DocumentUrl");
+                }
+            }
+
+            if (locale.Icons is { } icons)
+            {
+                for (int i = 0; i < icons.Count; i++)
+                {
+                    icons[i].IconUrl = Process(
+                        context, icons[i].IconUrl, documentName, manifestPath, $"Icons[{i}].IconUrl");
+                }
+            }
         }
     }
 
-    private string? Process(ManifestContext context, string? url, string documentName, string fieldName)
+    private string? Process(ManifestContext context, string? url, string documentName, string manifestPath, string fieldName)
     {
         if (url is null || !url.StartsWith(HttpPrefix, StringComparison.OrdinalIgnoreCase))
         {
@@ -61,6 +89,12 @@ public sealed class Meta1HttpsUpgradeRule : IRule
         }
 
         string upgraded = "https://" + url[HttpPrefix.Length..];
+        context.AddChangeEvidence(
+            this,
+            manifestPath,
+            fieldName,
+            "workflow HTTPS probe confirmed the https variant answers",
+            RuleChangeConfidence.High);
         context.AddTrace(this, $"{documentName}: upgraded {fieldName} to https (probe evidence confirmed).");
         return upgraded;
     }

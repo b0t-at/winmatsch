@@ -26,7 +26,7 @@ public sealed class Arp3SanitizeInstallerValuesRule : IRule
         InstallerManifest manifest = context.Manifests.Installer;
         if (manifest.AppsAndFeaturesEntries is { } rootEntries)
         {
-            SanitizeEntries(context, rootEntries, "root");
+            SanitizeEntries(context, rootEntries, "root", string.Empty);
             if (rootEntries.Count == 0)
             {
                 manifest.AppsAndFeaturesEntries = null;
@@ -35,7 +35,7 @@ public sealed class Arp3SanitizeInstallerValuesRule : IRule
 
         if (manifest.InstallationMetadata is not null)
         {
-            manifest.InstallationMetadata = SanitizeInstallationMetadata(context, manifest.InstallationMetadata, "root");
+            manifest.InstallationMetadata = SanitizeInstallationMetadata(context, manifest.InstallationMetadata, "root", string.Empty);
         }
 
         if (manifest.Installers is not { } installers)
@@ -47,9 +47,10 @@ public sealed class Arp3SanitizeInstallerValuesRule : IRule
         {
             Installer installer = installers[i];
             string location = $"Installers[{i}]";
+            string fieldPrefix = $"Installers[{i}].";
             if (installer.AppsAndFeaturesEntries is { } entries)
             {
-                SanitizeEntries(context, entries, location);
+                SanitizeEntries(context, entries, location, fieldPrefix);
                 if (entries.Count == 0)
                 {
                     installer.AppsAndFeaturesEntries = null;
@@ -58,21 +59,22 @@ public sealed class Arp3SanitizeInstallerValuesRule : IRule
 
             if (installer.InstallationMetadata is not null)
             {
-                installer.InstallationMetadata = SanitizeInstallationMetadata(context, installer.InstallationMetadata, location);
+                installer.InstallationMetadata = SanitizeInstallationMetadata(context, installer.InstallationMetadata, location, fieldPrefix);
             }
         }
     }
 
-    private void SanitizeEntries(ManifestContext context, List<AppsAndFeaturesEntry> entries, string location)
+    private void SanitizeEntries(ManifestContext context, List<AppsAndFeaturesEntry> entries, string location, string fieldPrefix)
     {
         for (int e = entries.Count - 1; e >= 0; e--)
         {
             AppsAndFeaturesEntry entry = entries[e];
-            entry.DisplayName = Sanitize(context, entry.DisplayName, location, "DisplayName");
-            entry.DisplayVersion = Sanitize(context, entry.DisplayVersion, location, "DisplayVersion");
-            entry.Publisher = Sanitize(context, entry.Publisher, location, "Publisher");
-            entry.ProductCode = Sanitize(context, entry.ProductCode, location, "ProductCode");
-            entry.UpgradeCode = Sanitize(context, entry.UpgradeCode, location, "UpgradeCode");
+            string entryPrefix = $"{fieldPrefix}AppsAndFeaturesEntries[{e}].";
+            entry.DisplayName = Sanitize(context, entry.DisplayName, location, "DisplayName", entryPrefix);
+            entry.DisplayVersion = Sanitize(context, entry.DisplayVersion, location, "DisplayVersion", entryPrefix);
+            entry.Publisher = Sanitize(context, entry.Publisher, location, "Publisher", entryPrefix);
+            entry.ProductCode = Sanitize(context, entry.ProductCode, location, "ProductCode", entryPrefix);
+            entry.UpgradeCode = Sanitize(context, entry.UpgradeCode, location, "UpgradeCode", entryPrefix);
 
             if (IsEmpty(entry))
             {
@@ -85,10 +87,11 @@ public sealed class Arp3SanitizeInstallerValuesRule : IRule
     private InstallationMetadata? SanitizeInstallationMetadata(
         ManifestContext context,
         InstallationMetadata metadata,
-        string location)
+        string location,
+        string fieldPrefix)
     {
         metadata.DefaultInstallLocation = Sanitize(
-            context, metadata.DefaultInstallLocation, location, "InstallationMetadata.DefaultInstallLocation");
+            context, metadata.DefaultInstallLocation, location, "InstallationMetadata.DefaultInstallLocation", fieldPrefix);
 
         if (metadata.Files is { Count: 0 })
         {
@@ -104,7 +107,7 @@ public sealed class Arp3SanitizeInstallerValuesRule : IRule
         return metadata;
     }
 
-    private string? Sanitize(ManifestContext context, string? value, string location, string fieldName)
+    private string? Sanitize(ManifestContext context, string? value, string location, string fieldName, string fieldPrefix)
     {
         if (value is null)
         {
@@ -117,6 +120,12 @@ public sealed class Arp3SanitizeInstallerValuesRule : IRule
             return value;
         }
 
+        context.AddChangeEvidence(
+            this,
+            ManifestContext.GetInstallerManifestPath(context.Manifests),
+            $"{fieldPrefix}{fieldName}",
+            $"garbage installer value rejected: {reason}",
+            RuleChangeConfidence.High);
         context.AddFinding(this, RuleSeverity.Warning,
             $"Dropped {fieldName} value: {reason}.",
             location);

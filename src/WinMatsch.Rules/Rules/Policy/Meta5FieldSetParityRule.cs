@@ -11,6 +11,9 @@ namespace WinMatsch.Rules.Policy;
 /// re-validated the previous value. A previous root <c>ReleaseDate</c> is recomputed from
 /// supplied release metadata — never copied. Dropping a field silently requires an explicit
 /// <see cref="OverridePack.DroppedFields"/> entry; otherwise a finding calls the drop out.
+/// Per-installer <c>InstallerSwitches</c> and <c>Dependencies</c> carry-over is owned by
+/// WM0007 <c>PreserveOnUpdateRule</c> (which matches entries by uniqueness key); this rule
+/// deliberately covers only the root/locale field-set so the two do not fight.
 /// </summary>
 public sealed class Meta5FieldSetParityRule : IRule
 {
@@ -51,32 +54,36 @@ public sealed class Meta5FieldSetParityRule : IRule
     {
         DefaultLocaleManifest locale = context.Manifests.DefaultLocale;
         DefaultLocaleManifest previousLocale = previous.DefaultLocale;
+        string manifestPath = PolicyValues.GetLocaleManifestPath(context.Manifests, locale);
+        string previousVersion = previous.Installer.PackageVersion?.Value ?? "previous";
 
-        CarryText(context, droppedFields, previousLocale.Author, () => locale.Author, v => locale.Author = v, nameof(locale.Author));
-        CarryText(context, droppedFields, previousLocale.Moniker, () => locale.Moniker, v => locale.Moniker = v, nameof(locale.Moniker));
-        CarryText(context, droppedFields, previousLocale.License, () => locale.License, v => locale.License = v, nameof(locale.License));
-        CarryText(context, droppedFields, previousLocale.Copyright, () => locale.Copyright, v => locale.Copyright = v, nameof(locale.Copyright));
-        CarryText(context, droppedFields, previousLocale.ShortDescription, () => locale.ShortDescription, v => locale.ShortDescription = v, nameof(locale.ShortDescription));
-        CarryText(context, droppedFields, previousLocale.Description, () => locale.Description, v => locale.Description = v, nameof(locale.Description));
-        CarryText(context, droppedFields, previousLocale.InstallationNotes, () => locale.InstallationNotes, v => locale.InstallationNotes = v, nameof(locale.InstallationNotes));
+        CarryText(context, droppedFields, previousLocale.Author, () => locale.Author, v => locale.Author = v, nameof(locale.Author), manifestPath, previousVersion);
+        CarryText(context, droppedFields, previousLocale.Moniker, () => locale.Moniker, v => locale.Moniker = v, nameof(locale.Moniker), manifestPath, previousVersion);
+        CarryText(context, droppedFields, previousLocale.License, () => locale.License, v => locale.License = v, nameof(locale.License), manifestPath, previousVersion);
+        CarryText(context, droppedFields, previousLocale.Copyright, () => locale.Copyright, v => locale.Copyright = v, nameof(locale.Copyright), manifestPath, previousVersion);
+        CarryText(context, droppedFields, previousLocale.ShortDescription, () => locale.ShortDescription, v => locale.ShortDescription = v, nameof(locale.ShortDescription), manifestPath, previousVersion);
+        CarryText(context, droppedFields, previousLocale.Description, () => locale.Description, v => locale.Description = v, nameof(locale.Description), manifestPath, previousVersion);
+        CarryText(context, droppedFields, previousLocale.InstallationNotes, () => locale.InstallationNotes, v => locale.InstallationNotes = v, nameof(locale.InstallationNotes), manifestPath, previousVersion);
 
-        CarryUrl(context, droppedFields, previousLocale.PublisherUrl, () => locale.PublisherUrl, v => locale.PublisherUrl = v, nameof(locale.PublisherUrl));
-        CarryUrl(context, droppedFields, previousLocale.PublisherSupportUrl, () => locale.PublisherSupportUrl, v => locale.PublisherSupportUrl = v, nameof(locale.PublisherSupportUrl));
-        CarryUrl(context, droppedFields, previousLocale.PrivacyUrl, () => locale.PrivacyUrl, v => locale.PrivacyUrl = v, nameof(locale.PrivacyUrl));
-        CarryUrl(context, droppedFields, previousLocale.PackageUrl, () => locale.PackageUrl, v => locale.PackageUrl = v, nameof(locale.PackageUrl));
-        CarryUrl(context, droppedFields, previousLocale.LicenseUrl, () => locale.LicenseUrl, v => locale.LicenseUrl = v, nameof(locale.LicenseUrl));
-        CarryUrl(context, droppedFields, previousLocale.CopyrightUrl, () => locale.CopyrightUrl, v => locale.CopyrightUrl = v, nameof(locale.CopyrightUrl));
-        CarryUrl(context, droppedFields, previousLocale.PurchaseUrl, () => locale.PurchaseUrl, v => locale.PurchaseUrl = v, nameof(locale.PurchaseUrl));
+        CarryUrl(context, droppedFields, previousLocale.PublisherUrl, () => locale.PublisherUrl, v => locale.PublisherUrl = v, nameof(locale.PublisherUrl), manifestPath, previousVersion);
+        CarryUrl(context, droppedFields, previousLocale.PublisherSupportUrl, () => locale.PublisherSupportUrl, v => locale.PublisherSupportUrl = v, nameof(locale.PublisherSupportUrl), manifestPath, previousVersion);
+        CarryUrl(context, droppedFields, previousLocale.PrivacyUrl, () => locale.PrivacyUrl, v => locale.PrivacyUrl = v, nameof(locale.PrivacyUrl), manifestPath, previousVersion);
+        CarryUrl(context, droppedFields, previousLocale.PackageUrl, () => locale.PackageUrl, v => locale.PackageUrl = v, nameof(locale.PackageUrl), manifestPath, previousVersion);
+        CarryUrl(context, droppedFields, previousLocale.LicenseUrl, () => locale.LicenseUrl, v => locale.LicenseUrl = v, nameof(locale.LicenseUrl), manifestPath, previousVersion);
+        CarryUrl(context, droppedFields, previousLocale.CopyrightUrl, () => locale.CopyrightUrl, v => locale.CopyrightUrl = v, nameof(locale.CopyrightUrl), manifestPath, previousVersion);
+        CarryUrl(context, droppedFields, previousLocale.PurchaseUrl, () => locale.PurchaseUrl, v => locale.PurchaseUrl = v, nameof(locale.PurchaseUrl), manifestPath, previousVersion);
 
         if (locale.Tags is null && previousLocale.Tags is { Count: > 0 } tags && !Skip(context, droppedFields, nameof(locale.Tags)))
         {
             locale.Tags = ManifestValues.CloneStringList(tags);
+            AddListEvidence(context, manifestPath, nameof(locale.Tags), tags.Count, previousVersion);
             RecordCarry(context, $"DefaultLocale.{nameof(locale.Tags)}");
         }
 
         if (locale.Documentations is null && previousLocale.Documentations is { Count: > 0 } docs && !Skip(context, droppedFields, nameof(locale.Documentations)))
         {
             locale.Documentations = ManifestValues.CloneList(docs, ManifestValues.CloneDocumentation);
+            AddListEvidence(context, manifestPath, nameof(locale.Documentations), docs.Count, previousVersion);
             RecordCarry(context, $"DefaultLocale.{nameof(locale.Documentations)}");
         }
     }
@@ -85,11 +92,14 @@ public sealed class Meta5FieldSetParityRule : IRule
     {
         InstallerManifest manifest = context.Manifests.Installer;
         InstallerManifest previousManifest = previous.Installer;
+        string manifestPath = ManifestContext.GetInstallerManifestPath(context.Manifests);
+        string previousVersion = previousManifest.PackageVersion?.Value ?? "previous";
 
         if (manifest.MinimumOSVersion is null && previousManifest.MinimumOSVersion is { } minimumOS
             && !Skip(context, droppedFields, nameof(manifest.MinimumOSVersion)))
         {
             manifest.MinimumOSVersion = minimumOS;
+            AddEvidence(context, manifestPath, nameof(manifest.MinimumOSVersion), previousVersion);
             RecordCarry(context, $"Installer.{nameof(manifest.MinimumOSVersion)}");
         }
 
@@ -97,6 +107,7 @@ public sealed class Meta5FieldSetParityRule : IRule
             && !Skip(context, droppedFields, nameof(manifest.InstallModes)))
         {
             manifest.InstallModes = [.. modes];
+            AddListEvidence(context, manifestPath, nameof(manifest.InstallModes), modes.Count, previousVersion);
             RecordCarry(context, $"Installer.{nameof(manifest.InstallModes)}");
         }
 
@@ -132,7 +143,9 @@ public sealed class Meta5FieldSetParityRule : IRule
         string? previousValue,
         Func<string?> get,
         Action<string> set,
-        string fieldName)
+        string fieldName,
+        string manifestPath,
+        string previousVersion)
     {
         if (previousValue is null || get() is not null || Skip(context, droppedFields, fieldName))
         {
@@ -140,6 +153,7 @@ public sealed class Meta5FieldSetParityRule : IRule
         }
 
         set(previousValue);
+        AddEvidence(context, manifestPath, fieldName, previousVersion);
         RecordCarry(context, $"DefaultLocale.{fieldName}");
     }
 
@@ -149,7 +163,9 @@ public sealed class Meta5FieldSetParityRule : IRule
         string? previousValue,
         Func<string?> get,
         Action<string> set,
-        string fieldName)
+        string fieldName,
+        string manifestPath,
+        string previousVersion)
     {
         if (previousValue is null || get() is not null || Skip(context, droppedFields, fieldName))
         {
@@ -164,7 +180,34 @@ public sealed class Meta5FieldSetParityRule : IRule
         }
 
         set(previousValue);
+        context.AddChangeEvidence(
+            this,
+            manifestPath,
+            fieldName,
+            $"previous merged manifest ({previousVersion}); URL re-validated by supplied evidence",
+            RuleChangeConfidence.High);
         RecordCarry(context, $"DefaultLocale.{fieldName} (URL re-validated by supplied evidence)");
+    }
+
+    private void AddEvidence(ManifestContext context, string manifestPath, string fieldPath, string previousVersion)
+        => context.AddChangeEvidence(
+            this,
+            manifestPath,
+            fieldPath,
+            $"previous merged manifest ({previousVersion})",
+            RuleChangeConfidence.High);
+
+    /// <summary>
+    /// Attaches carry evidence for a cloned list at the parent key and each item index, so
+    /// whichever paths the snapshot diff reports resolve to the same provenance.
+    /// </summary>
+    private void AddListEvidence(ManifestContext context, string manifestPath, string fieldName, int count, string previousVersion)
+    {
+        AddEvidence(context, manifestPath, fieldName, previousVersion);
+        for (int i = 0; i < count; i++)
+        {
+            AddEvidence(context, manifestPath, $"{fieldName}[{i}]", previousVersion);
+        }
     }
 
     private bool Skip(ManifestContext context, ImmutableStringSet droppedFields, string fieldName)

@@ -151,13 +151,15 @@ public sealed class Dep1PayloadDependencyRule : IRule
             return;
         }
 
-        Dependencies dependencies = installer.Dependencies ??= new Dependencies();
-        List<PackageDependency> packageDependencies = dependencies.PackageDependencies ??= [];
-        if (HasPackageDependency(dependencies, identifier))
+        // Creating a bare per-installer Dependencies object would mask the manifest-root
+        // defaults (WindowsFeatures, external deps, ...); clone the effective set first.
+        if (installer.Dependencies is null && effective is not null)
         {
-            return;
+            installer.Dependencies = ManifestValues.CloneDependencies(effective);
         }
 
+        Dependencies dependencies = installer.Dependencies ??= new Dependencies();
+        List<PackageDependency> packageDependencies = dependencies.PackageDependencies ??= [];
         packageDependencies.Add(new PackageDependency { PackageIdentifier = new PackageIdentifier(identifier) });
         string signals = evidence.Signals.Count == 0 ? "payload metadata" : string.Join(", ", evidence.Signals);
         context.AddChangeEvidence(

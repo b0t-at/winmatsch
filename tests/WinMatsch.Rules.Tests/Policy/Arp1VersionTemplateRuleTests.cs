@@ -111,6 +111,18 @@ public class Arp1VersionTemplateRuleTests
     }
 
     [Fact]
+    public void Old_version_matching_inside_a_larger_token_is_not_templated()
+    {
+        // Token-boundary guard: old version 1.2 must not rewrite inside 11.2.0 or 1.2.3.
+        (PackageManifests current, PackageManifests previous) = CreateUpdate("1.2", "1.3", displayName: "App 11.2.0");
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        _rule.Apply(context);
+
+        Assert.Equal("App 11.2.0", current.Installer.Installers![0].AppsAndFeaturesEntries![0].DisplayName);
+    }
+
+    [Fact]
     public void Values_without_the_old_version_are_untouched()
     {
         // Nonmatching control.

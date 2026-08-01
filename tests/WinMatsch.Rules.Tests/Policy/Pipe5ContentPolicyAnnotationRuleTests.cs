@@ -39,7 +39,7 @@ public class Pipe5ContentPolicyAnnotationRuleTests
         // Motivating regression: Oracle MySQL blocks Azure ranges -> Network-Blocker (#154168).
         PackageManifests manifests = TestManifests.Create(TestManifests.CreateInstaller());
         var rule = new Pipe5ContentPolicyAnnotationRule(CreateOverrides(
-            new PolicyAnnotation { Id = "network-blocked", Annotation = "publisher blocks Azure IP ranges" }));
+            new PolicyAnnotation { Id = "network-blocked-publishers", Annotation = "publisher blocks Azure IP ranges" }));
         ManifestContext context = TestManifests.CreateContext(manifests);
 
         rule.Apply(context);
