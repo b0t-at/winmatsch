@@ -99,6 +99,7 @@ public sealed class DownloadCache
                     tempPath,
                     preferredPath,
                     actual,
+                    hooks: null,
                     cancellationToken).ConfigureAwait(false);
             }
             catch
@@ -209,7 +210,9 @@ public sealed class DownloadCache
                 await using FileStream? processLock =
                     await AcquireExistingProcessLockAsync(cancellationToken).ConfigureAwait(false);
                 IReadOnlyList<DownloadCacheEntryInfo> entries =
-                    await InspectCoreAsync(cancellationToken).ConfigureAwait(false);
+                    await InspectCoreAsync(
+                        allowConcurrentMutation: processLock is null,
+                        cancellationToken).ConfigureAwait(false);
                 if (processLock is not null)
                 {
                     return entries;
@@ -233,6 +236,7 @@ public sealed class DownloadCache
     }
 
     private async Task<IReadOnlyList<DownloadCacheEntryInfo>> InspectCoreAsync(
+        bool allowConcurrentMutation,
         CancellationToken cancellationToken)
     {
         string[] metadataPaths;
@@ -256,7 +260,10 @@ public sealed class DownloadCache
             string key = Path.GetFileNameWithoutExtension(metadataPath);
             try
             {
-                CacheMetadata? metadata = await ReadMetadataAsync(key, cancellationToken).ConfigureAwait(false);
+                CacheMetadata? metadata = await ReadMetadataAsync(
+                    key,
+                    cancellationToken,
+                    allowConcurrentMutation).ConfigureAwait(false);
                 if (metadata is null)
                 {
                     continue;
@@ -272,7 +279,10 @@ public sealed class DownloadCache
                     }
                     else
                     {
-                        DownloadContentIdentity actual = await ComputeIdentityAsync(payloadPath, cancellationToken)
+                        DownloadContentIdentity actual = await ComputeIdentityAsync(
+                            payloadPath,
+                            cancellationToken,
+                            allowConcurrentMutation)
                             .ConfigureAwait(false);
                         state = actual == metadata.ContentIdentity
                             ? DownloadCacheEntryState.Fresh
@@ -292,6 +302,17 @@ public sealed class DownloadCache
                 });
             }
             catch (DownloadCacheCorruptionException)
+            {
+                entries.Add(new DownloadCacheEntryInfo
+                {
+                    Url = string.Empty,
+                    CacheKey = key,
+                    State = DownloadCacheEntryState.Corrupt,
+                });
+            }
+            catch (Exception exception) when (
+                allowConcurrentMutation
+                && exception is FileNotFoundException or DirectoryNotFoundException)
             {
                 entries.Add(new DownloadCacheEntryInfo
                 {
@@ -383,7 +404,10 @@ public sealed class DownloadCache
         }
     }
 
-    private async Task<CacheMetadata?> ReadMetadataAsync(string key, CancellationToken cancellationToken)
+    private async Task<CacheMetadata?> ReadMetadataAsync(
+        string key,
+        CancellationToken cancellationToken,
+        bool allowConcurrentMutation = false)
     {
         string metadataPath = GetMetadataPath(key);
         if (!File.Exists(metadataPath))
@@ -397,7 +421,9 @@ public sealed class DownloadCache
                 metadataPath,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.Read,
+                allowConcurrentMutation
+                    ? FileShare.ReadWrite | FileShare.Delete
+                    : FileShare.Read,
                 CopyBufferSize,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             using JsonDocument document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -636,15 +662,26 @@ public sealed class DownloadCache
         }
     }
 
-    private static async Task<DownloadContentIdentity> ComputeIdentityAsync(string path, CancellationToken cancellationToken)
+    private async Task<DownloadContentIdentity> ComputeIdentityAsync(
+        string path,
+        CancellationToken cancellationToken,
+        bool allowConcurrentMutation = false)
     {
         await using FileStream stream = new(
             path,
             FileMode.Open,
             FileAccess.Read,
-            FileShare.Read,
+            allowConcurrentMutation
+                ? FileShare.ReadWrite | FileShare.Delete
+                : FileShare.Read,
             CopyBufferSize,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (allowConcurrentMutation
+            && _options.AfterUnlockedInspectionPayloadOpenAsync is { } afterOpen)
+        {
+            await afterOpen(path, cancellationToken).ConfigureAwait(false);
+        }
+
         Sha256Hash hash = await Sha256Hash.ComputeAsync(stream, cancellationToken).ConfigureAwait(false);
         return new DownloadContentIdentity(hash, stream.Length);
     }

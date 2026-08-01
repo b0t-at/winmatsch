@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using WinMatsch.Core;
 
 namespace WinMatsch.Downloads;
@@ -5,11 +6,28 @@ namespace WinMatsch.Downloads;
 internal static class DownloadDestination
 {
     private const int CopyBufferSize = 81920;
+    private const int SharingViolationErrorCode = 32;
+    private const int SharingViolationRetryCount = 7;
+
+    private static readonly TimeSpan[] SharingViolationRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(5),
+        TimeSpan.FromMilliseconds(10),
+        TimeSpan.FromMilliseconds(20),
+        TimeSpan.FromMilliseconds(40),
+        TimeSpan.FromMilliseconds(80),
+        TimeSpan.FromMilliseconds(160),
+        TimeSpan.FromMilliseconds(320),
+    ];
+
+    private static readonly ConcurrentDictionary<string, DestinationGate> DestinationGates =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public static async Task<string> PublishAsync(
         string temporaryPath,
         string preferredPath,
         DownloadContentIdentity identity,
+        DownloadDestinationHooks? hooks,
         CancellationToken cancellationToken)
     {
         string normalizedPreferredPath = Path.GetFullPath(preferredPath);
@@ -17,6 +35,7 @@ internal static class DownloadDestination
             temporaryPath,
             normalizedPreferredPath,
             identity,
+            hooks,
             cancellationToken).ConfigureAwait(false);
         if (preferredOutcome != PublishOutcome.Conflict)
         {
@@ -28,6 +47,7 @@ internal static class DownloadDestination
             temporaryPath,
             contentPath,
             identity,
+            hooks,
             cancellationToken).ConfigureAwait(false);
         if (contentOutcome == PublishOutcome.Conflict)
         {
@@ -44,11 +64,20 @@ internal static class DownloadDestination
         string temporaryPath,
         string destinationPath,
         DownloadContentIdentity identity,
+        DownloadDestinationHooks? hooks,
         CancellationToken cancellationToken)
     {
+        await using DestinationLease lease = await AcquireDestinationLeaseAsync(
+            destinationPath,
+            hooks,
+            cancellationToken).ConfigureAwait(false);
+
         if (File.Exists(destinationPath))
         {
-            DownloadContentIdentity existing = await ComputeIdentityAsync(destinationPath, cancellationToken).ConfigureAwait(false);
+            DownloadContentIdentity existing = await ComputeIdentityAsync(
+                destinationPath,
+                hooks,
+                cancellationToken).ConfigureAwait(false);
             if (existing == identity)
             {
                 TryDelete(temporaryPath);
@@ -61,11 +90,19 @@ internal static class DownloadDestination
         try
         {
             File.Move(temporaryPath, destinationPath);
+            if (hooks?.AfterPublishAsync is { } afterPublish)
+            {
+                await afterPublish(destinationPath, cancellationToken).ConfigureAwait(false);
+            }
+
             return PublishOutcome.Published;
         }
         catch (IOException) when (File.Exists(destinationPath))
         {
-            DownloadContentIdentity existing = await ComputeIdentityAsync(destinationPath, cancellationToken).ConfigureAwait(false);
+            DownloadContentIdentity existing = await ComputeIdentityAsync(
+                destinationPath,
+                hooks,
+                cancellationToken).ConfigureAwait(false);
             if (existing == identity)
             {
                 TryDelete(temporaryPath);
@@ -80,6 +117,64 @@ internal static class DownloadDestination
                 destinationPath,
                 $"Failed to atomically publish the installer to '{destinationPath}'.",
                 exception);
+        }
+    }
+
+    private static async ValueTask<DestinationLease> AcquireDestinationLeaseAsync(
+        string destinationPath,
+        DownloadDestinationHooks? hooks,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            DestinationGate gate = DestinationGates.GetOrAdd(
+                destinationPath,
+                static _ => new DestinationGate());
+            lock (gate.SyncRoot)
+            {
+                if (gate.IsRetired)
+                {
+                    continue;
+                }
+
+                gate.ReferenceCount++;
+            }
+
+            try
+            {
+                hooks?.BeforeLockWait?.Invoke(destinationPath);
+                await gate.Semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+                return new DestinationLease(destinationPath, gate);
+            }
+            catch
+            {
+                ReleaseDestinationReference(destinationPath, gate, releaseSemaphore: false);
+                throw;
+            }
+        }
+    }
+
+    private static void ReleaseDestinationReference(
+        string destinationPath,
+        DestinationGate gate,
+        bool releaseSemaphore)
+    {
+        if (releaseSemaphore)
+        {
+            gate.Semaphore.Release();
+        }
+
+        lock (gate.SyncRoot)
+        {
+            gate.ReferenceCount--;
+            if (gate.ReferenceCount != 0)
+            {
+                return;
+            }
+
+            gate.IsRetired = true;
+            _ = ((ICollection<KeyValuePair<string, DestinationGate>>)DestinationGates).Remove(
+                new KeyValuePair<string, DestinationGate>(destinationPath, gate));
         }
     }
 
@@ -102,32 +197,52 @@ internal static class DownloadDestination
 
     private static async Task<DownloadContentIdentity> ComputeIdentityAsync(
         string path,
+        DownloadDestinationHooks? hooks,
         CancellationToken cancellationToken)
     {
-        try
+        for (int retry = 0; ; retry++)
         {
-            await using FileStream stream = new(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                CopyBufferSize,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            Sha256Hash sha256 = await Sha256Hash.ComputeAsync(stream, cancellationToken).ConfigureAwait(false);
-            return new DownloadContentIdentity(sha256, stream.Length);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            throw new DownloadFileException(
-                path,
-                $"Failed to verify the existing destination '{path}'.",
-                exception);
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                await using FileStream stream = new(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    CopyBufferSize,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+                Sha256Hash sha256 = await Sha256Hash.ComputeAsync(stream, cancellationToken).ConfigureAwait(false);
+                return new DownloadContentIdentity(sha256, stream.Length);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (IOException exception) when (
+                IsWindowsSharingViolation(exception)
+                && retry < SharingViolationRetryCount)
+            {
+                if (hooks?.BeforeSharingViolationRetryAsync is { } beforeRetry)
+                {
+                    await beforeRetry(path, retry + 1, cancellationToken).ConfigureAwait(false);
+                }
+
+                await Task.Delay(SharingViolationRetryDelays[retry], cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                throw new DownloadFileException(
+                    path,
+                    $"Failed to verify the existing destination '{path}'.",
+                    exception);
+            }
         }
     }
+
+    private static bool IsWindowsSharingViolation(IOException exception)
+        => OperatingSystem.IsWindows()
+            && (exception.HResult & 0xFFFF) == SharingViolationErrorCode;
 
     private static void TryDelete(string path)
     {
@@ -140,6 +255,37 @@ internal static class DownloadDestination
         }
         catch (UnauthorizedAccessException)
         {
+        }
+    }
+
+    private sealed class DestinationGate
+    {
+        public object SyncRoot { get; } = new();
+
+        public SemaphoreSlim Semaphore { get; } = new(1, 1);
+
+        public int ReferenceCount { get; set; }
+
+        public bool IsRetired { get; set; }
+    }
+
+    private sealed class DestinationLease(
+        string destinationPath,
+        DestinationGate gate) : IAsyncDisposable
+    {
+        private int _disposed;
+
+        public ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                ReleaseDestinationReference(
+                    destinationPath,
+                    gate,
+                    releaseSemaphore: true);
+            }
+
+            return ValueTask.CompletedTask;
         }
     }
 

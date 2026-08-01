@@ -13,4 +13,6 @@ public sealed class DownloadCacheOptions
     public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
 
     internal Func<CancellationToken, Task>? BeforeUnlockedInspectionRecheckAsync { get; set; }
+
+    internal Func<string, CancellationToken, Task>? AfterUnlockedInspectionPayloadOpenAsync { get; set; }
 }

@@ -54,4 +54,6 @@ public sealed class DownloaderOptions
     /// The clock used for HTTP age and freshness calculations. Override in deterministic hosts or tests.
     /// </summary>
     public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
+
+    internal DownloadDestinationHooks? DestinationHooks { get; set; }
 }

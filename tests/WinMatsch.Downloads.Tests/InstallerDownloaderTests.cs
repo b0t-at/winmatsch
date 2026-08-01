@@ -365,6 +365,118 @@ public sealed class InstallerDownloaderTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadManyAsync_RetriesSharingViolationDuringCoordinatedFinalization()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const int MaxConcurrency = 2;
+        string[] urls =
+        [
+            "https://example.com/first/setup.exe",
+            "https://example.com/second/setup.exe",
+        ];
+        byte[][] payloads =
+        [
+            CreatePayload(2_001),
+            CreatePayload(2_002),
+        ];
+        using CoordinatedHttpMessageHandler handler = new(MaxConcurrency, request =>
+        {
+            int index = request.RequestUri!.AbsolutePath.Contains("/first/", StringComparison.Ordinal) ? 0 : 1;
+            return Ok(request, payloads[index]);
+        });
+        var preferredHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sharingViolationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSharingViolation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        object preferredHandleGate = new();
+        FileStream? preferredHandle = null;
+        bool releasePreferredHandle = false;
+        int holdPreferred = 0;
+        using InstallerDownloader downloader = new(
+            handler,
+            new DownloaderOptions
+            {
+                DestinationHooks = new DownloadDestinationHooks
+                {
+                    AfterPublishAsync = (path, _) =>
+                    {
+                        if (Path.GetFileName(path) == "setup.exe"
+                            && Interlocked.CompareExchange(ref holdPreferred, 1, 0) == 0)
+                        {
+                            var newHandle = new FileStream(
+                                path,
+                                FileMode.Open,
+                                FileAccess.ReadWrite,
+                                FileShare.None);
+                            lock (preferredHandleGate)
+                            {
+                                if (releasePreferredHandle)
+                                {
+                                    newHandle.Dispose();
+                                }
+                                else
+                                {
+                                    preferredHandle = newHandle;
+                                }
+                            }
+
+                            preferredHeld.TrySetResult();
+                        }
+
+                        return Task.CompletedTask;
+                    },
+                    BeforeSharingViolationRetryAsync = async (_, _, cancellationToken) =>
+                    {
+                        sharingViolationObserved.TrySetResult();
+                        await releaseSharingViolation.Task.WaitAsync(cancellationToken);
+                    },
+                },
+            });
+
+        Task<IReadOnlyList<DownloadResult>> download = downloader.DownloadManyAsync(
+            urls,
+            _tempDir,
+            MaxConcurrency);
+        IReadOnlyList<DownloadResult>? results = null;
+        try
+        {
+            await preferredHeld.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await sharingViolationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(download.IsCompleted);
+        }
+        finally
+        {
+            FileStream? handleToDispose;
+            lock (preferredHandleGate)
+            {
+                releasePreferredHandle = true;
+                handleToDispose = preferredHandle;
+                preferredHandle = null;
+            }
+
+            if (handleToDispose is not null)
+            {
+                await handleToDispose.DisposeAsync();
+            }
+
+            releaseSharingViolation.TrySetResult();
+            results = await download.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        Assert.Equal(MaxConcurrency, handler.MaxObservedConcurrency);
+        Assert.NotEqual(results[0].FilePath, results[1].FilePath);
+        for (int index = 0; index < results.Count; index++)
+        {
+            byte[] persisted = await File.ReadAllBytesAsync(results[index].FilePath);
+            Assert.Equal(payloads[index], persisted);
+            Assert.Equal(Convert.ToHexString(SHA256.HashData(persisted)), results[index].Sha256.Normalized);
+        }
+    }
+
+    [Fact]
     public async Task DownloadManyAsync_FailsFast_WhenOneDownloadFails()
     {
         string[] urls =

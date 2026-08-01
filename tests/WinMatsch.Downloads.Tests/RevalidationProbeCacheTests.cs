@@ -829,6 +829,56 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task Cache_LegacyInspectionDoesNotBlockFirstCrossProcessMutation()
+    {
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        using StubHttpMessageHandler handler = new((request, _) => Ok(request, Payload(100)));
+        using InstallerDownloader downloader = CreateCachedDownloader(handler, cacheDirectory);
+        await downloader.DownloadAsync("https://example.com/setup.exe", Path.Combine(_tempDir, "first"));
+        string lockPath = Path.Combine(cacheDirectory, ".winmatsch-cache.lock");
+        File.Delete(lockPath);
+        var payloadOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePayload = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cache = new DownloadCache(cacheDirectory, new DownloadCacheOptions
+        {
+            AfterUnlockedInspectionPayloadOpenAsync = async (_, cancellationToken) =>
+            {
+                payloadOpened.TrySetResult();
+                await releasePayload.Task.WaitAsync(cancellationToken);
+            },
+        });
+
+        Task<IReadOnlyList<DownloadCacheEntryInfo>> inspection = cache.InspectAsync();
+        IReadOnlyList<DownloadCacheEntryInfo>? entries = null;
+        try
+        {
+            await payloadOpened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await using var crossProcessLock = new FileStream(
+                lockPath,
+                FileMode.CreateNew,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                bufferSize: 1,
+                FileOptions.Asynchronous);
+            foreach (string path in Directory.EnumerateFiles(cacheDirectory)
+                         .Where(path => !string.Equals(path, lockPath, StringComparison.Ordinal)))
+            {
+                File.Delete(path);
+            }
+        }
+        finally
+        {
+            releasePayload.TrySetResult();
+            entries = await inspection.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        Assert.Empty(entries);
+        Assert.Equal(
+            [lockPath],
+            Directory.EnumerateFiles(cacheDirectory).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task Cache_InspectOfMissingDirectoryStillHonorsCancellation()
     {
         var cache = new DownloadCache(Path.Combine(_tempDir, "missing-cache"));

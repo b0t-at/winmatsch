@@ -443,6 +443,7 @@ public sealed class InstallerDownloader : IDisposable
                 tempPath,
                 preferredPath,
                 identity,
+                _options.DestinationHooks,
                 cancellationToken).ConfigureAwait(false);
         }
         catch
