@@ -788,6 +788,47 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task Cache_LegacyInspectionRetriesWhenPersistentLockAppears()
+    {
+        string cacheDirectory = Path.Combine(_tempDir, "cache");
+        using StubHttpMessageHandler handler = new((request, _) => Ok(request, Payload(100)));
+        using InstallerDownloader downloader = CreateCachedDownloader(handler, cacheDirectory);
+        await downloader.DownloadAsync("https://example.com/setup.exe", Path.Combine(_tempDir, "first"));
+        string lockPath = Path.Combine(cacheDirectory, ".winmatsch-cache.lock");
+        File.Delete(lockPath);
+        var reachedRecheck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRecheck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cache = new DownloadCache(cacheDirectory, new DownloadCacheOptions
+        {
+            BeforeUnlockedInspectionRecheckAsync = async cancellationToken =>
+            {
+                reachedRecheck.TrySetResult();
+                await releaseRecheck.Task.WaitAsync(cancellationToken);
+            },
+        });
+
+        Task<IReadOnlyList<DownloadCacheEntryInfo>> inspection = cache.InspectAsync();
+        await reachedRecheck.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var blocker = new FileStream(
+            lockPath,
+            FileMode.CreateNew,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            bufferSize: 1,
+            FileOptions.Asynchronous);
+        releaseRecheck.TrySetResult();
+        await Task.Yield();
+        Assert.False(inspection.IsCompleted);
+
+        await blocker.DisposeAsync();
+        IReadOnlyList<DownloadCacheEntryInfo> entries =
+            await inspection.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Single(entries);
+        Assert.True(File.Exists(lockPath));
+    }
+
+    [Fact]
     public async Task Cache_InspectOfMissingDirectoryStillHonorsCancellation()
     {
         var cache = new DownloadCache(Path.Combine(_tempDir, "missing-cache"));

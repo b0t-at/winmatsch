@@ -204,71 +204,105 @@ public sealed class DownloadCache
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await using FileStream? processLock =
-                await AcquireExistingProcessLockAsync(cancellationToken).ConfigureAwait(false);
-            if (!Directory.Exists(_directory))
+            while (true)
             {
-                return [];
-            }
-
-            var entries = new List<DownloadCacheEntryInfo>();
-            foreach (string metadataPath in Directory.EnumerateFiles(_directory, "*" + MetadataSuffix).Order(StringComparer.Ordinal))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                string key = Path.GetFileNameWithoutExtension(metadataPath);
-                try
+                await using FileStream? processLock =
+                    await AcquireExistingProcessLockAsync(cancellationToken).ConfigureAwait(false);
+                IReadOnlyList<DownloadCacheEntryInfo> entries =
+                    await InspectCoreAsync(cancellationToken).ConfigureAwait(false);
+                if (processLock is not null)
                 {
-                    CacheMetadata? metadata = await ReadMetadataAsync(key, cancellationToken).ConfigureAwait(false);
-                    if (metadata is null)
-                    {
-                        continue;
-                    }
-
-                    string payloadPath = GetPayloadPath(metadata.PayloadFileName);
-                    DownloadCacheEntryState state = DownloadCacheEntryState.Stale;
-                    if (metadata.ExpiresAt > _timeProvider.GetUtcNow())
-                    {
-                        if (!File.Exists(payloadPath))
-                        {
-                            state = DownloadCacheEntryState.Corrupt;
-                        }
-                        else
-                        {
-                            DownloadContentIdentity actual = await ComputeIdentityAsync(payloadPath, cancellationToken).ConfigureAwait(false);
-                            state = actual == metadata.ContentIdentity
-                                ? DownloadCacheEntryState.Fresh
-                                : DownloadCacheEntryState.Corrupt;
-                        }
-                    }
-
-                    entries.Add(new DownloadCacheEntryInfo
-                    {
-                        Url = metadata.InitialUrl,
-                        CacheKey = key,
-                        ContentIdentity = metadata.ContentIdentity,
-                        CreatedAt = metadata.CreatedAt,
-                        LastAccessedAt = metadata.LastAccessedAt,
-                        ExpiresAt = metadata.ExpiresAt,
-                        State = state,
-                    });
+                    return entries;
                 }
-                catch (DownloadCacheCorruptionException)
+
+                if (_options.BeforeUnlockedInspectionRecheckAsync is { } beforeRecheck)
                 {
-                    entries.Add(new DownloadCacheEntryInfo
-                    {
-                        Url = string.Empty,
-                        CacheKey = key,
-                        State = DownloadCacheEntryState.Corrupt,
-                    });
+                    await beforeRecheck(cancellationToken).ConfigureAwait(false);
+                }
+
+                if (!File.Exists(Path.Combine(_directory, LockFileName)))
+                {
+                    return entries;
                 }
             }
-
-            return entries;
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    private async Task<IReadOnlyList<DownloadCacheEntryInfo>> InspectCoreAsync(
+        CancellationToken cancellationToken)
+    {
+        string[] metadataPaths;
+        try
+        {
+            metadataPaths =
+            [
+                .. Directory.EnumerateFiles(_directory, "*" + MetadataSuffix)
+                    .Order(StringComparer.Ordinal),
+            ];
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return [];
+        }
+
+        var entries = new List<DownloadCacheEntryInfo>();
+        foreach (string metadataPath in metadataPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string key = Path.GetFileNameWithoutExtension(metadataPath);
+            try
+            {
+                CacheMetadata? metadata = await ReadMetadataAsync(key, cancellationToken).ConfigureAwait(false);
+                if (metadata is null)
+                {
+                    continue;
+                }
+
+                string payloadPath = GetPayloadPath(metadata.PayloadFileName);
+                DownloadCacheEntryState state = DownloadCacheEntryState.Stale;
+                if (metadata.ExpiresAt > _timeProvider.GetUtcNow())
+                {
+                    if (!File.Exists(payloadPath))
+                    {
+                        state = DownloadCacheEntryState.Corrupt;
+                    }
+                    else
+                    {
+                        DownloadContentIdentity actual = await ComputeIdentityAsync(payloadPath, cancellationToken)
+                            .ConfigureAwait(false);
+                        state = actual == metadata.ContentIdentity
+                            ? DownloadCacheEntryState.Fresh
+                            : DownloadCacheEntryState.Corrupt;
+                    }
+                }
+
+                entries.Add(new DownloadCacheEntryInfo
+                {
+                    Url = metadata.InitialUrl,
+                    CacheKey = key,
+                    ContentIdentity = metadata.ContentIdentity,
+                    CreatedAt = metadata.CreatedAt,
+                    LastAccessedAt = metadata.LastAccessedAt,
+                    ExpiresAt = metadata.ExpiresAt,
+                    State = state,
+                });
+            }
+            catch (DownloadCacheCorruptionException)
+            {
+                entries.Add(new DownloadCacheEntryInfo
+                {
+                    Url = string.Empty,
+                    CacheKey = key,
+                    State = DownloadCacheEntryState.Corrupt,
+                });
+            }
+        }
+
+        return entries;
     }
 
     /// <summary>Clears one URL entry, or every entry when <paramref name="url"/> is null.</summary>
@@ -711,10 +745,6 @@ public sealed class DownloadCache
             catch (IOException) when (File.Exists(lockPath))
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken).ConfigureAwait(false);
-            }
-            catch (IOException) when (!File.Exists(lockPath))
-            {
-                return null;
             }
         }
     }

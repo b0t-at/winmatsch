@@ -11,4 +11,6 @@ public sealed class DownloadCacheOptions
 
     /// <summary>The clock used for cache TTL and HTTP freshness expiration.</summary>
     public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
+
+    internal Func<CancellationToken, Task>? BeforeUnlockedInspectionRecheckAsync { get; set; }
 }
