@@ -29,10 +29,18 @@ jobs:
         run: dotnet build --no-restore --configuration Release
 
       - name: Test
-        run: dotnet test --no-build --configuration Release --filter "FullyQualifiedName!~WinMatsch.E2E.Tests" --logger "console;verbosity=normal"
+        run: dotnet test --no-build --configuration Release --filter "FullyQualifiedName!~WinMatsch.E2E.Tests" --logger "console;verbosity=normal" --logger "trx;LogFilePrefix=unit" --results-directory TestResults
 
       - name: Hermetic end-to-end tests
-        run: dotnet test tests/WinMatsch.E2E.Tests/WinMatsch.E2E.Tests.csproj --no-build --configuration Release --logger "console;verbosity=normal"
+        run: dotnet test tests/WinMatsch.E2E.Tests/WinMatsch.E2E.Tests.csproj --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFilePrefix=e2e" --results-directory TestResults
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: TestResults/
+          if-no-files-found: ignore
 
   format:
     name: Format check

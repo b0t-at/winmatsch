@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>winmatsch</AssemblyName>
-    <Description>Cross-platform command-line host for WinMatsch workflows.</Description>
+    <Description>Cross-platform CLI that analyzes installers and creates, validates, and submits WinGet manifests.</Description>
     <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL3000;IL3002;IL3050</WarningsAsErrors>
   </PropertyGroup>
 
@@ -22,8 +22,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="..\WinMatsch.Validation\THIRD-PARTY-NOTICES.txt"
+    <None Include="..\..\THIRD-PARTY-NOTICES.txt"
           Link="THIRD-PARTY-NOTICES.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\LICENSE"
+          Link="LICENSE"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>

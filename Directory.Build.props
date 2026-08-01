@@ -18,7 +18,10 @@
   <PropertyGroup>
     <Product>winmatsch</Product>
     <Authors>winmatsch contributors</Authors>
+    <Copyright>Copyright (c) 2026 winmatsch contributors</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/b0t-at/winmatsch</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/b0t-at/winmatsch</PackageProjectUrl>
     <VersionPrefix>0.1.0</VersionPrefix>
   </PropertyGroup>
 
