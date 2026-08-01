@@ -21,6 +21,7 @@ public sealed class DownloaderFinalArtifactRevalidator(InstallerDownloader downl
             Path.GetTempPath(),
             $"winmatsch-final-revalidation-{Guid.NewGuid():N}");
         Directory.CreateDirectory(scratchDirectory);
+        Exception? cleanupFailure = null;
         try
         {
             foreach (InstallerArtifact artifact in request.LocalPlan.Preflight.InstallerArtifacts)
@@ -54,10 +55,26 @@ public sealed class DownloaderFinalArtifactRevalidator(InstallerDownloader downl
         }
         finally
         {
-            if (Directory.Exists(scratchDirectory))
+            try
             {
-                Directory.Delete(scratchDirectory, recursive: true);
+                if (Directory.Exists(scratchDirectory))
+                {
+                    Directory.Delete(scratchDirectory, recursive: true);
+                }
             }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                cleanupFailure = exception;
+            }
+        }
+
+        if (cleanupFailure is not null)
+        {
+            diagnostics.Add(new(
+                "GH1021",
+                "Final artifact revalidation completed, but its temporary files could not be removed: "
+                + GitHubSubmissionFormatter.Redact(cleanupFailure.Message)));
         }
 
         return diagnostics.Count == 0

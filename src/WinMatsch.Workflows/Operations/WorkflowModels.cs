@@ -95,6 +95,11 @@ public enum ExpectedFileState
 
 public sealed record WorkflowAuditEntry(string Code, string Message, string? Provenance = null);
 
+public sealed record WorkflowReleaseProvenance(
+    WinMatsch.GitHub.RepositoryCoordinates Repository,
+    long ReleaseId,
+    DateTimeOffset UpdatedAt);
+
 public sealed record RuleRunSummary(
     ImmutableArray<RuleExecution> Executions,
     ImmutableArray<RuleChange> Changes,
@@ -130,6 +135,8 @@ public sealed record LocalOperationPlan
     public required WorkflowPreflightRequest Preflight { get; init; }
 
     public required RuleRunSummary Rules { get; init; }
+
+    public WorkflowReleaseProvenance? Release { get; init; }
 
     public ImmutableArray<WorkflowQuestion> Questions { get; init; } = [];
 

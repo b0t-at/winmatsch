@@ -497,7 +497,10 @@ public sealed class LocalWorkflowEngine
             [],
             audit,
             installerArtifacts.ToImmutable(),
-            existingVersionEvidence);
+            existingVersionEvidence) with
+        {
+            Release = CreateReleaseProvenance(enrichedAssets),
+        };
         return await CompleteAsync(operationRequest, plan, cancellationToken).ConfigureAwait(false);
     }
 
@@ -680,7 +683,7 @@ public sealed class LocalWorkflowEngine
                 ErrorMessage = exception.Message,
             };
         }
-        catch (WorkflowCommittedCleanupException exception)
+        catch (WorkflowCommittedException exception)
         {
             return new()
             {
@@ -1187,6 +1190,51 @@ public sealed class LocalWorkflowEngine
                     .ThenBy(static entry => entry.Message, StringComparer.Ordinal),
             ],
         };
+
+    private static WorkflowReleaseProvenance? CreateReleaseProvenance(
+        IEnumerable<DiscoveredAsset> assets)
+    {
+        DiscoveredAsset[] releaseAssets =
+        [
+            .. assets.Where(static asset => asset.ReleaseId > 0),
+        ];
+        if (releaseAssets.Length == 0
+            || releaseAssets.Select(static asset => asset.ReleaseId).Distinct().Count() != 1)
+        {
+            return null;
+        }
+
+        Uri releaseUri = releaseAssets[0].ReleaseUri;
+        if (!releaseUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            || !releaseUri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        string[] segments = releaseUri.AbsolutePath.Split(
+            '/',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (segments.Length < 2)
+        {
+            return null;
+        }
+
+        DateTimeOffset updatedAt = releaseAssets
+            .SelectMany(static asset => new DateTimeOffset?[]
+            {
+                asset.ReleaseUpdatedAt,
+                asset.ReleasePublishedAt,
+                asset.AssetUpdatedAt,
+                asset.AssetCreatedAt,
+            })
+            .Where(static instant => instant.HasValue)
+            .Select(static instant => instant!.Value)
+            .Max();
+        return new(
+            new WinMatsch.GitHub.RepositoryCoordinates(segments[0], segments[1]),
+            releaseAssets[0].ReleaseId,
+            updatedAt);
+    }
 
     private static WorkflowOperationResult MissingResult(
         string operation,

@@ -122,8 +122,41 @@ public sealed class InstallerDownloaderPreflightNetwork(InstallerDownloader down
     public Task<DownloadProbeResult> ProbeAsync(string url, CancellationToken cancellationToken)
         => _downloader.ProbeAsync(url, cancellationToken);
 
-    public Task<DownloadRevalidationResult> RevalidateAsync(
+    public async Task<DownloadRevalidationResult> RevalidateAsync(
         DownloadResult previous,
         CancellationToken cancellationToken)
-        => _downloader.RevalidateAsync(previous, cancellationToken: cancellationToken);
+    {
+        if (File.Exists(previous.FilePath))
+        {
+            return await _downloader.RevalidateAsync(
+                previous,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        string scratchDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-preflight-revalidation-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratchDirectory);
+        try
+        {
+            DownloadResult current = await _downloader.DownloadFreshAsync(
+                previous.InitialUrl,
+                scratchDirectory,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            return new()
+            {
+                Status = current.ContentIdentity == previous.ContentIdentity
+                    ? DownloadRevalidationStatus.Unchanged
+                    : DownloadRevalidationStatus.ContentChanged,
+                Result = current,
+            };
+        }
+        finally
+        {
+            if (Directory.Exists(scratchDirectory))
+            {
+                Directory.Delete(scratchDirectory, recursive: true);
+            }
+        }
+    }
 }

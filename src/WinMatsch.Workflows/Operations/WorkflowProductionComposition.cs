@@ -22,9 +22,7 @@ public static class WorkflowProductionComposition
             new LocalManifestSnapshotSource(originalSubmissions),
             new RulePipelineWorkflowRunner(ProductionRuleComposer.Compose),
             preflight,
-            new ProvenanceWorkflowFileTransaction(
-                new AtomicWorkflowFileTransaction(),
-                originalSubmissions),
+            new AtomicWorkflowFileTransaction(originalSubmissions),
             releaseSource,
             new InstallerWorkflowArtifactProcessor(downloader),
             clock);

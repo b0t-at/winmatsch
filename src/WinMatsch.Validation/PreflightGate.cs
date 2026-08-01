@@ -265,6 +265,20 @@ public sealed class PreflightGate
                     $"Immediate installer revalidation failed: {exception.Message}",
                     expected.Url));
             }
+            catch (IOException exception)
+            {
+                findings.Add(Error(
+                    "VLD6010",
+                    $"Immediate installer revalidation failed: {exception.Message}",
+                    expected.Url));
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                findings.Add(Error(
+                    "VLD6010",
+                    $"Immediate installer revalidation failed: {exception.Message}",
+                    expected.Url));
+            }
         }
     }
 

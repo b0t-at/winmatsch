@@ -19,6 +19,8 @@ public sealed record DiscoveredAsset
 
     public DateTimeOffset? ReleasePublishedAt { get; init; }
 
+    public DateTimeOffset? ReleaseUpdatedAt { get; init; }
+
     public required long AssetId { get; init; }
 
     public required string AssetName { get; init; }
@@ -30,6 +32,8 @@ public sealed record DiscoveredAsset
     public required long DeclaredSize { get; init; }
 
     public required DateTimeOffset AssetCreatedAt { get; init; }
+
+    public DateTimeOffset? AssetUpdatedAt { get; init; }
 
     public AssetContentEvidence? Content { get; init; }
 
@@ -116,12 +120,14 @@ public static class ReleaseAssetDiscovery
                     ReleaseUri = item.Release.WebUri,
                     IsPrerelease = item.Release.IsPrerelease,
                     ReleasePublishedAt = item.Release.PublishedAt,
+                    ReleaseUpdatedAt = item.Release.UpdatedAt,
                     AssetId = item.Asset.Id,
                     AssetName = item.Asset.Name,
                     DownloadUri = item.Asset.DownloadUri,
                     DeclaredContentType = item.Asset.ContentType,
                     DeclaredSize = item.Asset.Size,
                     AssetCreatedAt = item.Asset.CreatedAt,
+                    AssetUpdatedAt = item.Asset.UpdatedAt,
                     Content = item.Evidence?.Content,
                     Analysis = item.Evidence?.Analysis,
                     HasOperatingSystemConflict = item.Classification.HasConflict,

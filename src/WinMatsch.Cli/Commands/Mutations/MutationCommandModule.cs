@@ -1020,13 +1020,18 @@ public sealed class MutationCommandModule : ICommandModule
                 SkipPullRequestCheck = context.ParseResult.GetValue(options.SkipPullRequestCheck),
                 ReplacePreviousVersion = previousVersion is not null,
                 PreviousVersion = previousVersion,
-                MinimumReleaseFreshness = context.Configuration.FreshnessDelay,
+                MinimumReleaseFreshness = plan.Release is null
+                    ? TimeSpan.Zero
+                    : context.Configuration.FreshnessDelay,
             },
             CreatedWith = context.ParseResult.GetValue(options.CreatedWith) ?? "winmatsch",
             CustomTitle = context.ParseResult.GetValue(options.PullRequestTitle),
             Resolves = context.ParseResult.GetValue(options.Resolves),
             IdempotencyKey =
                 $"{plan.Operation}:{plan.PackageIdentifier.Value}:{plan.PackageVersion.Value}",
+            ReleaseUpdatedAt = plan.Release?.UpdatedAt,
+            ReleaseRepository = plan.Release?.Repository,
+            ReleaseId = plan.Release?.ReleaseId,
         };
     }
 

@@ -263,6 +263,12 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _locks =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly IOriginalSubmissionStore? _originalSubmissions;
+
+    public AtomicWorkflowFileTransaction(IOriginalSubmissionStore? originalSubmissions = null)
+    {
+        _originalSubmissions = originalSubmissions;
+    }
 
     public async Task ApplyAsync(
         string outputDirectory,
@@ -298,6 +304,7 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         bool cleanupAllowed = false;
         bool committed = false;
         Exception? committedCleanupFailure = null;
+        Exception? committedProvenanceFailure = null;
         try
         {
             SecurePath.ValidateOutputRoot(root);
@@ -366,6 +373,15 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             WriteJournal(transactionRoot, "committed", installed);
             committed = true;
             cleanupAllowed = true;
+            try
+            {
+                _originalSubmissions?.CaptureChangedVersions(root, changes);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                committedProvenanceFailure = exception;
+            }
         }
         catch
         {
@@ -409,6 +425,20 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 processLock?.Dispose();
                 gate.Release();
             }
+        }
+
+        if (committedCleanupFailure is not null && committedProvenanceFailure is not null)
+        {
+            throw new WorkflowCommittedProvenanceException(
+                "The manifest transaction committed, but provenance capture and recovery-directory cleanup failed.",
+                new AggregateException(committedProvenanceFailure, committedCleanupFailure));
+        }
+
+        if (committedProvenanceFailure is not null)
+        {
+            throw new WorkflowCommittedProvenanceException(
+                "The manifest transaction committed, but its original-submission provenance could not be recorded.",
+                committedProvenanceFailure);
         }
 
         if (committedCleanupFailure is not null)
@@ -1048,9 +1078,25 @@ public sealed class WorkflowOperationException : Exception
     public WorkflowResultCode Code { get; }
 }
 
-public sealed class WorkflowCommittedCleanupException : IOException
+public abstract class WorkflowCommittedException : IOException
+{
+    protected WorkflowCommittedException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
+public sealed class WorkflowCommittedCleanupException : WorkflowCommittedException
 {
     public WorkflowCommittedCleanupException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
+public sealed class WorkflowCommittedProvenanceException : WorkflowCommittedException
+{
+    public WorkflowCommittedProvenanceException(string message, Exception innerException)
         : base(message, innerException)
     {
     }

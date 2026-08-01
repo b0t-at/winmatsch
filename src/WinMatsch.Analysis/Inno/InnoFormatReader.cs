@@ -128,10 +128,23 @@ internal static partial class InnoFormatReader
     }
 
     private static bool IsPlausibleLoaderTable(ReadOnlySpan<byte> candidate)
-        => candidate.Length >= 44
-            && (candidate[..12].SequenceEqual(ModernLoaderMagic)
-                || candidate[..12].SequenceEqual(AlternateModernLoaderMagic))
-            && BinaryPrimitives.ReadUInt32LittleEndian(candidate[12..]) == 1;
+    {
+        if (candidate.Length < 16
+            || !(candidate[..12].SequenceEqual(ModernLoaderMagic)
+                || candidate[..12].SequenceEqual(AlternateModernLoaderMagic)))
+        {
+            return false;
+        }
+
+        uint revision = BinaryPrimitives.ReadUInt32LittleEndian(candidate[12..]);
+        if (revision == 1)
+        {
+            return true;
+        }
+
+        return candidate.Length >= 44
+            && Crc32(candidate[..40]) == BinaryPrimitives.ReadUInt32LittleEndian(candidate[40..]);
+    }
 
     private static InnoLoaderOffsets ReadOffsetTable(Stream stream, long offset)
     {

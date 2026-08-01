@@ -3,8 +3,10 @@ using System.Security.Cryptography;
 using System.Text;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
+using WinMatsch.GitHub;
 using WinMatsch.Testing.Infrastructure;
 using WinMatsch.Validation;
+using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
 using WinMatsch.Workflows.Tests.GitHub;
@@ -58,6 +60,62 @@ public sealed class WorkflowProductionCompositionTests
                 static execution => execution.RuleId == Rules.RuleCatalogueIds.Pipe1);
             Assert.True(handler.Requests.Count >= 3);
             Assert.Empty(Directory.EnumerateFiles(output, "*", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Production_local_engine_carries_github_release_provenance()
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+        });
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(downloader);
+        string output = CreateDirectory();
+        var releaseUpdated = new DateTimeOffset(2026, 6, 1, 0, 0, 0, TimeSpan.Zero);
+        var assetUpdated = releaseUpdated.AddMinutes(5);
+        try
+        {
+            WorkflowOperationResult result = await engine.NewAsync(new NewOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PackageVersion = "1.0.0",
+                Assets =
+                [
+                    new DiscoveredAsset
+                    {
+                        ReleaseId = 42,
+                        ReleaseTag = "v1.0.0",
+                        ReleaseName = "1.0.0",
+                        ReleaseUri = new Uri("https://github.com/vendor/app/releases/tag/v1.0.0"),
+                        IsPrerelease = false,
+                        ReleasePublishedAt = releaseUpdated.AddDays(-1),
+                        ReleaseUpdatedAt = releaseUpdated,
+                        AssetId = 7,
+                        AssetName = "setup.exe",
+                        DownloadUri = new Uri("https://example.test/setup.exe"),
+                        DeclaredContentType = "application/octet-stream",
+                        DeclaredSize = executable.Length,
+                        AssetCreatedAt = releaseUpdated,
+                        AssetUpdatedAt = assetUpdated,
+                    },
+                ],
+                Locale = Locale(),
+            });
+
+            WorkflowReleaseProvenance provenance = Assert.IsType<WorkflowReleaseProvenance>(
+                result.Plan.Release);
+            Assert.Equal(new RepositoryCoordinates("vendor", "app"), provenance.Repository);
+            Assert.Equal(42, provenance.ReleaseId);
+            Assert.Equal(assetUpdated, provenance.UpdatedAt);
         }
         finally
         {
@@ -136,6 +194,66 @@ public sealed class WorkflowProductionCompositionTests
     }
 
     [Fact]
+    public async Task Composed_github_apply_revalidates_deleted_local_artifacts_before_mutation()
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+            Headers = { ETag = new("\"fixture\"") },
+        });
+        LocalOperationPlan localPlan;
+        string output = CreateDirectory();
+        using (var localDownloader = new InstallerDownloader(handler))
+        {
+            LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+                localDownloader,
+                new DirectWorkflowReleaseSource());
+            WorkflowOperationResult local = await engine.NewAsync(new NewOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PackageVersion = "1.0.0",
+                Release = new(
+                    null,
+                    [new Uri("https://example.test/setup.exe")],
+                    []),
+                Locale = Locale(),
+            });
+            Assert.Equal(WorkflowResultCode.Succeeded, local.Code);
+            localPlan = local.Plan;
+        }
+
+        try
+        {
+            Assert.All(
+                localPlan.Preflight.InstallerArtifacts,
+                static artifact => Assert.False(File.Exists(artifact.Download.FilePath)));
+            var client = new FakeGitHubClient();
+            using var remoteDownloader = new InstallerDownloader(handler);
+            GitHubLifecycleWorkflow workflow = WorkflowProductionComposition.CreateGitHubLifecycle(
+                client,
+                remoteDownloader);
+            GitHubLifecycleResult result = await workflow.ExecuteAsync(new GitHubSubmissionRequest
+            {
+                LocalPlan = localPlan,
+                UpstreamRepository = GitHubLifecycleTestSupport.Upstream,
+                TargetRepository = GitHubLifecycleTestSupport.Fork,
+                ExecutionMode = WorkflowExecutionMode.Apply,
+                IdempotencyKey = "production-deleted-artifact",
+            });
+
+            Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+            Assert.Equal(["branch", "commit", "pull-request"], client.Mutations);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Final_revalidation_redownloads_when_the_planned_file_no_longer_exists()
     {
         byte[] content = "stable installer"u8.ToArray();
@@ -192,9 +310,7 @@ public sealed class WorkflowProductionCompositionTests
         try
         {
             var store = new FileOriginalSubmissionStore(state);
-            var transaction = new ProvenanceWorkflowFileTransaction(
-                new AtomicWorkflowFileTransaction(),
-                store);
+            var transaction = new AtomicWorkflowFileTransaction(store);
             (PackageManifests manifests, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> changes) =
                 CreateInitialChanges("Original Publisher");
             await transaction.ApplyAsync(output, "Example.Composed", changes, CancellationToken.None);
@@ -223,6 +339,37 @@ public sealed class WorkflowProductionCompositionTests
             Assert.Equal("Human Publisher", snapshot.Manifests.DefaultLocale.Publisher);
             Assert.Equal("Original Publisher", snapshot.OriginalBotSubmission!.DefaultLocale.Publisher);
             Assert.NotSame(manifests, snapshot.OriginalBotSubmission);
+
+            System.Collections.Immutable.ImmutableArray<WorkflowFileChange> deletions =
+            [
+                .. Directory.EnumerateFiles(
+                        Path.GetDirectoryName(localePath)!,
+                        "*.yaml")
+                    .Select(path =>
+                    {
+                        byte[] content = File.ReadAllBytes(path);
+                        return new WorkflowFileChange(
+                            PlannedChangeKind.Delete,
+                            Path.GetRelativePath(output, path).Replace('\\', '/'),
+                            expectedState: ExpectedFileState.Present,
+                            expectedSha256: WorkflowFileChange.Hash(content));
+                    }),
+            ];
+            await transaction.ApplyAsync(output, "Example.Composed", deletions, CancellationToken.None);
+            Assert.Null(store.Load(
+                output,
+                new PackageIdentifier("Example.Composed"),
+                new PackageVersion("1.0.0")));
+
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> recreated) =
+                CreateInitialChanges("Recreated Publisher");
+            await transaction.ApplyAsync(output, "Example.Composed", recreated, CancellationToken.None);
+            Assert.Equal(
+                "Recreated Publisher",
+                store.Load(
+                    output,
+                    new PackageIdentifier("Example.Composed"),
+                    new PackageVersion("1.0.0"))!.DefaultLocale.Publisher);
         }
         finally
         {
@@ -380,5 +527,19 @@ public sealed class WorkflowProductionCompositionTests
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private sealed class ThrowingOriginalSubmissionStore : IOriginalSubmissionStore
+    {
+        public PackageManifests? Load(
+            string outputDirectory,
+            PackageIdentifier packageIdentifier,
+            PackageVersion packageVersion)
+            => null;
+
+        public void CaptureChangedVersions(
+            string outputDirectory,
+            IReadOnlyList<WorkflowFileChange> changes)
+            => throw new IOException("Simulated provenance write failure.");
     }
 }

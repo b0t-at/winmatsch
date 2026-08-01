@@ -88,7 +88,23 @@ public sealed class MutationCommandModuleTests
     [Fact]
     public async Task Submission_uses_the_resolved_release_freshness_delay()
     {
-        var workflow = new FakeMutationWorkflow();
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request =>
+            {
+                WorkflowOperationResult result = FakeMutationWorkflow.Result(request);
+                return result with
+                {
+                    Plan = result.Plan with
+                    {
+                        Release = new(
+                            new RepositoryCoordinates("vendor", "app"),
+                            42,
+                            new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero)),
+                    },
+                };
+            },
+        };
         var submission = new FakeSubmissionWorkflow();
         CliHarness harness = CreateHarness(workflow, submission);
         harness.EnvironmentVariables["WINMATSCH_FRESHNESS_DELAY"] = "00:42:00";
@@ -115,7 +131,30 @@ public sealed class MutationCommandModuleTests
             ]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(TimeSpan.FromMinutes(42), Assert.Single(submission.Requests).Policy.MinimumReleaseFreshness);
+        GitHubSubmissionRequest request = Assert.Single(submission.Requests);
+        Assert.Equal(TimeSpan.FromMinutes(42), request.Policy.MinimumReleaseFreshness);
+        Assert.Equal(new RepositoryCoordinates("vendor", "app"), request.ReleaseRepository);
+        Assert.Equal(42, request.ReleaseId);
+        Assert.Equal(new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero), request.ReleaseUpdatedAt);
+    }
+
+    [Fact]
+    public async Task Non_release_submission_does_not_apply_release_freshness()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var submission = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submission);
+        harness.EnvironmentVariables["WINMATSCH_FRESHNESS_DELAY"] = "00:42:00";
+
+        CliRunResult result = await harness.RunAsync(
+            ["remove", "Example.App", "1.0", "--yes", "--dry-run", "--submit"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        GitHubSubmissionRequest request = Assert.Single(submission.Requests);
+        Assert.Equal(TimeSpan.Zero, request.Policy.MinimumReleaseFreshness);
+        Assert.Null(request.ReleaseRepository);
+        Assert.Null(request.ReleaseId);
+        Assert.Null(request.ReleaseUpdatedAt);
     }
 
     [Fact]

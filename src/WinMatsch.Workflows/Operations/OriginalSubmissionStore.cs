@@ -51,7 +51,6 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
         ArgumentNullException.ThrowIfNull(changes);
         string root = Path.GetFullPath(outputDirectory);
         foreach (string relativeDirectory in changes
-                     .Where(static change => change.Kind != PlannedChangeKind.Delete)
                      .Select(static change => Path.GetDirectoryName(
                          change.RepositoryPath.Replace('/', Path.DirectorySeparatorChar)))
                      .Where(static directory => !string.IsNullOrWhiteSpace(directory))
@@ -63,13 +62,22 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
                     root + Path.DirectorySeparatorChar,
                     OperatingSystem.IsWindows()
                         ? StringComparison.OrdinalIgnoreCase
-                        : StringComparison.Ordinal)
-                || !Directory.Exists(source))
+                        : StringComparison.Ordinal))
             {
                 continue;
             }
 
             string destination = Path.Combine(RepositoryStateDirectory(root), relativeDirectory);
+            if (!Directory.Exists(source))
+            {
+                if (Directory.Exists(destination))
+                {
+                    Directory.Delete(destination, recursive: true);
+                }
+
+                continue;
+            }
+
             if (Directory.Exists(destination))
             {
                 continue;
@@ -138,30 +146,5 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
         }
 
         return Path.Combine(localData, "winmatsch", "original-submissions");
-    }
-}
-
-/// <summary>Records committed generated manifests after the atomic local transaction succeeds.</summary>
-public sealed class ProvenanceWorkflowFileTransaction(
-    IWorkflowFileTransaction inner,
-    IOriginalSubmissionStore originalSubmissions) : IWorkflowFileTransaction
-{
-    private readonly IWorkflowFileTransaction _inner =
-        inner ?? throw new ArgumentNullException(nameof(inner));
-    private readonly IOriginalSubmissionStore _originalSubmissions =
-        originalSubmissions ?? throw new ArgumentNullException(nameof(originalSubmissions));
-
-    public async Task ApplyAsync(
-        string outputDirectory,
-        string operationLockKey,
-        System.Collections.Immutable.ImmutableArray<WorkflowFileChange> changes,
-        CancellationToken cancellationToken)
-    {
-        await _inner.ApplyAsync(
-            outputDirectory,
-            operationLockKey,
-            changes,
-            cancellationToken).ConfigureAwait(false);
-        _originalSubmissions.CaptureChangedVersions(outputDirectory, changes);
     }
 }

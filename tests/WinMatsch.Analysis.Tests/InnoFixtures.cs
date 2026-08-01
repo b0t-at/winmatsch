@@ -59,6 +59,8 @@ internal static class InnoFixtures
 
         public bool CorruptLoaderChecksum { get; set; }
 
+        public uint LoaderRevision { get; set; } = 1;
+
         public bool CorruptHeaderChecksum { get; set; }
 
         public uint? FirstStringLengthOverride { get; set; }
@@ -102,7 +104,11 @@ internal static class InnoFixtures
         int tableOffset = stub.Length;
         int setupHeaderOffset = tableOffset + 44;
         int dataOffset = setupHeaderOffset + setupHeader.Length;
-        byte[] table = BuildLoaderTable(setupHeaderOffset, dataOffset, options.CorruptLoaderChecksum);
+        byte[] table = BuildLoaderTable(
+            setupHeaderOffset,
+            dataOffset,
+            options.LoaderRevision,
+            options.CorruptLoaderChecksum);
 
         List<byte> payload = [];
         foreach (Machine machine in options.PayloadMachines)
@@ -309,12 +315,16 @@ internal static class InnoFixtures
         }
     }
 
-    private static byte[] BuildLoaderTable(int headerOffset, int dataOffset, bool corrupt)
+    private static byte[] BuildLoaderTable(
+        int headerOffset,
+        int dataOffset,
+        uint revision,
+        bool corrupt)
     {
         byte[] table = new byte[44];
         byte[] magic = [0x72, 0x44, 0x6C, 0x50, 0x74, 0x53, 0xCD, 0xE6, 0xD7, 0x7B, 0x0B, 0x2A];
         magic.CopyTo(table, 0);
-        BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(12), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(12), revision);
         BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(32), (uint)headerOffset);
         BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(36), (uint)dataOffset);
         BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(40), FixtureCrc32(table.AsSpan(0, 40)));
