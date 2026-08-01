@@ -70,6 +70,12 @@ public sealed class Meta4ReleaseNotesSanitizeRule : IRule
             int boundary = sanitized.LastIndexOf("\n\n", _maximumLength, StringComparison.Ordinal);
             if (boundary <= 0)
             {
+                context.AddChangeEvidence(
+                    this,
+                    manifestPath,
+                    "ReleaseNotes",
+                    $"release notes exceed {_maximumLength} characters with no paragraph boundary; field omitted",
+                    RuleChangeConfidence.High);
                 context.AddFinding(this, RuleSeverity.Warning,
                     $"ReleaseNotes exceed {_maximumLength} characters and contain no paragraph boundary to truncate at; the field was omitted.",
                     documentName);

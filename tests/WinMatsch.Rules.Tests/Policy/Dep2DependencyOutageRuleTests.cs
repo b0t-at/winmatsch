@@ -46,6 +46,26 @@ public class Dep2DependencyOutageRuleTests
     }
 
     [Fact]
+    public void Typoed_runtime_identifiers_are_not_classified()
+    {
+        // Only the exact known package shapes match; Microsoft.DotNetBogus stays a manifest error.
+        PackageManifests manifests = TestManifests.Create(TestManifests.CreateInstaller());
+        var rule = new Dep2DependencyOutageRule(new PolicyEvidence
+        {
+            PipelineLogExcerpts =
+            [
+                "No suitable installer found for manifest Microsoft.DotNetBogus with version 1.0.0",
+                "No suitable installer found for manifest Microsoft.VCRedist.2015+.mips with version 14.0.0",
+            ],
+        });
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        rule.Apply(context);
+
+        Assert.Empty(context.Findings);
+    }
+
+    [Fact]
     public void Outage_signature_for_a_non_runtime_package_is_not_classified()
     {
         // Only the well-known runtime dependency identifiers count as the outage signature;

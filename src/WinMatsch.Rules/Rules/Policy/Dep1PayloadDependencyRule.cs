@@ -112,9 +112,45 @@ public sealed class Dep1PayloadDependencyRule : IRule
         if (evidence.Kind == DependencyEvidenceKind.DotNetRuntime)
         {
             VerifyPreviousDotNetMajor(context, manifest, installer, index, evidence);
+            if (FindConflictingDotNetMajor(manifest, installer, evidence.RuntimeMajor) is { } conflicting)
+            {
+                // Appending would leave two mandatory runtime majors; the carried pin must be
+                // resolved by review (or an override), never by stacking a second dependency.
+                context.AddFinding(this, RuleSeverity.Warning,
+                    $"Detected .NET runtime major {evidence.RuntimeMajor} conflicts with the already-declared dependency '{conflicting}'; resolve the pinned major instead of adding a second mandatory runtime.",
+                    $"Installers[{index}]");
+                return;
+            }
         }
 
         AddDependency(context, manifest, installer, index, identifier, evidence);
+    }
+
+    /// <summary>An already-declared <c>Microsoft.DotNet.Runtime.*</c> dependency whose major differs, or null.</summary>
+    private static string? FindConflictingDotNetMajor(
+        InstallerManifest manifest,
+        Installer installer,
+        int? detectedMajor)
+    {
+        if (detectedMajor is not { } major)
+        {
+            return null;
+        }
+
+        Dependencies? effective = EffectiveInstallerValues.GetDependencies(manifest, installer);
+        foreach (PackageDependency dependency in effective?.PackageDependencies ?? [])
+        {
+            string? id = dependency.PackageIdentifier?.Value;
+            if (id is not null
+                && id.StartsWith(DotNetRuntimePrefix, StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(id.AsSpan(DotNetRuntimePrefix.Length), out int declaredMajor)
+                && declaredMajor != major)
+            {
+                return id;
+            }
+        }
+
+        return null;
     }
 
     private static string? MapPackageIdentifier(DependencyEvidence evidence, Architecture architecture)

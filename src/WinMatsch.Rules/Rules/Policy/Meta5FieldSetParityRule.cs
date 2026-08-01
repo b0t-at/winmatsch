@@ -48,6 +48,81 @@ public sealed class Meta5FieldSetParityRule : IRule
 
         CarryLocaleFields(context, previous, droppedFields);
         CarryInstallerRootFields(context, previous, droppedFields);
+        CheckPerInstallerFieldPresence(context, previous, droppedFields);
+    }
+
+    /// <summary>
+    /// WM0007 carries per-installer InstallerSwitches/Dependencies only when a unique
+    /// Architecture+InstallerType+Scope match exists; when the type or scope changed, the
+    /// fields silently vanish. This parity pass reports such drops (no value is ever
+    /// fabricated — re-detection or an explicit drop override resolves the finding).
+    /// </summary>
+    private void CheckPerInstallerFieldPresence(
+        ManifestContext context,
+        PackageManifests previous,
+        ImmutableStringSet droppedFields)
+    {
+        InstallerManifest manifest = context.Manifests.Installer;
+        if (manifest.Installers is not { } installers)
+        {
+            return;
+        }
+
+        for (int i = 0; i < installers.Count; i++)
+        {
+            Installer installer = installers[i];
+            Installer? match = PolicyValues.FindPreviousByEntryKey(manifest, installer, previous.Installer)
+                ?? FindPreviousByArchitecture(installer, previous.Installer);
+            if (match is null)
+            {
+                continue;
+            }
+
+            if (EffectiveInstallerValues.GetInstallerSwitches(manifest, installer) is null
+                && EffectiveInstallerValues.GetInstallerSwitches(previous.Installer, match) is not null
+                && !Skip(context, droppedFields, "InstallerSwitches"))
+            {
+                context.AddFinding(this, RuleSeverity.Warning,
+                    "The previous version declared InstallerSwitches for this entry but the new manifest has none; re-detect the switches or add an explicit drop override.",
+                    $"Installers[{i}]");
+            }
+
+            if (EffectiveInstallerValues.GetDependencies(manifest, installer) is null
+                && EffectiveInstallerValues.GetDependencies(previous.Installer, match) is not null
+                && !Skip(context, droppedFields, "Dependencies"))
+            {
+                context.AddFinding(this, RuleSeverity.Warning,
+                    "The previous version declared Dependencies for this entry but the new manifest has none; verify the payload or add an explicit drop override.",
+                    $"Installers[{i}]");
+            }
+        }
+    }
+
+    /// <summary>The unique previous installer with the same architecture, or null when none or several match.</summary>
+    private static Installer? FindPreviousByArchitecture(Installer current, InstallerManifest previousManifest)
+    {
+        if (previousManifest.Installers is not { } previousInstallers || current.Architecture is null)
+        {
+            return null;
+        }
+
+        Installer? match = null;
+        foreach (Installer candidate in previousInstallers)
+        {
+            if (candidate.Architecture != current.Architecture)
+            {
+                continue;
+            }
+
+            if (match is not null)
+            {
+                return null;
+            }
+
+            match = candidate;
+        }
+
+        return match;
     }
 
     private void CarryLocaleFields(ManifestContext context, PackageManifests previous, ImmutableStringSet droppedFields)
@@ -83,7 +158,15 @@ public sealed class Meta5FieldSetParityRule : IRule
         if (locale.Documentations is null && previousLocale.Documentations is { Count: > 0 } docs && !Skip(context, droppedFields, nameof(locale.Documentations)))
         {
             locale.Documentations = ManifestValues.CloneList(docs, ManifestValues.CloneDocumentation);
-            AddListEvidence(context, manifestPath, nameof(locale.Documentations), docs.Count, previousVersion);
+            AddEvidence(context, manifestPath, nameof(locale.Documentations), previousVersion);
+            for (int i = 0; i < docs.Count; i++)
+            {
+                // The snapshot diff reports mapping leaves, so attach evidence per leaf path.
+                AddEvidence(context, manifestPath, $"Documentations[{i}]", previousVersion);
+                AddEvidence(context, manifestPath, $"Documentations[{i}].DocumentLabel", previousVersion);
+                AddEvidence(context, manifestPath, $"Documentations[{i}].DocumentUrl", previousVersion);
+            }
+
             RecordCarry(context, $"DefaultLocale.{nameof(locale.Documentations)}");
         }
     }

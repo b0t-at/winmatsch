@@ -143,6 +143,36 @@ public class Meta5FieldSetParityRuleTests
     }
 
     [Fact]
+    public void Switches_lost_across_a_layout_change_are_reported()
+    {
+        // WM0007 only carries switches on a unique Architecture+Type+Scope match; a type
+        // change silently loses them without this parity finding.
+        (PackageManifests current, PackageManifests previous) = CreateUpdatePair();
+        current.Installer.Installers![0].InstallerType = InstallerType.Exe;
+        previous.Installer.Installers![0].InstallerSwitches = new InstallerSwitches { Silent = "/S" };
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        new Meta5FieldSetParityRule().Apply(context);
+
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Contains("InstallerSwitches", finding.Message, StringComparison.Ordinal);
+        Assert.Null(current.Installer.Installers[0].InstallerSwitches);
+    }
+
+    [Fact]
+    public void Present_switches_produce_no_parity_finding()
+    {
+        (PackageManifests current, PackageManifests previous) = CreateUpdatePair();
+        current.Installer.Installers![0].InstallerSwitches = new InstallerSwitches { Silent = "/S" };
+        previous.Installer.Installers![0].InstallerSwitches = new InstallerSwitches { Silent = "/S" };
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        new Meta5FieldSetParityRule().Apply(context);
+
+        Assert.Empty(context.Findings);
+    }
+
+    [Fact]
     public void New_packages_without_previous_are_skipped()
     {
         PackageManifests current = TestManifests.Create(TestManifests.CreateInstaller());

@@ -10,7 +10,9 @@ namespace WinMatsch.Rules.Policy;
 /// rewritten or the file moves; short hex refs could be branch names and are left alone) and
 /// <c>raw.githubusercontent.com</c> links (which render as plain text) are rewritten.
 /// Branch-named blob links are left alone — renaming a default branch is the publisher's
-/// decision, not this rule's.
+/// decision, not this rule's. Accepted residual risk: a repository could in principle name a
+/// branch as 40 hex characters; resolving refs against GitHub would require live API access,
+/// which policy rules do not have, and such branch names are pathological in practice.
 /// </summary>
 public sealed partial class Meta3GitHubLicenseUrlRule : IRule
 {

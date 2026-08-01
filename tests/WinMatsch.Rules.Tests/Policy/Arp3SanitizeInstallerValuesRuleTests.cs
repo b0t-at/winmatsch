@@ -52,6 +52,30 @@ public class Arp3SanitizeInstallerValuesRuleTests
     }
 
     [Fact]
+    public void Garbage_in_installation_metadata_files_is_dropped_and_empty_files_pruned()
+    {
+        Installer installer = TestManifests.CreateInstaller();
+        installer.InstallationMetadata = new InstallationMetadata
+        {
+            DefaultInstallLocation = @"C:\Program Files\App",
+            Files =
+            [
+                new InstalledFile { RelativeFilePath = @"$INSTDIR\app.exe" },
+                new InstalledFile { RelativeFilePath = "app.exe", DisplayName = "App" },
+            ],
+        };
+        PackageManifests manifests = TestManifests.Create(installer);
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        InstallationMetadata metadata = manifests.Installer.Installers![0].InstallationMetadata!;
+        InstalledFile survivor = Assert.Single(metadata.Files!);
+        Assert.Equal("app.exe", survivor.RelativeFilePath);
+        Assert.Single(context.Findings);
+    }
+
+    [Fact]
     public void Entries_that_become_empty_are_removed()
     {
         // Motivating regression: "AppsAndFeaturesEntries: [- {}]" (#278914).

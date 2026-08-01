@@ -93,6 +93,29 @@ public sealed class Arp3SanitizeInstallerValuesRule : IRule
         metadata.DefaultInstallLocation = Sanitize(
             context, metadata.DefaultInstallLocation, location, "InstallationMetadata.DefaultInstallLocation", fieldPrefix);
 
+        if (metadata.Files is { } files)
+        {
+            for (int f = files.Count - 1; f >= 0; f--)
+            {
+                InstalledFile file = files[f];
+                string filePrefix = $"InstallationMetadata.Files[{f}].";
+                file.RelativeFilePath = Sanitize(context, file.RelativeFilePath, location, $"{filePrefix}RelativeFilePath", fieldPrefix);
+                file.InvocationParameter = Sanitize(context, file.InvocationParameter, location, $"{filePrefix}InvocationParameter", fieldPrefix);
+                file.DisplayName = Sanitize(context, file.DisplayName, location, $"{filePrefix}DisplayName", fieldPrefix);
+
+                bool empty = file.RelativeFilePath is null
+                    && file.FileSha256 is null
+                    && file.FileType is null
+                    && file.InvocationParameter is null
+                    && file.DisplayName is null;
+                if (empty)
+                {
+                    files.RemoveAt(f);
+                    context.AddTrace(this, $"{location}: removed empty InstallationMetadata.Files[{f}].");
+                }
+            }
+        }
+
         if (metadata.Files is { Count: 0 })
         {
             metadata.Files = null;

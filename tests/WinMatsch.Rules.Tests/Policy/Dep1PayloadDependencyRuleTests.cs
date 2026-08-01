@@ -144,6 +144,27 @@ public class Dep1PayloadDependencyRuleTests
     }
 
     [Fact]
+    public void Conflicting_dotnet_majors_are_never_stacked()
+    {
+        // Detected .NET 8 next to a carried .NET 5 pin must not produce two mandatory runtimes.
+        PackageManifests manifests = CreateManifests();
+        manifests.Installer.Installers![0].Dependencies = new Dependencies
+        {
+            PackageDependencies = [new PackageDependency { PackageIdentifier = new PackageIdentifier("Microsoft.DotNet.Runtime.5") }],
+        };
+        Dep1PayloadDependencyRule rule = CreateRule(
+            Evidence(DependencyEvidenceKind.DotNetRuntime, DependencyEvidenceStatus.Detected, runtimeMajor: 8));
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        rule.Apply(context);
+
+        PackageDependency dependency = Assert.Single(manifests.Installer.Installers![0].Dependencies!.PackageDependencies!);
+        Assert.Equal("Microsoft.DotNet.Runtime.5", dependency.PackageIdentifier?.Value);
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Contains("conflicts with the already-declared dependency", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Previous_dotnet_major_change_is_flagged_for_verification()
     {
         // Motivating regression: FamiStudio .NET 5 -> 8 major bump (#203022).
