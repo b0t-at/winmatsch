@@ -7,11 +7,13 @@ namespace WinMatsch.Workflows.GitHub;
 
 internal static class SubmissionRequestFingerprint
 {
+    public const int CurrentVersion = 1;
+
     public static string Create(SubmissionJournalRemoteRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        Add("format", "1");
+        Add("format", CurrentVersion.ToString(CultureInfo.InvariantCulture));
         Add("upstream", request.UpstreamRepository.ToString());
         Add("target", request.TargetRepository?.ToString());
         Add("fork-owner", request.ForkOwner);

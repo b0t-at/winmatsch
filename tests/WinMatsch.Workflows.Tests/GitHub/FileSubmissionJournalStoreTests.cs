@@ -1,5 +1,8 @@
 using System.Collections.Immutable;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
@@ -169,6 +172,47 @@ public sealed class FileSubmissionJournalStoreTests
 
         await Assert.ThrowsAsync<ArgumentException>(() =>
             store.PrepareAsync(request, default));
+    }
+
+    [Fact]
+    public async Task Legacy_journal_atomically_migrates_remote_request_fingerprint()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        GitHubSubmissionRequest request = Request(repository.Path);
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        SubmissionJournalEntry entry = await store.ActivateAsync(handle, default);
+        string path = System.IO.Path.Combine(state.Path, $"{entry.Id}.journal");
+        SubmissionJournalEnvelope envelope = JsonSerializer.Deserialize(
+            await File.ReadAllBytesAsync(path),
+            SubmissionJournalJsonContext.Default.SubmissionJournalEnvelope)!;
+        byte[] payload = Convert.FromBase64String(envelope.Payload);
+        JsonObject legacy = JsonNode.Parse(payload)!.AsObject();
+        _ = legacy.Remove("remoteRequestFingerprint");
+        _ = legacy.Remove("remoteRequestFingerprintVersion");
+        byte[] legacyPayload = Encoding.UTF8.GetBytes(legacy.ToJsonString());
+        var legacyEnvelope = new SubmissionJournalEnvelope(
+            Convert.ToBase64String(legacyPayload),
+            Convert.ToHexString(SHA256.HashData(legacyPayload)));
+        await File.WriteAllBytesAsync(
+            path,
+            JsonSerializer.SerializeToUtf8Bytes(
+                legacyEnvelope,
+                SubmissionJournalJsonContext.Default.SubmissionJournalEnvelope));
+
+        SubmissionJournalEntry migrated = Assert.IsType<SubmissionJournalEntry>(
+            await store.GetAsync(entry.Id, default));
+
+        Assert.Equal(
+            SubmissionRequestFingerprint.CurrentVersion,
+            migrated.RemoteRequestFingerprintVersion);
+        Assert.False(string.IsNullOrWhiteSpace(migrated.RemoteRequestFingerprint));
+        Assert.Equal(
+            SubmissionRequestFingerprint.Create(migrated.RemoteRequest),
+            migrated.RemoteRequestFingerprint);
     }
 
     [Fact]

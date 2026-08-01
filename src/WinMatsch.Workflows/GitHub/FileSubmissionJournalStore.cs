@@ -100,6 +100,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             LocalPlan = Snapshot(request.LocalPlan),
             RemoteRequest = remoteRequest,
             RemoteRequestFingerprint = remoteRequestFingerprint,
+            RemoteRequestFingerprintVersion = SubmissionRequestFingerprint.CurrentVersion,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -656,10 +657,71 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
     }
 
     private SubmissionJournalEntry ReadEntry(string path)
-        => ReadEnvelope(path, SubmissionJournalJsonContext.Default.SubmissionJournalEntry);
+    {
+        SubmissionJournalEntry entry = ReadEnvelope(
+            path,
+            SubmissionJournalJsonContext.Default.SubmissionJournalEntry);
+        return ValidateAndMigrateRemoteFingerprint(path, entry, preparedIntent: false);
+    }
 
     private SubmissionJournalEntry ReadIntent(string path)
-        => ReadEnvelope(path, SubmissionJournalJsonContext.Default.SubmissionPreparedIntent).Entry;
+    {
+        SubmissionJournalEntry entry = ReadEnvelope(
+            path,
+            SubmissionJournalJsonContext.Default.SubmissionPreparedIntent).Entry;
+        return ValidateAndMigrateRemoteFingerprint(path, entry, preparedIntent: true);
+    }
+
+    private SubmissionJournalEntry ValidateAndMigrateRemoteFingerprint(
+        string path,
+        SubmissionJournalEntry entry,
+        bool preparedIntent)
+    {
+        string actual = SubmissionRequestFingerprint.Create(entry.RemoteRequest);
+        if (entry.RemoteRequestFingerprintVersion
+            is not (0 or SubmissionRequestFingerprint.CurrentVersion))
+        {
+            throw new SubmissionJournalTamperedException(
+                $"Submission journal '{Path.GetFileName(path)}' uses unsupported remote-request fingerprint version "
+                + $"{entry.RemoteRequestFingerprintVersion}.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.RemoteRequestFingerprint)
+            && !string.Equals(
+                entry.RemoteRequestFingerprint,
+                actual,
+                StringComparison.Ordinal))
+        {
+            throw new SubmissionJournalTamperedException(
+                $"Submission journal '{Path.GetFileName(path)}' has inconsistent remote-request identity.");
+        }
+
+        if (entry.RemoteRequestFingerprintVersion
+                == SubmissionRequestFingerprint.CurrentVersion
+            && !string.IsNullOrWhiteSpace(entry.RemoteRequestFingerprint))
+        {
+            return entry;
+        }
+
+        SubmissionJournalEntry migrated = entry with
+        {
+            RemoteRequestFingerprint = actual,
+            RemoteRequestFingerprintVersion = SubmissionRequestFingerprint.CurrentVersion,
+        };
+        if (preparedIntent)
+        {
+            WriteEnvelope(
+                path,
+                new SubmissionPreparedIntent(migrated),
+                SubmissionJournalJsonContext.Default.SubmissionPreparedIntent);
+        }
+        else
+        {
+            WriteEntry(path, migrated);
+        }
+
+        return migrated;
+    }
 
     private void WriteEntry(string path, SubmissionJournalEntry entry)
         => WriteEnvelope(
