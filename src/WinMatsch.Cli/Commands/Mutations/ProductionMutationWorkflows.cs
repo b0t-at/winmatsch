@@ -155,7 +155,7 @@ internal sealed class ProductionMutationWorkflow(
             : WithExecutionMode(_preparedRequest, WorkflowExecutionMode.Apply);
         using var downloader = new InstallerDownloader(
             DownloaderOptions(configuration, prepared is SubmitOperationRequest));
-        using HttpClient? gitHubHttp = await CreateReleaseHttpClientAsync(request, cancellationToken)
+        using HttpClient? gitHubHttp = await CreateReleaseHttpClientAsync(prepared, cancellationToken)
             .ConfigureAwait(false);
         using IGitHubRepositoryClient? gitHub = gitHubHttp is null
             ? null
@@ -200,7 +200,6 @@ internal sealed class ProductionMutationWorkflow(
         {
             failures.Add(exception);
         }
-        GC.SuppressFinalize(this);
         GC.SuppressFinalize(this);
         if (failures.Count > 0)
         {

@@ -545,6 +545,12 @@ public sealed class MutationCommandModule : ICommandModule
                         : null;
                 if (applicableReleaseProvenance is not null)
                 {
+                    request = request is SubmitOperationRequest submitRequest
+                        ? submitRequest with
+                        {
+                            ReleaseProvenance = applicableReleaseProvenance,
+                        }
+                        : request;
                     local = local with
                     {
                         Plan = local.Plan with { Release = applicableReleaseProvenance },
@@ -834,9 +840,12 @@ public sealed class MutationCommandModule : ICommandModule
     {
         try
         {
-            return await workflow.ApplyVerifiedAsync(
-                request,
-                expectedPlanFingerprint,
+            return await context.Interaction.RunProgressAsync(
+                "Downloading and analyzing installers",
+                cancellation => workflow.ApplyVerifiedAsync(
+                    request,
+                    expectedPlanFingerprint,
+                    cancellation),
                 context.CancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
@@ -846,7 +855,7 @@ public sealed class MutationCommandModule : ICommandModule
         catch (OperationCanceledException exception)
         {
             throw new CliOperationException(
-                $"Verified local mutation timed out: {exception.Message}",
+                $"Verified local mutation timed out: {MutationRedact(exception.Message)}",
                 exception);
         }
         catch (Exception exception) when (
@@ -858,7 +867,7 @@ public sealed class MutationCommandModule : ICommandModule
                 or WorkflowOperationException)
         {
             throw new CliOperationException(
-                $"Verified local mutation failed: {exception.Message}",
+                $"Verified local mutation failed: {MutationRedact(exception.Message)}",
                 exception);
         }
     }
@@ -1411,96 +1420,6 @@ public sealed class MutationCommandModule : ICommandModule
         => plan.Preflight.InstallerArtifacts
             .Select(static artifact => artifact.InstallerUrl)
             .ToImmutableHashSet(StringComparer.Ordinal);
-
-    private static string PlanFingerprint(LocalOperationPlan plan)
-    {
-        var builder = new StringBuilder();
-        Append(plan.Operation);
-        Append(plan.PackageIdentifier.Value);
-        Append(plan.PackageVersion.Value);
-        Append(plan.OutputDirectory);
-        Append(plan.WarningPolicy.ToString());
-        Append(plan.ReviewApproved.ToString());
-        foreach (WorkflowFileChange change in plan.FileChanges.OrderBy(
-                     static change => change.RepositoryPath,
-                     StringComparer.Ordinal))
-        {
-            Append(change.Kind.ToString());
-            Append(change.RepositoryPath);
-            Append(change.ExpectedState.ToString());
-            Append(change.ExpectedSha256);
-            Append(Convert.ToHexString(SHA256.HashData(change.Content.AsSpan())));
-        }
-
-        foreach (RawManifestDocument document in plan.AfterDocuments.OrderBy(
-                     static document => document.RepositoryPath,
-                     StringComparer.Ordinal))
-        {
-            Append(document.RepositoryPath);
-            Append(Convert.ToHexString(SHA256.HashData(document.Content.AsSpan())));
-        }
-
-        foreach (WorkflowQuestion question in plan.Questions)
-        {
-            Append(question.Code);
-            Append(question.Prompt);
-            Append(question.Path);
-            foreach (string option in question.Options)
-            {
-                Append(option);
-            }
-        }
-
-        foreach (var execution in plan.Rules.Executions)
-        {
-            Append(execution.RuleId);
-            Append(execution.Mode.ToString());
-            Append(execution.ModeSource.ToString());
-        }
-
-        foreach (var change in plan.Rules.Changes)
-        {
-            Append(change.RuleId);
-            Append(change.ManifestPath);
-            Append(change.FieldPath);
-            Append(change.Before);
-            Append(change.After);
-        }
-
-        foreach (var review in plan.Rules.Reviews)
-        {
-            Append(review.ManifestPath);
-            Append(review.FieldPath);
-            Append(review.BotValue);
-            Append(review.HumanValue);
-            Append(review.GeneratedValue);
-        }
-
-        foreach (ValidationFinding finding in plan.Validation.Findings)
-        {
-            Append(finding.Code);
-            Append(finding.Severity.ToString());
-            Append(finding.Message);
-            Append(finding.Path);
-        }
-
-        if (plan.Release is { } release)
-        {
-            Append(release.Repository.ToString());
-            Append(release.ReleaseId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            Append(release.UpdatedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
-        }
-
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
-
-        void Append(string? value)
-        {
-            builder.Append(value?.Length ?? -1)
-                .Append(':')
-                .Append(value)
-                .Append('|');
-        }
-    }
 
     private static string ReviewFingerprint(LocalOperationPlan plan)
     {

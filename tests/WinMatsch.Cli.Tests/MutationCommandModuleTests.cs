@@ -70,14 +70,12 @@ public sealed class MutationCommandModuleTests
         CliRunResult result = await harness.RunAsync(commandLine.Split(' '));
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(3, workflow.Requests.Count);
+        Assert.Equal(2, workflow.Requests.Count);
         Assert.Equal(WorkflowExecutionMode.Plan, workflow.Requests[0].ExecutionMode);
-        Assert.Equal(WorkflowExecutionMode.Plan, workflow.Requests[1].ExecutionMode);
-        Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[2].ExecutionMode);
+        Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[1].ExecutionMode);
         Assert.Contains("Applied: true", result.StandardOutput, StringComparison.Ordinal);
         Assert.Equal(
             [
-                "Downloading and analyzing installers",
                 "Downloading and analyzing installers",
                 "Downloading and analyzing installers",
             ],
@@ -463,7 +461,7 @@ public sealed class MutationCommandModuleTests
             ["new", "Example.App", "--version", "2.0"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(4, workflow.Requests.Count);
+        Assert.Equal(3, workflow.Requests.Count);
         var first = Assert.IsType<NewOperationRequest>(workflow.Requests[0]);
         var rerun = Assert.IsType<NewOperationRequest>(workflow.Requests[1]);
         Assert.Null(first.Locale.Publisher);
@@ -498,7 +496,7 @@ public sealed class MutationCommandModuleTests
         CliRunResult result = await harness.RunAsync(["update", "Example.App", "1.0"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(4, workflow.Requests.Count);
+        Assert.Equal(3, workflow.Requests.Count);
         Assert.False(workflow.Requests[0].ApproveReview);
         Assert.True(workflow.Requests[1].ApproveReview);
         Assert.Contains(
@@ -604,7 +602,7 @@ public sealed class MutationCommandModuleTests
         Assert.Contains("\"reviewApproved\":true", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("\"requiresReview\":false", result.StandardOutput, StringComparison.Ordinal);
         Assert.Empty(harness.Interaction.Questions);
-        Assert.Equal(4, workflow.Requests.Count);
+        Assert.Equal(3, workflow.Requests.Count);
         Assert.True(workflow.Requests[1].ApproveReview);
     }
 
@@ -657,14 +655,13 @@ public sealed class MutationCommandModuleTests
             ["update", "Example.App", "1.0", "--edit"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal(4, workflow.Requests.Count);
+        Assert.Equal(3, workflow.Requests.Count);
         var edited = Assert.IsType<SubmitOperationRequest>(workflow.Requests[1]);
         Assert.Contains(
             "edited: true",
             Encoding.UTF8.GetString(edited.Documents[0].Content.AsSpan()),
             StringComparison.Ordinal);
-        Assert.Equal(WorkflowExecutionMode.Plan, workflow.Requests[2].ExecutionMode);
-        Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[3].ExecutionMode);
+        Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[2].ExecutionMode);
     }
 
     [Fact]
@@ -1788,7 +1785,7 @@ public sealed class MutationCommandModuleTests
     }
 }
 
-internal sealed class FakeMutationWorkflow : IMutationWorkflow
+internal sealed class FakeMutationWorkflow : IVerifiedMutationWorkflow
 {
     public List<WorkflowOperationRequest> Requests { get; } = [];
 
@@ -1800,6 +1797,30 @@ internal sealed class FakeMutationWorkflow : IMutationWorkflow
     {
         Requests.Add(request);
         return Task.FromResult(Handler?.Invoke(request) ?? Result(request));
+    }
+
+    public Task<WorkflowOperationResult> ApplyVerifiedAsync(
+        WorkflowOperationRequest request,
+        string expectedPlanFingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        WorkflowOperationResult verification = Handler?.Invoke(request) ?? Result(request);
+        if (!string.Equals(
+                verification.Plan.Fingerprint,
+                expectedPlanFingerprint,
+                StringComparison.Ordinal))
+        {
+            throw new WorkflowOperationException(
+                WorkflowResultCode.ValidationFailed,
+                "The mutation plan changed after approval; nothing was applied.");
+        }
+
+        WorkflowOperationRequest apply = WithExecutionMode(
+            request,
+            WorkflowExecutionMode.Apply);
+        Requests.Add(apply);
+        return Task.FromResult(Handler?.Invoke(apply) ?? Result(apply));
     }
 
     public static WorkflowOperationResult Result(
@@ -1847,6 +1868,7 @@ internal sealed class FakeMutationWorkflow : IMutationWorkflow
             Questions = questions.IsDefault ? [] : questions,
             ReviewApproved = request.ApproveReview,
             Audit = audit.IsDefault ? [] : audit,
+            Release = (request as SubmitOperationRequest)?.ReleaseProvenance,
         };
         return new()
         {
@@ -1874,6 +1896,20 @@ internal sealed class FakeMutationWorkflow : IMutationWorkflow
             SubmitOperationRequest => (
                 new PackageIdentifier("Example.App"),
                 new PackageVersion("1.0")),
+            _ => throw new ArgumentOutOfRangeException(nameof(request)),
+        };
+
+    private static WorkflowOperationRequest WithExecutionMode(
+        WorkflowOperationRequest request,
+        WorkflowExecutionMode mode)
+        => request switch
+        {
+            NewOperationRequest value => value with { ExecutionMode = mode },
+            UpdateOperationRequest value => value with { ExecutionMode = mode },
+            RemoveOperationRequest value => value with { ExecutionMode = mode },
+            SubmitOperationRequest value => value with { ExecutionMode = mode },
+            NewLocaleOperationRequest value => value with { ExecutionMode = mode },
+            UpdateLocaleOperationRequest value => value with { ExecutionMode = mode },
             _ => throw new ArgumentOutOfRangeException(nameof(request)),
         };
 }
