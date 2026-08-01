@@ -17,10 +17,19 @@ public class ConfigurationResolverTests
         Assert.Empty(configuration.DisabledRules);
         Assert.True(configuration.CacheEnabled);
         Assert.Null(configuration.CacheDirectory);
-        Assert.Equal(TimeSpan.FromHours(3), configuration.FreshnessDelay);
+        Assert.Equal(TimeSpan.FromHours(4), configuration.FreshnessDelay);
         Assert.Equal(OutputFormat.Text, configuration.OutputFormat);
         Assert.Null(configuration.OutputDirectory);
         Assert.Equal(InteractionMode.Auto, configuration.Interaction);
+    }
+
+    [Fact]
+    public void Explicit_zero_freshness_delay_disables_the_default()
+    {
+        WinMatschConfiguration configuration = ConfigurationResolver.Resolve(
+            userConfiguration: new ConfigurationLayer { FreshnessDelay = TimeSpan.Zero });
+
+        Assert.Equal(TimeSpan.Zero, configuration.FreshnessDelay);
     }
 
     [Fact]

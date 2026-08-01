@@ -61,6 +61,7 @@ Run first, in a fixed order, to produce a canonical manifest shape
 |---|---|
 | `WM0007` | Preserve hand-maintained fields (switches, dependencies, locale URLs) from the previous version on update. Runs first so carry-over sees the original shape. |
 | `WM0201` | Apply data-driven per-package quirks from override packs (see [quirks](#quirks)). |
+| `WM0202` | Apply validated scope layout, exact metadata URL rewrites, preserved/dropped fields, and explicitly approved learned fields. |
 | `WM0002` | Push root-level installer fields down to installers when per-installer conflicts exist. |
 | `WM0004` | Scrub junk: null out empty strings, remove empty lists, prune empty composite objects. |
 | `WM0006` | Normalize GUID product/upgrade codes to canonical uppercase-in-braces form. |
@@ -138,10 +139,12 @@ assetMappings:                       # asset → installer entry mapping
     entry: primary
 scopeLayout: Preserve                # Preserve | Root | PerInstaller
 versionSource: "…"                   # version detection override
-metadataUrlReplacements:             # exact URL rewrites
+metadataUrlReplacements:             # exact metadata-field URL rewrites; targets must be safe HTTPS
   "http://old.example/": "https://new.example/"
-preservedFields: ["ReleaseNotesUrl"] # never drop these fields
-droppedFields: []                    # always drop these fields
+preservedFields:                     # preserve prior merged values when generation drops them
+  - "DefaultLocale.ReleaseNotesUrl"
+  - "Installers[*].InstallerSwitches"
+droppedFields: []                    # explicit drops win over preservation
 vanityUrls: []                       # URLs that redirect per release (vanity)
 manualOnly: false                    # true => refuse automated submission
 policies:                            # human-readable policy annotations
@@ -181,9 +184,13 @@ Before overwriting anything, update workflows perform a three-way comparison:
 
 When a human changed a value and the new run would revert it, the run is
 flagged `requiresReview` and each conflict is reported with the bot value,
-the human value, and the newly generated value. The tool never silently
-reverts a human correction; you resolve the conflict by adjusting rule modes,
-adding an override pack entry, or accepting the regenerated value explicitly.
+the human value, and the newly generated value. The tool never silently reverts a human correction. Interactive approval in
+Apply mode writes a separate per-user learned pack with optimistic content
+locking, backup recovery, and before/after/source audit hashes; Plan mode never
+writes. Later runs compose that learned layer beneath explicit `--override-pack`
+files. Unsupported or ambiguous corrections remain review-blocking instead of
+being learned with false confidence. Checked-in built-in packs are never
+modified at runtime.
 
 ## Security and redaction
 

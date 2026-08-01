@@ -46,6 +46,20 @@ public class OverridePackYamlTests
                 [KeyValuePair.Create("http://old.example.test", "https://new.example.test")]),
             PreservedFields = ["DefaultLocale.PublisherUrl", "Installers[*].InstallerSwitches"],
             DroppedFields = ["DefaultLocale.ReleaseNotes"],
+            LearnedFields =
+            [
+                new()
+                {
+                    DocumentKey = "installer",
+                    SemanticPath = "Installers{installer:ABC#0}.Scope",
+                    Value = "Machine",
+                    ValueSha256 = new string('A', 64),
+                    BotValueSha256 = new string('C', 64),
+                    SourceFingerprint = new string('B', 64),
+                    Source = "manifests/e/Example/App/1.0.0/Example.App.installer.yaml:Installers[0].Scope",
+                    InstallerSelectorSha256 = new string('D', 64),
+                },
+            ],
             VanityUrls = ["https://download.example.test/latest"],
             ManualOnly = true,
             Policies =
@@ -68,6 +82,7 @@ public class OverridePackYamlTests
         Assert.Equal(ScopeLayoutOverride.PerInstaller, parsed.ScopeLayout);
         Assert.True(parsed.ManualOnly);
         Assert.Equal(2, parsed.Policies.Length);
+        Assert.Equal("Machine", Assert.Single(parsed.LearnedFields).Value);
         Assert.Equal("Comments", parsed.Quirks.DisplayVersionFromEvidenceProperty);
     }
 
@@ -111,6 +126,29 @@ public class OverridePackYamlTests
     public void Malformed_or_hostile_yaml_is_rejected(string yaml)
     {
         Assert.Throws<FormatException>(() => OverridePackYaml.Read(yaml));
+    }
+
+    [Theory]
+    [InlineData("formatVersion: 1\npackageIdentifier: Test.App\npreservedFields:\n  - Unknown.Path\n")]
+    [InlineData("formatVersion: 1\npackageIdentifier: Test.App\nmetadataUrlReplacements:\n  \"https://old.example.test\": \"http://new.example.test\"\n")]
+    [InlineData("formatVersion: 1\npackageIdentifier: Test.App\nmetadataUrlReplacements:\n  \"https://old.example.test?a=secret\": \"https://new.example.test\"\n")]
+    [InlineData("formatVersion: 1\npackageIdentifier: Test.App\nversionSource: unknown\n")]
+    public void Unsafe_or_unsupported_override_semantics_are_rejected(string yaml)
+    {
+        FormatException exception = Assert.Throws<FormatException>(() => OverridePackYaml.Read(yaml));
+
+        Assert.NotEmpty(exception.Message);
+    }
+
+    [Fact]
+    public void Unsafe_metadata_url_error_does_not_echo_query_secrets()
+    {
+        const string secret = "sensitive-token";
+        string yaml = $"formatVersion: 1\npackageIdentifier: Test.App\nmetadataUrlReplacements:\n  \"https://old.example.test?a={secret}\": \"https://new.example.test\"\n";
+
+        FormatException exception = Assert.Throws<FormatException>(() => OverridePackYaml.Read(yaml));
+
+        Assert.DoesNotContain(secret, exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -205,7 +243,7 @@ public class OverridePackYamlTests
             PreservedFields =
             [
                 .. Enumerable.Range(0, OverridePackYaml.MaximumNodeCount)
-                    .Select(static index => $"Field{index}"),
+                    .Select(static _ => "DefaultLocale.Description"),
             ],
         };
 
@@ -221,7 +259,14 @@ public class OverridePackYamlTests
         var pack = new OverridePack
         {
             PackageIdentifier = new PackageIdentifier("Example.App"),
-            PreservedFields = [.. Enumerable.Repeat(large, 16)],
+            Policies =
+            [
+                .. Enumerable.Range(0, 16).Select(index => new PolicyAnnotation
+                {
+                    Id = $"TEST-{index}",
+                    Annotation = large,
+                }),
+            ],
         };
 
         ArgumentException exception = Assert.Throws<ArgumentException>(() => OverridePackYaml.Write(pack));

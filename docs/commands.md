@@ -274,7 +274,7 @@ cache entries.
 | `--release <tag>` | Release tag or name to discover. |
 | `--urls <urls>` | Installer HTTP(S) URLs. |
 | `--release-url <urls>` | Release metadata HTTP(S) URLs. |
-| `--url <spec>` | Installer override in `url\|arch\|scope\|displayVersion` form. |
+| `--url <spec>` | Installer override in `url`, `url\|arch`, `url\|arch\|scope`, or `url\|arch\|scope\|displayVersion` form. Supplied components must be non-empty valid enum values. |
 | `--allow-structural-rewrite` | Approve an installer architecture/type/scope layout rewrite. |
 | `--allow-stable-url-change` | Approve changed bytes behind a stable installer URL. |
 | `--allow-shared-content` | Approve distinct installer URLs resolving to identical bytes. |

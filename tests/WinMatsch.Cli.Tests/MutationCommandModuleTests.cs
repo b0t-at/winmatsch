@@ -917,7 +917,15 @@ public sealed class MutationCommandModuleTests
             WorkflowResultCode.ReviewRequired,
             reviews:
             [
-                new("manifest.yaml", "Publisher", "bot", "human", "bot"),
+                new(
+                    "manifest.yaml",
+                    "Publisher",
+                    "bot",
+                    "human",
+                    "bot",
+                    "defaultLocale",
+                    "Publisher",
+                    new string('A', 64)),
             ]);
 
     private static WorkflowOperationResult LocaleResult(WorkflowOperationRequest request)

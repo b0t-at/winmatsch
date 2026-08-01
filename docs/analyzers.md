@@ -38,7 +38,8 @@ When analysis cannot classify an installer confidently — an unknown EXE
 layout, a ZIP whose candidates fail magic-byte validation, an archive
 exceeding limits — the workflow does not fabricate values. Depending on
 context it asks an interactive question, reports a validation finding, or
-requires an explicit override (`--url url|arch|scope|displayVersion`, or an
+requires an explicit override (`--url url`, `--url url|arch`,
+`--url url|arch|scope`, or `--url url|arch|scope|displayVersion`), or an
 [override pack](rules.md#override-packs) with `forcedArchitectures` /
 `assetMappings`).
 

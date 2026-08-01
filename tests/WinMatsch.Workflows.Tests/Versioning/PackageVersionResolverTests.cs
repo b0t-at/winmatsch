@@ -193,11 +193,126 @@ public sealed class PackageVersionResolverTests
         Assert.Equal("1.0", result.Version?.Value);
     }
 
+    [Fact]
+    public void Pe_version_wins_over_cumulus_build_tag()
+    {
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = new("CumulusMX.CumulusMX"),
+            Assets =
+            [
+                CreateAsset(
+                    "b4088",
+                    "https://example.test/cumulusmx.exe",
+                    "4.5.2",
+                    trustworthy: true,
+                    versionKind: InstallerVersionEvidenceKind.PeVersionInfoProductVersion,
+                    versionConfidence: EvidenceConfidence.High),
+            ],
+        });
+
+        Assert.Equal("4.5.2", result.Version?.Value);
+        Assert.Equal(PackageVersionSource.InstallerProductVersion, result.Source);
+    }
+
+    [Fact]
+    public void Inconsistent_pe_version_does_not_override_semantic_release_tag()
+    {
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = new("Vendor.Product"),
+            Assets =
+            [
+                CreateAsset(
+                    "v2.0.0",
+                    "https://example.test/product.exe",
+                    "1.0.0",
+                    trustworthy: true,
+                    versionKind: InstallerVersionEvidenceKind.PeVersionInfoProductVersion,
+                    versionConfidence: EvidenceConfidence.High),
+            ],
+        });
+
+        Assert.Equal("2.0.0", result.Version?.Value);
+        Assert.Equal(PackageVersionSource.ReleaseTag, result.Source);
+        Assert.Contains(result.Diagnostics, static value => value.StartsWith("VERSION_BINARY_INCONSISTENT", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("0.0.0")]
+    [InlineData("1.2.3-internal")]
+    [InlineData("debug-2.0.0")]
+    public void Pe_version_policy_rejects_placeholders_and_internal_values(string value)
+    {
+        InstallerVersionTrustDecision decision = InstallerVersionTrustEvaluator.Evaluate(
+            new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.GenericInstallerExe,
+                ProductVersion = value,
+                Installers = [new Installer { Architecture = Architecture.X64, InstallerType = InstallerType.Exe }],
+            },
+            new InstallerVersionTrustPolicy());
+
+        Assert.False(decision.IsTrustworthy);
+        Assert.Contains("REJECTED", decision.Diagnostic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Pe_version_policy_can_disable_binary_version_trust()
+    {
+        InstallerVersionTrustDecision decision = InstallerVersionTrustEvaluator.Evaluate(
+            new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.GenericInstallerExe,
+                ProductVersion = "2.0.0",
+                Installers = [new Installer { Architecture = Architecture.X64, InstallerType = InstallerType.Exe }],
+            },
+            new InstallerVersionTrustPolicy { AllowPeVersionInfo = false });
+
+        Assert.False(decision.IsTrustworthy);
+        Assert.Contains("POLICY", decision.Diagnostic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Msi_metadata_keeps_the_preexisting_trust_path()
+    {
+        InstallerVersionTrustDecision decision = InstallerVersionTrustEvaluator.Evaluate(
+            new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.Msi,
+                ProductVersion = "0.0.0",
+                Installers = [new Installer { Architecture = Architecture.X64, InstallerType = InstallerType.Msi }],
+            },
+            new InstallerVersionTrustPolicy());
+
+        Assert.True(decision.IsTrustworthy);
+        Assert.Equal(InstallerVersionEvidenceKind.PackageMetadata, decision.Kind);
+    }
+
+    [Fact]
+    public void Zip_version_requires_one_complete_nested_installer_candidate()
+    {
+        InstallerVersionTrustDecision decision = InstallerVersionTrustEvaluator.Evaluate(
+            new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.Zip,
+                ProductVersion = "2.0.0",
+                Installers = [new Installer { Architecture = Architecture.X64, InstallerType = InstallerType.Zip }],
+                Zip = new ZipContents(["a.exe", "b.exe"]),
+            },
+            new InstallerVersionTrustPolicy());
+
+        Assert.False(decision.IsTrustworthy);
+        Assert.Contains("exactly one", decision.Diagnostic, StringComparison.Ordinal);
+    }
+
     private static DiscoveredAsset CreateAsset(
         string tag,
         string url,
         string? productVersion = null,
-        bool trustworthy = false)
+        bool trustworthy = false,
+        InstallerVersionEvidenceKind versionKind = InstallerVersionEvidenceKind.Unspecified,
+        EvidenceConfidence versionConfidence = EvidenceConfidence.Low)
     {
         var uri = new Uri(url);
         var identity = new DownloadContentIdentity(
@@ -230,6 +345,8 @@ public sealed class PackageVersionResolverTests
                 AnalyzedUrl = uri.AbsoluteUri,
                 ProductVersion = productVersion,
                 IsProductVersionTrustworthy = trustworthy,
+                ProductVersionEvidenceKind = versionKind,
+                ProductVersionConfidence = versionConfidence,
                 InstallerShapes = [new() { InstallerType = InstallerType.Exe }],
             },
         };

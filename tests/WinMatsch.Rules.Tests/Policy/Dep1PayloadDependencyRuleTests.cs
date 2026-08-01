@@ -71,6 +71,7 @@ public class Dep1PayloadDependencyRuleTests
     [Theory]
     [InlineData(DependencyEvidenceStatus.Inferred)]
     [InlineData(DependencyEvidenceStatus.Ambiguous)]
+    [InlineData(DependencyEvidenceStatus.Unavailable)]
     public void Weak_evidence_never_becomes_a_mandatory_dependency(DependencyEvidenceStatus status)
     {
         PackageManifests manifests = CreateManifests();

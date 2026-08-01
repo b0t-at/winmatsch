@@ -33,6 +33,7 @@ public class ProductionRuleComposerTests
         RuleCatalogueIds.Pipe2,
         RuleCatalogueIds.Pipe4,
         RuleCatalogueIds.Pipe5,
+        RuleIds.ApplyOverridePackFields,
         RuleCatalogueIds.Arp4,
         RuleCatalogueIds.Dep2,
         RuleCatalogueIds.Pipe3,

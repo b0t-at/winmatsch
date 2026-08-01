@@ -134,7 +134,17 @@ public sealed class AssetMappingPlannerTests
         Assert.Equal(Architecture.Arm64, result.Architecture);
         Assert.Equal(Scope.Machine, result.Scope);
         Assert.Equal("2.0-preview", result.DisplayVersion);
+        Assert.Null(UrlOverride.Parse("https://example.test/tool.exe").Architecture);
+        Assert.Equal(
+            Architecture.X64,
+            UrlOverride.Parse("https://example.test/tool.exe|x64").Architecture);
+        Assert.Equal(
+            Scope.User,
+            UrlOverride.Parse("https://example.test/tool.exe|x86|user").Scope);
         Assert.False(UrlOverride.TryParse("https://example.test/tool.exe|x64|invalid|2.0", out _, out _));
+        Assert.False(UrlOverride.TryParse("https://example.test/tool.exe||user", out _, out _));
+        Assert.False(UrlOverride.TryParse("https://example.test/tool.exe|x64||2.0", out _, out _));
+        Assert.False(UrlOverride.TryParse("https://example.test/tool.exe|x64|user|", out _, out _));
     }
 
     [Fact]

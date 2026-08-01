@@ -83,8 +83,8 @@ bypass it entirely set `cache.enabled` to `false`.
 
 `analyze` classifies unknown executables as `GenericInstallerExe` or
 `PortableExe` with PE metadata only. If the workflow cannot derive required
-fields from evidence, supply them explicitly (`--url
-url|arch|scope|displayVersion`) or add `forcedArchitectures` /
+fields from evidence, supply them explicitly (`--url url`, optionally followed
+by `|arch`, `|scope`, and `|displayVersion`) or add `forcedArchitectures` /
 `assetMappings` in an override pack. See
 [known non-goals](analyzers.md#known-unsupported-variants-and-non-goals).
 
