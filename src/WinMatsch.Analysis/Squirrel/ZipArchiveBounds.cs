@@ -28,10 +28,15 @@ internal static class ZipArchiveBounds
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumEntryCount);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCentralDirectoryBytes);
+        if (!stream.CanSeek)
+        {
+            throw new InvalidDataException($"{description} must be seekable for bounded ZIP validation.");
+        }
+
         long savedPosition = stream.Position;
         try
         {
-            if (!stream.CanSeek || stream.Length < 22)
+            if (stream.Length < 22)
             {
                 throw Corrupt(description);
             }
@@ -64,12 +69,20 @@ internal static class ZipArchiveBounds
             ulong directorySize = BinaryPrimitives.ReadUInt32LittleEndian(eocd[12..]);
             ulong directoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(eocd[16..]);
             long eocdOffset = stream.Length - tailLength + eocdIndex;
+            ulong directoryEnd = (ulong)eocdOffset;
 
             if (entryCount == ushort.MaxValue
                 || directorySize == uint.MaxValue
                 || directoryOffset == uint.MaxValue)
             {
-                ReadZip64(stream, eocdOffset, description, out entryCount, out directorySize, out directoryOffset);
+                ReadZip64(
+                    stream,
+                    eocdOffset,
+                    description,
+                    out entryCount,
+                    out directorySize,
+                    out directoryOffset,
+                    out directoryEnd);
             }
 
             if (entryCount > (ulong)maximumEntryCount)
@@ -88,6 +101,15 @@ internal static class ZipArchiveBounds
             {
                 throw Corrupt(description);
             }
+
+            ValidateCentralDirectory(
+                stream,
+                description,
+                directoryOffset,
+                directorySize,
+                directoryEnd,
+                entryCount,
+                maximumCentralDirectoryBytes);
         }
         finally
         {
@@ -101,9 +123,10 @@ internal static class ZipArchiveBounds
         string description,
         out ulong entryCount,
         out ulong directorySize,
-        out ulong directoryOffset)
+        out ulong directoryOffset,
+        out ulong directoryEnd)
     {
-        entryCount = directorySize = directoryOffset = 0;
+        entryCount = directorySize = directoryOffset = directoryEnd = 0;
         if (eocdOffset < 20)
         {
             throw Corrupt(description);
@@ -138,6 +161,63 @@ internal static class ZipArchiveBounds
         entryCount = BinaryPrimitives.ReadUInt64LittleEndian(record[32..]);
         directorySize = BinaryPrimitives.ReadUInt64LittleEndian(record[40..]);
         directoryOffset = BinaryPrimitives.ReadUInt64LittleEndian(record[48..]);
+        directoryEnd = recordOffset;
+    }
+
+    private static void ValidateCentralDirectory(
+        Stream stream,
+        string description,
+        ulong directoryOffset,
+        ulong declaredSize,
+        ulong directoryEnd,
+        ulong entryCount,
+        long maximumBytes)
+    {
+        const uint CentralDirectoryHeaderSignature = 0x02014B50;
+        const int FixedHeaderSize = 46;
+        if (directoryOffset > directoryEnd
+            || directoryEnd > (ulong)stream.Length
+            || directoryOffset > long.MaxValue)
+        {
+            throw Corrupt(description);
+        }
+
+        ulong position = directoryOffset;
+        Span<byte> header = stackalloc byte[FixedHeaderSize];
+        for (ulong i = 0; i < entryCount; i++)
+        {
+            if (position > directoryEnd || directoryEnd - position < FixedHeaderSize)
+            {
+                throw Corrupt(description);
+            }
+
+            stream.Position = (long)position;
+            stream.ReadExactly(header);
+            if (BinaryPrimitives.ReadUInt32LittleEndian(header) != CentralDirectoryHeaderSignature)
+            {
+                throw Corrupt(description);
+            }
+
+            ulong variableSize = (ulong)BinaryPrimitives.ReadUInt16LittleEndian(header[28..])
+                + BinaryPrimitives.ReadUInt16LittleEndian(header[30..])
+                + BinaryPrimitives.ReadUInt16LittleEndian(header[32..]);
+            ulong recordSize = FixedHeaderSize + variableSize;
+            if (recordSize > directoryEnd - position
+                || position - directoryOffset + recordSize > (ulong)maximumBytes)
+            {
+                throw new InvalidDataException(
+                    $"{description} has an actual ZIP central directory larger than {maximumBytes} bytes or extending outside its validated bounds.");
+            }
+
+            position += recordSize;
+        }
+
+        ulong actualSize = position - directoryOffset;
+        if (position != directoryEnd || actualSize != declaredSize)
+        {
+            throw new InvalidDataException(
+                $"{description} has inconsistent declared and actual ZIP central-directory bounds.");
+        }
     }
 
     private static int FindLast(ReadOnlySpan<byte> data, uint signature)

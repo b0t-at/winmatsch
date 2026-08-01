@@ -16,6 +16,7 @@ internal static class PeImportReader
 {
     private const int ImportDescriptorSize = 20;
     private const int ImportDescriptorNameOffset = 12;
+    private const int CorHeaderSize = 72;
     private const uint IlOnly = 0x00000001;
     private const uint Requires32Bit = 0x00000002;
 
@@ -134,20 +135,40 @@ internal static class PeImportReader
 
                 if (clrRva != 0)
                 {
-                    if (clrSize < 20
+                    if (clrSize < CorHeaderSize
                         || !TryMapRva(clrRva, sizeOfHeaders, sections, stream.Length, out long clrOffset, out long clrAvailable))
                     {
                         return new PeImportInspection(architecture, [], false, false);
                     }
 
-                    Span<byte> clrPrefix = stackalloc byte[20];
-                    if (clrAvailable < clrPrefix.Length || !TryReadAt(stream, clrOffset, clrPrefix))
+                    Span<byte> clrHeader = stackalloc byte[CorHeaderSize];
+                    if (clrAvailable < clrHeader.Length || !TryReadAt(stream, clrOffset, clrHeader))
+                    {
+                        return new PeImportInspection(architecture, [], false, false);
+                    }
+
+                    uint headerSize = BinaryPrimitives.ReadUInt32LittleEndian(clrHeader);
+                    uint metadataRva = BinaryPrimitives.ReadUInt32LittleEndian(clrHeader[8..]);
+                    uint metadataSize = BinaryPrimitives.ReadUInt32LittleEndian(clrHeader[12..]);
+                    if (headerSize < CorHeaderSize
+                        || headerSize > clrSize
+                        || headerSize > clrAvailable
+                        || metadataRva == 0
+                        || metadataSize == 0
+                        || !TryMapRva(
+                            metadataRva,
+                            sizeOfHeaders,
+                            sections,
+                            stream.Length,
+                            out _,
+                            out long metadataAvailable)
+                        || metadataSize > metadataAvailable)
                     {
                         return new PeImportInspection(architecture, [], false, false);
                     }
 
                     isManaged = true;
-                    uint flags = BinaryPrimitives.ReadUInt32LittleEndian(clrPrefix[16..]);
+                    uint flags = BinaryPrimitives.ReadUInt32LittleEndian(clrHeader[16..]);
                     if (machine == Machine.I386
                         && (flags & IlOnly) != 0
                         && (flags & Requires32Bit) == 0)

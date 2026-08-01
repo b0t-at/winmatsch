@@ -49,7 +49,7 @@ public sealed partial class PayloadDependencyAnalyzer
 
         if (string.Equals(Path.GetExtension(fileName), ".zip", StringComparison.OrdinalIgnoreCase))
         {
-            return AnalyzeArchive(stream, cancellationToken);
+            return AnalyzeArchive(stream, fileName, cancellationToken);
         }
 
         return AnalyzeExecutable(stream, fileName, cancellationToken);
@@ -188,8 +188,21 @@ public sealed partial class PayloadDependencyAnalyzer
         }
     }
 
-    private PayloadDependencyAnalysis AnalyzeArchive(Stream stream, CancellationToken cancellationToken)
+    private PayloadDependencyAnalysis AnalyzeArchive(
+        Stream stream,
+        string fileName,
+        CancellationToken cancellationToken)
     {
+        if (!stream.CanSeek)
+        {
+            string payloadPath = Path.GetFileName(fileName);
+            const string signal = "analysis-unavailable:non-seekable-archive";
+            return new PayloadDependencyAnalysis(
+                CreateUnavailableEvidence(payloadPath, signal),
+                [new AnalysisDiagnostic("DEP001", $"Dependency evidence for '{payloadPath}' is unavailable because bounded ZIP validation requires a seekable stream.")],
+                isComplete: false);
+        }
+
         ZipArchiveBounds.Validate(
             stream,
             "The dependency-analysis archive",
@@ -206,6 +219,7 @@ public sealed partial class PayloadDependencyAnalyzer
         var pePayloads = new List<PePayload>();
         var runtimeConfigs = new List<RuntimeConfigPayload>();
         var unavailableRuntimeConfigs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unavailableHostFxrDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var hostFxrPayloads = new List<PePayload>();
         var evidence = new List<DependencyEvidence>();
         var diagnostics = new List<AnalysisDiagnostic>();
@@ -260,6 +274,13 @@ public sealed partial class PayloadDependencyAnalyzer
                 {
                     unavailableRuntimeConfigs.Add(path);
                 }
+                else if (string.Equals(
+                    Path.GetFileName(path),
+                    HostFxrFileName,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    unavailableHostFxrDirectories.Add(GetDirectory(path));
+                }
                 string signal = $"analysis-unavailable:{read.Reason}";
                 evidence.AddRange(CreateUnavailableEvidence(path, signal, isRuntimeConfig));
                 diagnostics.Add(new AnalysisDiagnostic(
@@ -296,13 +317,16 @@ public sealed partial class PayloadDependencyAnalyzer
             PePayload? nearbyHostFxr = FindNearbyHostFxr(payload.Path, hostFxrPayloads);
             bool runtimeConfigUnavailable = unavailableRuntimeConfigs.Contains(
                 GetExpectedRuntimeConfigPath(payload.Path));
+            bool nearbyHostFxrUnavailable = unavailableHostFxrDirectories.Contains(
+                GetDirectory(payload.Path));
             evidence.AddRange(CreatePeEvidence(
                 payload,
                 runtimeConfig,
                 nearbyHostFxr,
                 allowAbsent: true,
                 additionalSignal: null,
-                runtimeConfigUnavailable));
+                runtimeConfigUnavailable,
+                nearbyHostFxrUnavailable));
         }
 
         foreach (RuntimeConfigPayload runtimeConfig in runtimeConfigs)
@@ -336,7 +360,8 @@ public sealed partial class PayloadDependencyAnalyzer
         PePayload? nearbyHostFxr,
         bool allowAbsent,
         string? additionalSignal,
-        bool runtimeConfigUnavailable = false)
+        bool runtimeConfigUnavailable = false,
+        bool nearbyHostFxrUnavailable = false)
     {
         PeImportInspection pe = payload.Inspection;
         List<string> vcSignals = pe.ImportedModules
@@ -379,6 +404,10 @@ public sealed partial class PayloadDependencyAnalyzer
         {
             runtimeSignals.Add("runtimeconfig:analysis-unavailable");
         }
+        if (nearbyHostFxrUnavailable)
+        {
+            runtimeSignals.Add("hostfxr:analysis-unavailable");
+        }
 
         if (IsHostFxr(payload.Path))
         {
@@ -389,7 +418,7 @@ public sealed partial class PayloadDependencyAnalyzer
             runtimeSignals.Add($"bundled-hostfxr:{nearbyHostFxr.Path}");
         }
 
-        DependencyEvidenceStatus dotNetStatus = runtimeConfigUnavailable
+        DependencyEvidenceStatus dotNetStatus = runtimeConfigUnavailable || nearbyHostFxrUnavailable
             ? DependencyEvidenceStatus.Unavailable
             : runtimeConfig is not null
             ? runtime.Status

@@ -199,6 +199,30 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Truncated_clr_header_cannot_create_false_neutral_evidence()
+    {
+        byte[] pe = DependencyFixtures.BuildPe(Machine.I386);
+        int peOffset = BinaryPrimitives.ReadInt32LittleEndian(pe.AsSpan(0x3C));
+        int optionalOffset = peOffset + 24;
+        int optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(pe.AsSpan(peOffset + 20));
+        int sectionOffset = optionalOffset + optionalSize;
+        uint sectionRva = BinaryPrimitives.ReadUInt32LittleEndian(pe.AsSpan(sectionOffset + 12));
+        uint sectionRawOffset = BinaryPrimitives.ReadUInt32LittleEndian(pe.AsSpan(sectionOffset + 20));
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 208), sectionRva);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 212), 20);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(checked((int)sectionRawOffset) + 16), 1);
+        using MemoryStream archive = DependencyFixtures.BuildZip(("forged.exe", pe));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "forged.zip");
+
+        Assert.All(analysis.Evidence, evidence =>
+        {
+            Assert.Equal(Architecture.X86, evidence.Architecture);
+            Assert.Equal(DependencyEvidenceStatus.Ambiguous, evidence.Status);
+        });
+    }
+
+    [Fact]
     public void Half_populated_import_directory_is_ambiguous_not_absent()
     {
         byte[] pe = DependencyFixtures.BuildPe(Machine.Amd64);
@@ -254,6 +278,28 @@ public class PayloadDependencyAnalyzerTests
             DependencyEvidenceKind.DotNetRuntime);
         Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status);
         Assert.Contains("runtimeconfig:analysis-unavailable", evidence.Signals);
+    }
+
+    [Fact]
+    public void Unavailable_nearby_hostfxr_prevents_contradictory_dotnet_absent_evidence()
+    {
+        byte[] app = DependencyFixtures.BuildPe(Machine.Amd64);
+        var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
+        {
+            MaximumPayloadBytes = app.Length,
+        });
+        using MemoryStream archive = DependencyFixtures.BuildZip(
+            ("bin/app.exe", app),
+            ("bin/hostfxr.dll", [.. app, 0]));
+
+        PayloadDependencyAnalysis analysis = analyzer.Analyze(archive, "runtime.zip");
+
+        DependencyEvidence evidence = Find(
+            analysis,
+            "bin/app.exe",
+            DependencyEvidenceKind.DotNetRuntime);
+        Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status);
+        Assert.Contains("hostfxr:analysis-unavailable", evidence.Signals);
     }
 
     [Fact]
@@ -386,6 +432,37 @@ public class PayloadDependencyAnalyzerTests
             () => analyzer.Analyze(archive, "directory-bomb.zip"));
 
         Assert.Contains("central directory larger", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Underreported_central_directory_size_is_rejected_before_materialization()
+    {
+        using MemoryStream valid = DependencyFixtures.BuildZip(
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64)));
+        byte[] archiveBytes = valid.ToArray();
+        BinaryPrimitives.WriteUInt32LittleEndian(archiveBytes.AsSpan(archiveBytes.Length - 10), 1);
+        using var archive = new MemoryStream(archiveBytes);
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => _analyzer.Analyze(archive, "underreported.zip"));
+
+        Assert.Contains("declared and actual", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Non_seekable_zip_returns_unavailable_instead_of_leaking_position_errors()
+    {
+        using MemoryStream archive = DependencyFixtures.BuildZip(
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64)));
+        using Stream nonSeekable = DependencyFixtures.AsNonSeekable(archive);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(nonSeekable, "stream.zip");
+
+        Assert.False(analysis.IsComplete);
+        Assert.All(
+            analysis.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "DEP001");
     }
 
     [Fact]
