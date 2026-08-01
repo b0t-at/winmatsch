@@ -1206,23 +1206,37 @@ public static class AssetMappingPlanner
         Candidate[] candidates)
     {
         var retirements = new HashSet<int>();
-        foreach (IGrouping<string, PreviousInstallerEntry> group in request.PreviousInstallers
+        IGrouping<string, PreviousInstallerEntry>[] sharedGroups = request.PreviousInstallers
                      .GroupBy(static previous => previous.Url.AbsoluteUri, StringComparer.Ordinal)
-                     .Where(static group => group.Count() > 1))
+                     .Where(static group => group.Count() > 1)
+                     .ToArray();
+        var candidatesByAssignedGroup = new Dictionary<string, List<Candidate>>(StringComparer.Ordinal);
+        foreach (Candidate candidate in candidates.Where(static candidate => candidate.Entry is not null))
         {
-            PreviousInstallerEntry[] previousEntries = [.. group];
-            Candidate[] targetedCandidates = candidates
-                .Where(static candidate => candidate.Entry is not null)
-                .Where(candidate => previousEntries.Any(previous => IsCompatible(previous, candidate)))
-                .ToArray();
-            if (targetedCandidates.Length == 0)
-            {
-                continue;
-            }
+                     IGrouping<string, PreviousInstallerEntry>[] matchingGroups = sharedGroups
+                         .Where(group => group.Any(previous => IsCompatible(previous, candidate)))
+                         .ToArray();
+                     if (matchingGroups.Length != 1)
+                     {
+                         continue;
+                     }
 
-            foreach (PreviousInstallerEntry previous in previousEntries)
-            {
-                if (targetedCandidates.All(candidate => !IsCompatible(previous, candidate)))
+                     string groupKey = matchingGroups[0].Key;
+                     if (!candidatesByAssignedGroup.TryGetValue(groupKey, out List<Candidate>? assignedCandidates))
+                     {
+                         assignedCandidates = [];
+                         candidatesByAssignedGroup.Add(groupKey, assignedCandidates);
+                     }
+
+                     assignedCandidates.Add(candidate);
+        }
+
+        foreach ((string groupKey, List<Candidate> targetedCandidates) in candidatesByAssignedGroup)
+        {
+                     PreviousInstallerEntry[] previousEntries = [.. sharedGroups.Single(group => group.Key == groupKey)];
+                     foreach (PreviousInstallerEntry previous in previousEntries)
+                     {
+                         if (targetedCandidates.All(candidate => !IsCompatible(previous, candidate)))
                 {
                     retirements.Add(previous.Position);
                 }

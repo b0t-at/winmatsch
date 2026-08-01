@@ -762,6 +762,55 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
+    public void Entry_targeted_retirement_requires_unique_shared_group_assignment()
+    {
+        PackageIdentifier package = new("Vendor.Product");
+        Uri firstShared = new("https://example.test/1.0.0/first-x64.exe");
+        Uri secondShared = new("https://example.test/1.0.0/second-x64.exe");
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            Previous(0, firstShared.AbsoluteUri, Architecture.X86, InstallerType.Exe),
+            Previous(1, firstShared.AbsoluteUri, Architecture.X64, InstallerType.Exe),
+            Previous(2, secondShared.AbsoluteUri, Architecture.X86, InstallerType.Exe),
+            Previous(3, secondShared.AbsoluteUri, Architecture.X64, InstallerType.Exe),
+        ];
+        DiscoveredAsset asset = Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64);
+        var packs = new OverridePackSet(
+        [
+            new OverridePack
+            {
+                PackageIdentifier = package,
+                AssetMappings =
+                [
+                    new()
+                    {
+                        AssetPattern = "*",
+                        Entry = "x64",
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Exe,
+                    },
+                ],
+            },
+        ]);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], previous) with
+        {
+            PackageIdentifier = package,
+            OverridePacks = packs,
+        });
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(
+            plan.UnresolvedQuestions,
+            static question => question.Code == "MAP_REMOVED"
+                && question.PreviousPosition == 0);
+        Assert.Contains(
+            plan.UnresolvedQuestions,
+            static question => question.Code == "MAP_REMOVED"
+                && question.PreviousPosition == 2);
+    }
+
+    [Fact]
     public void Approved_zip_to_exe_transition_clears_nested_state()
     {
         PreviousInstallerEntry previous = Previous(
