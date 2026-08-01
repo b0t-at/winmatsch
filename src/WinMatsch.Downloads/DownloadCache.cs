@@ -188,11 +188,7 @@ public sealed class DownloadCache
     /// <summary>Returns all entries with current expiry and payload-integrity state.</summary>
     public async Task<IReadOnlyList<DownloadCacheEntryInfo>> InspectAsync(CancellationToken cancellationToken = default)
     {
-        if (!Directory.Exists(_directory))
-        {
-            return [];
-        }
-
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
             if (!Directory.EnumerateFiles(_directory, "*" + MetadataSuffix).Any())

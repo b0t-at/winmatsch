@@ -770,6 +770,17 @@ public sealed class RevalidationProbeCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task Cache_InspectOfMissingDirectoryStillHonorsCancellation()
+    {
+        var cache = new DownloadCache(Path.Combine(_tempDir, "missing-cache"));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => cache.InspectAsync(cancellation.Token));
+    }
+
+    [Fact]
     public async Task Cache_ClearWaitsForPersistedCrossProcessLockWithoutFileFinalizationRace()
     {
         string cacheDirectory = Path.Combine(_tempDir, "cache");
