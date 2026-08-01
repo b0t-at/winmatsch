@@ -700,6 +700,35 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
+    public async Task Cross_fork_duplicate_close_failure_keeps_confirmed_comment_state()
+    {
+        var client = new FakeGitHubClient
+        {
+            FailMutation = "close",
+            OnSearch = static (fake, call) =>
+            {
+                if (call == 3)
+                {
+                    fake.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
+                        1,
+                        author: "other-fork",
+                        branch: "winmatsch/submissions/example-app/2-0-0"));
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.True(result.RemoteState.CommentCreated);
+        Assert.Equal(
+            RemoteOperationKind.ClosePullRequest,
+            result.RemoteState.LastAttemptedOperation);
+        Assert.True(result.RemoteState.RemoteOutcomeUncertain);
+    }
+
+    [Fact]
     public async Task Live_release_is_rechecked_as_last_success_gate()
     {
         var clock = new FakeClock();

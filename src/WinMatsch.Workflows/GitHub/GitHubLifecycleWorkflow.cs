@@ -444,6 +444,7 @@ public sealed class GitHubLifecycleWorkflow
                             $"Duplicate of #{winner.Number}. Closing this newly created tool-owned PR.",
                             Mutation($"{request.IdempotencyKey}:duplicate-comment"),
                             cancellationToken).ConfigureAwait(false);
+                        state = state with { CommentCreated = true };
                         attemptedMutation = RemoteOperationKind.ClosePullRequest;
                         _ = await _gitHub.ClosePullRequestAsync(
                             request.UpstreamRepository,
