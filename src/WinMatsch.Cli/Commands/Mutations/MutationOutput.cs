@@ -30,6 +30,11 @@ internal static partial class MutationOutput
         writer.WriteLine($"Package: {plan.PackageIdentifier} {plan.PackageVersion}");
         writer.WriteLine($"Result: {ToKebab(local.Code)}");
         writer.WriteLine($"Applied: {local.Applied.ToString().ToLowerInvariant()}");
+        if (!string.IsNullOrWhiteSpace(local.ErrorMessage))
+        {
+            writer.WriteLine($"Warning: {Redact(local.ErrorMessage)}");
+        }
+
         writer.WriteLine($"Output: {plan.OutputDirectory}");
         writer.WriteLine("Changes:");
         foreach (WorkflowFileChange change in plan.FileChanges.OrderBy(
@@ -199,6 +204,11 @@ internal static partial class MutationOutput
         json.WriteString("packageVersion", plan.PackageVersion.Value);
         json.WriteString("result", ToKebab(local.Code));
         json.WriteBoolean("applied", local.Applied);
+        if (!string.IsNullOrWhiteSpace(local.ErrorMessage))
+        {
+            json.WriteString("warning", Redact(local.ErrorMessage));
+        }
+
         json.WriteString("outputDirectory", plan.OutputDirectory);
         json.WriteBoolean("requiresReview", plan.RequiresReview);
         json.WriteStartArray("changes");

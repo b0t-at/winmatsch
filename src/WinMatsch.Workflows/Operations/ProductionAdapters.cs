@@ -176,7 +176,10 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
 
         using IDisposable operationLock =
             AtomicWorkflowFileTransaction.AcquirePackageLock(root, packageIdentifier.Value);
-        AtomicWorkflowFileTransaction.RecoverPendingUnderLock(root, packageIdentifier.Value);
+        AtomicWorkflowFileTransaction.RecoverPendingUnderLock(
+            root,
+            packageIdentifier.Value,
+            _originalSubmissions);
         return Task.FromResult(LoadCore(root, packageIdentifier, packageVersion, cancellationToken));
     }
 
@@ -193,7 +196,10 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
 
         using IDisposable operationLock =
             AtomicWorkflowFileTransaction.AcquirePackageLock(root, packageIdentifier.Value);
-        AtomicWorkflowFileTransaction.RecoverPendingUnderLock(root, packageIdentifier.Value);
+        AtomicWorkflowFileTransaction.RecoverPendingUnderLock(
+            root,
+            packageIdentifier.Value,
+            _originalSubmissions);
         string packageDirectory = ManifestPaths.GetPackageDirectory(packageIdentifier);
         string? fullPackageDirectory = SecurePath.ResolveExactExistingDirectory(root, packageDirectory);
         if (fullPackageDirectory is null)
@@ -310,7 +316,11 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             SecurePath.ValidateOutputRoot(root);
             Directory.CreateDirectory(root);
             processLock = RepositoryOperationLock.Acquire(root, operationLockKey);
-            RecoverAbandonedTransactions(root, transactionPrefix, currentTransaction: "");
+            RecoverAbandonedTransactions(
+                root,
+                transactionPrefix,
+                currentTransaction: "",
+                _originalSubmissions);
             Directory.CreateDirectory(transactionRoot);
             string stageRoot = Path.Combine(transactionRoot, "stage");
             string backupRoot = Path.Combine(transactionRoot, "backup");
@@ -370,17 +380,29 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
 
             DisposePins(directoryPins);
             DeleteEmptyManifestDirectories(root, installed);
-            WriteJournal(transactionRoot, "committed", installed);
-            committed = true;
-            cleanupAllowed = true;
-            try
+            if (_originalSubmissions is null)
             {
-                _originalSubmissions?.CaptureChangedVersions(root, changes);
+                WriteJournal(transactionRoot, "committed", installed);
+                committed = true;
+                cleanupAllowed = true;
             }
-            catch (Exception exception) when (
-                exception is IOException or UnauthorizedAccessException or InvalidDataException)
+            else
             {
-                committedProvenanceFailure = exception;
+                WriteJournal(transactionRoot, "manifests-committed", installed);
+                committed = true;
+                try
+                {
+                    _originalSubmissions.CaptureChangedVersions(
+                        root,
+                        ToCommittedPaths(changes));
+                    WriteJournal(transactionRoot, "committed", installed);
+                    cleanupAllowed = true;
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException or InvalidDataException)
+                {
+                    committedProvenanceFailure = exception;
+                }
             }
         }
         catch
@@ -598,7 +620,10 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
     internal static IDisposable AcquirePackageLock(string root, string operationLockKey)
         => RepositoryOperationLock.Acquire(root, operationLockKey);
 
-    internal static void RecoverPendingUnderLock(string root, string operationLockKey)
+    internal static void RecoverPendingUnderLock(
+        string root,
+        string operationLockKey,
+        IOriginalSubmissionStore? originalSubmissions = null)
     {
         string transactionPrefix =
             $".winmatsch-transaction-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(operationLockKey.ToUpperInvariant())))[..16]}";
@@ -607,7 +632,11 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             return;
         }
 
-        RecoverAbandonedTransactions(root, transactionPrefix, currentTransaction: "");
+        RecoverAbandonedTransactions(
+            root,
+            transactionPrefix,
+            currentTransaction: "",
+            originalSubmissions);
     }
 
     private static void WriteJournal(
@@ -646,7 +675,8 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
     private static void RecoverAbandonedTransactions(
         string root,
         string transactionPrefix,
-        string currentTransaction)
+        string currentTransaction,
+        IOriginalSubmissionStore? originalSubmissions)
     {
         foreach (string transaction in Directory.EnumerateDirectories(root, $"{transactionPrefix}-*")
                      .Where(path => !string.Equals(path, currentTransaction, StringComparison.OrdinalIgnoreCase))
@@ -664,7 +694,22 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             }
 
             string[] lines = File.ReadAllLines(journalPath);
-            bool committed = lines.Length > 0 && string.Equals(lines[0], "committed", StringComparison.Ordinal);
+            string status = lines.FirstOrDefault() ?? "";
+            bool committed = string.Equals(status, "committed", StringComparison.Ordinal);
+            if (string.Equals(status, "manifests-committed", StringComparison.Ordinal))
+            {
+                if (originalSubmissions is null)
+                {
+                    throw new InvalidDataException(
+                        $"Transaction journal '{journalPath}' requires provenance recovery.");
+                }
+
+                originalSubmissions.CaptureChangedVersions(
+                    root,
+                    ParseCommittedPaths(lines, journalPath));
+                committed = true;
+            }
+
             if (!committed)
             {
                 foreach (string line in lines.Skip(1).Where(static line => line.Length > 0).Reverse())
@@ -715,6 +760,36 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             Directory.Delete(transaction, recursive: true);
         }
     }
+
+    private static List<CommittedWorkflowPath> ParseCommittedPaths(
+        IReadOnlyList<string> lines,
+        string journalPath)
+    {
+        var paths = new List<CommittedWorkflowPath>();
+        foreach (string line in lines.Skip(1).Where(static line => line.Length > 0))
+        {
+            string[] parts = line.Split('|');
+            if (parts.Length != 3
+                || !Enum.TryParse(parts[0], out PlannedChangeKind kind))
+            {
+                throw new InvalidDataException($"Invalid transaction journal '{journalPath}'.");
+            }
+
+            paths.Add(new(
+                kind,
+                Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))));
+        }
+
+        return paths;
+    }
+
+    private static CommittedWorkflowPath[] ToCommittedPaths(
+        IEnumerable<WorkflowFileChange> changes)
+        => changes
+            .Select(static change => new CommittedWorkflowPath(
+                change.Kind,
+                change.RepositoryPath))
+            .ToArray();
 
     private static void DeleteEmptyManifestDirectories(string root, IEnumerable<TransactionEntry> entries)
     {

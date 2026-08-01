@@ -355,6 +355,7 @@ public sealed class WorkflowProductionCompositionTests
                             expectedSha256: WorkflowFileChange.Hash(content));
                     }),
             ];
+            File.WriteAllText(Path.Combine(Path.GetDirectoryName(localePath)!, ".gitkeep"), "");
             await transaction.ApplyAsync(output, "Example.Composed", deletions, CancellationToken.None);
             Assert.Null(store.Load(
                 output,
@@ -370,6 +371,45 @@ public sealed class WorkflowProductionCompositionTests
                     output,
                     new PackageIdentifier("Example.Composed"),
                     new PackageVersion("1.0.0"))!.DefaultLocale.Publisher);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+            Directory.Delete(state, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Provenance_failure_reports_committed_state_and_is_recovered_from_journal()
+    {
+        string output = CreateDirectory();
+        string state = CreateDirectory();
+        try
+        {
+            var transaction = new AtomicWorkflowFileTransaction(new ThrowingOriginalSubmissionStore());
+            (_, System.Collections.Immutable.ImmutableArray<WorkflowFileChange> changes) =
+                CreateInitialChanges("Original Publisher");
+
+            WorkflowCommittedProvenanceException exception =
+                await Assert.ThrowsAsync<WorkflowCommittedProvenanceException>(() =>
+                    transaction.ApplyAsync(
+                        output,
+                        "Example.Composed",
+                        changes,
+                        CancellationToken.None));
+
+            Assert.Contains("committed", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.NotEmpty(Directory.EnumerateFiles(output, "*.yaml", SearchOption.AllDirectories));
+            Assert.NotEmpty(Directory.EnumerateDirectories(output, ".winmatsch-transaction-*"));
+
+            PackageSnapshot recovered = Assert.IsType<PackageSnapshot>(
+                await new LocalManifestSnapshotSource(new FileOriginalSubmissionStore(state)).LoadAsync(
+                    output,
+                    new PackageIdentifier("Example.Composed"),
+                    new PackageVersion("1.0.0"),
+                    CancellationToken.None));
+            Assert.Equal("Original Publisher", recovered.OriginalBotSubmission!.DefaultLocale.Publisher);
+            Assert.Empty(Directory.EnumerateDirectories(output, ".winmatsch-transaction-*"));
         }
         finally
         {
@@ -539,7 +579,7 @@ public sealed class WorkflowProductionCompositionTests
 
         public void CaptureChangedVersions(
             string outputDirectory,
-            IReadOnlyList<WorkflowFileChange> changes)
+            IReadOnlyList<CommittedWorkflowPath> changes)
             => throw new IOException("Simulated provenance write failure.");
     }
 }

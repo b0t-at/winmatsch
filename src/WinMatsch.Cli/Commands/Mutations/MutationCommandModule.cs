@@ -352,6 +352,7 @@ public sealed class MutationCommandModule : ICommandModule
             local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
         }
 
+        WorkflowReleaseProvenance? releaseProvenance = local.Plan.Release;
         if (local.Code != WorkflowResultCode.Succeeded)
         {
             MutationOutput.Write(context, local, remote: null);
@@ -438,6 +439,14 @@ public sealed class MutationCommandModule : ICommandModule
                 Documents = editedDocuments,
             });
             local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
+            if (releaseProvenance is not null)
+            {
+                local = local with
+                {
+                    Plan = local.Plan with { Release = releaseProvenance },
+                };
+            }
+
             if (local.Code != WorkflowResultCode.Succeeded)
             {
                 MutationOutput.Write(context, local, remote: null);
@@ -504,6 +513,12 @@ public sealed class MutationCommandModule : ICommandModule
             request = WithExecutionMode(request, WorkflowExecutionMode.Apply);
             local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
             if (!local.Applied)
+            {
+                MutationOutput.Write(context, local, remote: null);
+                return ExitCodes.OperationFailed;
+            }
+
+            if (!string.IsNullOrWhiteSpace(local.ErrorMessage))
             {
                 MutationOutput.Write(context, local, remote: null);
                 return ExitCodes.OperationFailed;

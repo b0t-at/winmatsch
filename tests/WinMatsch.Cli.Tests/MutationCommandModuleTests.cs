@@ -158,6 +158,83 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task Editing_preserves_release_freshness_provenance_for_submission()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request =>
+            {
+                WorkflowOperationResult result = FakeMutationWorkflow.Result(request);
+                return request is SubmitOperationRequest
+                    ? result
+                    : result with
+                    {
+                        Plan = result.Plan with
+                        {
+                            Release = new(
+                                new RepositoryCoordinates("vendor", "app"),
+                                42,
+                                new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero)),
+                        },
+                    };
+            },
+        };
+        var submission = new FakeSubmissionWorkflow();
+        var editor = new FakeEditorRunner();
+        CliHarness harness = CreateHarness(workflow, submission, editor);
+        harness.EnvironmentVariables["WINMATSCH_FRESHNESS_DELAY"] = "00:42:00";
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--edit", "--dry-run", "--submit", "--yes"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        GitHubSubmissionRequest request = Assert.Single(submission.Requests);
+        Assert.Equal(TimeSpan.FromMinutes(42), request.Policy.MinimumReleaseFreshness);
+        Assert.Equal(new RepositoryCoordinates("vendor", "app"), request.ReleaseRepository);
+        Assert.Equal(42, request.ReleaseId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Committed_provenance_failure_is_visible_and_blocks_remote_submission(bool json)
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request =>
+            {
+                WorkflowOperationResult result = FakeMutationWorkflow.Result(request);
+                return request.ExecutionMode == WorkflowExecutionMode.Apply
+                    ? result with
+                    {
+                        Applied = true,
+                        ErrorMessage = "Committed, but provenance failed for https://example.test/a?sig=SECRET.",
+                    }
+                    : result;
+            },
+        };
+        var submission = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submission);
+        string[] args =
+        [
+            "update",
+            "Example.App",
+            "1.0",
+            "--submit",
+            "--yes",
+            .. json ? new[] { "--format", "json" } : Array.Empty<string>(),
+        ];
+
+        CliRunResult result = await harness.RunAsync(args);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Empty(submission.Requests);
+        Assert.DoesNotContain("SECRET", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains(json ? "\"warning\"" : "Warning:", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Json_question_never_prompts_and_returns_missing_input()
     {
         var workflow = new FakeMutationWorkflow

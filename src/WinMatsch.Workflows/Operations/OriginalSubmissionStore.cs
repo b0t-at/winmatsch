@@ -13,8 +13,12 @@ public interface IOriginalSubmissionStore
 
     public void CaptureChangedVersions(
         string outputDirectory,
-        IReadOnlyList<WorkflowFileChange> changes);
+        IReadOnlyList<CommittedWorkflowPath> changes);
 }
+
+public sealed record CommittedWorkflowPath(
+    PlannedChangeKind Kind,
+    string RepositoryPath);
 
 /// <summary>
 /// Persists the first tool-generated manifest set outside the repository so later updates can
@@ -45,7 +49,7 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
 
     public void CaptureChangedVersions(
         string outputDirectory,
-        IReadOnlyList<WorkflowFileChange> changes)
+        IReadOnlyList<CommittedWorkflowPath> changes)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
         ArgumentNullException.ThrowIfNull(changes);
@@ -68,7 +72,12 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
             }
 
             string destination = Path.Combine(RepositoryStateDirectory(root), relativeDirectory);
-            if (!Directory.Exists(source))
+            bool hasManifestFiles = Directory.Exists(source)
+                && Directory.EnumerateFiles(source).Any(static path =>
+                    Path.GetExtension(path) is { } extension
+                    && (extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase)
+                        || extension.Equals(".yml", StringComparison.OrdinalIgnoreCase)));
+            if (!hasManifestFiles)
             {
                 if (Directory.Exists(destination))
                 {
