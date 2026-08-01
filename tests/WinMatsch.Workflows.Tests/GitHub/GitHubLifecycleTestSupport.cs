@@ -115,7 +115,11 @@ internal static class GitHubLifecycleTestSupport
             "main",
             new Uri($"https://github.invalid/upstream/repo/pull/{number}"),
             new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
-            new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero));
+            new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero))
+        {
+            HeadRepository = new RepositoryCoordinates(author, Upstream.Name),
+            BaseSha = UpstreamSha,
+        };
 }
 
 internal sealed class FakeGitHubClient : IGitHubRepositoryClient
@@ -123,6 +127,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     private readonly Dictionary<RepositoryCoordinates, RepositoryInfo> _repositories = [];
     private readonly Dictionary<(RepositoryCoordinates Repository, string Branch), GitReference> _references = [];
     private readonly Dictionary<(RepositoryCoordinates Repository, string Path, string Reference), byte[]> _contents = [];
+    private readonly Dictionary<long, IReadOnlyList<PullRequestChangedFile>> _pullRequestFiles = [];
     private readonly List<PullRequestInfo> _pullRequests = [];
     private EventHandler<RateLimitInfo>? _rateLimitObserved;
 
@@ -162,6 +167,10 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public int PullRequestHeadContentCalls { get; private set; }
 
+    public int PullRequestFilesCalls { get; private set; }
+
+    public bool PullRequestChangedFilesUnsupported { get; set; }
+
     public int FailNextPullRequestContentCalls { get; set; }
 
     public Action<FakeGitHubClient, int>? OnSearch { get; set; }
@@ -184,6 +193,8 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public string PullRequestHeadSha { get; set; } = GitHubLifecycleTestSupport.CommitSha;
 
+    public string PullRequestMergeBaseSha { get; set; } = GitHubLifecycleTestSupport.UpstreamSha;
+
     public IReadOnlyList<GitHubRelease> Releases { get; set; } = [];
 
     public int GetReleasesCalls { get; private set; }
@@ -196,7 +207,22 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public IReadOnlyList<PullRequestInfo> PullRequests => _pullRequests;
 
-    public void AddPullRequest(PullRequestInfo pullRequest) => _pullRequests.Add(pullRequest);
+    public void AddPullRequest(PullRequestInfo pullRequest)
+    {
+        if (pullRequest.HeadRepository is { } headRepository
+            && !_repositories.ContainsKey(headRepository))
+        {
+            _repositories.Add(
+                headRepository,
+                Repository(
+                    headRepository,
+                    isFork: true,
+                    GitHubLifecycleTestSupport.Upstream,
+                    GitHubLifecycleTestSupport.UpstreamSha));
+        }
+
+        _pullRequests.Add(pullRequest);
+    }
 
     public void UpdatePullRequest(long number, Func<PullRequestInfo, PullRequestInfo> update)
     {
@@ -211,6 +237,12 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         {
             DefaultBranch = current.DefaultBranch with { HeadSha = sha },
         };
+    }
+
+    public void SetRepositoryPrivate(RepositoryCoordinates repository, bool isPrivate)
+    {
+        RepositoryInfo current = _repositories[repository];
+        _repositories[repository] = current with { IsPrivate = isPrivate };
     }
 
     public Task<GitHubUser> GetAuthenticatedUserAsync(CancellationToken cancellationToken = default)
@@ -421,6 +453,16 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
             : new CompareResult("behind", 0, 1, 0, []));
     }
 
+    public Task<string> GetMergeBaseAsync(
+        RepositoryCoordinates repository,
+        string baseReference,
+        string head,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(PullRequestMergeBaseSha);
+    }
+
     public Task<ForkResult> EnsureForkAsync(
         RepositoryCoordinates upstream,
         string owner,
@@ -475,12 +517,25 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
             result = result.Where(pr => pr.HeadOwner == search.HeadOwner);
         }
 
+        if (search.BaseBranch is not null)
+        {
+            result = result.Where(pr => pr.BaseBranch == search.BaseBranch);
+        }
+
         if (search.ExactTitleToken is not null)
         {
             result = result.Where(pr => pr.Title.Contains(search.ExactTitleToken, StringComparison.Ordinal));
         }
 
-        return Task.FromResult<IReadOnlyList<PullRequestInfo>>([.. result]);
+        PullRequestInfo[] matches = [.. result];
+        if (search.MaximumResults is { } maximum && matches.Length > maximum)
+        {
+            return Task.FromException<IReadOnlyList<PullRequestInfo>>(
+                new GitHubApiException(
+                    $"GitHub pagination exceeded the safe result limit of {maximum}."));
+        }
+
+        return Task.FromResult<IReadOnlyList<PullRequestInfo>>(matches);
     }
 
     public Task<PullRequestInfo> CreatePullRequestAsync(
@@ -527,6 +582,24 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         return Task.FromResult(_pullRequests.Single(pr => pr.Number == number));
     }
 
+    public Task<IReadOnlyList<PullRequestChangedFile>> GetPullRequestChangedFilesAsync(
+        RepositoryCoordinates repository,
+        long number,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        PullRequestFilesCalls++;
+        if (PullRequestChangedFilesUnsupported)
+        {
+            throw new NotSupportedException("Synthetic changed-file evidence is unavailable.");
+        }
+
+        return Task.FromResult(
+            _pullRequestFiles.TryGetValue(number, out IReadOnlyList<PullRequestChangedFile>? files)
+                ? files
+                : (IReadOnlyList<PullRequestChangedFile>)[]);
+    }
+
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,
         long number,
@@ -564,6 +637,14 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         string reference,
         ReadOnlySpan<byte> content)
         => _contents[(repository, path, reference)] = content.ToArray();
+
+    public void SetPullRequestChangedFiles(long number, params string[] paths)
+        => _pullRequestFiles[number] = [.. paths.Select(static path => new PullRequestChangedFile(path))];
+
+    public void SetPullRequestChangedFiles(
+        long number,
+        params PullRequestChangedFile[] files)
+        => _pullRequestFiles[number] = files;
 
     public void SetForkHead(string sha)
     {
@@ -675,12 +756,32 @@ internal sealed class FakePullRequestManifestEvidenceProvider(
     PullRequestManifestEvidence evidence)
     : IPullRequestManifestEvidenceProvider
 {
+    public Func<IReadOnlyList<PullRequestInfo>, IReadOnlyList<PullRequestInfo>>?
+        CandidateSelector
+    {
+        get;
+        init;
+    }
+
+    public int EvidenceCalls { get; private set; }
+
+    public Task<IReadOnlyList<PullRequestInfo>> GetCandidatesAsync(
+        GitHubSubmissionPlan plan,
+        IReadOnlyList<PullRequestInfo> openPullRequests,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(
+            CandidateSelector?.Invoke(openPullRequests) ?? openPullRequests);
+    }
+
     public Task<PullRequestManifestEvidence> GetEvidenceAsync(
         GitHubSubmissionPlan plan,
         PullRequestInfo pullRequest,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        EvidenceCalls++;
         return Task.FromResult(evidence);
     }
 }
@@ -723,4 +824,9 @@ internal sealed class FakeClock : IWorkflowClock
 {
     public DateTimeOffset UtcNow { get; set; } =
         new(2026, 1, 10, 0, 0, 0, TimeSpan.Zero);
+}
+
+internal sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
+{
+    public override DateTimeOffset GetUtcNow() => utcNow;
 }

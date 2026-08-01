@@ -180,6 +180,9 @@ internal sealed class RestCompareDto
     [JsonPropertyName("total_commits")]
     public int TotalCommits { get; set; }
 
+    [JsonPropertyName("merge_base_commit")]
+    public RestCommitSummaryDto? MergeBaseCommit { get; set; }
+
     public List<RestComparedCommitDto> Commits { get; set; } = [];
 }
 
@@ -269,6 +272,14 @@ internal sealed class RestPullRequestRefDto
     public RestRepositoryDto? Repo { get; set; }
 
     public RestPullRequestUserDto? User { get; set; }
+}
+
+internal sealed class RestPullRequestChangedFileDto
+{
+    public string Filename { get; set; } = "";
+
+    [JsonPropertyName("previous_filename")]
+    public string? PreviousFilename { get; set; }
 }
 
 internal sealed class RestPullRequestUserDto

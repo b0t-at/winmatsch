@@ -61,7 +61,15 @@ public sealed class GitHubLifecycleWorkflow
     }
 
     public static GitHubSubmissionPlan Plan(GitHubSubmissionRequest request)
-        => CreatePlan(request, DateTimeOffset.UtcNow);
+        => Plan(request, TimeProvider.System);
+
+    public static GitHubSubmissionPlan Plan(
+        GitHubSubmissionRequest request,
+        TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        return CreatePlan(request, timeProvider.GetUtcNow());
+    }
 
     private static GitHubSubmissionPlan CreatePlan(
         GitHubSubmissionRequest request,
@@ -173,7 +181,10 @@ public sealed class GitHubLifecycleWorkflow
 
             if (!request.Policy.SkipPullRequestCheck)
             {
-                PullRequestInfo? duplicate = await FindDuplicateAsync(plan, cancellationToken).ConfigureAwait(false);
+                PullRequestInfo? duplicate = await FindDuplicateAsync(
+                    plan,
+                    upstreamDefault.Name,
+                    cancellationToken).ConfigureAwait(false);
                 if (duplicate is not null)
                 {
                     return Result(
@@ -475,6 +486,7 @@ public sealed class GitHubLifecycleWorkflow
 
             PullRequestInfo? finalDuplicate = await FindDuplicateAsync(
                 plan,
+                upstreamDefault.Name,
                 cancellationToken).ConfigureAwait(false);
             if (finalDuplicate is not null)
             {
@@ -543,7 +555,11 @@ public sealed class GitHubLifecycleWorkflow
             }
 
             IReadOnlyList<PullRequestInfo> associated =
-                await FindAssociatedPullRequestsAsync(plan, cancellationToken).ConfigureAwait(false);
+                await FindAssociatedPullRequestsAsync(
+                    plan,
+                    upstreamDefault.Name,
+                    cancellationToken,
+                    pullRequest.Number).ConfigureAwait(false);
             PullRequestInfo freshPullRequest = await _gitHub.GetPullRequestAsync(
                 request.UpstreamRepository,
                 pullRequest.Number,
@@ -594,6 +610,7 @@ public sealed class GitHubLifecycleWorkflow
                     if (!await IsAssociatedPullRequestAsync(
                             plan,
                             freshWinner,
+                            upstreamDefault.Name,
                             cancellationToken).ConfigureAwait(false)
                         || !string.Equals(
                             freshWinner.BaseBranch,
@@ -864,36 +881,96 @@ public sealed class GitHubLifecycleWorkflow
 
     private async Task<PullRequestInfo?> FindDuplicateAsync(
         GitHubSubmissionPlan plan,
+        string expectedBaseBranch,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<PullRequestInfo> associated =
-            await FindAssociatedPullRequestsAsync(plan, cancellationToken).ConfigureAwait(false);
+            await FindAssociatedPullRequestsAsync(
+                plan,
+                expectedBaseBranch,
+                cancellationToken).ConfigureAwait(false);
         return associated.Count == 0 ? null : associated[0];
     }
 
     private async Task<IReadOnlyList<PullRequestInfo>> FindAssociatedPullRequestsAsync(
         GitHubSubmissionPlan plan,
-        CancellationToken cancellationToken)
+        string expectedBaseBranch,
+        CancellationToken cancellationToken,
+        long? additionallyExcludedPullRequestNumber = null)
     {
         GitHubSubmissionRequest request = plan.Request;
-        IReadOnlyList<PullRequestInfo> candidates = await _gitHub.SearchPullRequestsAsync(
-            request.UpstreamRepository,
-            new PullRequestSearch(PullRequestState.Open),
-            cancellationToken).ConfigureAwait(false);
+        HashSet<long> associationExcludedPullRequestNumbers = [];
+        if (request.SupersedesPullRequestNumber is { } superseded)
+        {
+            associationExcludedPullRequestNumbers.Add(superseded);
+        }
+
+        var boundExcludedPullRequestNumbers =
+            new HashSet<long>(associationExcludedPullRequestNumbers);
+        if (additionallyExcludedPullRequestNumber is { } additionallyExcluded)
+        {
+            boundExcludedPullRequestNumbers.Add(additionallyExcluded);
+        }
+
+        int maximumSearchResults =
+            PullRequestManifestEvidenceLimits.MaximumCandidates
+            + boundExcludedPullRequestNumbers.Count;
+        IReadOnlyList<PullRequestInfo> candidates;
+        try
+        {
+            candidates = await _gitHub.SearchPullRequestsAsync(
+                request.UpstreamRepository,
+                new PullRequestSearch(
+                    PullRequestState.Open,
+                    BaseBranch: expectedBaseBranch)
+                {
+                    MaximumResults = maximumSearchResults,
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (GitHubApiException exception) when (exception.StatusCode is null)
+        {
+            throw new PullRequestEvidenceLimitException(
+                "Pull request discovery failed a local transport safety bound: "
+                + exception.Message);
+        }
+
+        PullRequestInfo[] boundedDiscoveryCandidates =
+        [
+            .. candidates.Where(pullRequest =>
+                !boundExcludedPullRequestNumbers.Contains(pullRequest.Number)),
+        ];
+        if (boundedDiscoveryCandidates.Length > PullRequestManifestEvidenceLimits.MaximumCandidates)
+        {
+            throw new PullRequestEvidenceLimitException(
+                $"Manifest evidence candidate count {boundedDiscoveryCandidates.Length} exceeds the safe limit of {PullRequestManifestEvidenceLimits.MaximumCandidates}.");
+        }
+
+        PullRequestInfo[] associationCandidates =
+        [
+            .. candidates.Where(pullRequest =>
+                !associationExcludedPullRequestNumbers.Contains(pullRequest.Number)),
+        ];
         var associated = new List<PullRequestInfo>();
         PullRequestInfo[] unassociated =
         [
-            .. candidates.Where(pullRequest =>
-                pullRequest.Number != request.SupersedesPullRequestNumber
-                && pullRequest.State == PullRequestState.Open
+            .. associationCandidates.Where(pullRequest =>
+                pullRequest.State == PullRequestState.Open
+                && string.Equals(
+                    pullRequest.BaseBranch,
+                    expectedBaseBranch,
+                    StringComparison.Ordinal)
                 && !GitHubSubmissionFormatter.IsCanonicalTitleFor(
                     pullRequest.Title,
                     request.LocalPlan.PackageIdentifier,
                     request.LocalPlan.PackageVersion)),
         ];
-        associated.AddRange(candidates.Where(pullRequest =>
-            pullRequest.Number != request.SupersedesPullRequestNumber
-            && pullRequest.State == PullRequestState.Open
+        associated.AddRange(associationCandidates.Where(pullRequest =>
+            pullRequest.State == PullRequestState.Open
+            && string.Equals(
+                pullRequest.BaseBranch,
+                expectedBaseBranch,
+                StringComparison.Ordinal)
             && GitHubSubmissionFormatter.IsCanonicalTitleFor(
                 pullRequest.Title,
                 request.LocalPlan.PackageIdentifier,
@@ -903,20 +980,44 @@ public sealed class GitHubLifecycleWorkflow
                 plan,
                 unassociated,
                 cancellationToken).ConfigureAwait(false);
-        HashSet<(long Number, string HeadOwner, string HeadSha)> allowed =
+        HashSet<(
+            long Number,
+            string HeadOwner,
+            string HeadSha,
+            RepositoryCoordinates? HeadRepository,
+            string BaseBranch,
+            string? BaseSha)> allowed =
         [
             .. unassociated.Select(static pullRequest =>
-                (pullRequest.Number, pullRequest.HeadOwner, pullRequest.HeadSha)),
+                (
+                    pullRequest.Number,
+                    pullRequest.HeadOwner,
+                    pullRequest.HeadSha,
+                    pullRequest.HeadRepository,
+                    pullRequest.BaseBranch,
+                    pullRequest.BaseSha)),
         ];
         PullRequestInfo[] boundedCandidates =
         [
             .. evidenceCandidates
                 .DistinctBy(static pullRequest =>
-                    (pullRequest.Number, pullRequest.HeadOwner, pullRequest.HeadSha)),
+                    (
+                        pullRequest.Number,
+                        pullRequest.HeadOwner,
+                        pullRequest.HeadSha,
+                        pullRequest.HeadRepository,
+                        pullRequest.BaseBranch,
+                        pullRequest.BaseSha)),
         ];
         if (boundedCandidates.Length > PullRequestManifestEvidenceLimits.MaximumCandidates
             || boundedCandidates.Any(candidate => !allowed.Contains(
-                (candidate.Number, candidate.HeadOwner, candidate.HeadSha))))
+                (
+                    candidate.Number,
+                    candidate.HeadOwner,
+                    candidate.HeadSha,
+                    candidate.HeadRepository,
+                    candidate.BaseBranch,
+                    candidate.BaseSha))))
         {
             throw new PullRequestEvidenceLimitException(
                 "Manifest evidence provider returned an unbounded, duplicate, or out-of-scope candidate set.");
@@ -940,9 +1041,15 @@ public sealed class GitHubLifecycleWorkflow
     private async Task<bool> IsAssociatedPullRequestAsync(
         GitHubSubmissionPlan plan,
         PullRequestInfo pullRequest,
+        string expectedBaseBranch,
         CancellationToken cancellationToken)
     {
         if (pullRequest.State != PullRequestState.Open)
+        {
+            return false;
+        }
+
+        if (!string.Equals(pullRequest.BaseBranch, expectedBaseBranch, StringComparison.Ordinal))
         {
             return false;
         }

@@ -120,6 +120,102 @@ public sealed class GitHubPullRequestTests
         PullRequestInfo pullRequest = Assert.Single(pullRequests);
         Assert.Equal("contributor", pullRequest.HeadOwner);
         Assert.Equal("update", pullRequest.HeadBranch);
+        Assert.Null(pullRequest.HeadRepository);
+    }
+
+    [Fact]
+    public async Task Pull_request_maps_complete_head_repository_coordinates()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $"[{GitHubClientTestSupport.PullRequestJson(3, "Update fork", headOwner: "renamed-owner")}]"));
+
+        PullRequestInfo pullRequest = Assert.Single(await GitHubClientTestSupport
+            .CreateClient(handler)
+            .SearchPullRequestsAsync(_repository, new PullRequestSearch(), TestContext.Current.CancellationToken));
+
+        Assert.Equal(new RepositoryCoordinates("renamed-owner", "repo"), pullRequest.HeadRepository);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_file_maps_renamed_source_path()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            [{
+              "filename": "manifests/e/Example/App/2.0.0/Renamed.yaml",
+              "previous_filename": "manifests/e/Example/App/2.0.0/Example.App.yaml"
+            }]
+            """));
+
+        PullRequestChangedFile file = Assert.Single(await GitHubClientTestSupport
+            .CreateClient(handler)
+            .GetPullRequestChangedFilesAsync(
+                _repository,
+                7,
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal("manifests/e/Example/App/2.0.0/Renamed.yaml", file.Path);
+        Assert.Equal(
+            "manifests/e/Example/App/2.0.0/Example.App.yaml",
+            file.PreviousPath);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_file_pagination_fails_closed_at_the_limit()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        for (int page = 1; page <= 10; page++)
+        {
+            int nextPage = page + 1;
+            handler.Add(_ => GitHubClientTestSupport.Json(
+                """[{"filename":"manifests/e/Example/App/2.0.0/Example.App.yaml"}]""",
+                headers:
+                [
+                    ("Link", $"<https://github.invalid/api/pulls/7/files?page={nextPage}>; rel=\"next\""),
+                ]));
+        }
+
+        await Assert.ThrowsAsync<GitHubApiException>(() => GitHubClientTestSupport
+            .CreateClient(handler)
+            .GetPullRequestChangedFilesAsync(_repository, 7, TestContext.Current.CancellationToken));
+
+        Assert.Equal(10, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Pull_request_search_stops_at_the_requested_result_bound()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $"[{GitHubClientTestSupport.PullRequestJson(1, "Update one")}," +
+            $"{GitHubClientTestSupport.PullRequestJson(2, "Update two")}]"));
+
+        await Assert.ThrowsAsync<GitHubApiException>(() => GitHubClientTestSupport
+            .CreateClient(handler)
+            .SearchPullRequestsAsync(
+                _repository,
+                new PullRequestSearch { MaximumResults = 1 },
+                TestContext.Current.CancellationToken));
+
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_search_uses_the_requested_base_branch()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(request =>
+        {
+            Assert.Contains("base=release", request.Uri.Query, StringComparison.Ordinal);
+            return GitHubClientTestSupport.Json("[]");
+        });
+
+        _ = await GitHubClientTestSupport.CreateClient(handler).SearchPullRequestsAsync(
+            _repository,
+            new PullRequestSearch(PullRequestState.Open, BaseBranch: "release"),
+            TestContext.Current.CancellationToken);
     }
 
     [Fact]

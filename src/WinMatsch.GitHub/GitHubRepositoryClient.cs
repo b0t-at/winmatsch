@@ -11,6 +11,9 @@ namespace WinMatsch.GitHub;
 /// <summary>A raw-HTTP, AOT-friendly GitHub GraphQL and REST client.</summary>
 public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
 {
+    private const int MaximumPullRequestFilePages = 10;
+    private const int MaximumPullRequestFiles = 1_000;
+
     private const string ViewerQuery =
         """
         query {
@@ -556,9 +559,33 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             comparison.BehindBy,
             comparison.TotalCommits,
             commits.Select(static commit => new ComparedCommit(
-            commit.Sha,
-            commit.Commit.Message,
-            ParseAbsoluteUri(commit.HtmlUrl, "commit URL"))).ToArray());
+                commit.Sha,
+                commit.Commit.Message,
+                ParseAbsoluteUri(commit.HtmlUrl, "commit URL"))).ToArray());
+    }
+
+    public async Task<string> GetMergeBaseAsync(
+        RepositoryCoordinates repository,
+        string baseReference,
+        string head,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentException.ThrowIfNullOrWhiteSpace(baseReference);
+        ArgumentException.ThrowIfNullOrWhiteSpace(head);
+        var requestUri = new Uri(
+            _options.NormalizedApiBaseUri,
+            $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/compare/" +
+            $"{Escape(baseReference)}...{Escape(head)}?per_page=1");
+        TransportResponse<RestCompareDto> comparison = await _transport.GetPageAsync(
+            requestUri,
+            GitHubJsonContext.Default.RestCompareDto,
+            cancellationToken).ConfigureAwait(false);
+        string mergeBaseSha = comparison.Value.MergeBaseCommit?.Sha
+            ?? throw new GitHubApiException(
+                "GitHub compare did not report a merge-base commit.");
+        ValidateSha(mergeBaseSha);
+        return mergeBaseSha;
     }
 
     public async Task<ForkResult> EnsureForkAsync(
@@ -664,6 +691,13 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     {
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentNullException.ThrowIfNull(search);
+        if (search.MaximumResults is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(search),
+                "The maximum pull-request result count must be positive.");
+        }
+
         bool hasHeadOwner = !string.IsNullOrWhiteSpace(search.HeadOwner);
         bool hasHeadBranch = !string.IsNullOrWhiteSpace(search.HeadBranch);
         if (hasHeadBranch && !hasHeadOwner)
@@ -700,7 +734,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         List<RestPullRequestDto> pullRequests = await GetAllPagesAsync(
             first,
             GitHubJsonContext.Default.ListRestPullRequestDto,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            search.MaximumResults).ConfigureAwait(false);
         IEnumerable<PullRequestInfo> filtered = pullRequests.Select(MapPullRequest);
         if (hasHeadOwner)
         {
@@ -790,6 +825,27 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             GitHubJsonContext.Default.RestPullRequestDto,
             cancellationToken).ConfigureAwait(false);
         return MapPullRequest(pullRequest);
+    }
+
+    public async Task<IReadOnlyList<PullRequestChangedFile>> GetPullRequestChangedFilesAsync(
+        RepositoryCoordinates repository,
+        long number,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(number);
+        var first = new Uri(
+            _options.NormalizedApiBaseUri,
+            $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/pulls/" +
+            $"{number.ToString(CultureInfo.InvariantCulture)}/files?per_page=100");
+        List<RestPullRequestChangedFileDto> files = await GetAllPagesAsync(
+            first,
+            GitHubJsonContext.Default.ListRestPullRequestChangedFileDto,
+            cancellationToken,
+            maximumResults: MaximumPullRequestFiles,
+            maximumPages: MaximumPullRequestFilePages).ConfigureAwait(false);
+        return files.Select(static file =>
+            new PullRequestChangedFile(file.Filename, file.PreviousFilename)).ToArray();
     }
 
     public Task<PullRequestComment> CommentOnPullRequestAsync(
@@ -1033,7 +1089,9 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     private async Task<List<T>> GetAllPagesAsync<T>(
         Uri first,
         System.Text.Json.Serialization.Metadata.JsonTypeInfo<List<T>> responseType,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? maximumResults = null,
+        int? maximumPages = null)
     {
         var results = new List<T>();
         Uri? next = first;
@@ -1041,13 +1099,19 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         int pageCount = 0;
         while (next is not null)
         {
-            ValidatePaginationPage(next, visited, pageCount++);
+            ValidatePaginationPage(next, visited, pageCount++, maximumPages);
             TransportResponse<List<T>> page = await _transport.GetPageAsync(
                 next,
                 responseType,
                 cancellationToken).ConfigureAwait(false);
             ValidatePaginationItemCount(results.Count, page.Value.Count);
             results.AddRange(page.Value);
+            if (maximumResults is { } maximum && results.Count > maximum)
+            {
+                throw new GitHubApiException(
+                    $"GitHub pagination exceeded the safe result limit of {maximum}.");
+            }
+
             next = page.NextUri;
         }
 
@@ -1246,7 +1310,26 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             pullRequest.Base.Ref,
             ParseAbsoluteUri(pullRequest.HtmlUrl, "pull request URL"),
             pullRequest.CreatedAt,
-            pullRequest.UpdatedAt);
+            pullRequest.UpdatedAt)
+        {
+            HeadRepository = ParseRepositoryCoordinates(pullRequest.Head.Repo),
+            BaseSha = pullRequest.Base.Sha,
+        };
+    }
+
+    private static RepositoryCoordinates? ParseRepositoryCoordinates(RestRepositoryDto? repository)
+    {
+        if (repository is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(repository.FullName))
+        {
+            throw new GitHubApiException("GitHub pull request head repository did not include full coordinates.");
+        }
+
+        return RepositoryCoordinates.Parse(repository.FullName);
     }
 
     private static bool IsForkNotReady(GitHubApiException exception)
@@ -1442,12 +1525,19 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         return uri;
     }
 
-    private void ValidatePaginationPage(Uri page, HashSet<Uri> visited, int pageCount)
+    private void ValidatePaginationPage(
+        Uri page,
+        HashSet<Uri> visited,
+        int pageCount,
+        int? maximumPages = null)
     {
-        if (pageCount >= _options.MaxPaginationPages)
+        int pageLimit = maximumPages is { } requestedLimit
+            ? Math.Min(requestedLimit, _options.MaxPaginationPages)
+            : _options.MaxPaginationPages;
+        if (pageCount >= pageLimit)
         {
             throw new GitHubApiException(
-                $"GitHub pagination exceeded the configured limit of {_options.MaxPaginationPages} pages.");
+                $"GitHub pagination exceeded the safe limit of {pageLimit} pages.");
         }
 
         if (!visited.Add(page))

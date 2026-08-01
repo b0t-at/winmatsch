@@ -18,6 +18,7 @@ namespace WinMatsch.GitHub.Internal;
 [JsonSerializable(typeof(MergeUpstreamDto))]
 [JsonSerializable(typeof(RestMergeUpstreamResultDto))]
 [JsonSerializable(typeof(List<RestPullRequestDto>))]
+[JsonSerializable(typeof(List<RestPullRequestChangedFileDto>))]
 [JsonSerializable(typeof(RestPullRequestDto))]
 [JsonSerializable(typeof(CreatePullRequestDto))]
 [JsonSerializable(typeof(UpdatePullRequestDto))]

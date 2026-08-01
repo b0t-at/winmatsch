@@ -143,6 +143,7 @@ public sealed class GitHubLifecycleWorkflowTests
             change.RepositoryPath,
             GitHubLifecycleTestSupport.CommitSha,
             "independently generated manifest bytes"u8);
+        client.SetPullRequestChangedFiles(7, change.RepositoryPath);
         client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
             7,
             author: "human-maintainer") with
@@ -168,6 +169,7 @@ public sealed class GitHubLifecycleWorkflowTests
             change.RepositoryPath,
             GitHubLifecycleTestSupport.CommitSha,
             change.Content.AsSpan());
+        client.SetPullRequestChangedFiles(7, change.RepositoryPath);
         client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
             7,
             author: GitHubLifecycleTestSupport.Fork.Owner) with
@@ -181,6 +183,264 @@ public sealed class GitHubLifecycleWorkflowTests
 
         Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
         Assert.Empty(client.Mutations);
+        Assert.Equal(1, client.PullRequestHeadContentCalls);
+    }
+
+    [Fact]
+    public async Task Deleted_fork_evidence_fails_closed_before_remote_mutation()
+    {
+        var client = new FakeGitHubClient();
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
+            7,
+            author: GitHubLifecycleTestSupport.Fork.Owner) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+            HeadRepository = null,
+        });
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Private_fork_evidence_fails_closed_before_remote_mutation()
+    {
+        var client = new FakeGitHubClient();
+        PullRequestInfo candidate = GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        };
+        client.AddPullRequest(candidate);
+        client.SetRepositoryPrivate(candidate.HeadRepository!, isPrivate: true);
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Unavailable_changed_file_evidence_fails_closed_before_remote_mutation()
+    {
+        var client = new FakeGitHubClient
+        {
+            PullRequestChangedFilesUnsupported = true,
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        });
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Renamed_fork_evidence_fails_closed_when_head_coordinates_change()
+    {
+        var client = new FakeGitHubClient();
+        PullRequestInfo candidate = GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        };
+        client.AddPullRequest(candidate);
+        client.OnGetPullRequest = static (fake, number) =>
+        {
+            fake.UpdatePullRequest(number, pullRequest => pullRequest with
+            {
+                HeadRepository = new RepositoryCoordinates("renamed-owner", "renamed-repository"),
+            });
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Head_movement_evidence_fails_closed_when_pinned_sha_changes()
+    {
+        var client = new FakeGitHubClient();
+        PullRequestInfo candidate = GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        };
+        client.AddPullRequest(candidate);
+        client.OnGetPullRequest = static (fake, number) =>
+        {
+            fake.UpdatePullRequest(number, pullRequest => pullRequest with
+            {
+                HeadSha = "dddddddddddddddddddddddddddddddddddddddd",
+            });
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Successful_evidence_is_cached_by_pull_request_head_identity()
+    {
+        var client = new FakeGitHubClient();
+        WorkflowFileChange change = GitHubLifecycleTestSupport.Plan().FileChanges[0];
+        PullRequestInfo candidate = GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        };
+        client.AddPullRequest(candidate);
+        client.SetPullRequestChangedFiles(candidate.Number, change.RepositoryPath);
+        client.SetContent(
+            candidate.HeadRepository!,
+            change.RepositoryPath,
+            candidate.HeadSha,
+            change.Content.AsSpan());
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        _ = await provider.GetEvidenceAsync(plan, candidate, CancellationToken.None);
+        _ = await provider.GetEvidenceAsync(plan, candidate, CancellationToken.None);
+
+        PullRequestInfo moved = candidate with
+        {
+            HeadSha = "dddddddddddddddddddddddddddddddddddddddd",
+        };
+        client.UpdatePullRequest(candidate.Number, _ => moved);
+        client.SetContent(
+            moved.HeadRepository!,
+            change.RepositoryPath,
+            moved.HeadSha,
+            change.Content.AsSpan());
+        _ = await provider.GetEvidenceAsync(plan, moved, CancellationToken.None);
+
+        Assert.Equal(2, client.PullRequestFilesCalls);
+    }
+
+    [Fact]
+    public async Task Cached_evidence_revalidates_the_live_pull_request_head()
+    {
+        var client = new FakeGitHubClient();
+        WorkflowFileChange change = GitHubLifecycleTestSupport.Plan().FileChanges[0];
+        PullRequestInfo candidate = GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        };
+        client.AddPullRequest(candidate);
+        client.SetPullRequestChangedFiles(candidate.Number, change.RepositoryPath);
+        client.SetContent(
+            candidate.HeadRepository!,
+            change.RepositoryPath,
+            candidate.HeadSha,
+            change.Content.AsSpan());
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        _ = await provider.GetEvidenceAsync(plan, candidate, CancellationToken.None);
+        client.UpdatePullRequest(candidate.Number, pullRequest => pullRequest with
+        {
+            HeadSha = "dddddddddddddddddddddddddddddddddddddddd",
+        });
+
+        await Assert.ThrowsAsync<PullRequestEvidenceLimitException>(
+            () => provider.GetEvidenceAsync(plan, candidate, CancellationToken.None));
+        Assert.Equal(1, client.PullRequestFilesCalls);
+    }
+
+    [Fact]
+    public async Task Different_base_branch_does_not_block_duplicate_detection()
+    {
+        var client = new FakeGitHubClient();
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            BaseBranch = "release",
+            Title = "Update version: Example.App version 2.0.0",
+            Body = "Hand-authored update.",
+        });
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+    }
+
+    [Fact]
+    public async Task Cancelled_evidence_is_not_cached()
+    {
+        var client = new FakeGitHubClient();
+        WorkflowFileChange change = GitHubLifecycleTestSupport.Plan().FileChanges[0];
+        PullRequestInfo candidate = GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        };
+        client.AddPullRequest(candidate);
+        client.SetPullRequestChangedFiles(candidate.Number, change.RepositoryPath);
+        client.SetContent(
+            candidate.HeadRepository!,
+            change.RepositoryPath,
+            candidate.HeadSha,
+            change.Content.AsSpan());
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => provider.GetEvidenceAsync(plan, candidate, cancellation.Token));
+        PullRequestManifestEvidence evidence = await provider.GetEvidenceAsync(
+            plan,
+            candidate,
+            CancellationToken.None);
+
+        Assert.True(evidence.IsAssociated);
+        Assert.Equal(1, client.PullRequestFilesCalls);
+    }
+
+    [Fact]
+    public void Planning_release_freshness_uses_the_injected_time_provider()
+    {
+        DateTimeOffset releaseUpdatedAt = new(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        GitHubSubmissionRequest request = GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan) with
+        {
+            ReleaseUpdatedAt = releaseUpdatedAt,
+            ReleaseRepository = GitHubLifecycleTestSupport.Upstream,
+            ReleaseId = 42,
+            Policy = new()
+            {
+                MinimumReleaseFreshness = TimeSpan.FromHours(1),
+            },
+        };
+
+        GitHubSubmissionPlan early = GitHubLifecycleWorkflow.Plan(
+            request,
+            new FixedTimeProvider(releaseUpdatedAt.AddMinutes(59)));
+        GitHubSubmissionPlan ready = GitHubLifecycleWorkflow.Plan(
+            request,
+            new FixedTimeProvider(releaseUpdatedAt.AddHours(1)));
+
+        Assert.Contains(early.Diagnostics, diagnostic => diagnostic.Code == "GH1015");
+        Assert.DoesNotContain(ready.Diagnostics, diagnostic => diagnostic.Code == "GH1015");
     }
 
     [Fact]
@@ -287,7 +547,7 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
-    public async Task Stale_head_with_different_existing_content_is_not_assumed_to_be_a_changed_path()
+    public async Task Pinned_head_content_detects_target_change_despite_empty_changed_file_snapshot()
     {
         string path = "manifests/e/Example/App/2.0.0/Example.App.yaml";
         byte[] expected = "expected upstream"u8.ToArray();
@@ -323,7 +583,98 @@ public sealed class GitHubLifecycleWorkflowTests
         GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
             .ExecuteAsync(GitHubLifecycleTestSupport.Request() with { LocalPlan = local });
 
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Base_only_target_change_does_not_make_stale_pr_a_duplicate()
+    {
+        const string mergeBaseSha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        string path = "manifests/e/Example/App/2.0.0/Example.App.yaml";
+        byte[] previous = "previous upstream"u8.ToArray();
+        byte[] current = "current upstream"u8.ToArray();
+        var change = new WorkflowFileChange(
+            PlannedChangeKind.Update,
+            path,
+            "our update"u8,
+            ExpectedFileState.Present,
+            WorkflowFileChange.Hash(current));
+        LocalOperationPlan local = GitHubLifecycleTestSupport.Plan([change]) with
+        {
+            BeforeDocuments = [new RawManifestDocument(path, current)],
+        };
+        var client = new FakeGitHubClient
+        {
+            PullRequestMergeBaseSha = mergeBaseSha,
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
+            7,
+            author: GitHubLifecycleTestSupport.Fork.Owner) with
+        {
+            Title = "Unrelated stale maintenance",
+            Body = null,
+        });
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            path,
+            mergeBaseSha,
+            previous);
+        client.SetContent(
+            GitHubLifecycleTestSupport.Fork,
+            path,
+            GitHubLifecycleTestSupport.CommitSha,
+            previous);
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            path,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            current);
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request() with { LocalPlan = local });
+
         Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.True(result.RemoteState.PullRequestCreated);
+    }
+
+    [Fact]
+    public async Task Renamed_target_path_is_detected_at_pinned_head_identity()
+    {
+        string path = "manifests/e/Example/App/2.0.0/Example.App.yaml";
+        byte[] expected = "expected upstream"u8.ToArray();
+        var change = new WorkflowFileChange(
+            PlannedChangeKind.Update,
+            path,
+            "our update"u8,
+            ExpectedFileState.Present,
+            WorkflowFileChange.Hash(expected));
+        LocalOperationPlan local = GitHubLifecycleTestSupport.Plan([change]) with
+        {
+            BeforeDocuments = [new RawManifestDocument(path, expected)],
+        };
+        var client = new FakeGitHubClient();
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Rename old manifest",
+            Body = null,
+        });
+        client.SetPullRequestChangedFiles(
+            7,
+            new PullRequestChangedFile(
+                "manifests/e/Example/App/2.0.0/Renamed.yaml",
+                path));
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            path,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            expected);
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request() with { LocalPlan = local });
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Empty(client.Mutations);
     }
 
     [Fact]
@@ -338,6 +689,14 @@ public sealed class GitHubLifecycleWorkflowTests
             Title = "Example.App transient maintenance",
             Body = null,
         });
+        client.SetPullRequestChangedFiles(
+            7,
+            GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath);
+        client.SetContent(
+            new RepositoryCoordinates("someone", GitHubLifecycleTestSupport.Upstream.Name),
+            GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath,
+            GitHubLifecycleTestSupport.CommitSha,
+            "different manifest content"u8);
         GitHubLifecycleWorkflow workflow = GitHubLifecycleTestSupport.Workflow(client);
 
         GitHubLifecycleResult failed = await workflow.ExecuteAsync(
@@ -346,7 +705,7 @@ public sealed class GitHubLifecycleWorkflowTests
             GitHubLifecycleTestSupport.Request() with { IdempotencyKey = "operation-retry" });
 
         Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, failed.Code);
-        Assert.Equal(GitHubLifecycleResultCode.Succeeded, retried.Code);
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, retried.Code);
         Assert.True(client.PullRequestHeadContentCalls >= 2);
     }
 
@@ -354,7 +713,7 @@ public sealed class GitHubLifecycleWorkflowTests
     public async Task Excessive_manifest_evidence_candidates_fail_closed_without_remote_mutation()
     {
         var client = new FakeGitHubClient();
-        for (int number = 1; number <= 65; number++)
+        for (int number = 1; number <= PullRequestManifestEvidenceLimits.MaximumCandidates + 1; number++)
         {
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
             {
@@ -376,7 +735,7 @@ public sealed class GitHubLifecycleWorkflowTests
     public async Task Workflow_enforces_candidate_limit_for_injected_evidence_providers()
     {
         var client = new FakeGitHubClient();
-        for (int number = 1; number <= 65; number++)
+        for (int number = 1; number <= PullRequestManifestEvidenceLimits.MaximumCandidates + 1; number++)
         {
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
             {
@@ -398,7 +757,63 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
-    public async Task Noncanonical_removal_without_changed_file_evidence_fails_closed()
+    public async Task Post_creation_reconciliation_allows_the_new_pr_beyond_candidate_limit()
+    {
+        var client = new FakeGitHubClient();
+        for (int index = 0; index < PullRequestManifestEvidenceLimits.MaximumCandidates; index++)
+        {
+            int number = 100 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(
+                client,
+                pullRequestEvidence: new FakePullRequestManifestEvidenceProvider(
+                    PullRequestManifestEvidence.None))
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.True(result.RemoteState.PullRequestCreated);
+    }
+
+    [Fact]
+    public async Task Workflow_rejects_injected_candidate_with_changed_repository_identity()
+    {
+        var client = new FakeGitHubClient();
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        });
+        var evidenceProvider = new FakePullRequestManifestEvidenceProvider(
+            new(true, true))
+        {
+            CandidateSelector = candidates =>
+            [
+                candidates[0] with
+                {
+                    HeadRepository = new RepositoryCoordinates("other", "other"),
+                },
+            ],
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(
+                client,
+                pullRequestEvidence: evidenceProvider)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.Equal(0, evidenceProvider.EvidenceCalls);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Unrelated_noncanonical_pr_does_not_block_removal()
     {
         PackageIdentifier package = new("Example.App");
         PackageVersion version = new("2.0.0");
@@ -425,6 +840,16 @@ public sealed class GitHubLifecycleWorkflowTests
             Title = "Example.App removal cleanup",
             Body = null,
         });
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            path,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            expected);
+        client.SetContent(
+            GitHubLifecycleTestSupport.Fork,
+            path,
+            GitHubLifecycleTestSupport.CommitSha,
+            expected);
 
         GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
             .ExecuteAsync(GitHubLifecycleTestSupport.Request() with
@@ -433,9 +858,8 @@ public sealed class GitHubLifecycleWorkflowTests
                 Operation = GitHubManifestOperation.Remove,
             });
 
-        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
-        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
-        Assert.Empty(client.Mutations);
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.True(result.RemoteState.PullRequestCreated);
     }
 
     [Fact]
@@ -1252,6 +1676,33 @@ public sealed class GitHubLifecycleWorkflowTests
             client.Mutations);
         Assert.Equal(PullRequestState.Closed, client.PullRequests.Single(pr => pr.Number == 42).State);
         Assert.Equal(PullRequestState.Open, client.PullRequests.Single(pr => pr.Number == 1).State);
+    }
+
+    [Fact]
+    public async Task Later_duplicate_never_closes_the_earlier_tool_pr()
+    {
+        var client = new FakeGitHubClient
+        {
+            OnSearch = static (fake, call) =>
+            {
+                if (call == 3)
+                {
+                    fake.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
+                        99,
+                        author: "later-fork",
+                        branch: "later-update"));
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.False(result.RemoteState.PullRequestClosed);
+        Assert.DoesNotContain("close", client.Mutations);
+        Assert.Equal(PullRequestState.Open, client.PullRequests.Single(pr => pr.Number == 42).State);
+        Assert.Equal(PullRequestState.Open, client.PullRequests.Single(pr => pr.Number == 99).State);
     }
 
     [Fact]

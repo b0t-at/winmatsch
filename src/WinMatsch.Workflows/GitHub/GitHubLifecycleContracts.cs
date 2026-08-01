@@ -49,6 +49,8 @@ public interface IPullRequestManifestEvidenceProvider
 public static class PullRequestManifestEvidenceLimits
 {
     public const int MaximumCandidates = 64;
+    public const int MaximumContentFiles = 16;
+    public const long MaximumContentBytes = 1_048_576;
 }
 
 public interface IRevalidationScratchSpace

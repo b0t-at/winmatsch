@@ -96,6 +96,17 @@ public interface IGitHubRepositoryClient : IDisposable
         string head,
         CancellationToken cancellationToken = default);
 
+    public Task<string> GetMergeBaseAsync(
+        RepositoryCoordinates repository,
+        string baseReference,
+        string head,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromException<string>(
+            new NotSupportedException(
+                "This GitHub client does not support immutable merge-base evidence."));
+    }
+
     public Task<ForkResult> EnsureForkAsync(
         RepositoryCoordinates upstream,
         string owner,
@@ -123,6 +134,16 @@ public interface IGitHubRepositoryClient : IDisposable
         RepositoryCoordinates repository,
         long number,
         CancellationToken cancellationToken = default);
+
+    public Task<IReadOnlyList<PullRequestChangedFile>> GetPullRequestChangedFilesAsync(
+        RepositoryCoordinates repository,
+        long number,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromException<IReadOnlyList<PullRequestChangedFile>>(
+            new NotSupportedException(
+                "This GitHub client does not support authoritative pull-request changed-file evidence."));
+    }
 
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,

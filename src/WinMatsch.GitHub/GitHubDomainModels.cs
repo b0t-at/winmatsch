@@ -129,7 +129,10 @@ public sealed record PullRequestSearch(
     string? HeadOwner = null,
     string? HeadBranch = null,
     string? BaseBranch = null,
-    string? ExactTitleToken = null);
+    string? ExactTitleToken = null)
+{
+    public int? MaximumResults { get; init; }
+}
 
 public sealed record PullRequestInfo(
     long Number,
@@ -144,7 +147,16 @@ public sealed record PullRequestInfo(
     string BaseBranch,
     Uri WebUri,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    public RepositoryCoordinates? HeadRepository { get; init; }
+
+    public string? BaseSha { get; init; }
+}
+
+public sealed record PullRequestChangedFile(
+    string Path,
+    string? PreviousPath = null);
 
 public sealed record CreatePullRequestRequest(
     string Title,

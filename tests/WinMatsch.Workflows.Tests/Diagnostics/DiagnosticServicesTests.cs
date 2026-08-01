@@ -411,6 +411,12 @@ internal sealed class FakeGitHubRepositoryClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
         => throw new NotSupportedException();
 
+    public Task<IReadOnlyList<PullRequestChangedFile>> GetPullRequestChangedFilesAsync(
+        RepositoryCoordinates repository,
+        long number,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException();
+
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,
         long number,

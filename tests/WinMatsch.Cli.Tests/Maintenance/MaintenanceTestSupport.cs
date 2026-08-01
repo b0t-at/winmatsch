@@ -128,6 +128,12 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
         => Task.FromResult(PullRequests.Single(pullRequest => pullRequest.Number == number));
 
+    public Task<IReadOnlyList<PullRequestChangedFile>> GetPullRequestChangedFilesAsync(
+        RepositoryCoordinates repository,
+        long number,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException();
+
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,
         long number,
