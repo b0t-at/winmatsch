@@ -676,6 +676,36 @@ public sealed class MaintenanceWorkflowCommandTests
     }
 
     [Fact]
+    public async Task Allowlisted_repair_planner_owns_workflow_until_disposed()
+    {
+        var workflow = new DisposableMutationWorkflow();
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule(async context =>
+        {
+            using var planner = new AllowlistedApprovedRepairPlanner(
+                context,
+                new Dictionary<long, string> { [41] = "approved-directory" },
+                new FixedMutationWorkflowFactory(workflow),
+                new FakeManifestLoader());
+            PullRequestInfo pullRequest = MaintenancePullRequests.ToolOwned(41) with
+            {
+                Body = "<!-- winmatsch:package=Example.App;version=1.0 -->",
+            };
+            _ = await planner.PlanApprovedRepairAsync(
+                Assert.Single(MaintenancePullRequests.Observe(pullRequest)),
+                FeedbackClassification.HashMismatch,
+                context.CancellationToken);
+            Assert.False(workflow.Disposed);
+            return ExitCodes.Success;
+        }));
+
+        CliRunResult result = await harness.RunAsync(["probe"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.True(workflow.Disposed);
+    }
+
+    [Fact]
     public async Task Allowlisted_repair_never_runs_for_arbitrary_classifications()
     {
         var workflow = new FakeMutationWorkflow();
@@ -971,6 +1001,22 @@ public sealed class MaintenanceWorkflowCommandTests
                         or FeedbackWorkState.RetryScheduled
                     && item.RetryAfter.GetValueOrDefault(DateTimeOffset.MinValue) <= now),
             ]);
+        }
+    }
+
+    private sealed class DisposableMutationWorkflow : IMutationWorkflow, IDisposable
+    {
+        public bool Disposed { get; private set; }
+
+        public Task<WorkflowOperationResult> ExecuteAsync(
+            WorkflowOperationRequest request,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(FakeMutationWorkflow.Result(request));
+
+        public void Dispose()
+        {
+            Disposed = true;
+            GC.SuppressFinalize(this);
         }
     }
 }

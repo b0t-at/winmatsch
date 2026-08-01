@@ -27,7 +27,8 @@ public sealed class ProductionMutationWorkflowFactory : IMutationWorkflowFactory
             new ProductionMutationWorkflow(
                 context.Configuration,
                 context.Tokens,
-                context.GitHubOptions));
+                context.GitHubOptions,
+                context.Output.WriteDiagnostic));
     }
 }
 
@@ -49,11 +50,15 @@ public sealed class ProductionSubmissionWorkflowFactory : ISubmissionWorkflowFac
 internal sealed class ProductionMutationWorkflow(
     WinMatschConfiguration configuration,
     Hosting.ITokenAccessor tokens,
-    GitHubClientOptions gitHubOptions) : IVerifiedMutationWorkflow, IDisposable
+    GitHubClientOptions gitHubOptions,
+    Action<string>? cleanupWarning = null,
+    Action<string>? deleteDirectory = null) : IVerifiedMutationWorkflow, IDisposable
 {
     private WorkflowOperationRequest? _preparedRequest;
     private string? _artifactDirectory;
     private string? _submitCacheDirectory;
+    private readonly Action<string> _deleteDirectory =
+        deleteDirectory ?? (static path => Directory.Delete(path, recursive: true));
 
     public async Task<WorkflowOperationResult> ExecuteAsync(
         WorkflowOperationRequest request,
@@ -192,7 +197,7 @@ internal sealed class ProductionMutationWorkflow(
             if (_submitCacheDirectory is not null
                 && Directory.Exists(_submitCacheDirectory))
             {
-                Directory.Delete(_submitCacheDirectory, recursive: true);
+                _deleteDirectory(_submitCacheDirectory);
             }
         }
         catch (Exception exception) when (
@@ -201,11 +206,11 @@ internal sealed class ProductionMutationWorkflow(
             failures.Add(exception);
         }
         GC.SuppressFinalize(this);
-        if (failures.Count > 0)
+        foreach (Exception failure in failures)
         {
-            throw new AggregateException(
-                "One or more mutation temporary directories could not be removed.",
-                failures);
+            cleanupWarning?.Invoke(
+                $"Warning: a mutation temporary directory could not be removed: "
+                + failure.Message);
         }
     }
 
@@ -465,7 +470,7 @@ internal sealed class ProductionMutationWorkflow(
     {
         if (_artifactDirectory is not null && Directory.Exists(_artifactDirectory))
         {
-            Directory.Delete(_artifactDirectory, recursive: true);
+            _deleteDirectory(_artifactDirectory);
         }
         _artifactDirectory = null;
     }

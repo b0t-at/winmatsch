@@ -68,8 +68,10 @@ public sealed class AllowlistedApprovedRepairPlanner(
     CommandContext context,
     IReadOnlyDictionary<long, string> approvedManifestDirectories,
     IMutationWorkflowFactory workflows,
-    IRawManifestSetLoader loader) : IApprovedRepairPlanner
+    IRawManifestSetLoader loader) : IApprovedRepairPlanner, IDisposable
 {
+    private readonly List<IDisposable> _workflowLeases = [];
+
     public async Task<GitHubSubmissionRequest?> PlanApprovedRepairAsync(
         PullRequestObservation pullRequest,
         FeedbackClassification classification,
@@ -93,6 +95,11 @@ public sealed class AllowlistedApprovedRepairPlanner(
             cancellationToken).ConfigureAwait(false);
         IMutationWorkflow workflow = await workflows.CreateAsync(context, cancellationToken)
             .ConfigureAwait(false);
+        if (workflow is IDisposable disposable)
+        {
+            _workflowLeases.Add(disposable);
+        }
+
         WorkflowOperationResult local = await workflow.ExecuteAsync(
             new SubmitOperationRequest
             {
@@ -140,6 +147,31 @@ public sealed class AllowlistedApprovedRepairPlanner(
             IdempotencyKey = $"feedback-repair:{pullRequest.PullRequest.Number}:"
                 + classification.ToString(),
         };
+    }
+
+    public void Dispose()
+    {
+        for (int index = _workflowLeases.Count - 1; index >= 0; index--)
+        {
+            try
+            {
+                _workflowLeases[index].Dispose();
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException
+                    || exception is AggregateException aggregate
+                    && aggregate.InnerExceptions.All(static inner =>
+                        inner is IOException or UnauthorizedAccessException))
+            {
+                context.Output.WriteDiagnostic(
+                    "Warning: approved-repair temporary artifact cleanup failed: "
+                    + exception.Message);
+            }
+        }
+
+        _workflowLeases.Clear();
+        GC.SuppressFinalize(this);
     }
 
     private static RepairAssociation ParseAssociation(

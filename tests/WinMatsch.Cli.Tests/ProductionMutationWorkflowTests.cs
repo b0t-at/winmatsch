@@ -65,7 +65,50 @@ public sealed class ProductionMutationWorkflowTests
         Assert.True(Directory.Exists(versionDirectory));
     }
 
-    private static ProductionMutationWorkflow CreateWorkflow(string root)
+    [Fact]
+    public async Task Dispose_reports_cleanup_failure_without_reclassifying_completed_work()
+    {
+        using var temporary = new TemporaryDirectory();
+        var warnings = new List<string>();
+        string? retainedDirectory = null;
+        var workflow = CreateWorkflow(
+            temporary.Path,
+            warnings.Add,
+            path =>
+            {
+                retainedDirectory = path;
+                throw new IOException("directory is locked");
+            });
+        try
+        {
+            _ = await workflow.ExecuteAsync(new SubmitOperationRequest
+            {
+                OutputDirectory = temporary.Path,
+                ExecutionMode = WorkflowExecutionMode.Plan,
+                Documents = [],
+                NetworkValidationMode = NetworkValidationMode.Skip,
+            });
+
+            Exception? disposeFailure = Record.Exception(workflow.Dispose);
+
+            Assert.Null(disposeFailure);
+            Assert.Contains(
+                warnings,
+                warning => warning.Contains("directory is locked", StringComparison.Ordinal));
+        }
+        finally
+        {
+            if (retainedDirectory is not null && Directory.Exists(retainedDirectory))
+            {
+                Directory.Delete(retainedDirectory, recursive: true);
+            }
+        }
+    }
+
+    private static ProductionMutationWorkflow CreateWorkflow(
+        string root,
+        Action<string>? cleanupWarning = null,
+        Action<string>? deleteDirectory = null)
         => new(
             new WinMatschConfiguration
             {
@@ -81,7 +124,9 @@ public sealed class ProductionMutationWorkflowTests
                 Interaction = InteractionMode.Always,
             },
             new UnusedTokenAccessor(),
-            new GitHubClientOptions());
+            new GitHubClientOptions(),
+            cleanupWarning,
+            deleteDirectory);
 
     private static void WritePackage(string root)
     {

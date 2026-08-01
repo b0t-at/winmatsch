@@ -442,6 +442,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
                 context.IsDryRun || !apply || schedule
                     ? new Dictionary<long, string>()
                     : approvedRepairs);
+            using IDisposable? plannerLease = planner as IDisposable;
             IFeedbackStateStore stateForRun = replay && context.IsDryRun
                 ? new ReadOnlyFeedbackStateStore(_feedbackStateStore)
                 : schedule && !context.IsDryRun || apply && !context.IsDryRun
