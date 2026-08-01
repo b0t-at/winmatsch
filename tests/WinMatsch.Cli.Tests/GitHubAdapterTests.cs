@@ -59,4 +59,24 @@ public sealed class GitHubAdapterTests
                 value => value.StartsWith("comment:", StringComparison.Ordinal)),
             StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Authoritative_pull_request_changed_files_are_forwarded()
+    {
+        var inner = new FakeMaintenanceGitHubClient();
+        inner.PullRequestFiles[42] =
+        [
+            new(
+                "manifests/e/Example/App/0.9/Example.App.yaml",
+                Status: PullRequestFileStatus.Removed),
+        ];
+        using var client = new RedactingGitHubRepositoryClient(inner);
+
+        IReadOnlyList<PullRequestChangedFile> files =
+            await client.GetPullRequestChangedFilesAsync(
+                new RepositoryCoordinates("owner", "repo"),
+                42);
+
+        Assert.Equal(PullRequestFileStatus.Removed, Assert.Single(files).Status);
+    }
 }
