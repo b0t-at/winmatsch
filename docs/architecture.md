@@ -1,0 +1,140 @@
+# Architecture
+
+## Project graph
+
+Nine production projects with a strict, acyclic dependency direction —
+foundations never depend on orchestration:
+
+```mermaid
+graph BT
+    Core[WinMatsch.Core<br/>manifest model, YAML, primitives]
+    Analysis[WinMatsch.Analysis<br/>installer analyzers] --> Core
+    Downloads[WinMatsch.Downloads<br/>HTTP + cache] --> Core
+    GitHub[WinMatsch.GitHub<br/>API client + auth] --> Core
+    Validation[WinMatsch.Validation<br/>schema + preflight gates] --> Core
+    Validation --> Downloads
+    Rules[WinMatsch.Rules<br/>rule pipeline + overrides] --> Core
+    Rules --> Analysis
+    Workflows[WinMatsch.Workflows<br/>orchestration + configuration] --> Analysis
+    Workflows --> Core
+    Workflows --> Downloads
+    Workflows --> GitHub
+    Workflows --> Rules
+    Workflows --> Validation
+    Cli[WinMatsch.Cli<br/>command host] --> GitHub
+    Cli --> Workflows
+```
+
+| Project | Responsibility |
+|---|---|
+| `WinMatsch.Core` | Manifest object model, YAML serialization, enums, primitives. No I/O. |
+| `WinMatsch.Analysis` | Static installer analyzers (MSI, MSIX, ZIP, PE, Burn, NSIS, Inno, Advanced Installer, Squirrel) and analysis limits. |
+| `WinMatsch.Downloads` | HTTP downloads, persistent cache with integrity, locking, freshness. |
+| `WinMatsch.GitHub` | GitHub REST client, token resolution, OS keyring stores. |
+| `WinMatsch.Validation` | Manifest-schema validation (embedded WinGet 1.12.0 schemas) and preflight gates. |
+| `WinMatsch.Rules` | Rule pipeline, rule catalogue, override packs, quirks, sanitization, human-correction detection. |
+| `WinMatsch.Workflows` | End-to-end workflows (discover → download → analyze → generate → rules → validate → submit), configuration resolution. |
+| `WinMatsch.Cli` | `winmatsch` executable: command tree, hosting, interaction, output contract. |
+| `tests/WinMatsch.Testing` | Shared test infrastructure: synthetic fixtures, HTTP recordings, fakes. |
+
+Everything is trim- and AOT-analyzable (`IsAotCompatible`), warnings are
+errors, and trim-analysis warnings (`IL2026`, `IL3050`, …) are errors in the
+executable-facing projects.
+
+## Workflow stages and evidence trust
+
+Mutation workflows run a fixed pipeline:
+
+1. **Discover** — resolve the target version and installer URLs (release
+   metadata, explicit `--urls`, or override pack).
+2. **Download** — fetch installers through the caching pipeline; verify
+   hashes; detect changed bytes behind stable URLs.
+3. **Analyze** — extract evidence from installer binaries
+   ([analyzer guide](analyzers.md)).
+4. **Generate** — build the multi-file manifest set from the previous
+   version plus evidence.
+5. **Rules** — run the deterministic rule pipeline
+   ([rules guide](rules.md)); mutating rules precede validation rules by
+   construction.
+6. **Validate** — schema and preflight validation
+   (`WinMatsch.Validation`).
+7. **Submit** (opt-in) — fork → branch → commit → pull request, with
+   duplicate-PR preflight, provenance tracking, and partial-state reporting.
+
+Evidence is trusted in tiers: values proven by installer analysis rank above
+values inferred from downloads, which rank above defaults; human corrections
+detected in the merged upstream manifest outrank all regeneration and force
+review instead of being overwritten.
+
+## Extending
+
+### Adding an analyzer
+
+1. Implement the analysis in a new folder under `src/WinMatsch.Analysis/`
+   (for EXE variants, implement the format probe interface used by
+   `ExeAnalyzer`; for new containers, extend `FileAnalyzer` dispatch).
+2. Route all archive/stream reads through `AnalysisLimits` so bounds apply.
+3. Add synthetic fixtures (see [fixture policy](#fixture-policy)) and unit
+   tests under `tests/WinMatsch.Analysis.Tests`.
+
+### Adding a rule
+
+1. Reserve an ID: `WM00xx` normalization, `WM01xx` validation, `WM02xx`
+   quirk, or a policy prefix (`ARP-`, `SCOPE-`, `META-`, `DEP-`, `PIPE-`).
+2. Implement `IRule` under `src/WinMatsch.Rules/Rules/` (policy rules in
+   `Rules/Policy/`). Rules must be deterministic, mutate only fields they
+   own, and attach change evidence for non-obvious values.
+3. Register it in `ProductionRuleComposer` at the right pipeline position —
+   mutating rules must precede validation rules; the pipeline asserts this.
+4. Add tests in `tests/WinMatsch.Rules.Tests`, including log-only behavior.
+5. Document it in [docs/rules.md](rules.md).
+
+### Adding a command
+
+1. Create a module implementing `ICommandModule` under
+   `src/WinMatsch.Cli/Commands/`.
+2. Respect the hosting contracts: results to stdout via `ICommandOutput`
+   (text and JSON), diagnostics to stderr, exit codes from `ExitCodes`,
+   prompting via `IUserInteraction` only.
+3. Register it in the CLI composition and cover it in
+   `tests/WinMatsch.Cli.Tests` (help shape, JSON contract, non-interactive
+   behavior).
+
+## Fixture policy
+
+Test fixtures are **synthetic**: JSON descriptors, recorded HTTP
+interactions, and generated bytes. Real third-party installer binaries are
+never committed — for licensing reasons and repository hygiene. Regression
+descriptors can optionally re-acquire live artifacts locally via the opt-in
+`WINMATSCH_E2E_ACQUIRE_FIXTURES=1` flow; acquired binaries stay out of the
+repository.
+
+## Clean-room licensing
+
+The installer-format analyzers were implemented from public format
+documentation and observation of file structures — not by porting existing
+parsers. Do not copy source from third-party installers/tools into this
+repository; add any new runtime dependency to
+[THIRD-PARTY-NOTICES.txt](../THIRD-PARTY-NOTICES.txt) with verified license,
+source, and version.
+
+## Testing model
+
+| Layer | Location | Character |
+|---|---|---|
+| Unit/component | `tests/<Project>.Tests` | Hermetic, fast, per-project. |
+| Shared infrastructure | `tests/WinMatsch.Testing` (+ its own tests) | Fixture catalog, fakes, recordings. |
+| End-to-end | `tests/WinMatsch.E2E.Tests` | Runs the real executable as a process; hermetic by default (no network, token cleared, `NO_COLOR` forced); asserts safety contracts (no secrets, no stack traces, no ANSI in captured output). |
+
+Opt-in live E2E (excluded from CI):
+
+| Variable | Effect |
+|---|---|
+| `WINMATSCH_E2E_TEST_REPOSITORY` + `WINMATSCH_E2E_GITHUB_TOKEN` | Enables read-only live GitHub tests against the named repository. |
+| `WINMATSCH_E2E_LIVE_MUTATION=1` + `WINMATSCH_E2E_LIVE_REPOSITORY` + `WINMATSCH_E2E_GITHUB_TOKEN` | Enables live mutation tests. The test asserts the repository is exactly `b0t-at/winmatsch-e2e` — a hard allowlist; mutations against any other repository refuse to run. |
+| `WINMATSCH_E2E_ACQUIRE_FIXTURES=1` | Enables fixture acquisition flows. |
+
+## Local development
+
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for setup, build/test/format
+commands, and PR expectations.
