@@ -184,6 +184,7 @@ internal static class ZipArchiveBounds
 
         ulong position = directoryOffset;
         Span<byte> header = stackalloc byte[FixedHeaderSize];
+        Span<byte> optionalRecordHeader = stackalloc byte[8];
         for (ulong i = 0; i < entryCount; i++)
         {
             if (position > directoryEnd || directoryEnd - position < FixedHeaderSize)
@@ -212,10 +213,9 @@ internal static class ZipArchiveBounds
             position += recordSize;
         }
 
-        Span<byte> optionalRecordHeader = stackalloc byte[8];
-        while (position < directoryEnd)
+        if (position < directoryEnd)
         {
-            if (directoryEnd - position < 4)
+            if (directoryEnd - position < 6)
             {
                 throw Corrupt(description);
             }
@@ -223,22 +223,13 @@ internal static class ZipArchiveBounds
             stream.Position = (long)position;
             stream.ReadExactly(optionalRecordHeader[..4]);
             uint signature = BinaryPrimitives.ReadUInt32LittleEndian(optionalRecordHeader);
-            ulong recordSize;
-            if (signature == 0x05054B50)
-            {
-                stream.ReadExactly(optionalRecordHeader.Slice(4, 2));
-                recordSize = 6UL + BinaryPrimitives.ReadUInt16LittleEndian(optionalRecordHeader[4..]);
-            }
-            else if (signature == 0x08064B50)
-            {
-                stream.ReadExactly(optionalRecordHeader[4..]);
-                recordSize = 8UL + BinaryPrimitives.ReadUInt32LittleEndian(optionalRecordHeader[4..]);
-            }
-            else
+            if (signature != 0x05054B50)
             {
                 throw Corrupt(description);
             }
 
+            stream.ReadExactly(optionalRecordHeader.Slice(4, 2));
+            ulong recordSize = 6UL + BinaryPrimitives.ReadUInt16LittleEndian(optionalRecordHeader[4..]);
             if (recordSize > directoryEnd - position
                 || position - directoryOffset + recordSize > (ulong)maximumBytes)
             {

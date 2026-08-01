@@ -199,6 +199,36 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Truncated_bsjb_metadata_root_cannot_create_neutral_evidence()
+    {
+        byte[] pe = DependencyFixtures.BuildPe(Machine.I386);
+        int peOffset = BinaryPrimitives.ReadInt32LittleEndian(pe.AsSpan(0x3C));
+        int optionalOffset = peOffset + 24;
+        int optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(pe.AsSpan(peOffset + 20));
+        int sectionOffset = optionalOffset + optionalSize;
+        uint sectionRva = BinaryPrimitives.ReadUInt32LittleEndian(pe.AsSpan(sectionOffset + 12));
+        int sectionRawOffset = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(pe.AsSpan(sectionOffset + 20)));
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 208), sectionRva);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 212), 72);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset), 72);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 8), sectionRva + 72);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 12), 17);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 16), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 72), 0x424A5342);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(sectionRawOffset + 84), 1);
+        pe[sectionRawOffset + 88] = 0;
+        using MemoryStream archive = DependencyFixtures.BuildZip(("forged.exe", pe));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "forged.zip");
+
+        Assert.All(analysis.Evidence, evidence =>
+        {
+            Assert.Equal(Architecture.X86, evidence.Architecture);
+            Assert.Equal(DependencyEvidenceStatus.Ambiguous, evidence.Status);
+        });
+    }
+
+    [Fact]
     public void Forged_clr_header_without_metadata_signature_cannot_create_neutral_evidence()
     {
         byte[] pe = DependencyFixtures.BuildPe(Machine.I386);
@@ -502,6 +532,23 @@ public class PayloadDependencyAnalyzerTests
         using var archive = new MemoryStream(archiveBytes);
 
         PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "signed.zip");
+
+        Assert.Equal(
+            DependencyEvidenceStatus.Detected,
+            Find(analysis, "app.exe", DependencyEvidenceKind.VisualCppRuntime).Status);
+    }
+
+    [Fact]
+    public void Bounded_archive_extra_data_before_file_headers_is_accepted()
+    {
+        using MemoryStream valid = DependencyFixtures.BuildZip(
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64, "VCRUNTIME140.dll")));
+        byte[] archiveBytes = DependencyFixtures.AddArchiveExtraDataRecord(
+            valid.ToArray(),
+            "extra"u8);
+        using var archive = new MemoryStream(archiveBytes);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "extra.zip");
 
         Assert.Equal(
             DependencyEvidenceStatus.Detected,

@@ -64,6 +64,30 @@ internal static class DependencyFixtures
         return result;
     }
 
+    public static byte[] AddArchiveExtraDataRecord(
+        byte[] archive,
+        ReadOnlySpan<byte> extraData)
+    {
+        ArgumentNullException.ThrowIfNull(archive);
+        int eocdOffset = archive.Length - 22;
+        int directoryOffset = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(
+            archive.AsSpan(eocdOffset + 16)));
+        byte[] record = new byte[8 + extraData.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(record, 0x08064B50);
+        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(4), checked((uint)extraData.Length));
+        extraData.CopyTo(record.AsSpan(8));
+        byte[] result = new byte[archive.Length + record.Length];
+        archive.AsSpan(0, directoryOffset).CopyTo(result);
+        record.CopyTo(result, directoryOffset);
+        archive.AsSpan(directoryOffset).CopyTo(result.AsSpan(directoryOffset + record.Length));
+        int newEocdOffset = eocdOffset + record.Length;
+        uint oldDirectoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(newEocdOffset + 16));
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            result.AsSpan(newEocdOffset + 16),
+            checked(oldDirectoryOffset + (uint)record.Length));
+        return result;
+    }
+
     public static MemoryStream BuildCompressedZeroZip(string path, long uncompressedLength)
     {
         var stream = new MemoryStream();

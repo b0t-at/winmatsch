@@ -168,16 +168,7 @@ internal static class PeImportReader
                         return new PeImportInspection(architecture, [], false, false);
                     }
 
-                    Span<byte> metadataPrefix = stackalloc byte[16];
-                    if (!TryReadAt(stream, metadataOffset, metadataPrefix))
-                    {
-                        return new PeImportInspection(architecture, [], false, false);
-                    }
-
-                    uint versionLength = BinaryPrimitives.ReadUInt32LittleEndian(metadataPrefix[12..]);
-                    if (BinaryPrimitives.ReadUInt32LittleEndian(metadataPrefix) != 0x424A5342
-                        || versionLength == 0
-                        || versionLength > metadataSize - 16)
+                    if (!ValidateMetadataRoot(stream, metadataOffset, metadataSize))
                     {
                         return new PeImportInspection(architecture, [], false, false);
                     }
@@ -278,6 +269,98 @@ internal static class PeImportReader
         }
 
         return sections;
+    }
+
+    private static bool ValidateMetadataRoot(Stream stream, long offset, uint size)
+    {
+        const int PrefixSize = 16;
+        const int StorageHeaderSize = 4;
+        const int StreamHeaderSize = 8;
+        const int MaximumStreams = 64;
+        const int MaximumStreamNameBytes = 128;
+
+        Span<byte> prefix = stackalloc byte[PrefixSize];
+        if (size < PrefixSize
+            || !TryReadAt(stream, offset, prefix)
+            || BinaryPrimitives.ReadUInt32LittleEndian(prefix) != 0x424A5342)
+        {
+            return false;
+        }
+
+        uint versionLength = BinaryPrimitives.ReadUInt32LittleEndian(prefix[12..]);
+        if (versionLength == 0 || versionLength > size - PrefixSize)
+        {
+            return false;
+        }
+
+        long cursor = PrefixSize + versionLength;
+        cursor = (cursor + 3) & ~3L;
+        if (cursor > size - StorageHeaderSize)
+        {
+            return false;
+        }
+
+        Span<byte> storageHeader = stackalloc byte[StorageHeaderSize];
+        if (!TryReadAt(stream, offset + cursor, storageHeader))
+        {
+            return false;
+        }
+
+        int streamCount = BinaryPrimitives.ReadUInt16LittleEndian(storageHeader[2..]);
+        if (streamCount is <= 0 or > MaximumStreams)
+        {
+            return false;
+        }
+
+        cursor += StorageHeaderSize;
+        byte[] nameBuffer = new byte[MaximumStreamNameBytes];
+        Span<byte> streamHeader = stackalloc byte[StreamHeaderSize];
+        for (int i = 0; i < streamCount; i++)
+        {
+            if (cursor > size - StreamHeaderSize)
+            {
+                return false;
+            }
+
+            if (!TryReadAt(stream, offset + cursor, streamHeader))
+            {
+                return false;
+            }
+
+            uint streamOffset = BinaryPrimitives.ReadUInt32LittleEndian(streamHeader);
+            uint streamSize = BinaryPrimitives.ReadUInt32LittleEndian(streamHeader[4..]);
+            if (streamOffset > size || streamSize > size - streamOffset)
+            {
+                return false;
+            }
+
+            cursor += StreamHeaderSize;
+            int availableNameBytes = (int)Math.Min(MaximumStreamNameBytes, size - cursor);
+            if (availableNameBytes <= 0
+                || !TryReadAt(stream, offset + cursor, nameBuffer.AsSpan(0, availableNameBytes)))
+            {
+                return false;
+            }
+
+            int terminator = nameBuffer.AsSpan(0, availableNameBytes).IndexOf((byte)0);
+            if (terminator <= 0)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < terminator; index++)
+            {
+                if (nameBuffer[index] is < 0x21 or > 0x7E)
+                {
+                    return false;
+                }
+            }
+
+            cursor += terminator + 1;
+            cursor = (cursor + 3) & ~3L;
+        }
+
+        return cursor <= size;
     }
 
     private static bool ValidateSections(
