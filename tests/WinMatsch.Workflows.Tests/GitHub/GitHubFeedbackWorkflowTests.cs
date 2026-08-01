@@ -113,6 +113,8 @@ public sealed class GitHubFeedbackWorkflowTests
         Assert.Equal(1, repairs.Calls);
         Assert.Equal(1, preflight.BoundaryCalls);
         Assert.Equal(["branch", "commit", "pull-request", "comment", "close"], client.Mutations);
+        Assert.Single(result.RemoteStates);
+        Assert.True(result.RemoteStates[0].State.CommitCreated);
         Assert.Empty(result.Diagnostics);
     }
 

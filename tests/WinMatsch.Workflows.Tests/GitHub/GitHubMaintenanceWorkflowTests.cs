@@ -174,6 +174,34 @@ public sealed class GitHubMaintenanceWorkflowTests
     }
 
     [Fact]
+    public async Task Forged_replacement_from_another_owner_cannot_close_old_pr()
+    {
+        var client = new FakeGitHubClient();
+        PullRequestInfo oldPullRequest = GitHubLifecycleTestSupport.PullRequest(
+            18,
+            branch: "winmatsch/update/example-app/old");
+        PullRequestInfo replacement = GitHubLifecycleTestSupport.PullRequest(
+            19,
+            author: "attacker",
+            branch: "winmatsch/update/example-app/replacement") with
+        {
+            Body = GitHubLifecycleTestSupport.PullRequest(19).Body + "\nSupersedes: #18",
+        };
+        client.AddPullRequest(oldPullRequest);
+        client.AddPullRequest(replacement);
+
+        GitHubMaintenanceResult result = await new GitHubMaintenanceWorkflow(client, new FakeClock())
+            .CloseSupersededAsync(
+                GitHubLifecycleTestSupport.Upstream,
+                Observation(oldPullRequest, toolOwned: true),
+                replacement,
+                "supersede-forged");
+
+        Assert.Equal(GitHubLifecycleResultCode.Conflict, result.Code);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
     public async Task Remove_dead_versions_rejects_transient_failures_and_default_grouping()
     {
         var inspector = new FakeDeadVersionInspector

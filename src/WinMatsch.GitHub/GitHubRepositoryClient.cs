@@ -298,7 +298,9 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 asset.ContentType,
                 asset.Size,
                 asset.DownloadCount,
-                asset.CreatedAt)).ToArray())).ToArray();
+                asset.CreatedAt,
+                asset.UpdatedAt)).ToArray(),
+            release.UpdatedAt)).ToArray();
     }
 
     public async Task<IReadOnlyList<BranchState>> GetBranchesAsync(

@@ -61,7 +61,8 @@ public sealed record ReleaseAsset(
     string ContentType,
     long Size,
     int DownloadCount,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? UpdatedAt = null);
 
 public sealed record GitHubRelease(
     long Id,
@@ -72,7 +73,8 @@ public sealed record GitHubRelease(
     bool IsDraft,
     bool IsPrerelease,
     DateTimeOffset? PublishedAt,
-    IReadOnlyList<ReleaseAsset> Assets);
+    IReadOnlyList<ReleaseAsset> Assets,
+    DateTimeOffset? UpdatedAt = null);
 
 public sealed record GitReference(
     string Name,

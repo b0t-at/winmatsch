@@ -104,6 +104,9 @@ internal sealed class RestReleaseDto
     [JsonPropertyName("published_at")]
     public DateTimeOffset? PublishedAt { get; set; }
 
+    [JsonPropertyName("updated_at")]
+    public DateTimeOffset? UpdatedAt { get; set; }
+
     public List<RestReleaseAssetDto> Assets { get; set; } = [];
 }
 
@@ -126,6 +129,9 @@ internal sealed class RestReleaseAssetDto
 
     [JsonPropertyName("created_at")]
     public DateTimeOffset CreatedAt { get; set; }
+
+    [JsonPropertyName("updated_at")]
+    public DateTimeOffset? UpdatedAt { get; set; }
 }
 
 internal sealed class RestBranchDto

@@ -162,6 +162,8 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public string PullRequestHeadSha { get; set; } = GitHubLifecycleTestSupport.CommitSha;
 
+    public IReadOnlyList<GitHubRelease> Releases { get; set; } = [];
+
     public IReadOnlyList<PullRequestInfo> PullRequests => _pullRequests;
 
     public void AddPullRequest(PullRequestInfo pullRequest) => _pullRequests.Add(pullRequest);
@@ -244,7 +246,10 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     public Task<IReadOnlyList<GitHubRelease>> GetReleasesAsync(
         RepositoryCoordinates repository,
         CancellationToken cancellationToken = default)
-        => Task.FromResult<IReadOnlyList<GitHubRelease>>([]);
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Releases);
+    }
 
     public Task<IReadOnlyList<BranchState>> GetBranchesAsync(
         RepositoryCoordinates repository,
@@ -325,6 +330,15 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
     {
         BeforeMutation("commit", cancellationToken);
+        if (!_references.TryGetValue((repository, request.BranchName), out GitReference? current)
+            || !string.Equals(current.Sha, request.ExpectedHeadSha, StringComparison.Ordinal))
+        {
+            return Task.FromException<ServerCommitResult>(new GitHubApiException(
+                "expected head mismatch",
+                HttpStatusCode.Conflict,
+                null));
+        }
+
         _references[(repository, request.BranchName)] =
             new(request.BranchName, GitHubLifecycleTestSupport.CommitSha);
         return Task.FromResult(new ServerCommitResult(
@@ -538,7 +552,7 @@ internal sealed class FakePreflight : IWorkflowPreflight
         Func<CancellationToken, Task> boundary,
         CancellationToken cancellationToken)
     {
-        if (Report.IsValid)
+        if (Report.CanProceed(request.Options.WarningPolicy))
         {
             BoundaryCalls++;
             await boundary(cancellationToken);

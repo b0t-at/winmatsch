@@ -268,6 +268,14 @@ public sealed class GitHubMaintenanceWorkflow
             || !freshReplacement.HeadBranch.StartsWith("winmatsch/", StringComparison.Ordinal)
             || !string.Equals(freshReplacement.BaseBranch, freshOld.BaseBranch, StringComparison.Ordinal)
             || !string.Equals(
+                freshReplacement.HeadOwner,
+                replacement.HeadOwner,
+                StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(
+                freshReplacement.HeadOwner,
+                freshOld.HeadOwner,
+                StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(
                 freshOld.HeadOwner,
                 oldPullRequest.PullRequest.HeadOwner,
                 StringComparison.OrdinalIgnoreCase)

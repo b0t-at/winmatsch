@@ -154,9 +154,14 @@ public sealed record FeedbackRetryMetadata(
     DateTimeOffset RetryAfter,
     string? LearnedOverrideSignal);
 
+public sealed record FeedbackRemoteState(
+    long PullRequestNumber,
+    RemoteMutationState State);
+
 public sealed record FeedbackResult(
     ImmutableArray<PullRequestLifecycleStatus> Statuses,
     ImmutableArray<FeedbackRetryMetadata> RetryMetadata,
+    ImmutableArray<FeedbackRemoteState> RemoteStates,
     ImmutableArray<GitHubLifecycleDiagnostic> Diagnostics);
 
 public interface IApprovedRepairPlanner

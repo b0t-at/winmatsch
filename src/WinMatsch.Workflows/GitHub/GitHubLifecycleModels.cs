@@ -87,6 +87,8 @@ public sealed record RemoteMutationState
 
     public bool PullRequestCreated { get; init; }
 
+    public bool PullRequestClosed { get; init; }
+
     public RemoteOperationKind? LastAttemptedOperation { get; init; }
 
     public bool RemoteOutcomeUncertain { get; init; }
@@ -156,6 +158,10 @@ public sealed record GitHubSubmissionRequest
     public ImmutableArray<string> VanityUrlAnnotations { get; init; } = [];
 
     public DateTimeOffset? ReleaseUpdatedAt { get; init; }
+
+    public RepositoryCoordinates? ReleaseRepository { get; init; }
+
+    public long? ReleaseId { get; init; }
 }
 
 public sealed record GitHubSubmissionPlan

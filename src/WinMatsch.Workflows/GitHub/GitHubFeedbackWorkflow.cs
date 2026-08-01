@@ -32,6 +32,7 @@ public sealed class GitHubFeedbackWorkflow
         policy ??= new FeedbackPolicy();
         var statuses = ImmutableArray.CreateBuilder<PullRequestLifecycleStatus>();
         var retries = ImmutableArray.CreateBuilder<FeedbackRetryMetadata>();
+        var remoteStates = ImmutableArray.CreateBuilder<FeedbackRemoteState>();
         var diagnostics = ImmutableArray.CreateBuilder<GitHubLifecycleDiagnostic>();
         foreach (PullRequestObservation observation in observations)
         {
@@ -86,6 +87,7 @@ public sealed class GitHubFeedbackWorkflow
                         GitHubLifecycleResult result = await _submissions.ExecuteAsync(
                             repair,
                             cancellationToken).ConfigureAwait(false);
+                        remoteStates.Add(new(observation.PullRequest.Number, result.RemoteState));
                         if (result.Code is not (GitHubLifecycleResultCode.Succeeded or GitHubLifecycleResultCode.Planned))
                         {
                             diagnostics.AddRange(result.Diagnostics);
@@ -102,6 +104,7 @@ public sealed class GitHubFeedbackWorkflow
                                 upstream,
                                 observation,
                                 replacementNumber,
+                                result.RemoteState.Fork?.Owner,
                                 cancellationToken).ConfigureAwait(false);
                             if (supersedeFailure is not null)
                             {
@@ -186,7 +189,11 @@ public sealed class GitHubFeedbackWorkflow
             }
         }
 
-        return new(statuses.ToImmutable(), retries.ToImmutable(), diagnostics.ToImmutable());
+        return new(
+            statuses.ToImmutable(),
+            retries.ToImmutable(),
+            remoteStates.ToImmutable(),
+            diagnostics.ToImmutable());
     }
 
     public async Task<FeedbackResult> PollAsync(
@@ -252,6 +259,7 @@ public sealed class GitHubFeedbackWorkflow
         RepositoryCoordinates upstream,
         PullRequestObservation observation,
         long replacementNumber,
+        string? expectedReplacementOwner,
         CancellationToken cancellationToken)
     {
         if (!observation.ToolOwned
@@ -276,6 +284,11 @@ public sealed class GitHubFeedbackWorkflow
         string? oldAssociation = AssociationMarker(old.Body);
         if (replacement.State != PullRequestState.Open
             || old.State != PullRequestState.Open
+            || string.IsNullOrWhiteSpace(expectedReplacementOwner)
+            || !string.Equals(
+                replacement.HeadOwner,
+                expectedReplacementOwner,
+                StringComparison.OrdinalIgnoreCase)
             || oldAssociation is null
             || !string.Equals(AssociationMarker(replacement.Body), oldAssociation, StringComparison.Ordinal)
             || replacement.Body?.Contains(
