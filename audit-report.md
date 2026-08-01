@@ -1,0 +1,237 @@
+# Audit report — branch `utesgui-project-implementation-plan`
+
+**Audited worktree:** `D:\copilot-worktrees\winmatsch\utesgui-psychic-umbrella` @ `29e6f7b` (116 commits ahead of `main`; 389 files, +71,746 / −433)
+**Audit date:** 2026-08-01 · **Method:** Phase 0 inventory + central build/test by the coordinating auditor; 7 parallel per-unit deep-review subagents (all Claude Fable 5, long context — **no unit hit model guardrails, the GPT‑5.6 Sol fallback was never needed**); Phase 2 independent re-verification of every blocker and load-bearing major (code re-read and/or live repro against the built binary).
+**Methodology deviation (disclosed):** builds/tests were run **once, centrally** by the coordinator instead of per-subagent — 7 concurrent `dotnet build/test` runs in one worktree would deadlock on `obj/` file locks. Per-project results are recorded in §4 from that central run. Subagents were read-only.
+
+---
+
+## 1. Executive summary
+
+The branch is far more real than a typical overnight agent run: the solution builds with 0 warnings, all 1,781 tests pass (+3 opt-in live tests skipped, exactly matching plan.md's claim), there are **zero** TODO/FIXME/NotImplementedException markers in `src/`, docs are unusually accurate, and hard sub-systems (journaled file transactions, cache process-locking, GitHub race handling, adversarial YAML/ZIP validation) are genuinely engineered rather than stubbed. However, it is **not mergeable as-is**. Two blockers exist: (B1) the payload-dependency analyzer hard-fails on any `.exe`/`.zip` over 64 MiB and is called unguarded by both `analyze` and the update/new acquisition path — reproduced live: `winmatsch analyze` on a 70 MB PE exits 1 with "exceeds the analysis limit" — which makes the tool unusable for a large share of real winget packages (Electron apps, VS Code-class installers); and (B2) the human-correction detector crashes with an unhandled `ToDictionary` duplicate-key `ArgumentException` on the same-URL twin-entry pattern (SurrealDB/DUP-2) that the spec itself designates a flagship scenario. Beyond that, the spec's self-declared "single highest-leverage feature" — per-package *memory* (§0.2) — is only half-delivered (detection and halt work; nothing ever persists a learned override, and three override-pack fields are parsed but consumed by nothing), the DUP-1 duplicate-entry gate implements a key that diverges from winget's actual comparator in both directions, and the WORK-1 duplicate-PR gate cannot see other tools' PRs. A cluster of "built-but-unwired" seams (retired-identifier/duplicate-hash evidence, feedback auto-repair, PE-version trust) shows the parallel workstreams were assembled but not fully composed. The biggest merge risk is therefore **not** hidden breakage of what exists — it is that several spec-critical behaviors quietly do less than plan.md and the test-green status imply. Recommendation: **fix-first, then merge** (list in §5); the codebase quality justifies completion rather than rework.
+
+---
+
+## 2. Blockers and major findings (ranked)
+
+Status legend: **confirmed-live** = reproduced against the built binary by the coordinator; **confirmed** = independently re-read/re-derived from code by the coordinator; **confirmed-agent** = verified by the unit subagent with cited evidence, spot-checked but not independently re-derived; *plausible* = reported, not fully verified.
+
+### Blockers
+
+- **B1 · Any installer > 64 MiB aborts analyze/update/new — confirmed-live**
+  `src/WinMatsch.Analysis/Dependencies/PayloadDependencyAnalyzer.cs:35,393-410` (throws `InvalidDataException` when the stream exceeds `MaximumPayloadBytes`, default 64 MiB per `PayloadDependencyAnalyzerOptions.cs:7`; ZIP path throws likewise per entry at `:69-72`) — called **unguarded** for every `.exe`/`.zip` by `src/WinMatsch.Workflows/Operations/ProductionAdapters.cs:129-134` (update/new acquisition) and `src/WinMatsch.Workflows/Diagnostics/InstallerDiagnosticService.cs:123` (`analyze`).
+  *Failure scenario:* `winmatsch update SomeElectronApp` (typical NSIS installers are 70–150 MB) downloads the asset, then dies. Reproduced: `winmatsch analyze <70MB exe>` → `Unexpected error: Payload 'big-setup.exe' exceeds the analysis limit of 67108864 bytes.`, exit 1 (not even the documented failure exit-code class). There is no CLI/config knob to raise the limit and no degrade-to-no-evidence path.
+
+- **B2 · Human-correction detector crashes on the DUP-2 same-URL twin pattern — confirmed (static trace)**
+  `src/WinMatsch.Rules/HumanCorrectionDetector.cs:25-29` builds a `ToDictionary` keyed on `(DocumentKey, SemanticPath)` with no duplicate-key handling. `ManifestSnapshot.cs:1745-1751` excludes `Architecture` from installer identity, and matched pairs use the *before*-occurrence ordinal (`:1456-1458`) while unmatched added entries use the *after*-occurrence ordinal (`:1494-1508`) — so "bot originally submitted 1 entry, human added a same-URL twin (x86+x64 SurrealDB pattern), tool regenerates the preserved 2-entry layout" produces two changes with the identical `{installer:HASH#0}` semantic path → `ArgumentException` propagates uncaught through `RulePipeline.Run` (`RulePipeline.cs:112`), crashing the run instead of raising a review. This is precisely the learned-override flow the spec calls the highest-leverage feature, on a package pattern in the spec's own §13 corpus. Existing tests only cover 2v2 and distinct-URL cases.
+
+### Major findings
+
+- **M1 · DUP-1 gate key is wrong in both directions — confirmed**
+  (a) `src/WinMatsch.Validation/ManifestSemanticValidator.cs:175-179` (VLD3001) treats absent/`Unknown` scope/locale as a *distinct* key value, but winget-cli's duplicate comparator treats Unknown as **equal to every value**; `{x64, exe, no-scope}` + `{x64, exe, user}` passes this gate and then dies in the winget pipeline with "Duplicate installer entry found" — the exact dead-PR class DUP-1 exists to kill (verified against winget-cli `ManifestValidation.cpp` semantics by the unit agent; code side re-verified by me). It also omits `NestedInstallerType`, so legal archive twins are hard-blocked (false positive).
+  (b) The Rules-side twin WM0102 (`src/WinMatsch.Rules/Rules/DuplicateInstallerEntriesRule.cs:37`) uses a **3-part** key (`Architecture|InstallerType|Scope`, no locale — `EffectiveInstallerValues.GetEntryKey`), so a legitimate multi-locale manifest gets an Error finding, and the two gates contradict each other.
+
+- **M2 · §0.2 per-package memory is detection-only — confirmed (grep-verified)**
+  `OverridePackYaml.WriteFile` (`src/WinMatsch.Rules/Overrides/OverridePackYaml.cs:121`) has **zero callers** in `src/`; detected human corrections only halt for review (`LocalWorkflowEngine.cs:712`, `WorkflowModels.cs:147`) and are never persisted, so the same halt recurs every version — the spec's "single highest-leverage feature" has no memory. Additionally `OverridePack.ScopeLayout`, `.MetadataUrlReplacements`, `.PreservedFields` (`OverridePack.cs:22,26,29`) are parsed, serialized, round-trip-tested — and **consumed by nothing**: a maintainer writing the §0.2-mandated scope-layout or URL-replacement override gets a silent no-op.
+
+- **M3 · WORK-1 duplicate-PR gate cannot see other tools' PRs — confirmed**
+  `src/WinMatsch.Workflows/GitHub/GitHubLifecycleWorkflow.cs:736-748`: a PR counts as duplicate only if the title contains id **and** version **and** the body contains the winmatsch HTML marker or the version directory path. Komac/YamlCreate/human PR bodies contain neither → winmatsch opens a second PR → `Possible-Duplicate` (the top WORK-1 failure class). The spec demands title-token *or* manifest-path search across *any author*. Test fakes always use winmatsch-format bodies (`GitHubLifecycleTestSupport.cs:99-101`), masking this.
+
+- **M4 · PR/commit title convention deviates from the pinned UpdateState format — confirmed**
+  `src/WinMatsch.Workflows/GitHub/GitHubSubmissionFormatter.cs:18` renders `"{operation}: {id} version {ver}"` → "Update: Foo.Bar version 1.2.3". plan.md:26/70 pins Komac/winget-pkgs convention "New version:", "Update version:", "Add version:", "Remove version:". Moderation tooling and other bots' `in:title` duplicate searches key on these canonical prefixes — this also *worsens* M3 in the reverse direction (other tools won't recognize winmatsch PRs as duplicates).
+
+- **M5 · Crash between branch creation and PR creation bricks that package-version — confirmed-agent**
+  Deterministic branch name with no run suffix (`GitHubLifecycleContracts.cs:36`), no adopt-existing-branch path, and cleanup requires an associated **closed PR** while Apply-mode cleanup always returns `HumanEscalationRequired` (`GitHubMaintenanceWorkflow.cs:134-136,163-173`). Crash/cancel after `CreateUniqueReferenceAsync` (`GitHubLifecycleWorkflow.cs:274`) but before PR creation → every retry gets 422/Conflict forever until a human deletes the branch.
+
+- **M6 · Retired-identifier / sibling-hash / vanity-URL submission gates are vacuous in production — confirmed (grep-verified)**
+  `RepositoryInstallerEvidence.RetiredIdentifier` (`GitHubLifecycleModels.cs:104`) is never read; no production caller populates `GitHubSubmissionRequest.RepositoryEvidence`, `.Policy.DuplicateHashes`, or `.VanityUrlAnnotations` (CLI wiring at `MutationCommandModule.cs:1014-1066` omits all three), so GH1010/GH1011 (WORK-1 #3, the MongoDB.Compass.Community class) can never fire outside tests.
+
+- **M7 · REST-fallback commits silently break deletions — confirmed**
+  `GitHubJsonContext.cs:7` sets `DefaultIgnoreCondition = WhenWritingNull`; deletion entries are `CreateTreeEntryDto { Sha = null }` (`GitHubRepositoryClient.cs:921-925`, DTO at `GitHubTransportDtos.cs:360-369` with no per-property override) → the serialized tree entry has *neither* `sha` nor `content`, which GitHub's create-tree API rejects (422). Any `--replace`/remove flow that takes the REST fallback (GraphQL classified unavailable, `GitHubRepositoryClient.cs:1123`) fails. The recorded test passes a deletion but never asserts the serialized body shape.
+
+- **M8 · JSON/non-interactive automation is hard-walled out of the two states it most needs — confirmed**
+  `MutationCommandModule.cs:337-353`: when a plan `RequiresReview`, `EnsurePrompting` throws `MissingInputException` **before** `MutationOutput.Write`, so in `--format json` / `--interaction never` the documented `requiresReview:true` + `rules.reviews` envelope (docs/commands.md:155-158) is never emitted (exit 4, empty stdout) and `--yes` does not approve reviews despite docs listing it as the approval flag; the same pattern makes the documented `questions` array unreachable in JSON mode (`:617-621`). CI usage cannot even *read* what needs approving.
+
+- **M9 · Secret-redaction inconsistencies in the CLI — confirmed-live (first item)**
+  (a) Parse errors echo raw argument values: `winmatsch config path --tokn ghp_FAKE…` prints the token verbatim on stderr (reproduced; `CliHost.cs:60-66` has no redaction). (b) `questions[].path` is written **unredacted** in the JSON envelope (`MutationOutput.cs:232` uses `WriteNullable` while the sibling prompt/options fields go through `Redact` — re-verified by me); question paths carry installer URLs which routinely embed presigned query-string secrets. (c) Two divergent redaction engines (`MutationOutput.cs:425-440` vs `GitHubSubmissionFormatter.cs:124-131` — the latter has no `ghp_`/`github_pat_` shape rule), plus unredacted `CliHost` exception paths (`CliHost.cs:131-184`) and maintenance plan/diagnostic renderers (`MaintenanceCommandHelpers.cs:148-201`) whose doc comment claims "secrets stay redacted".
+
+- **M10 · Exit-code contract drift: declined confirmation = 130 vs 5 depending on command family — confirmed**
+  Maintenance/cache decline returns `ExitCodes.Cancelled` (130) (`MaintenanceCommandModule.cs:108,195,272,296,362`; `CacheCommandModule.cs:141,197`), mutations return 5 on decline, and docs/commands.md:86 defines 130 as "Ctrl+C, POSIX 128+SIGINT". Scripts cannot distinguish user-abort from SIGINT; both behaviors are pinned by tests, so the drift is baked in.
+
+- **M11 · ANSI Inno installers with non-cp1252 strings crash analysis — confirmed**
+  `src/WinMatsch.Analysis/Inno/InnoFormatReader.cs:313` first-pass-decodes every ANSI header as cp1252 with `DecoderFallback.ExceptionFallback` (`:1031-1042`); a genuine ANSI Inno 5.5.x installer with any byte undefined in cp1252 (0x81/0x8D/0x8F/0x90/0x9D — common Shift-JIS lead bytes) throws `DecoderFallbackException` (derives from `ArgumentException`, caught by none of the `InvalidDataException`-shaped probe contracts) and kills the whole file analysis. Also `checked((int)codePage)` at `:324` can throw uncaught `OverflowException` on a hostile header.
+
+- **M12 · ARCH-4 only half-implemented: `x86compatible` still becomes *conclusive* x86 — confirmed**
+  `src/WinMatsch.Analysis/Inno/InnoProbe.cs:158-209`: the payload-PE override fires only when payload evidence has exactly one distinct architecture (`:178-183`); with absent (bzip2 payloads yield none — `InnoFormatReader.cs:668,678-686` swallows them silently; >64 MB scan window) or mixed-arch payloads, `x86compatible` returns `(X86, Conclusive=true)` (`InnoProbe.cs:195-201`), telling downstream not to second-guess — recreating the Keeper-Commander x86→x64 fix-PR class the rule exists to kill. Payload sizes are collected but never weighted ("largest embedded PE" per spec). Tests codify this behavior rather than challenge it.
+
+- **M13 · DEP-1 evidence is stub-only for exe installers — confirmed**
+  `PayloadDependencyAnalyzer.cs:30-37`: for `.exe` the analyzer inspects the **outer stub PE's** imports only (payload never decompressed) and reports a confident `VisualCppRuntime=Absent` — exactly wrong for the wrapped-payload cases DEP-1 cites (S3Drive/UltraGrid VCRedist class). Interacts with B1 (same method).
+
+- **M14 · Preflight gate can crash instead of failing closed on numeric overflow — confirmed**
+  `src/WinMatsch.Validation/ManifestPackageParser.cs:67-115`: materialization runs even when schema validation already produced errors, and the catch list (YamlException/FormatException/ArgumentException) omits `OverflowException` — a 20-digit `InstallerSuccessCodes` value (passes the 256-char numeric budget; schema violation is only a finding) reaches `long.Parse` (`ManifestYamlReader.cs:322,351`) → uncaught `OverflowException` out of `PreflightGate.ValidateAsync`.
+
+- **M15 · A second, completely unbudgeted YAML entry point bypasses every cffa8af protection — confirmed**
+  `src/WinMatsch.Core/PackageManifestIO.cs:24-77` does unbounded `File.ReadAllText` + `ManifestYamlReader`/`YamlStream.Load` with no byte/depth/node budget and no alias ban (all budgets live only in `ManifestSchemaValidator.ConvertYamlToJson`). Consumed by `OriginalSubmissionStore.cs:47` and `ProductionAdapters.cs:244` on **repo-sourced previous manifests** (attacker-influenceable content in a public repo): deep-nesting → `StackOverflowException` (uncatchable process kill); multi-GB planted `.yaml` → full materialization. `PreflightRequest.FromDirectory` (`PreflightModels.cs:85`) also `ReadAllText`s before its 16 MB check.
+
+- **M16 · VER-1 tier 2 (binary version) never applies to exe/zip-only releases — confirmed**
+  `ProductionAdapters.cs:141-144` marks product versions trustworthy only for `Msi/Msix/MsixBundle`; PE `VS_VERSIONINFO` is never a version candidate, so an exe-only release with a build-style tag (`b4088`) resolves the tag as PackageVersion — the CumulusMX failure class — unless a per-package override exists.
+
+- **M17 · §13 regression corpus never exercises the pipeline it exists to protect — confirmed-agent**
+  All 13 descriptor/expected pairs exist, but every fixture plan asserts `CanApply == false` via `ANALYSIS_METADATA_ONLY` (`RegressionDescriptorE2ETests.cs:60-63`), `Expected/*.json` are reduced installer-topology snapshots (not the spec-mandated "final merged manifests"), and the mapping theory seeds `PreviousInstallers` *from* the expected snapshot (`AssetMappingFixtureTests.cs:39-42`) — verifying layout preservation, not derivation. A regression in generate/rules/merge for these exact packages would pass untouched.
+
+- **M18 · WORK-4 feedback loop is report-only in production — confirmed-agent**
+  The auto-repair path exists and is forced through full preflight (`GitHubFeedbackWorkflow.cs:47-133`), but production wires `NullApprovedRepairPlanner` (always null — `MaintenanceGitHubAdapters.cs:397-404`), and retry metadata is returned, never persisted — so nothing is ever auto-fixed and no learning survives the process (Jellyfin.FFmpeg ×4 zero-learning is still possible). Disclosed in code as intentional composition, but plan-spec-wise this is "partial".
+
+---
+
+## 3. Spec coverage
+
+### 3.1 plan.md (branch scope: P4-remainder → P8 + command surface; P0–P5 were already on `main`)
+
+| Item | Verdict | Evidence / gap |
+|---|---|---|
+| P4: Inno analyzer (loader, versioned header, arch, privileges→scope/elevation, AppId→ProductCode, DefaultDirName, language) | **partial** | Implemented within pinned 5.5.7–6.4.0.1 (`InnoFormatReader.cs:210-214` hard-throws outside); ARCH-4 gap (M12); cp1252 crash (M11); `UnsupportedOSArchitectures` **never emitted by any analyzer** (grep-clean across src/) despite plan.md:21 |
+| P4: AdvancedInstaller (7z SFX) | **fully** | `Advanced/AdvancedInstallerProbe.cs:29-108` (footer/table/XOR/nested-7z); one hardening drift: unbounded `new byte[entry.Length]` in `AdvancedMsiProperties.cs:69-75` |
+| P4: Squirrel (nupkg) | **fully** | `Squirrel/SquirrelProbe.cs:37-61`; arch from nupkg name else x86 stub — payload PEs never inspected (minor) |
+| P4: probe chain order AdvancedInstaller→Burn→Inno→NSIS→Squirrel→generic | **fully** | `ExeAnalyzer.cs:18-25`, order pinned by test |
+| P5→branch: schema validation (was "seam only") | **fully** (better than plan) | Real JsonSchema.Net Draft-07 validation, embedded byte-pinned schemas verified semantically identical to upstream winget-cli 1.12.0 (`ManifestSchemaValidator.cs:16-131`, `SchemaParityTests.cs`); plan.md:120 claim now stale in the *conservative* direction |
+| P6: GitHub client (repo info, createRef, createCommitOnBranch, createPullRequest, PR search, compare, merge-upstream) | **fully** | `GitHubRepositoryClient.cs` (verified commits via GraphQL + CAS REST fallback — deletion bug M7) |
+| P6: release metadata → locale (notes, date, **license, topics→tags, publisher URL**) | **partial** | notes/date/assets fully; license/topics/publisher-URL **not fetched anywhere** (`RestRepositoryDto`/GraphQL query lack the fields) |
+| P6: update/new/submit/remove flows, installer matching, existing-PR check, `--replace` same-commit delete, auto-fork w/ consent, sync, cleanup | **mostly** | Flows + matching + `--replace` (`LocalWorkflowEngine.cs:438-452`) + fork consent + safe sync ✓; commit titles ✗ (M4); duplicate check partial (M3); cleanup is plan-only — Apply always escalates (`GitHubMaintenanceWorkflow.cs:163-173`) |
+| P6: UpdateState commit titles | **missing** | M4 |
+| P7: interactive prompts everywhere + automation flags | **fully** for input/confirm; **partial** for review gate (M8) |
+| P7: preview/diff/edit loop | **partial** | before/after ±blocks, no rich diff; `$EDITOR` is single-pass with full preflight rerun, not an edit-until-valid loop (`MutationContracts.cs:273-351`) |
+| P7: locale commands, completions, config, cache | **fully** | `new-locale`/`update-locale`, static bash/zsh/fish/powershell (fish descriptions dead), config show/set/unset/path, cache list/inspect/clear/prune |
+| P7: download progress events UI | **missing** | plain `ReportStatus` lines only; no Spectre progress despite plan.md:55 |
+| P8: hermetic E2E + safety contracts | **fully** on safety (fail-closed acquisition, mutation allow-list `b0t-at/winmatsch-e2e` hard-asserted, `GITHUB_TOKEN` cleared, only 3 env-gated live tests) | "full update+submit dry-run against configurable fork" is realized as 1 read-only GraphQL call + in-process fakes — **partial** vs plan.md:79 |
+| P8: analyzer corpus compiled in CI (Inno/NSIS/WiX on windows job) | **missing (substituted)** | No such CI job; replaced by in-code synthetic fixture builders — defensible but an undocumented plan deviation |
+| P8: docs, release engineering | **fully** | Every H1 claim in plan.md:135-140 verified individually true (LICENSE/NOTICES wiring, release.yml tag-validation/per-RID verify/SHA256SUMS-checked/fail_on_unmatched_files, ci.yml trx-on-failure); "1781 tests green (3 skipped)" **exactly matches** the central run |
+| Command surface (17 commands + hidden) | **fully** with 3 caveats | All present incl. hidden `remove-dead-versions`; `complete` repurposed to PR-lifecycle inspection with shell scripts under `completion` (documented); `remove-dead-versions` submission deliberately unwired (always exit 5 "not wired up yet" — disclosed in docs); **`DRY_RUN` env var missing** (flag exists; env var promised in plan.md:61 appears nowhere) |
+| Global flags | **fully** | incl. `--url 'url\|arch\|scope\|displayVersion'` (exact-4-part split, whitelisted, injection-safe), `--replace [ver]`, `--prtitle`, `--skip-pr-check`, `--resolves`, `--created-with(-url)` (provenance drift minor A18) |
+
+### 3.2 rules_to_implement.md
+
+| Rule | Verdict | Where / gap |
+|---|---|---|
+| §0.1 feature flags, log-only, per-pkg mode, pre/post log, PR lists rule IDs | **fully** | 4-layer mode resolution (command>package>user>default); true clone-based log-only simulation (`RulePipeline.cs:189-231`); PR body lists executions (`GitHubSubmissionFormatter.cs:106-120`); degraded by over-redaction (A2) and silent snapshot-capture fallback (A3) |
+| §0.2 override store consulted after detection / before emission | **partial** | Forced-arch, asset→entry mapping, version source, drop-fields, vanity-url, manual-only all consumed (`AssetMappingPlanner.cs:430,444,458`; `PackageVersionResolver.cs:61,119`; `Meta5…:47`); **ScopeLayout / MetadataUrlReplacements / PreservedFields dead (M2)** |
+| §0.2 learned overrides (three-way diff, keep-human-value-or-halt) | **partial** | Detection + halt genuinely work end-to-end; **no persistence, no auto-keep path (M2), crash bug in the flagship pattern (B2)** |
+| §0.3 local gate: schema / DUP-1 / MAP-1 / URL HEAD / re-hash / ARP-2 | **partial** | Schema ✓ (VLD2xxx, live-verified), MAP-1 ✓ (VLD3002), URL probes ✓ (VLD5004 live-verified, `--offline` honest), re-hash ✓ (VLD6012 + boundary revalidator), ARP-2 index ✓ (VLD3101); **DUP-1 key wrong (M1)** |
+| ARCH-1 payload-based arch | **partial** | NSIS marker/token heuristics (`NsisProbe.cs:213-268`, `$PROGRAMFILES64`) ✓; **inner-payload PE parsing for NSIS not implemented**; Inno payload override exists but gated (M12) |
+| ARCH-2 token-less sibling ≠ x64 | **fully** | `AssetMappingPlanner.ApplySiblingCoverage` (`:43`) |
+| ARCH-3 token table most-specific-first (win64a, win32-arm64) | **fully** | `ArchitectureTokenClassifier.cs:19-32` weighted classes |
+| ARCH-4 x86compatible ≠ x86 | **partial** | M12 |
+| ARCH-5 never generate neutral | **fully** | neutral filtered from generated candidates (`AssetMappingPlanner.cs:607`) |
+| MAP-1 stable tokens, no similarity, URL⇔hash identity | **fully** | no similarity metric anywhere (grep-clean); `MAP_DUPLICATE_ASSET`, `CONTENT_IDENTITY_CONFLICT`/`CONTENT_SHARED_ACROSS_URLS` (opt-in override) |
+| MAP-2 new URL belongs to new version | **fully** (indirect arch-token check) | version continuity + URL-vs-target checks block `CanApply`; arch preserved via entry-arch equality rather than literal token-class compare |
+| MAP-3 whole-release enumeration, new/removed entries, magic-bytes re-detection | **fully** with caveat | exe→zip / wix→burn transitions degrade to blocking questions instead of automatic re-typed mapping — unattended runs stall (acceptable-safe, spec-tension) |
+| MAP-4 nested paths re-derived, alias↔path uniqueness | **fully** | `NestedInstallerPathResolver.cs:69-148` with version templating |
+| DUP-1 | **partial** | M1 |
+| DUP-2 preserve same-URL x86+x64 verbatim | **fully** | `BuildPreservedSharedGroups`/`preserveIntentionalLayout` + `MAP_STRUCTURAL_REWRITE` opt-in; **but the follow-on detector crashes (B2)** |
+| ARP-1 version templating | **fully** | `Arp1VersionTemplateRule` (MongoDB #151617 reproduced in test) |
+| ARP-2 omit redundant / index collision | **fully** | Rules redundancy + VLD3101 split |
+| ARP-3 garbage sanitization | **fully** | rule + Inno sanitizes at source |
+| ARP-4 key-set parity | **fully** | `Arp4ShapeParityRule` |
+| HASH-1 re-hash before push + fresh-release delay | **fully** / delay **default 0** | full re-download + identity compare at plan AND final boundary + post-PR close-on-failure (commit 4edcf94 real); spec suggests 3–6 h default — `ConfigurationDefaults.cs:13` ships 0 (spec allows "0 disables", so config-compliant but not recommendation-compliant) |
+| HASH-2 vanity URLs | **fully** (annotation store + re-hash path) | `vanity-url` override consumed in planner; PR-body annotations exist but CLI never populates them (M6 adjacency) |
+| SCOPE-1/2/3 | **fully** | per-installer twins, evidence-only explicit scope, switch hygiene |
+| SCOPE-4 wrapper classification | **fully** | Burn outer-type + gated inner ARP; Squirrel never wix |
+| VER-1 precedence | **partial** | resolver implements override>product>tag>URL with prefix-stripping and folder==manifest by construction; **binary tier restricted to MSI/MSIX (M16)** |
+| META-1 https upgrade | **fully** | probe-evidence-gated |
+| META-2 HEAD-check metadata URLs | **fully** | VLD5xxx probes + workflows evidence |
+| META-3 blob/HEAD license URLs | **fully** (conservative) | full-sha + raw links normalized; abbreviated-sha links deliberately untouched |
+| META-4 release-notes sanitization | **partial** | bullets/colons/10k truncation/URL retarget ✓; **the spec-mandated separate `META-4-bullets` flag does not exist at runtime** (ctor flag never wired — `Meta4…Rule.cs:26-34`, `ProductionRuleComposer.cs:43`) |
+| META-5 field-set parity | **fully** | incl. ambiguous-previous-layout reporting (commit ec11aa4 verified real) |
+| DEP-1 | **partial** | rule + arch matching + previous-major verification ✓; **evidence pipeline defective for exe (M13) and >64 MiB (B1)** |
+| DEP-2 infra-error classification | **fully** | feedback workflow classifies infra signatures → rerun/keep-alive |
+| WORK-1 duplicate prevention (4 sub-items) | **partial** | search too narrow (M3); machine-local per-package lock + repo-side branch reservation ✓; retired-id/sibling-hash unwired (M6); remove-version re-check ✓ |
+| WORK-2 non-empty single-(pkg,version) PR, fresh branch | **fully** | `GitHubManifestChangeGuard` GH1002-1013 |
+| WORK-3 backfill URL-verify | **partial / lives-elsewhere** | dead-version proof gating exists; no bulk backfill-update flow as such |
+| WORK-4 feedback loop | **partial** | M18 |
+| WORK-5 close superseded w/ cross-link | **fully** | ownership+freshness-proved comment-then-close |
+| PIPE-1 one serializer, single trailing newline, byte-identical round-trip | **fully** (with documented deviation) | byte-fidelity re-verified for 1.12 near-exhaustively; **project uses LF everywhere while the spec text says CRLF** — deliberate main-era decision, but rewriting an existing CRLF manifest produces a whole-file line-ending diff, the PIPE-1 symptom itself |
+| PIPE-2 ManifestVersion + $schema sync | **fully** | pinned end-to-end; caveat: *two* hardcoded `"1.12.0"` literals (`ManifestSchemaValidator.cs:18` vs `ManifestVersion.cs:10`) with no cross-assembly equality test |
+| PIPE-3 identity immutability | **fully** | findings-rule + repo-casing resolution in workflows |
+| PIPE-4 ArchiveBinariesDependOnPath | **fully** (bonus — implemented though not explicitly requested of this branch) |
+| PIPE-5 content-policy annotation lists | **fully** | incl. `manual-only`; nit: built-in Chrome pack carries a dead `ARP-1` annotation producing permanent Info noise |
+| §13 test corpus = final merged manifests | **partial** | M17 |
+| §14 non-goals documented | **fully** | docs/troubleshooting.md + annotation lists |
+
+### 3.3 plan.md "done"-claim spot-checks (question 3: are claims/versions current?)
+
+- **"1781 tests green (3 skipped opt-in live)" — TRUE**, matches the central run exactly (§4).
+- **All H1 release-docs claims (plan.md:135-140) — TRUE**, each verified individually (release.yml/ci.yml/LICENSE/NOTICES).
+- **plan.md is otherwise badly stale**: the progress log documents only P0–P5 (pre-branch) and the final H1 session. The branch's ~100 commits of Workflows/GitHub/CLI/Validation/Rules-policy work have **no session entries at all**, and plan.md:120 still claims "schema validation NOT implemented — IManifestSchemaValidator seam only", which the branch superseded (the seam file is deleted). The premise "the agent updated plan.md as it worked" holds only for the last session.
+- **rules_to_implement.md**: unchanged vs main (as expected — it is the spec).
+- **Dependency currency** (NuGet, checked 2026-08-01): SharpCompress 1.0.0, Spectre.Console 0.57.2, System.CommandLine 2.0.10 = latest stable ✓; OpenMcdf 3.1.4 (latest 3.2.0, one minor behind); **YamlDotNet 16.3.0 (latest 18.1.0, two majors behind)** and **JsonSchema.Net 8.0.5 (latest 9.4.0, one major behind)** — possibly deliberate AOT-vetting pins, but undocumented.
+- **GitHub Actions**: all pinned to mutable major tags (`@v4`, `@v2`) incl. third-party `softprops/action-gh-release@v2` running with `contents: write`; ci.yml has no `permissions:` block (A21/A22).
+
+---
+
+## 4. Build & test matrix
+
+Central run in the audited worktree (SDK 10.0.302, user-local; logs: session artifacts `build.log` / `tests.log`).
+
+`dotnet build WinMatsch.slnx` → **Build succeeded, 0 Warning(s), 0 Error(s)** (35.1 s). All 19 projects build.
+
+`dotnet test WinMatsch.slnx --no-build`:
+
+| Test project | Passed | Failed | Skipped | Total |
+|---|---:|---:|---:|---:|
+| WinMatsch.Core.Tests | 169 | 0 | 0 | 169 |
+| WinMatsch.Analysis.Tests | 432 | 0 | 0 | 432 |
+| WinMatsch.Downloads.Tests | 64 | 0 | 0 | 64 |
+| WinMatsch.Rules.Tests | 413 | 0 | 0 | 413 |
+| WinMatsch.Validation.Tests | 53 | 0 | 0 | 53 |
+| WinMatsch.GitHub.Tests | 90 | 0 | 0 | 90 |
+| WinMatsch.Workflows.Tests | 226 | 0 | 0 | 226 |
+| WinMatsch.Cli.Tests | 296 | 0 | 0 | 296 |
+| WinMatsch.Testing.Tests | 15 | 0 | 0 | 15 |
+| WinMatsch.E2E.Tests | 23 | 0 | 3 | 26 |
+| **Total** | **1781** | **0** | **3** | **1784** |
+
+The 3 skips are the intended env-gated live tests (`Opt_in_acquisition…`, `Live_mutation_contract…`, `Configurable_test_fork_contract…`).
+
+**CLI smoke (built binary, coordinator-run):** `--version` = `0.1.0+29e6f7b…` ✓ · root help lists all 17 commands ✓ · hidden `remove-dead-versions` reachable (its `--help` intentionally prints nothing, exit 0 — matches docs; missing-arg exit 2 with the usage message duplicated twice, nit) · `analyze <PE>` text+JSON well-formed, exit 0 ✓ · `analyze <70 MB PE>` → **exit 1, "exceeds the analysis limit"** (B1 repro) · `validate` schema-header gate VLD2104 fires, exit 5 ✓; `--offline` honest (VLD5001 warning) ✓; **default mode probes installer URLs over the network** (VLD5004/VLD6012 observed against a dead URL — by design per §0.3, but surprising for a "local" validate; docs do document it) · flag typo `--network` was swallowed as a *path* argument (exit 5 "Manifest path '--network' does not exist" instead of usage exit 2 — greedy `<paths>...` arity, minor A16) · `config path --tokn ghp_…` echoes the token (M9 repro).
+
+**E2E:** the suite's own hermetic tests pass in the central run (real-process CLI invocations, golden SHA256-pinned manifest bytes, transaction atomicity/rollback/16-way concurrency, path-traversal rejection). No live-network E2E was executed by this audit (requires opt-in secrets by design).
+
+---
+
+## 5. Merge recommendation
+
+**Do not merge yet.** The branch is a strong foundation with no evidence of fabricated work, but B1 makes the tool unusable for a large class of real packages and B2 crashes the flagship safety flow; both are cheap to fix relative to the branch size. Recommended fix-first order:
+
+1. **B1** — make dependency analysis degrade (skip with a diagnostic) instead of throwing on oversize payloads, or raise/scope the cap and guard the two call sites (`ProductionAdapters.cs:129-134`, `InstallerDiagnosticService.cs:123`).
+2. **B2** — deduplicate/disambiguate `SemanticChangeKey` construction (include occurrence disambiguation consistent across matched/added paths) in `HumanCorrectionDetector` + regression test for 1→2 same-URL twins.
+3. **M1** — align both duplicate gates with winget's comparator (Unknown-scope/locale wildcard, NestedInstallerType) and make WM0102 delegate to or agree with VLD3001.
+4. **M7** — force `sha: null` serialization for tree deletions (per-property `[JsonIgnore(Condition = Never)]`) + assert the serialized body in the recorded test.
+5. **M3 + M4** — broaden duplicate-PR detection to title-token/path search across any author; adopt the canonical "Update version:"-style titles (fixes both directions of duplicate blindness).
+6. **M8 + M10 + M9** — emit the documented JSON envelopes before throwing on review/questions gates, honor `--yes` for reviews (or add `--approve-reviews`); unify decline exit codes with docs; route parse errors and `questions[].path` through redaction and consolidate the two redaction engines.
+7. **M5, M6, M18** — adopt-or-suffix the submission branch and allow cleanup of PR-less own branches; wire `RepositoryEvidence`/`DuplicateHashes`/retired-identifier population; either wire a real repair planner or mark WORK-4 partial in docs/plan.
+8. **M2** — implement consumers for `ScopeLayout`/`MetadataUrlReplacements`/`PreservedFields` (or reject those keys in the parser) and add the learned-override persistence path (`WriteFile` exists, unused).
+9. **M11–M16** — Inno codepage fallback-to-replacement (not exception), Inno payload-size weighting + payload use for empty/absent arch expressions, exe payload decompression for DEP-1 or downgrade its confidence, add `OverflowException` to the parser catch list, budget `PackageManifestIO` reads (or route them through the validator), extend version trust to PE evidence behind a flag.
+10. **M17** — extend the §13 corpus to drive the full plan→rules→emit pipeline against stored merged-manifest goldens.
+11. Housekeeping before v1: update plan.md progress log (or drop the stale line 120), decide/document the YamlDotNet/JsonSchema.Net major-version pins, pin GitHub Actions to SHAs, add `permissions:` to ci.yml, add the missing `DRY_RUN` env var or remove it from the plan.
+
+Items 1–6 are the merge gate; 7–11 can be fast-follow issues if the team prefers a shorter gate, but 7's branch-deadlock (M5) will bite the first crashed CI run against a real repo.
+
+---
+
+## 6. Appendix — minor findings and nits (compact)
+
+**Analysis** · A1 Inno emits no diagnostic for ambiguous/mixed payload arch (unlike NSIS001/BURN001) so `RequiresManualAnalysis` never fires for Inno (`InnoProbe.cs:75-83`) · A1b empty/absent `ArchitecturesAllowed` never consults payload evidence; `ArchitecturesInstallIn64BitMode` unused as arch signal (`InnoProbe.cs:178-183`) · A1c pre-6.3 flag 0x04 rendered `x64compatible` (overstates OS set), 0x08 → untokenizable `ia64` (`InnoFormatReader.cs:572-596`) · A1d Inno version window hard-throws on future releases (`:210-214`) · A1e bzip2 payloads silently yield zero evidence via message-less swallowed throw (`:668,678-686`) · A1f `PrivilegesRequired=lowest`→`ElevationProhibited` is stronger than the data warrants (`InnoProbe.cs:119-124`) · A1g Burn x64-stub + arm64-only chain stays x64 silently (`BurnProbe.cs:110-152`) · A1h Squirrel ignores in-hand nupkg payload PEs for arch (`SquirrelProbe.cs:212-213`) · A1i unbounded alloc drift in `AdvancedMsiProperties.cs:69-75` · A1j aggregate ZIP budget counts declared not actual bytes → CPU amplification (`PayloadDependencyAnalyzer.cs:69-83`) · A1k dead `PeOverlay.FindSignature`, no-op `catch{throw;}` blocks, unreachable zlib arm, NRE-catch masking own bugs (`AdvancedInstallerProbe.cs:277-287`).
+
+**Rules** · A2 log sanitizer over-redacts: 3-segment dotted identifiers (`Microsoft.VisualStudioCode.Insiders`) JWT-match → whole message `[REDACTED]`, erasing exactly the §0.1 audit values (`RuleLogSanitizer.cs:359-396`) · A3 Apply-mode snapshot-capture failure silently skips change recording while log-only throws (`RulePipeline.cs:173-204`) · A4 `RulePipeline.CreateDefault(WithRuntime)` maintain a policy-rule-free copy of the order; `WithRuntime` has zero callers (`RulePipeline.cs:121-160`) · A5 META-4 bullets flag unwired (M-adjacent, see table) · A6 built-in Chrome pack dead `ARP-1` annotation → permanent Pipe5 Info noise (`Overrides/BuiltIn/Google.Chrome.yaml:5`) · A7 bare `-64`/`-32` tokens version-normalized out of URL identity → pairing relies on arch score alone (`ManifestSnapshot.cs:1806-1824`) · A8 multi-locale previous-entry matching declares ambiguity and skips (conservative) (`PolicyValues.cs:102-128`) · A9 ARP evidence field paths use pre-removal indices → provenance falls back to generic attribution · A10 `FindIgnoreCase` dictionary-order nondeterminism seed (`PolicyEvidence.cs:111-133`) · dead: `IsBase64UrlToken`.
+
+**Workflows** · A11 `RecoverStaleMetadata` is dead logic superseded by unconditional `SetLength(0)`; PID written, never consumed (`FileRemoteOperationLockProvider.cs:55-88`) — the *actual* mutual exclusion (exclusive open handle, never deleted) is sound on Windows · A12 non-Windows lock identity = SHA256(full path), symlinks defeat it; lock files under `/tmp` never deleted → tmp-cleaner can break flock mutual exclusion on very long runs (`ProductionAdapters.cs:897-899,959-964`) · A13 rollback-failure rethrow discards the original exception (`ProductionAdapters.cs:411-425`) · A14 scratch-cleanup failure fails an otherwise-valid revalidation (GH1021, fail-closed for a non-safety reason) · A15 snapshot reads under contention throw raw while applies return Conflict results (`LocalWorkflowEngine.cs:57-61`) · A15b `FreshnessDelay` default 0 (spec suggests 3–6 h) · A15c first-write provenance capture can record human manifests as bot-original on locale-edit of pre-existing versions (`OriginalSubmissionStore.cs:95-100`) · nits: mutable never-written `Candidate.Architecture`; per-call regex construction in `ArchitectureTokenClassifier` (unfinished `GeneratedRegex` migration); `SingleOrDefault` case-collision throw; `DateTimeOffset.UtcNow` in pure `Plan()`; `UrlOverride` requires exactly-4 parts (wingetcreate accepts shorter).
+
+**Downloads/GitHub** · A16 crash-orphaned `*.tmp.<guid>` files never swept (only `ClearAsync` removes) (`DownloadCache.cs:151,363-405,490`) · A17 lock spin has no deadline/diagnostics; POSIX exclusion depends on .NET flock emulation (`DownloadCache.cs:734-785`) · A17b server-directed retry delay has no ceiling (`GitHubHttpTransport.cs:259-266`); Link-header pagination unbounded (same-origin loop) · A17c GraphQL-unavailable / fork-not-ready detection sniffs its own exception message text (`GitHubRepositoryClient.cs:1123-1130,1180-1182`) · A17d `Dispose()` disposes the caller-supplied `HttpClient` · A17e downloader `Dispose` races in-flight semaphores · A17f `SearchPullRequestsAsync` head-filter without owner silently unfiltered · A17g `GraphQlUri` independent of `ApiBaseUri` — a GHES library consumer setting only `ApiBaseUri` would POST the token to `api.github.com/graphql`; **latent-only**: the shipped CLI never passes options (grep: sole construction uses defaults), which equally means **GHES is not actually configurable from the CLI at all** · nits: dead GraphQL `defaultBranchRef.oid` + extra REST round-trip; `SanitizeFileName` misses reserved device names; unescaped `|`-joined PR fingerprint; benign double dispose; `secret-tool` stderr never drained; `TokenValidationResult.Scopes` never populated.
+
+**Core/Validation** · A18 `--created-with-url` reaches local manifests but not the submission request (provenance drift) (`MutationCommandModule.cs:755-761` vs `:1057`) · A19 revalidation result hands back a `FilePath` into a deleted scratch dir; `finally` delete can mask the real error (`PreflightModels.cs:136-160`) · A19b ARP-2 overlap falls back to ordinal string compare for unparseable versions · A19c `$schema` header accepted on any line, not just line 1 · A19d empty non-Markets sequences (`Tags: []`) silently dropped on re-serialization (pre-existing on main) · A19e LF-vs-CRLF spec tension (documented deviation) · A19f two `"1.12.0"` literals without a sync test · nits: VLD3006/3010 message overstates scope; plan.md:120 stale.
+
+**CLI** · A20 dead options `--allow-structural-rewrite`/`--allow-stable-url-change` on `new` (registered, never read — `MutationCommandModule.cs:116-130` vs `:1478-1480`) · A20b `--edit`+`--replace` combo rejected only after the full plan ran · A20c `remove-dead-versions` multi-version arity always yields "not removable" with zero inspections (policy never enabled) · A20d fish completions ship without descriptions (space-rejecting `Sanitize` makes the `-d` branch dead) · A20e `config set/unset` silently drops comments/unknown keys (undocumented) · A20f `show`/`list-versions` require a token though the repo is public (parity gap vs komac) · A20g `--open-pr` uses `UseShellExecute` (no xdg-open path on Linux); Ctrl+C in that window exits 0 · A20h JSON enum-casing drift between command families (kebab vs camel) · nits: `submit` error names nonexistent `--path`; duplicate `--rule-mode` surfaces raw framework message; editor temp-dir delete can throw in `finally`; duplicated missing-arg error line.
+
+**Testing/E2E/CI/docs** · A21 actions pinned to mutable tags; third-party release action with `contents: write` · A22 ci.yml missing `permissions:`; release.yml workflow-wide `contents: write` · A23 recordings (`http-recordings.json`) exercise a REST shape (`releases/tags/{tag}`) production never calls, and `RecordedHttpMessageHandler` has no consumer outside its own self-test — replay infrastructure is effectively dead · A24 `AssertSafe`'s secret parameter is vacuous (no test injects the default value) · A25 tautological `FoundationSmokeTests.Production_assemblies_load` · A26 duplicated fixture-parsing helpers with silent semantic divergence + undocumented super-productivity null-arch carve-out (E2E vs mapping tests) · A27 hardcoded `C:\`-style paths in cross-platform in-memory tests (benign) · A28 docs/architecture.md says "Nine production projects", table has 8 + test-infra · A29 plan.md P8 "analyzer corpus in CI" silently substituted by synthetic fixtures.
+
+**Skipped / not audited (explicit):** unchanged-on-main analyzer internals (MSI/NSIS string readers, CabinetReader beyond diffs), legacy rule bodies WM0001–WM0101/0103, `InstallerFieldAccessors.cs`, ~50 of 66 `RuleRuntimeTests` bodies (names+targeted reads only), tail halves of the largest Analysis/GitHub test files (assertion-skimmed), `DESIGN.md`/`PRODUCT.md` (untracked files, not part of the branch), live-network E2E (requires opt-in secrets by design), and NuGet-latest verification beyond the six main packages. Subagent coverage notes are preserved verbatim in their unit reports.
