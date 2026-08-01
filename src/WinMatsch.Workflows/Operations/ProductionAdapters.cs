@@ -26,7 +26,8 @@ public sealed class GitHubWorkflowReleaseSource(
     IWorkflowReleaseSource,
     IWorkflowReleaseMetadataSource
 {
-    private const int MaximumTopics = 20;
+    private const int MaximumTopics = 16;
+    private const int MaximumReleaseNotesLength = 10_000;
     private readonly IGitHubRepositoryClient _client = client ?? throw new ArgumentNullException(nameof(client));
     private RepositoryReleaseMetadata? _cachedMetadata;
 
@@ -104,10 +105,16 @@ public sealed class GitHubWorkflowReleaseSource(
             repositoryMetadataSource,
             cancellationToken).ConfigureAwait(false);
         var provenance = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
-        string? releaseNotes = string.IsNullOrWhiteSpace(release?.Body) ? null : release.Body.Trim();
+        string? rawReleaseNotes = string.IsNullOrWhiteSpace(release?.Body)
+            ? null
+            : release.Body.Trim();
+        bool releaseNotesTruncated = rawReleaseNotes?.Length > MaximumReleaseNotesLength;
+        string? releaseNotes = TruncateReleaseNotes(rawReleaseNotes);
         if (releaseNotes is not null)
         {
-            provenance[nameof(PackageLocaleMetadata.ReleaseNotes)] = $"github-release:{release!.Id}:body";
+            provenance[nameof(PackageLocaleMetadata.ReleaseNotes)] = releaseNotesTruncated
+                ? $"github-release:{release!.Id}:body:truncated={MaximumReleaseNotesLength}"
+                : $"github-release:{release!.Id}:body";
         }
 
         string? releaseNotesUrl = release?.WebUri.AbsoluteUri;
@@ -215,6 +222,24 @@ public sealed class GitHubWorkflowReleaseSource(
             && topic.Length <= 40
             && topic.All(static character =>
                 char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.');
+
+    private static string? TruncateReleaseNotes(string? value)
+    {
+        if (value is null || value.Length <= MaximumReleaseNotesLength)
+        {
+            return value;
+        }
+
+        int length = MaximumReleaseNotesLength;
+        if (char.IsHighSurrogate(value[length - 1])
+            && length < value.Length
+            && char.IsLowSurrogate(value[length]))
+        {
+            length--;
+        }
+
+        return value[..length].TrimEnd();
+    }
 }
 
 /// <summary>Creates release assets from explicit installer URLs without network discovery.</summary>
@@ -289,21 +314,46 @@ public sealed class InstallerWorkflowArtifactProcessor(
         InstallerVersionTrustDecision versionTrust = InstallerVersionTrustEvaluator.Evaluate(
             analysis,
             _versionTrustPolicy);
+        InstallerVersionTrustDecision fileVersionTrust =
+            InstallerVersionTrustEvaluator.EvaluateFileVersion(
+                analysis,
+                _versionTrustPolicy);
         AssetAnalysisEvidence analysisEvidence = AssetAnalysisEvidence.FromAnalysis(
             analysis,
             content,
             dependencies,
-            isProductVersionTrustworthy: versionTrust.IsTrustworthy,
+            isProductVersionTrustworthy: versionTrust.IsTrustworthy
+                && versionTrust.UsesProductVersion,
             productVersionEvidenceKind: versionTrust.Kind,
-            productVersionConfidence: versionTrust.Confidence);
-        if (versionTrust.Diagnostic is not null)
+            productVersionConfidence: versionTrust.UsesProductVersion
+                ? versionTrust.Confidence
+                : EvidenceConfidence.Low,
+            isFileVersionTrustworthy: fileVersionTrust.IsTrustworthy,
+            fileVersionEvidenceKind: fileVersionTrust.Kind,
+            fileVersionConfidence: fileVersionTrust.Confidence);
+        string[] versionDiagnostics =
+        [
+            .. new[]
+                {
+                    versionTrust.Diagnostic,
+                    !versionTrust.IsTrustworthy
+                        || !versionTrust.UsesProductVersion
+                        || !string.IsNullOrWhiteSpace(analysis.FileVersion)
+                        ? fileVersionTrust.Diagnostic
+                        : null,
+                }
+                .Where(static diagnostic => diagnostic is not null)
+                .Select(static diagnostic => diagnostic!)
+                .Distinct(StringComparer.Ordinal),
+        ];
+        if (versionDiagnostics.Length > 0)
         {
             analysisEvidence = analysisEvidence with
             {
                 Diagnostics =
                 [
                     .. analysisEvidence.Diagnostics,
-                    versionTrust.Diagnostic,
+                    .. versionDiagnostics,
                 ],
             };
         }
@@ -857,7 +907,10 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
     }
 }
 
-public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
+public sealed class AtomicWorkflowFileTransaction :
+    IWorkflowFileTransaction,
+    IWorkflowFileTransactionRecovery,
+    IWorkflowCoordinatedRecovery
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _locks =
         new(StringComparer.OrdinalIgnoreCase);
@@ -875,6 +928,60 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
     {
         _originalSubmissions = originalSubmissions;
         _fileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
+    }
+
+    public async Task RecoverAsync(
+        string outputDirectory,
+        string operationLockKey,
+        CancellationToken cancellationToken)
+    {
+        using IDisposable lease = await RecoverAndHoldAsync(
+            outputDirectory,
+            operationLockKey,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IDisposable> RecoverAndHoldAsync(
+        string outputDirectory,
+        string operationLockKey,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationLockKey);
+        string root = Path.GetFullPath(outputDirectory);
+        if (!Directory.Exists(root))
+        {
+            return EmptyRecoveryLease.Instance;
+        }
+
+        string rootIdentity = DirectoryPin.GetIdentity(root);
+        string normalizedLockKey = $"{rootIdentity}\u001f{operationLockKey.ToUpperInvariant()}";
+        SemaphoreSlim gate = _locks.GetOrAdd(normalizedLockKey, static _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+        {
+            throw new WorkflowOperationException(
+                WorkflowResultCode.Conflict,
+                "Another local operation is already running for this package.");
+        }
+
+        RepositoryOperationLock? processLock = null;
+        try
+        {
+            SecurePath.ValidateOutputRoot(root);
+            processLock = RepositoryOperationLock.Acquire(root, operationLockKey);
+            await RecoverPendingUnderLockAsync(
+                root,
+                operationLockKey,
+                _originalSubmissions,
+                cancellationToken).ConfigureAwait(false);
+            return new RecoveryLease(processLock, gate);
+        }
+        catch
+        {
+            processLock?.Dispose();
+            gate.Release();
+            throw;
+        }
     }
 
     public async Task ApplyAsync(
@@ -1641,6 +1748,39 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         public bool HadDestination { get; set; }
         public bool BackupCreated { get; set; }
         public bool DestinationInstalled { get; set; }
+    }
+
+    private sealed class RecoveryLease(
+        IDisposable processLock,
+        SemaphoreSlim gate) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                processLock.Dispose();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+    }
+
+    private sealed class EmptyRecoveryLease : IDisposable
+    {
+        public static EmptyRecoveryLease Instance { get; } = new();
+
+        public void Dispose()
+        {
+        }
     }
 
     private sealed class RepositoryOperationLock : IDisposable

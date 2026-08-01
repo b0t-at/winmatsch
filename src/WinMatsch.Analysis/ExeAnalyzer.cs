@@ -41,17 +41,28 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
     {
         ArgumentNullException.ThrowIfNull(stream);
         using var peFile = new PeFile(stream);
+        VersionInfo version = peFile.VersionInfo;
         foreach (IExeFormatProbe probe in _probes)
         {
             stream.Position = 0;
             InstallerAnalysis? probed = probe.Probe(peFile, stream);
             if (probed is not null)
             {
-                return probed;
+                return new InstallerAnalysis
+                {
+                    Format = probed.Format,
+                    Installers = probed.Installers,
+                    ProductName = probed.ProductName,
+                    Publisher = probed.Publisher,
+                    ProductVersion = probed.ProductVersion,
+                    FileVersion = probed.FileVersion ?? version.FileVersion,
+                    Copyright = probed.Copyright,
+                    Zip = probed.Zip,
+                    Diagnostics = probed.Diagnostics,
+                };
             }
         }
 
-        VersionInfo version = peFile.VersionInfo;
         bool isInstaller = ContainsInstallerKeyword(version.OriginalFilename)
             || ContainsInstallerKeyword(version.FileDescription);
 
@@ -62,6 +73,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
             ProductName = version.ProductName,
             Publisher = version.CompanyName,
             ProductVersion = version.ProductVersion,
+            FileVersion = version.FileVersion,
             Copyright = version.LegalCopyright,
         };
     }

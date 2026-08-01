@@ -87,6 +87,11 @@ public sealed class RulePipeline
     public IReadOnlyList<RuleFinding> Run(ManifestContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
+        if (context.GeneratedInput is null
+            && ManifestSnapshot.TryClone(context.Manifests, out PackageManifests? generatedInput))
+        {
+            context.GeneratedInput = generatedInput;
+        }
 
         _overridePacks.TryGet(context.Manifests.Installer.PackageIdentifier, out OverridePack? packageOverride);
 
@@ -209,6 +214,9 @@ public sealed class RulePipeline
             OriginalBotSubmission = context.OriginalBotSubmission is null
                 ? null
                 : ManifestSnapshot.Clone(context.OriginalBotSubmission),
+            GeneratedInput = context.GeneratedInput is null
+                ? null
+                : ManifestSnapshot.Clone(context.GeneratedInput),
             Evidence = context.Evidence,
             Options = context.Options,
         };

@@ -47,6 +47,10 @@ public static class ConfigurationYamlParser
                 },
                 "rules" => ParseRules(layer, valueNode),
                 "cache" => ParseCache(layer, valueNode),
+                "overrideStore" => layer with
+                {
+                    OverrideStoreDirectory = GetScalar(valueNode, "overrideStore"),
+                },
                 "freshnessDelay" => layer with
                 {
                     FreshnessDelay = ConfigurationValues.ParseFreshnessDelay(GetScalar(valueNode, "freshnessDelay")),

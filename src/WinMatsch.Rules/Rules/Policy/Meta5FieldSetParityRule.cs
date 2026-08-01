@@ -68,6 +68,28 @@ public sealed class Meta5FieldSetParityRule : IRule
             return;
         }
 
+        if (manifest.InstallerSwitches is null
+            && previous.Installer.InstallerSwitches is not null
+            && !Skip(context, droppedFields, "Installer.InstallerSwitches"))
+        {
+            context.AddFinding(
+                this,
+                RuleSeverity.Warning,
+                "The previous version declared root InstallerSwitches but the new manifest has none; re-detect the switches or add an explicit root drop override.",
+                "Installer.InstallerSwitches");
+        }
+
+        if (manifest.Dependencies is null
+            && previous.Installer.Dependencies is not null
+            && !Skip(context, droppedFields, "Installer.Dependencies"))
+        {
+            context.AddFinding(
+                this,
+                RuleSeverity.Warning,
+                "The previous version declared root Dependencies but the new manifest has none; verify the payload or add an explicit root drop override.",
+                "Installer.Dependencies");
+        }
+
         for (int i = 0; i < installers.Count; i++)
         {
             Installer installer = installers[i];
@@ -100,18 +122,26 @@ public sealed class Meta5FieldSetParityRule : IRule
                 continue;
             }
 
-            if (EffectiveInstallerValues.GetInstallerSwitches(manifest, installer) is null
-                && EffectiveInstallerValues.GetInstallerSwitches(previous.Installer, match) is not null
-                && !Skip(context, droppedFields, "InstallerSwitches"))
+            if (installer.InstallerSwitches is null
+                && match.InstallerSwitches is not null
+                && (manifest.InstallerSwitches is null
+                    || !ManifestValues.SwitchesEqual(
+                        manifest.InstallerSwitches,
+                        match.InstallerSwitches))
+                && !Skip(context, droppedFields, "Installers[*].InstallerSwitches"))
             {
                 context.AddFinding(this, RuleSeverity.Warning,
                     "The previous version declared InstallerSwitches for this entry but the new manifest has none; re-detect the switches or add an explicit drop override.",
                     $"Installers[{i}]");
             }
 
-            if (EffectiveInstallerValues.GetDependencies(manifest, installer) is null
-                && EffectiveInstallerValues.GetDependencies(previous.Installer, match) is not null
-                && !Skip(context, droppedFields, "Dependencies"))
+            if (installer.Dependencies is null
+                && match.Dependencies is not null
+                && (manifest.Dependencies is null
+                    || !ManifestValues.DependenciesEqual(
+                        manifest.Dependencies,
+                        match.Dependencies))
+                && !Skip(context, droppedFields, "Installers[*].Dependencies"))
             {
                 context.AddFinding(this, RuleSeverity.Warning,
                     "The previous version declared Dependencies for this entry but the new manifest has none; verify the payload or add an explicit drop override.",
@@ -137,20 +167,34 @@ public sealed class Meta5FieldSetParityRule : IRule
             }
         }
 
-        bool anySwitches = candidates.Any(c => EffectiveInstallerValues.GetInstallerSwitches(previousManifest, c) is not null);
+        bool anySwitches = candidates.Any(static candidate => candidate.InstallerSwitches is not null);
+        bool switchesRepresentedAtRoot = manifest.InstallerSwitches is not null
+            && candidates
+                .Where(static candidate => candidate.InstallerSwitches is not null)
+                .All(candidate => ManifestValues.SwitchesEqual(
+                    manifest.InstallerSwitches,
+                    candidate.InstallerSwitches!));
         if (anySwitches
-            && EffectiveInstallerValues.GetInstallerSwitches(manifest, installer) is null
-            && !Skip(context, droppedFields, "InstallerSwitches"))
+            && installer.InstallerSwitches is null
+            && !switchesRepresentedAtRoot
+            && !Skip(context, droppedFields, "Installers[*].InstallerSwitches"))
         {
             context.AddFinding(this, RuleSeverity.Warning,
                 "The previous version's same-architecture entries declared InstallerSwitches but this entry has none and the layout changed too much for a unique match; review the switches or add an explicit drop override.",
                 $"Installers[{index}]");
         }
 
-        bool anyDependencies = candidates.Any(c => EffectiveInstallerValues.GetDependencies(previousManifest, c) is not null);
+        bool anyDependencies = candidates.Any(static candidate => candidate.Dependencies is not null);
+        bool dependenciesRepresentedAtRoot = manifest.Dependencies is not null
+            && candidates
+                .Where(static candidate => candidate.Dependencies is not null)
+                .All(candidate => ManifestValues.DependenciesEqual(
+                    manifest.Dependencies,
+                    candidate.Dependencies!));
         if (anyDependencies
-            && EffectiveInstallerValues.GetDependencies(manifest, installer) is null
-            && !Skip(context, droppedFields, "Dependencies"))
+            && installer.Dependencies is null
+            && !dependenciesRepresentedAtRoot
+            && !Skip(context, droppedFields, "Installers[*].Dependencies"))
         {
             context.AddFinding(this, RuleSeverity.Warning,
                 "The previous version's same-architecture entries declared Dependencies but this entry has none and the layout changed too much for a unique match; review the dependencies or add an explicit drop override.",
@@ -213,14 +257,18 @@ public sealed class Meta5FieldSetParityRule : IRule
         CarryUrl(context, droppedFields, previousLocale.CopyrightUrl, () => locale.CopyrightUrl, v => locale.CopyrightUrl = v, nameof(locale.CopyrightUrl), manifestPath, previousVersion);
         CarryUrl(context, droppedFields, previousLocale.PurchaseUrl, () => locale.PurchaseUrl, v => locale.PurchaseUrl = v, nameof(locale.PurchaseUrl), manifestPath, previousVersion);
 
-        if (locale.Tags is null && previousLocale.Tags is { Count: > 0 } tags && !Skip(context, droppedFields, nameof(locale.Tags)))
+        if (locale.Tags is null
+            && previousLocale.Tags is { Count: > 0 } tags
+            && !Skip(context, droppedFields, $"DefaultLocale.{nameof(locale.Tags)}"))
         {
             locale.Tags = ManifestValues.CloneStringList(tags);
             AddListEvidence(context, manifestPath, nameof(locale.Tags), tags.Count, previousVersion);
             RecordCarry(context, $"DefaultLocale.{nameof(locale.Tags)}");
         }
 
-        if (locale.Documentations is null && previousLocale.Documentations is { Count: > 0 } docs && !Skip(context, droppedFields, nameof(locale.Documentations)))
+        if (locale.Documentations is null
+            && previousLocale.Documentations is { Count: > 0 } docs
+            && !Skip(context, droppedFields, $"DefaultLocale.{nameof(locale.Documentations)}"))
         {
             locale.Documentations = ManifestValues.CloneList(docs, ManifestValues.CloneDocumentation);
             AddEvidence(context, manifestPath, nameof(locale.Documentations), previousVersion);
@@ -244,7 +292,7 @@ public sealed class Meta5FieldSetParityRule : IRule
         string previousVersion = previousManifest.PackageVersion?.Value ?? "previous";
 
         if (manifest.MinimumOSVersion is null && previousManifest.MinimumOSVersion is { } minimumOS
-            && !Skip(context, droppedFields, nameof(manifest.MinimumOSVersion)))
+            && !Skip(context, droppedFields, $"Installer.{nameof(manifest.MinimumOSVersion)}"))
         {
             manifest.MinimumOSVersion = minimumOS;
             AddEvidence(context, manifestPath, nameof(manifest.MinimumOSVersion), previousVersion);
@@ -252,7 +300,7 @@ public sealed class Meta5FieldSetParityRule : IRule
         }
 
         if (manifest.InstallModes is null && previousManifest.InstallModes is { Count: > 0 } modes
-            && !Skip(context, droppedFields, nameof(manifest.InstallModes)))
+            && !Skip(context, droppedFields, $"Installer.{nameof(manifest.InstallModes)}"))
         {
             manifest.InstallModes = [.. modes];
             AddListEvidence(context, manifestPath, nameof(manifest.InstallModes), modes.Count, previousVersion);
@@ -260,7 +308,7 @@ public sealed class Meta5FieldSetParityRule : IRule
         }
 
         if (!HasAnyReleaseDate(manifest) && HasAnyReleaseDate(previousManifest)
-            && !Skip(context, droppedFields, nameof(manifest.ReleaseDate)))
+            && !Skip(context, droppedFields, $"Installer.{nameof(manifest.ReleaseDate)}"))
         {
             if (_evidence.ReleaseDate is { } releaseDate)
             {
@@ -295,7 +343,9 @@ public sealed class Meta5FieldSetParityRule : IRule
         string manifestPath,
         string previousVersion)
     {
-        if (previousValue is null || get() is not null || Skip(context, droppedFields, fieldName))
+        if (previousValue is null
+            || get() is not null
+            || Skip(context, droppedFields, $"DefaultLocale.{fieldName}"))
         {
             return;
         }
@@ -315,7 +365,9 @@ public sealed class Meta5FieldSetParityRule : IRule
         string manifestPath,
         string previousVersion)
     {
-        if (previousValue is null || get() is not null || Skip(context, droppedFields, fieldName))
+        if (previousValue is null
+            || get() is not null
+            || Skip(context, droppedFields, $"DefaultLocale.{fieldName}"))
         {
             return;
         }
@@ -358,14 +410,17 @@ public sealed class Meta5FieldSetParityRule : IRule
         }
     }
 
-    private bool Skip(ManifestContext context, ImmutableStringSet droppedFields, string fieldName)
+    private bool Skip(
+        ManifestContext context,
+        ImmutableStringSet droppedFields,
+        string canonicalSelector)
     {
-        if (!droppedFields.Contains(fieldName))
+        if (!droppedFields.Contains(canonicalSelector))
         {
             return false;
         }
 
-        context.AddTrace(this, $"{fieldName}: drop explicitly authorized by the package override's DroppedFields.");
+        context.AddTrace(this, $"{canonicalSelector}: drop explicitly authorized by the package override's DroppedFields.");
         return true;
     }
 
@@ -377,8 +432,14 @@ public sealed class Meta5FieldSetParityRule : IRule
         private readonly HashSet<string> _values = new(values, StringComparer.OrdinalIgnoreCase);
 
         public bool Contains(string value)
-            => _values.Contains(value)
-                || _values.Any(selector =>
-                    selector.EndsWith($".{value}", StringComparison.OrdinalIgnoreCase));
+        {
+            if (_values.Contains(value))
+            {
+                return true;
+            }
+
+            int separator = value.LastIndexOf('.');
+            return separator >= 0 && _values.Contains(value[(separator + 1)..]);
+        }
     }
 }

@@ -187,6 +187,7 @@ public class ExeAnalyzerTests
             CompanyName: "Foo Corp",
             LegalCopyright: "© Foo Corp",
             ProductVersion: "1.2.3",
+            FileVersion: "1.2.3.4",
             FileDescription: "Foo Setup"));
 
         InstallerAnalysis analysis = _analyzer.Analyze(stream, "foo.exe");
@@ -194,6 +195,7 @@ public class ExeAnalyzerTests
         Assert.Equal("Foo", analysis.ProductName);
         Assert.Equal("Foo Corp", analysis.Publisher);
         Assert.Equal("1.2.3", analysis.ProductVersion);
+        Assert.Equal("1.2.3.4", analysis.FileVersion);
         Assert.Equal("© Foo Corp", analysis.Copyright);
     }
 

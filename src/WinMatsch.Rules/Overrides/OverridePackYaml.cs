@@ -132,8 +132,33 @@ public static class OverridePackYaml
         string temporaryPath = Path.Combine(directory!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
         try
         {
-            File.WriteAllText(temporaryPath, yaml, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-            File.Move(temporaryPath, path, overwrite: true);
+            using (FileStream stream = new(
+                       temporaryPath,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None,
+                       bufferSize: 4096,
+                       FileOptions.WriteThrough))
+            using (var writer = new StreamWriter(
+                       stream,
+                       new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                       bufferSize: 4096,
+                       leaveOpen: true))
+            {
+                writer.Write(yaml);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
+            DurableFileSystem.ReplaceFile(temporaryPath, path);
+            using FileStream committed = new(
+                path,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.Read,
+                bufferSize: 1,
+                FileOptions.WriteThrough);
+            committed.Flush(flushToDisk: true);
         }
         finally
         {
@@ -387,12 +412,13 @@ public static class OverridePackYaml
                 && PackageVersion.TryCreate(normalized["literal:".Length..].Trim(), out _);
             bool known = normalized.ToLowerInvariant() is
                 "installer" or "installer.productversion" or "product-version"
+                or "installer.fileversion" or "file-version"
                 or "release" or "release.tag" or "release-tag" or "tag"
                 or "url" or "url.token" or "url-token";
             if (!literal && !known)
             {
                 throw new FormatException(
-                    $"versionSource '{versionSource}' is unsupported; use installer.productVersion, release-tag, url-token, or literal:<version>.");
+                    $"versionSource '{versionSource}' is unsupported; use installer.productVersion, installer.fileVersion, release-tag, url-token, or literal:<version>.");
             }
         }
 

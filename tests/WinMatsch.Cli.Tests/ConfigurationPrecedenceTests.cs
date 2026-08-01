@@ -21,13 +21,15 @@ public sealed class ConfigurationPrecedenceTests
             concurrentDownloads: 7
             """;
 
-        CliRunResult result = await harness.RunAsync(["probe", "--repo", "cli/repo"]);
+        CliRunResult result = await harness.RunAsync(
+            ["probe", "--repo", "cli/repo", "--override-store", "cli-overrides"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.NotNull(probe.LastContext);
         WinMatschConfiguration configuration = probe.LastContext.Configuration;
         // Command layer wins over environment and file.
         Assert.Equal(RepositoryCoordinates.Parse("cli/repo"), configuration.Repository);
+        Assert.Equal("cli-overrides", configuration.OverrideStoreDirectory);
         // Environment wins where the command is silent.
         Assert.Equal(OutputFormat.Json, configuration.OutputFormat);
         // File wins where command and environment are silent.

@@ -141,6 +141,7 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
                 inner.ProductName,
                 inner.Publisher,
                 inner.ProductVersion,
+                inner.FileVersion,
                 inner.Copyright,
                 inner.Diagnostics));
         }
@@ -209,6 +210,7 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
             ProductName = CommonValue(resolved.Select(static candidate => candidate.ProductName)),
             Publisher = CommonValue(resolved.Select(static candidate => candidate.Publisher)),
             ProductVersion = CommonValue(resolved.Select(static candidate => candidate.ProductVersion)),
+            FileVersion = CommonValue(resolved.Select(static candidate => candidate.FileVersion)),
             Copyright = CommonValue(resolved.Select(static candidate => candidate.Copyright)),
             Zip = new ZipContents(candidatePaths),
             Diagnostics = diagnostics,
@@ -425,6 +427,7 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         string? ProductName,
         string? Publisher,
         string? ProductVersion,
+        string? FileVersion,
         string? Copyright,
         IReadOnlyList<AnalysisDiagnostic> Diagnostics)
     {

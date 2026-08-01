@@ -60,11 +60,17 @@ serves different bytes, winmatsch refuses to proceed silently:
 previously merged manifest and the current run would revert that edit. The
 run stops on purpose. Options:
 
-- accept the human value permanently: encode it in an
-  [override pack](rules.md#override-packs) (`preservedFields`, `quirks`,
-  `policies`), or
+- approve the fingerprint-bound review interactively to stage a learned
+  [override pack](rules.md#override-packs); it becomes active only after the
+  manifest and provenance transaction commits, and a retained recovery journal
+  finishes activation on the next apply run, or
+- encode the decision manually in an override pack (`preservedFields`,
+  `quirks`, `policies`), or
 - change the responsible rule's mode (`--rule-mode RULE_ID=log-only`), or
 - decide the regenerated value is right and re-run with the review resolved.
+
+Non-interactive and JSON invocations never auto-approve a review. Use
+`--override-store` (or `overrideStore`) to relocate the learned-pack store.
 
 ## Cache problems
 

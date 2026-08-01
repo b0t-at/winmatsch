@@ -9,6 +9,7 @@ public enum GitHubApiErrorKind
     Conflict,
     GraphQlUnavailable,
     ForkNotReady,
+    RateLimited,
 }
 
 /// <summary>An unsuccessful GitHub REST or GraphQL operation.</summary>
@@ -34,11 +35,15 @@ public sealed class GitHubApiException : HttpRequestException
         string? requestId,
         IReadOnlyList<string>? errors = null,
         Exception? inner = null,
-        GitHubApiErrorKind errorKind = GitHubApiErrorKind.Unknown)
+        GitHubApiErrorKind errorKind = GitHubApiErrorKind.Unknown,
+        RateLimitInfo? rateLimit = null,
+        TimeSpan? retryAfter = null)
         : base(message, inner, statusCode)
     {
         RequestId = requestId;
         Errors = errors ?? [];
+        RateLimit = rateLimit;
+        RetryAfter = retryAfter;
         ErrorKind = errorKind != GitHubApiErrorKind.Unknown
             ? errorKind
             : statusCode switch
@@ -46,6 +51,7 @@ public sealed class GitHubApiException : HttpRequestException
                 HttpStatusCode.NotFound => GitHubApiErrorKind.ResourceNotFound,
                 HttpStatusCode.Conflict or HttpStatusCode.UnprocessableEntity
                     => GitHubApiErrorKind.Conflict,
+                HttpStatusCode.TooManyRequests => GitHubApiErrorKind.RateLimited,
                 _ => GitHubApiErrorKind.Unknown,
             };
     }
@@ -55,6 +61,10 @@ public sealed class GitHubApiException : HttpRequestException
     public IReadOnlyList<string> Errors { get; } = [];
 
     public GitHubApiErrorKind ErrorKind { get; }
+
+    public RateLimitInfo? RateLimit { get; }
+
+    public TimeSpan? RetryAfter { get; }
 
     public bool IsConflict => ErrorKind == GitHubApiErrorKind.Conflict;
 }

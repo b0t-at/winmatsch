@@ -20,6 +20,7 @@ public class ConfigurationYamlParserTests
             cache:
               enabled: false
               directory: C:/cache
+            overrideStore: C:/overrides
             freshnessDelay: 2.00:00:00
             output:
               format: json
@@ -35,6 +36,7 @@ public class ConfigurationYamlParserTests
         Assert.Equal(["slow-check"], layer.DisabledRules);
         Assert.False(layer.CacheEnabled);
         Assert.Equal("C:/cache", layer.CacheDirectory);
+        Assert.Equal("C:/overrides", layer.OverrideStoreDirectory);
         Assert.Equal(TimeSpan.FromDays(2), layer.FreshnessDelay);
         Assert.Equal(OutputFormat.Json, layer.OutputFormat);
         Assert.Equal("reports", layer.OutputDirectory);

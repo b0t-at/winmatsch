@@ -143,8 +143,10 @@ public sealed class AssetMappingPlannerTests
             UrlOverride.Parse("https://example.test/tool.exe|x86|user").Scope);
         Assert.False(UrlOverride.TryParse("https://example.test/tool.exe|x64|invalid|2.0", out _, out _));
         Assert.False(UrlOverride.TryParse("https://example.test/tool.exe||user", out _, out _));
-        Assert.False(UrlOverride.TryParse("https://example.test/tool.exe|x64||2.0", out _, out _));
-        Assert.False(UrlOverride.TryParse("https://example.test/tool.exe|x64|user|", out _, out _));
+        UrlOverride emptyScope = UrlOverride.Parse("https://example.test/tool.exe|x64||2.0");
+        Assert.Null(emptyScope.Scope);
+        Assert.Equal("2.0", emptyScope.DisplayVersion);
+        Assert.Null(UrlOverride.Parse("https://example.test/tool.exe|x64|user|").DisplayVersion);
     }
 
     [Fact]

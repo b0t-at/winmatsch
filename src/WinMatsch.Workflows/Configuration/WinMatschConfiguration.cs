@@ -18,6 +18,9 @@ public sealed record WinMatschConfiguration
     /// <summary>Null selects the platform default cache location.</summary>
     public string? CacheDirectory { get; init; }
 
+    /// <summary>Null selects the platform default learned-override store.</summary>
+    public string? OverrideStoreDirectory { get; init; }
+
     public required TimeSpan FreshnessDelay { get; init; }
 
     public required OutputFormat OutputFormat { get; init; }

@@ -23,7 +23,7 @@ falling back to keyword heuristics.
 | Inno Setup (`.exe`) | `InnoSetup` | Inno structures plus PE version info. |
 | Advanced Installer (`.exe`) | `AdvancedInstaller` | 7-Zip SFX-wrapped Advanced Installer payload metadata. |
 | Squirrel / Clowd.Squirrel (`.exe`) | `Squirrel` | Squirrel package metadata. |
-| Generic installer (`.exe`) | `GenericInstallerExe` | PE version info (product name, company, product version, copyright, original filename, description), architecture, elevation requirement. Chosen when installer keywords (`installer`, `setup`, 7z SFX markers) match but no specific format probe does. |
+| Generic installer (`.exe`) | `GenericInstallerExe` | PE version info (product name, company, product version, file version, copyright, original filename, description), architecture, elevation requirement. Chosen when installer keywords (`installer`, `setup`, 7z SFX markers) match but no specific format probe does. |
 | Portable executable (`.exe`) | `PortableExe` | Same PE metadata; classified as portable when no installer signals are present. |
 
 Every extracted value is attached to the manifest as *evidence* with a source
@@ -31,6 +31,11 @@ description; rule changes backed by installer analysis carry `high`
 confidence, values derived from a raw download alone carry `medium`
 confidence, and low-confidence situations surface as questions or human
 escalation rather than silent guesses.
+
+For generic/portable EXEs and a ZIP with exactly one analyzed nested payload,
+version resolution considers a trustworthy PE `ProductVersion` first and then
+the separately captured `FileVersion`. Placeholder, internal, all-zero, and
+mixed product/build text is rejected rather than normalized into a version.
 
 ## Manual-analysis behavior
 

@@ -184,13 +184,20 @@ Before overwriting anything, update workflows perform a three-way comparison:
 
 When a human changed a value and the new run would revert it, the run is
 flagged `requiresReview` and each conflict is reported with the bot value,
-the human value, and the newly generated value. The tool never silently reverts a human correction. Interactive approval in
-Apply mode writes a separate per-user learned pack with optimistic content
-locking, backup recovery, and before/after/source audit hashes; Plan mode never
-writes. Later runs compose that learned layer beneath explicit `--override-pack`
-files. Unsupported or ambiguous corrections remain review-blocking instead of
-being learned with false confidence. Checked-in built-in packs are never
-modified at runtime.
+the human value, and the newly generated value. The tool never silently reverts
+a human correction. Interactive approval is bound to both the correction
+fingerprints and a digest of the reviewed package/version, raw before/after
+documents, file changes, installer artifacts, existing-version evidence, and
+release provenance. Apply mode writes a separate per-user learned pack with
+optimistic content locking, backup recovery, and before/after/source audit
+hashes; Plan mode never writes. The approved human value is applied to the
+current manifest transaction, while the pack remains inactive until manifest
+and provenance commit. A durable journal completes or discards activation
+idempotently after crashes. Later runs apply a learned value only while the
+generator still emits the fingerprinted bot value, and compose that learned
+layer beneath explicit `--override-pack` files. Unsupported, stale, or
+ambiguous corrections remain review-visible instead of being learned with
+false confidence. Checked-in built-in packs are never modified at runtime.
 
 ## Security and redaction
 

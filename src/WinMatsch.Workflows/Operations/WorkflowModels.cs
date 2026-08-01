@@ -250,6 +250,8 @@ public abstract record WorkflowOperationRequest
     public bool ApproveReview { get; init; }
 
     public ImmutableArray<string> ApprovedReviewFingerprints { get; init; } = [];
+
+    public string? ApprovedPlanFingerprint { get; init; }
 }
 
 public sealed record PackageLocaleMetadata

@@ -47,6 +47,7 @@ internal static partial class MutationOutput
         WriteQuestions(writer, plan);
         WriteRules(writer, plan);
         WriteValidation(writer, plan);
+        WriteAudit(writer, plan);
         WritePreview(writer, plan);
         if (remote is not null)
         {
@@ -109,6 +110,17 @@ internal static partial class MutationOutput
             writer.WriteLine(
                 $"  {ToKebab(finding.Severity)} {finding.Code}: {Redact(finding.Message)}"
                 + (finding.Path is null ? "" : $" [{Redact(finding.Path)}]"));
+        }
+    }
+
+    private static void WriteAudit(TextWriter writer, LocalOperationPlan plan)
+    {
+        writer.WriteLine("Audit:");
+        foreach (WorkflowAuditEntry entry in plan.Audit)
+        {
+            writer.WriteLine(
+                $"  {entry.Code}: {Redact(entry.Message)}"
+                + (entry.Provenance is null ? "" : $" [{Redact(entry.Provenance)}]"));
         }
     }
 
@@ -243,6 +255,7 @@ internal static partial class MutationOutput
         json.WriteEndArray();
         WriteRules(json, plan);
         WriteValidation(json, plan);
+        WriteAudit(json, plan);
         WritePreview(json, plan);
         json.WritePropertyName("remote");
         if (remote is null)
@@ -309,6 +322,21 @@ internal static partial class MutationOutput
             json.WriteString("severity", ToKebab(finding.Severity));
             json.WriteString("message", Redact(finding.Message));
             WriteNullable(json, "path", Redact(finding.Path));
+            json.WriteEndObject();
+        }
+
+        json.WriteEndArray();
+    }
+
+    private static void WriteAudit(Utf8JsonWriter json, LocalOperationPlan plan)
+    {
+        json.WriteStartArray("audit");
+        foreach (WorkflowAuditEntry entry in plan.Audit)
+        {
+            json.WriteStartObject();
+            json.WriteString("code", entry.Code);
+            json.WriteString("message", Redact(entry.Message));
+            WriteNullable(json, "provenance", Redact(entry.Provenance));
             json.WriteEndObject();
         }
 

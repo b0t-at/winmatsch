@@ -171,6 +171,59 @@ public sealed class GitHubReadOperationsTests
     }
 
     [Fact]
+    public async Task Repository_metadata_maps_license_topics_and_public_urls()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(request =>
+        {
+            Assert.Equal("https://github.invalid/api/repos/upstream/repo", request.Uri.AbsoluteUri);
+            return GitHubClientTestSupport.Json(
+                """
+                {
+                  "id": 100,
+                  "node_id": "R_rest",
+                  "full_name": "upstream/repo",
+                  "html_url": "https://github.com/upstream/repo",
+                  "fork": false,
+                  "private": false,
+                  "default_branch": "main",
+                  "owner": {
+                    "login": "upstream",
+                    "html_url": "https://github.com/upstream"
+                  },
+                  "license": { "spdx_id": "Apache-2.0" },
+                  "topics": ["windows", "weather", "windows"]
+                }
+                """,
+                headers:
+                [
+                    ("X-RateLimit-Limit", "5000"),
+                    ("X-RateLimit-Remaining", "4990"),
+                    ("X-RateLimit-Used", "10"),
+                    ("X-RateLimit-Reset", "1767229200"),
+                    ("X-RateLimit-Resource", "core"),
+                ]);
+        });
+        handler.Add(request =>
+        {
+            Assert.Equal("https://github.invalid/api/repos/upstream/repo/license", request.Uri.AbsoluteUri);
+            return GitHubClientTestSupport.Json(
+                """{"html_url":"https://github.com/upstream/repo/blob/main/LICENSE"}""");
+        });
+        GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
+
+        RepositoryMetadataInfo metadata = await client.GetRepositoryMetadataAsync(
+            _repository,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("Apache-2.0", metadata.LicenseSpdxId);
+        Assert.Equal("https://github.com/upstream/repo/blob/main/LICENSE", metadata.LicenseUri?.AbsoluteUri);
+        Assert.Equal(["weather", "windows"], metadata.Topics);
+        Assert.Equal("https://github.com/upstream", metadata.OwnerUri.AbsoluteUri);
+        Assert.Equal(4990, client.LastRateLimit?.Remaining);
+    }
+
+    [Fact]
     public async Task Manifest_read_uses_tree_and_content_endpoints()
     {
         var handler = new ScriptedHttpMessageHandler();
@@ -383,6 +436,64 @@ public sealed class GitHubReadOperationsTests
         Assert.Equal("Test", result.GetText());
         Assert.Equal(0, client.LastRateLimit?.Remaining);
         Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Exhausted_secondary_rate_limit_has_response_specific_error_kind()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            handler.Add(_ => GitHubClientTestSupport.Json(
+                """{"message":"secondary rate limit"}""",
+                HttpStatusCode.Forbidden,
+                ("Retry-After", "0")));
+        }
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler).GetContentAsync(
+                _repository,
+                "manifest.yaml",
+                "main",
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(GitHubApiErrorKind.RateLimited, exception.ErrorKind);
+        Assert.Equal(TimeSpan.Zero, exception.RetryAfter);
+        Assert.Null(exception.RateLimit);
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Http_date_retry_after_is_preserved_as_response_cooldown()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        string retryAt = DateTimeOffset.UtcNow.AddMinutes(5).ToString("R");
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            handler.Add(_ => GitHubClientTestSupport.Json(
+                """{"message":"secondary rate limit"}""",
+                HttpStatusCode.Forbidden,
+                ("Retry-After", retryAt)));
+        }
+
+        var options = new GitHubClientOptions
+        {
+            ApiBaseUri = new Uri("https://github.invalid/api/"),
+            GraphQlUri = new Uri("https://github.invalid/graphql"),
+            UserAgent = "winmatsch-tests",
+            RetryBaseDelay = TimeSpan.Zero,
+            MaxRetryDelay = TimeSpan.Zero,
+            MaxTransientRetries = 2,
+        };
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler, options).GetContentAsync(
+                _repository,
+                "manifest.yaml",
+                "main",
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(GitHubApiErrorKind.RateLimited, exception.ErrorKind);
+        Assert.True(exception.RetryAfter > TimeSpan.FromMinutes(4));
     }
 
     [Fact]

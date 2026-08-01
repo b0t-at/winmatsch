@@ -23,7 +23,8 @@ token; see the [security guide](security.md).
 | `rules.disabled` | string list | rule IDs | empty | — | `WINMATSCH_RULES_DISABLED` (comma-separated) |
 | `cache.enabled` | bool | `true` / `false` | `true` | — | `WINMATSCH_CACHE_ENABLED` |
 | `cache.directory` | string | filesystem path | platform default (below) | — | `WINMATSCH_CACHE_DIRECTORY` |
-| `freshnessDelay` | timespan | `d.hh:mm:ss` / `hh:mm:ss`, ≥ 0 | `00:00:00` | — | `WINMATSCH_FRESHNESS_DELAY` |
+| `overrideStore` | string | filesystem path | platform default (`winmatsch/overrides`) | `--override-store` | `WINMATSCH_OVERRIDE_STORE_DIRECTORY` |
+| `freshnessDelay` | timespan | `d.hh:mm:ss` / `hh:mm:ss`, ≥ 0 | `04:00:00` | — | `WINMATSCH_FRESHNESS_DELAY` |
 | `output.format` | enum | `text`, `json` | `text` | `--format` | `WINMATSCH_OUTPUT_FORMAT` |
 | `output.directory` | string | filesystem path | current directory | `--output` | `WINMATSCH_OUTPUT_DIRECTORY` |
 | `interaction` | enum | `auto`, `always`, `never` | `auto` | `--interaction` | `WINMATSCH_INTERACTION` |
@@ -40,9 +41,13 @@ token; see the [security guide](security.md).
   pack's per-rule modes. See [rule mode precedence](rules.md#rule-modes-and-precedence).
 - **`cache.enabled`** — turns the persistent download cache on or off.
 - **`cache.directory`** — custom cache location.
+- **`overrideStore`** — stores fingerprint-bound, explicitly approved learned
+  override packs plus their crash-recovery journals. Pending packs remain
+  inactive until the corresponding manifest/provenance transaction commits.
 - **`freshnessDelay`** — how long a release must remain unchanged before a
   remote submission is allowed. `1.12:00:00` means 1 day 12 hours. Guards
-  against submitting a release the publisher is still re-uploading.
+  against submitting a release the publisher is still re-uploading. The
+  default is four hours; set `00:00:00` to opt out explicitly.
 - **`output.format`** — default result format on stdout.
 - **`output.directory`** — where generated manifests and reports are written.
 - **`interaction`** — prompting policy; see
@@ -68,6 +73,7 @@ prints the path in effect.
 repository: "microsoft/winget-pkgs"
 concurrentDownloads: 4
 freshnessDelay: "1.00:00:00"
+overrideStore: "/var/lib/winmatsch/overrides"
 interaction: "auto"
 rules:
   enabled:

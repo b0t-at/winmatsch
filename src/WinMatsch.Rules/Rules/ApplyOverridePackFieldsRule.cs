@@ -28,7 +28,6 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
             return;
         }
 
-        ApplyScopeLayout(context, pack.ScopeLayout);
         if (context.Previous is { } previous)
         {
             foreach (string selector in pack.PreservedFields.Order(StringComparer.Ordinal))
@@ -55,6 +54,8 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
             DropSelector(context.Manifests, selector);
             context.AddTrace(this, $"{selector}: applied explicit droppedFields selector.");
         }
+
+        ApplyScopeLayout(context, pack.ScopeLayout);
     }
 
     private void ApplyScopeLayout(ManifestContext context, ScopeLayoutOverride? requested)
@@ -125,14 +126,16 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
     {
         if (pack.LearnedFields.IsDefaultOrEmpty
             || !ManifestSnapshot.TryCapture(previous, out ManifestSnapshot before)
-            || !ManifestSnapshot.TryCapture(context.Manifests, out ManifestSnapshot after))
+            || !ManifestSnapshot.TryCapture(
+                context.GeneratedInput ?? context.Manifests,
+                out ManifestSnapshot generated))
         {
             return;
         }
 
         RawManifestChange[] changes =
         [
-            .. before.Diff(after).Where(static change => !change.IsPairing),
+            .. before.Diff(generated).Where(static change => !change.IsPairing),
         ];
         foreach (LearnedFieldOverride learned in pack.LearnedFields)
         {
@@ -145,7 +148,11 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
             if (learned.DocumentKey == "installer"
                 && learned.InstallerSelectorSha256 is not null)
             {
-                ApplyLearnedInstallerField(context, previous, learned);
+                ApplyLearnedInstallerField(
+                    context,
+                    previous,
+                    context.GeneratedInput ?? context.Manifests,
+                    learned);
                 continue;
             }
 
@@ -162,15 +169,41 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
             }
 
             if (matches.Length != 1
-                || !string.Equals(Hash(matches[0].Before), learned.ValueSha256, StringComparison.Ordinal)
-                || !string.Equals(matches[0].Before, learned.Value, StringComparison.Ordinal)
-                || !TrySetLearnedValue(context.Manifests, learned.DocumentKey, matches[0].FieldPath, learned.Value))
+                || !string.Equals(Hash(matches[0].Before), learned.ValueSha256, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(matches[0].Before, learned.Value, StringComparison.Ordinal))
             {
                 context.AddFinding(
                     this,
                     RuleSeverity.Warning,
                     $"Approved learned override '{learned.SemanticPath}' no longer matches its reviewed correction identity; review it again.",
                     matches.FirstOrDefault()?.FieldPath ?? learned.SemanticPath);
+                continue;
+            }
+
+            if (!string.Equals(
+                    Hash(matches[0].After),
+                    learned.BotValueSha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                context.AddFinding(
+                    this,
+                    RuleSeverity.Warning,
+                    $"Approved learned override '{learned.SemanticPath}' no longer matches its reviewed bot value; review it again.",
+                    matches[0].FieldPath);
+                continue;
+            }
+
+            if (!TrySetLearnedValue(
+                    context.Manifests,
+                    learned.DocumentKey,
+                    matches[0].FieldPath,
+                    learned.Value))
+            {
+                context.AddFinding(
+                    this,
+                    RuleSeverity.Warning,
+                    $"Approved learned override '{learned.SemanticPath}' could not be applied safely; review it again.",
+                    matches[0].FieldPath);
             }
         }
     }
@@ -178,11 +211,13 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
     private void ApplyLearnedInstallerField(
         ManifestContext context,
         PackageManifests previous,
+        PackageManifests generated,
         LearnedFieldOverride learned)
     {
         string field = learned.SemanticPath.Split('.').Last();
         if (learned.InstallerSelectorSha256 is null
             || previous.Installer.Installers is not { } previousInstallers
+            || generated.Installer.Installers is not { } generatedInstallers
             || context.Manifests.Installer.Installers is not { } currentInstallers)
         {
             AddStaleLearnedFinding(context, learned, learned.SemanticPath, "selector metadata is unavailable");
@@ -195,7 +230,7 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
                     string.Equals(
                         LearnedInstallerSelector.Create(previous, index, field),
                         learned.InstallerSelectorSha256,
-                        StringComparison.Ordinal)),
+                        StringComparison.OrdinalIgnoreCase)),
             ];
         if (matchingPrevious.Length != 1)
         {
@@ -208,35 +243,55 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
         }
 
         int previousIndex = matchingPrevious[0];
-        int?[] previousByCurrent = ManifestSnapshot.MatchInstallerIndices(
-            previous,
-            context.Manifests);
+        int[] matchingGenerated =
+        [
+            .. Enumerable.Range(0, generatedInstallers.Count).Where(index =>
+                    string.Equals(
+                        LearnedInstallerSelector.Create(generated, index, field),
+                        learned.InstallerSelectorSha256,
+                        StringComparison.OrdinalIgnoreCase)),
+            ];
         int[] matchingCurrent =
         [
             .. Enumerable.Range(0, currentInstallers.Count).Where(index =>
-                    previousByCurrent[index] == previousIndex
-                    && string.Equals(
+                    string.Equals(
                         LearnedInstallerSelector.Create(context.Manifests, index, field),
                         learned.InstallerSelectorSha256,
-                        StringComparison.Ordinal)),
+                        StringComparison.OrdinalIgnoreCase)),
             ];
         string? previousValue = LearnedInstallerSelector.GetValue(
             previous.Installer,
             previousInstallers[previousIndex],
             field);
-        if (matchingCurrent.Length != 1
+        if (matchingGenerated.Length != 1
+            || matchingCurrent.Length != 1
             || !string.Equals(previousValue, learned.Value, StringComparison.Ordinal)
-            || !string.Equals(Hash(previousValue), learned.ValueSha256, StringComparison.Ordinal))
+            || !string.Equals(Hash(previousValue), learned.ValueSha256, StringComparison.OrdinalIgnoreCase))
         {
             AddStaleLearnedFinding(
                 context,
                 learned,
                 learned.SemanticPath,
-                $"matched {matchingCurrent.Length} current installers or the prior approved value changed");
+                $"matched {matchingGenerated.Length} generated and {matchingCurrent.Length} current installers or the prior approved value changed");
             return;
         }
 
+        int generatedIndex = matchingGenerated[0];
         int currentIndex = matchingCurrent[0];
+        string? generatedValue = LearnedInstallerSelector.GetValue(
+            generated.Installer,
+            generatedInstallers[generatedIndex],
+            field);
+        if (!string.Equals(Hash(generatedValue), learned.BotValueSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            AddStaleLearnedFinding(
+                context,
+                learned,
+                learned.SemanticPath,
+                "the raw generated value no longer matches the reviewed bot value");
+            return;
+        }
+
         string? currentValue = LearnedInstallerSelector.GetValue(
             context.Manifests.Installer,
             currentInstallers[currentIndex],
@@ -245,7 +300,7 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
         {
             context.AddTrace(
                 this,
-                $"{learned.SemanticPath}: approved learned installer value already holds.");
+                $"{learned.SemanticPath}: approved learned installer value already holds after verified bot-value CAS.");
             return;
         }
 
@@ -276,13 +331,20 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
         LearnedFieldOverride learned)
     {
         string field = learned.SemanticPath.Split('.').Last();
+        bool installerSpecific = learned.SemanticPath.StartsWith(
+            "Installers{installer:",
+            StringComparison.Ordinal);
         return droppedFields.Any(selector =>
             string.Equals(selector, field, StringComparison.Ordinal)
             || learned.DocumentKey == "defaultLocale"
                 && string.Equals(selector, $"DefaultLocale.{field}", StringComparison.Ordinal)
             || learned.DocumentKey == "installer"
-                && (string.Equals(selector, $"Installer.{field}", StringComparison.Ordinal)
-                    || string.Equals(selector, $"Installers[*].{field}", StringComparison.Ordinal)));
+                && string.Equals(
+                    selector,
+                    installerSpecific
+                        ? $"Installers[*].{field}"
+                        : $"Installer.{field}",
+                    StringComparison.Ordinal));
     }
 
     private static int ApplyMetadataUrlReplacements(
@@ -327,6 +389,28 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
             }
         }
 
+        if (locale.Agreements is not null)
+        {
+            foreach (PackageAgreement agreement in locale.Agreements)
+            {
+                agreement.AgreementUrl = Replace(
+                    agreement.AgreementUrl,
+                    replacements,
+                    ref count);
+            }
+        }
+
+        if (locale.Icons is not null)
+        {
+            foreach (Icon icon in locale.Icons)
+            {
+                icon.IconUrl = Replace(
+                    icon.IconUrl,
+                    replacements,
+                    ref count);
+            }
+        }
+
         return count;
     }
 
@@ -364,11 +448,15 @@ public sealed class ApplyOverridePackFieldsRule(OverridePackSet? overridePacks =
             string field = selector["Locales[*].".Length..];
             foreach (LocaleManifest locale in current.Locales)
             {
-                LocaleManifest? source = previous.Locales.SingleOrDefault(candidate =>
-                    candidate.PackageLocale == locale.PackageLocale);
-                if (source is not null)
+                LocaleManifest[] sources =
+                [
+                    .. previous.Locales
+                        .Where(candidate => candidate.PackageLocale == locale.PackageLocale)
+                        .Take(2),
+                ];
+                if (sources.Length == 1)
                 {
-                    CopyLocaleField(source, locale, field, missingOnly: true);
+                    CopyLocaleField(sources[0], locale, field, missingOnly: true);
                 }
             }
 

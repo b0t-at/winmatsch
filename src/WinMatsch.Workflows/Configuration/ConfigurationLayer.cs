@@ -22,6 +22,8 @@ public sealed record ConfigurationLayer
 
     public string? CacheDirectory { get; init; }
 
+    public string? OverrideStoreDirectory { get; init; }
+
     /// <summary>How long a package must remain unchanged before it is checked.</summary>
     public TimeSpan? FreshnessDelay { get; init; }
 

@@ -76,6 +76,7 @@ public sealed class ConfigCommandModule : ICommandModule
         "rules.disabled",
         "cache.enabled",
         "cache.directory",
+        "overrideStore",
         "freshnessDelay",
         "output.format",
         "output.directory",
@@ -145,6 +146,12 @@ public sealed class ConfigCommandModule : ICommandModule
                 ("cache.directory",
                     effective.CacheDirectory,
                     Provenance(commandLayer.CacheDirectory, environmentLayer.CacheDirectory, userLayer.CacheDirectory)),
+                ("overrideStore",
+                    effective.OverrideStoreDirectory,
+                    Provenance(
+                        commandLayer.OverrideStoreDirectory,
+                        environmentLayer.OverrideStoreDirectory,
+                        userLayer.OverrideStoreDirectory)),
                 ("freshnessDelay",
                     effective.FreshnessDelay.ToString("c", CultureInfo.InvariantCulture),
                     Provenance(commandLayer.FreshnessDelay, environmentLayer.FreshnessDelay, userLayer.FreshnessDelay)),
@@ -389,6 +396,7 @@ public sealed class ConfigCommandModule : ICommandModule
             "rules.disabled" => layer with { DisabledRules = SplitList(value) },
             "cache.enabled" => layer with { CacheEnabled = value is null ? null : ParseBool(value) },
             "cache.directory" => layer with { CacheDirectory = value },
+            "overrideStore" => layer with { OverrideStoreDirectory = value },
             "freshnessDelay" => layer with
             {
                 FreshnessDelay = value is null ? null : ParseDelay(value),
@@ -481,6 +489,7 @@ public sealed class ConfigCommandModule : ICommandModule
             AppendScalar(builder, 2, "directory", layer.CacheDirectory);
         }
 
+        AppendScalar(builder, 0, "overrideStore", layer.OverrideStoreDirectory);
         AppendScalar(
             builder,
             0,

@@ -147,6 +147,22 @@ public interface IWorkflowFileTransaction
         CancellationToken cancellationToken);
 }
 
+public interface IWorkflowFileTransactionRecovery
+{
+    public Task RecoverAsync(
+        string outputDirectory,
+        string operationLockKey,
+        CancellationToken cancellationToken);
+}
+
+public interface IWorkflowCoordinatedRecovery : IWorkflowFileTransactionRecovery
+{
+    public Task<IDisposable> RecoverAndHoldAsync(
+        string outputDirectory,
+        string operationLockKey,
+        CancellationToken cancellationToken);
+}
+
 public interface IWorkflowClock
 {
     public DateTimeOffset UtcNow { get; }

@@ -354,13 +354,16 @@ public sealed class MutationCommandModule : ICommandModule
 
         WorkflowReleaseProvenance? releaseProvenance = local.Plan.Release;
         ImmutableHashSet<string> releaseInstallerUrls = InstallerUrls(local.Plan);
-        if (local.Code != WorkflowResultCode.Succeeded)
+        bool learningOnly = local.Code == WorkflowResultCode.NoChanges
+            && local.Plan.LearnedOverride is not null
+            && local.Plan.ReviewApproved;
+        if (local.Code != WorkflowResultCode.Succeeded && !learningOnly)
         {
             MutationOutput.Write(context, local, remote: null);
             return ExitCodes.OperationFailed;
         }
 
-        if (context.ParseResult.GetValue(options.Edit))
+        if (context.ParseResult.GetValue(options.Edit) && !learningOnly)
         {
             if (context.Configuration.OutputFormat == OutputFormat.Json || !context.Interaction.CanPrompt)
             {
@@ -482,7 +485,7 @@ public sealed class MutationCommandModule : ICommandModule
 
         GitHubLifecycleResult? remote = null;
         bool outputWritten = false;
-        bool submit = context.ParseResult.GetValue(options.Submit);
+        bool submit = context.ParseResult.GetValue(options.Submit) && !learningOnly;
         bool submissionConsent = context.ParseResult.GetValue(options.Yes);
         ISubmissionWorkflow? submission = null;
         if (submit)
@@ -596,7 +599,7 @@ public sealed class MutationCommandModule : ICommandModule
 
         if (context.IsDryRun)
         {
-            return local.Code == WorkflowResultCode.Succeeded
+            return (local.Code == WorkflowResultCode.Succeeded || learningOnly)
                 && (remote is null || remote.Code == GitHubLifecycleResultCode.Planned)
                 ? ExitCodes.Success
                 : ExitCodes.OperationFailed;

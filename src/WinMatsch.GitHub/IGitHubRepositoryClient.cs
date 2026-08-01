@@ -21,6 +21,12 @@ public interface IGitHubRepositoryClient : IDisposable
         RepositoryCoordinates repository,
         CancellationToken cancellationToken = default);
 
+    public Task<RepositoryMetadataInfo> GetRepositoryMetadataAsync(
+        RepositoryCoordinates repository,
+        CancellationToken cancellationToken = default)
+        => Task.FromException<RepositoryMetadataInfo>(
+            new NotSupportedException("Repository metadata is not supported by this client."));
+
     public Task<BranchState> GetDefaultBranchAsync(
         RepositoryCoordinates repository,
         CancellationToken cancellationToken = default);

@@ -57,6 +57,9 @@ public static class ConfigurationResolver
             CacheDirectory = command.CacheDirectory
                 ?? environment.CacheDirectory
                 ?? userConfiguration.CacheDirectory,
+            OverrideStoreDirectory = command.OverrideStoreDirectory
+                ?? environment.OverrideStoreDirectory
+                ?? userConfiguration.OverrideStoreDirectory,
             FreshnessDelay = freshnessDelay,
             OutputFormat = command.OutputFormat
                 ?? environment.OutputFormat

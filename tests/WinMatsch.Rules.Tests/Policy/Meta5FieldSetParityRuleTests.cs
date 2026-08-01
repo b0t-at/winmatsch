@@ -85,6 +85,53 @@ public class Meta5FieldSetParityRuleTests
     }
 
     [Fact]
+    public void Scoped_drop_does_not_suppress_another_manifest_location()
+    {
+        (PackageManifests current, PackageManifests previous) = CreateUpdatePair();
+        previous.DefaultLocale.Description = "Default locale description";
+        previous.Installer.ReleaseDate = new DateOnly(2024, 1, 1);
+        var overrides = new OverridePackSet(
+        [
+            new OverridePack
+            {
+                PackageIdentifier = new PackageIdentifier("Test.App"),
+                DroppedFields = ["Locales[*].Description", "Installers[*].ReleaseDate"],
+            },
+        ]);
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        new Meta5FieldSetParityRule(overridePacks: overrides).Apply(context);
+
+        Assert.Equal("Default locale description", current.DefaultLocale.Description);
+        Assert.Contains(
+            context.Findings,
+            finding => finding.Message.Contains("ReleaseDate", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Root_drop_does_not_authorize_losing_per_installer_override()
+    {
+        (PackageManifests current, PackageManifests previous) = CreateUpdatePair();
+        previous.Installer.InstallerSwitches = new InstallerSwitches { Silent = "/root" };
+        previous.Installer.Installers![0].InstallerSwitches =
+            new InstallerSwitches { Custom = "/per-installer" };
+        var overrides = new OverridePackSet(
+        [
+            new OverridePack
+            {
+                PackageIdentifier = new PackageIdentifier("Test.App"),
+                DroppedFields = ["Installer.InstallerSwitches"],
+            },
+        ]);
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        new Meta5FieldSetParityRule(overridePacks: overrides).Apply(context);
+
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Contains("this entry", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Existing_values_are_never_overwritten()
     {
         // Nonmatching control.
@@ -165,6 +212,20 @@ public class Meta5FieldSetParityRuleTests
         (PackageManifests current, PackageManifests previous) = CreateUpdatePair();
         current.Installer.Installers![0].InstallerSwitches = new InstallerSwitches { Silent = "/S" };
         previous.Installer.Installers![0].InstallerSwitches = new InstallerSwitches { Silent = "/S" };
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        new Meta5FieldSetParityRule().Apply(context);
+
+        Assert.Empty(context.Findings);
+    }
+
+    [Fact]
+    public void Hoisted_identical_switches_produce_no_per_installer_loss()
+    {
+        (PackageManifests current, PackageManifests previous) = CreateUpdatePair();
+        current.Installer.InstallerSwitches = new InstallerSwitches { Silent = "/S" };
+        previous.Installer.Installers![0].InstallerSwitches =
+            new InstallerSwitches { Silent = "/S" };
         ManifestContext context = TestManifests.CreateContext(current, previous: previous);
 
         new Meta5FieldSetParityRule().Apply(context);

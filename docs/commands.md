@@ -32,6 +32,7 @@ through to the next layer. See the
 | `--format` | `text` \| `json` | Result format on stdout. JSON output never prompts. |
 | `--output` | directory | Where generated manifests and reports are written. |
 | `--concurrent-downloads` | count | Maximum parallel installer downloads (default: 2). |
+| `--override-store` | directory | Store for approved learned overrides and their recovery journals. |
 | `--dry-run` | flag | Plan mode: validate and show what would change without mutating anything. |
 | `--interaction` | `auto` \| `always` \| `never` | Prompting policy (default: `auto`). |
 | `--no-color` | flag | Disable ANSI color (the `NO_COLOR` environment variable is also honored). |
@@ -57,6 +58,7 @@ what would be removed. Exit code 0 means the plan is valid.
 | `WINMATSCH_RULES_DISABLED` | Configuration: comma-separated rule IDs forced to *disabled*. |
 | `WINMATSCH_CACHE_ENABLED` | Configuration: `true`/`false`, enable the download cache. |
 | `WINMATSCH_CACHE_DIRECTORY` | Configuration: custom cache directory. |
+| `WINMATSCH_OVERRIDE_STORE_DIRECTORY` | Configuration: learned override store directory. |
 | `WINMATSCH_FRESHNESS_DELAY` | Configuration: `d.hh:mm:ss` or `hh:mm:ss` minimum release age before submission. |
 | `WINMATSCH_OUTPUT_FORMAT` | Configuration: `text` or `json`. |
 | `WINMATSCH_OUTPUT_DIRECTORY` | Configuration: output directory. |
@@ -438,7 +440,7 @@ Inspect and edit the user configuration file. See the
 
 Valid keys: `repository`, `concurrentDownloads`, `rules.enabled`,
 `rules.disabled`, `cache.enabled`, `cache.directory`, `freshnessDelay`,
-`output.format`, `output.directory`, `interaction`.
+`overrideStore`, `output.format`, `output.directory`, `interaction`.
 
 ### cache
 

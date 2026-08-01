@@ -56,6 +56,13 @@ public sealed class GlobalOptions
             Recursive = true,
         };
 
+        OverrideStoreDirectory = new Option<string?>("--override-store")
+        {
+            Description = "Directory for approved learned override packs and recovery journals.",
+            HelpName = "directory",
+            Recursive = true,
+        };
+
         DryRun = new Option<bool>("--dry-run")
         {
             Description = "Plan mode: validate and show what would change without mutating anything.",
@@ -100,6 +107,8 @@ public sealed class GlobalOptions
 
     public Option<int?> ConcurrentDownloads { get; }
 
+    public Option<string?> OverrideStoreDirectory { get; }
+
     public Option<bool> DryRun { get; }
 
     public Option<InteractionMode?> Interaction { get; }
@@ -117,6 +126,7 @@ public sealed class GlobalOptions
         Format,
         OutputDirectory,
         ConcurrentDownloads,
+        OverrideStoreDirectory,
         DryRun,
         Interaction,
         NoColor,
@@ -132,6 +142,7 @@ public sealed class GlobalOptions
         {
             Repository = parseResult.GetValue(Repository),
             ConcurrentDownloads = parseResult.GetValue(ConcurrentDownloads),
+            OverrideStoreDirectory = parseResult.GetValue(OverrideStoreDirectory),
             OutputFormat = parseResult.GetValue(Format),
             OutputDirectory = parseResult.GetValue(OutputDirectory),
             Interaction = parseResult.GetValue(Interaction),

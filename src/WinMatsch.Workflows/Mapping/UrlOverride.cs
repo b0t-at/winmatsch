@@ -65,14 +65,8 @@ public sealed record UrlOverride(
         }
 
         Scope? scope = null;
-        if (parts.Length >= 3)
+        if (parts.Length >= 3 && !string.IsNullOrWhiteSpace(parts[2]))
         {
-            if (string.IsNullOrWhiteSpace(parts[2]))
-            {
-                error = "The scope component of a URL override must not be empty.";
-                return false;
-            }
-
             scope = parts[2].Trim().ToLowerInvariant() switch
             {
                 "user" => WinMatsch.Core.Scope.User,
@@ -87,14 +81,8 @@ public sealed record UrlOverride(
         }
 
         string? displayVersion = null;
-        if (parts.Length == 4)
+        if (parts.Length == 4 && !string.IsNullOrWhiteSpace(parts[3]))
         {
-            if (string.IsNullOrWhiteSpace(parts[3]))
-            {
-                error = "The displayVersion component of a URL override must not be empty.";
-                return false;
-            }
-
             displayVersion = parts[3].Trim();
         }
 

@@ -65,6 +65,22 @@ internal sealed class ManifestSnapshot
         return ManifestClone.Clone(manifests);
     }
 
+    internal static bool TryClone(
+        PackageManifests manifests,
+        out PackageManifests? clone)
+    {
+        try
+        {
+            clone = Clone(manifests);
+            return true;
+        }
+        catch (Exception exception) when (IsSnapshotFailure(exception))
+        {
+            clone = null;
+            return false;
+        }
+    }
+
     internal static int?[] MatchInstallerIndices(
         PackageManifests before,
         PackageManifests after)

@@ -49,6 +49,7 @@ public static class LearnedOverrideBuilder
             string humanValue = matches[0].After!;
             string field = matches[0].SemanticPath.Split('.').Last();
             string? installerSelector = null;
+            string? botValue = matches[0].Before;
             if (matches[0].DocumentKey == "installer"
                 && TryInstallerIndex(matches[0].FieldPath, out int installerIndex))
             {
@@ -56,6 +57,27 @@ public static class LearnedOverrideBuilder
                     mergedManifest,
                     installerIndex,
                     field);
+                int?[] originalByMerged = ManifestSnapshot.MatchInstallerIndices(
+                    originalBotSubmission,
+                    mergedManifest);
+                int? originalIndex = installerIndex < originalByMerged.Length
+                    ? originalByMerged[installerIndex]
+                    : null;
+                if (originalBotSubmission.Installer.Installers is { } originalInstallers
+                    && originalIndex is int pairedIndex
+                    && pairedIndex >= 0
+                    && pairedIndex < originalInstallers.Count)
+                {
+                    botValue = LearnedInstallerSelector.GetValue(
+                        originalBotSubmission.Installer,
+                        originalInstallers[pairedIndex],
+                        field);
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        $"Correction '{review.SemanticPath}' could not resolve a unique original installer identity.");
+                }
             }
 
             var value = new LearnedFieldOverride
@@ -64,7 +86,7 @@ public static class LearnedOverrideBuilder
                 SemanticPath = review.SemanticPath,
                 Value = humanValue,
                 ValueSha256 = Hash(humanValue),
-                BotValueSha256 = Hash(matches[0].Before ?? "<null>"),
+                BotValueSha256 = Hash(botValue ?? "<null>"),
                 SourceFingerprint = review.CorrectionFingerprint,
                 Source = $"{review.ManifestPath}:{review.FieldPath}",
                 InstallerSelectorSha256 = installerSelector,

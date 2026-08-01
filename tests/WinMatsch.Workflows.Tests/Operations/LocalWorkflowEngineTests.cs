@@ -740,6 +740,45 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Startup_recovery_io_failure_returns_structured_diagnostics()
+    {
+        using var temporary = new TemporaryDirectory();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new IoRecoveryFailingTransaction(),
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.NewAsync(
+            NewRequest(temporary.Path, WorkflowExecutionMode.Apply));
+
+        Assert.Equal(WorkflowResultCode.ApplyFailed, result.Code);
+        Assert.Equal("malformed recovery journal", result.ErrorMessage);
+        Assert.True(Assert.IsType<WorkflowRecoveryDetails>(result.Recovery).JournalRetained);
+    }
+
+    [Fact]
+    public async Task Startup_recovery_lock_contention_returns_conflict()
+    {
+        using var temporary = new TemporaryDirectory();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new ConflictingRecoveryTransaction(),
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.NewAsync(
+            NewRequest(temporary.Path, WorkflowExecutionMode.Apply));
+
+        Assert.Equal(WorkflowResultCode.Conflict, result.Code);
+        Assert.Contains(
+            result.Plan.Validation.Findings,
+            static finding => finding.Code == "WF_CONFLICT");
+    }
+
+    [Fact]
     public async Task Human_correction_approval_persists_and_next_run_consumes_learned_value()
     {
         using var temporary = new TemporaryDirectory();
@@ -748,12 +787,16 @@ public sealed class LocalWorkflowEngineTests
         {
             RootDirectory = storeDirectory,
         });
-        var transaction = new RecordingTransaction();
+        var transaction = new WritingRecordingTransaction();
         PackageManifests original = CreatePackage("1.0.0", "A");
         original.Installer.Installers![0].Scope = Scope.User;
         PackageManifests merged = ManifestSnapshotForTest.Clone(original);
         merged.Installer.Installers![0].Scope = Scope.Machine;
-        PackageSnapshot previous = Snapshot(merged) with { OriginalBotSubmission = original };
+        PackageSnapshot previous = Snapshot(merged) with
+        {
+            OriginalBotSubmission = original,
+            Documents = Documents(merged, "winmatsch"),
+        };
         var engine = new LocalWorkflowEngine(
             new DictionarySnapshotSource(previous),
             new LearningRuleRunner(),
@@ -771,30 +814,60 @@ public sealed class LocalWorkflowEngineTests
             Assets = [Asset("2.0.0", "A")],
             NetworkValidationMode = NetworkValidationMode.Skip,
         };
+        UpdateOperationRequest disabledBaseline = baseline with
+        {
+            RuleRuntime = new RuleRuntimeConfiguration(
+                commandOverrides: new Dictionary<string, RuleMode>
+                {
+                    [RuleIds.ApplyOverridePackFields] = RuleMode.Disabled,
+                }),
+        };
 
         WorkflowOperationResult preview = await engine.UpdateAsync(
-            baseline with { ExecutionMode = WorkflowExecutionMode.Plan });
+            disabledBaseline with { ExecutionMode = WorkflowExecutionMode.Plan });
         UpdateOperationRequest plannedRequest = Assert.IsType<UpdateOperationRequest>(
             ReviewApproval.Bind(
-                baseline with { ExecutionMode = WorkflowExecutionMode.Plan },
+                disabledBaseline with { ExecutionMode = WorkflowExecutionMode.Plan },
                 preview.Plan));
         WorkflowOperationResult planned = await engine.UpdateAsync(plannedRequest);
         Assert.False(Directory.Exists(storeDirectory));
-        WorkflowOperationResult blocked = await engine.UpdateAsync(baseline);
+        WorkflowOperationResult blocked = await engine.UpdateAsync(disabledBaseline);
         WorkflowOperationResult changedApproval = await engine.UpdateAsync(
-            baseline with
+            disabledBaseline with
             {
                 ApproveReview = true,
                 ApprovedReviewFingerprints = [new string('F', 64)],
             });
         UpdateOperationRequest approvedRequest = Assert.IsType<UpdateOperationRequest>(
-            ReviewApproval.Bind(baseline, blocked.Plan));
+            ReviewApproval.Bind(disabledBaseline, blocked.Plan));
+        WorkflowOperationResult replayedApproval = await engine.UpdateAsync(
+            approvedRequest with
+            {
+                PackageVersion = "3.0.0",
+                Assets = [Asset("3.0.0", "A")],
+            });
         WorkflowOperationResult approved = await engine.UpdateAsync(approvedRequest);
         WorkflowOperationResult subsequent = await engine.UpdateAsync(baseline);
+        var changedGeneratorEngine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(previous),
+            new ChangedGeneratorRuleRunner(),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            clock: new FixedClock(),
+            overridePackStore: store);
+        WorkflowOperationResult changedGenerator = await changedGeneratorEngine.UpdateAsync(
+            baseline with
+            {
+                ExecutionMode = WorkflowExecutionMode.Plan,
+                PackageVersion = "4.0.0",
+                Assets = [Asset("4.0.0", "A")],
+            });
 
         Assert.Equal(WorkflowResultCode.ReviewRequired, blocked.Code);
         Assert.False(blocked.Applied);
         Assert.Equal(WorkflowResultCode.ReviewRequired, changedApproval.Code);
+        Assert.Equal(WorkflowResultCode.ReviewRequired, replayedApproval.Code);
+        Assert.False(replayedApproval.Applied);
         Assert.Equal(WorkflowResultCode.Succeeded, planned.Code);
         Assert.False(planned.Applied);
         Assert.True(approved.Applied);
@@ -803,6 +876,12 @@ public sealed class LocalWorkflowEngineTests
             approved.Plan.Audit,
             static entry => entry.Code == "LEARNED_OVERRIDE_PERSISTED"
                 && entry.Message.EndsWith(".Scope", StringComparison.Ordinal));
+        PackageManifests committed = PackageManifestIO.LoadDirectory(Path.Combine(
+            temporary.Path,
+            ManifestPaths.GetVersionDirectory(
+                baseline.PackageIdentifier,
+                new PackageVersion("2.0.0")).Replace('/', Path.DirectorySeparatorChar)));
+        Assert.Equal(Scope.Machine, committed.Installer.Installers![0].Scope);
         Assert.True(
             subsequent.Code == WorkflowResultCode.Succeeded,
             string.Join(
@@ -815,6 +894,19 @@ public sealed class LocalWorkflowEngineTests
                         $"{entry.RuleId}:{entry.Message}"),
                 ]));
         Assert.False(subsequent.Plan.RequiresReview);
+        Assert.Contains(
+            changedGenerator.Plan.Validation.Findings,
+            static finding => finding.Message.Contains(
+                "raw generated value no longer matches",
+                StringComparison.Ordinal));
+        InstallerManifest changedInstaller = ManifestYamlReader.ReadInstaller(
+            System.Text.Encoding.UTF8.GetString(
+                changedGenerator.Plan.AfterDocuments.Single(document =>
+                        ManifestYamlReader.TryDetectType(
+                            System.Text.Encoding.UTF8.GetString(document.Content.AsSpan()))
+                        == ManifestType.Installer)
+                    .Content.AsSpan()));
+        Assert.Null(changedInstaller.Installers![0].Scope);
         Assert.Equal(2, transaction.Calls);
     }
 
@@ -868,6 +960,195 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Manifest_commit_with_pack_failure_recovers_learning_on_next_run()
+    {
+        using var temporary = new TemporaryDirectory();
+        string storeDirectory = Path.Combine(temporary.Path, "override-store");
+        string activePackPath = Path.Combine(storeDirectory, "EXAMPLE.APP.yaml");
+        var store = new FileOverridePackStore(new OverridePackStoreOptions
+        {
+            RootDirectory = storeDirectory,
+        });
+        PackageManifests original = CreatePackage("1.0.0", "A");
+        original.Installer.Installers![0].Scope = Scope.User;
+        PackageManifests merged = ManifestSnapshotForTest.Clone(original);
+        merged.Installer.Installers![0].Scope = Scope.Machine;
+        PackageSnapshot previous = Snapshot(merged) with { OriginalBotSubmission = original };
+        var firstEngine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(previous),
+            new LearningRuleRunner(),
+            new CapturingPreflight(),
+            new ManifestWritingPackBlockingTransaction(activePackPath),
+            clock: new FixedClock(),
+            overridePackStore: store);
+        var request = new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            ExecutionMode = WorkflowExecutionMode.Apply,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PreviousVersion = new PackageVersion("1.0.0"),
+            PackageVersion = "2.0.0",
+            Assets = [Asset("2.0.0", "A")],
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        };
+        WorkflowOperationResult preview = await firstEngine.UpdateAsync(
+            request with { ExecutionMode = WorkflowExecutionMode.Plan });
+        UpdateOperationRequest approved = Assert.IsType<UpdateOperationRequest>(
+            ReviewApproval.Bind(request, preview.Plan));
+
+        WorkflowOperationResult committed = await firstEngine.UpdateAsync(approved);
+
+        Assert.True(committed.Applied);
+        Assert.Contains("retained for automatic recovery", committed.ErrorMessage, StringComparison.Ordinal);
+        Assert.True(File.Exists($"{activePackPath}.pending"));
+        Assert.True(File.Exists($"{activePackPath}.transaction"));
+        Directory.Delete(activePackPath);
+
+        var nextEngine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(previous),
+            new LearningRuleRunner(),
+            new CapturingPreflight(),
+            new WritingRecordingTransaction(),
+            clock: new FixedClock(),
+            overridePackStore: store);
+        WorkflowOperationResult next = await nextEngine.UpdateAsync(request);
+
+        Assert.False(next.Plan.RequiresReview);
+        Assert.Contains(
+            next.Plan.Audit,
+            static entry => entry.Code == "LEARNED_OVERRIDE_ACTIVE"
+                && entry.Provenance?.Contains("durable", StringComparison.Ordinal) == true);
+        Assert.False(File.Exists($"{activePackPath}.pending"));
+        Assert.False(File.Exists($"{activePackPath}.transaction"));
+    }
+
+    [Fact]
+    public async Task Provenance_failure_keeps_learning_inactive_until_recovery_finishes()
+    {
+        using var temporary = new TemporaryDirectory();
+        string storeDirectory = Path.Combine(temporary.Path, "override-store");
+        var store = new FileOverridePackStore(new OverridePackStoreOptions
+        {
+            RootDirectory = storeDirectory,
+        });
+        PackageManifests original = CreatePackage("1.0.0", "A");
+        original.Installer.Installers![0].Scope = Scope.User;
+        PackageManifests merged = ManifestSnapshotForTest.Clone(original);
+        merged.Installer.Installers![0].Scope = Scope.Machine;
+        PackageSnapshot previous = Snapshot(merged) with { OriginalBotSubmission = original };
+        var firstEngine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(previous),
+            new LearningRuleRunner(),
+            new CapturingPreflight(),
+            new ManifestWritingProvenanceFailingTransaction(),
+            clock: new FixedClock(),
+            overridePackStore: store);
+        var request = new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            ExecutionMode = WorkflowExecutionMode.Apply,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PreviousVersion = new PackageVersion("1.0.0"),
+            PackageVersion = "2.0.0",
+            Assets = [Asset("2.0.0", "A")],
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        };
+        WorkflowOperationResult preview = await firstEngine.UpdateAsync(
+            request with { ExecutionMode = WorkflowExecutionMode.Plan });
+        UpdateOperationRequest approved = Assert.IsType<UpdateOperationRequest>(
+            ReviewApproval.Bind(request, preview.Plan));
+
+        WorkflowOperationResult failedProvenance = await firstEngine.UpdateAsync(approved);
+        OverridePackStoreSnapshot pending = await store.LoadAsync(
+            request.PackageIdentifier,
+            allowRecoveryWrites: true,
+            CancellationToken.None);
+
+        Assert.True(failedProvenance.Applied);
+        Assert.Null(pending.Pack);
+        Assert.True(pending.PendingActivation);
+
+        var recoveredEngine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(previous),
+            new LearningRuleRunner(),
+            new CapturingPreflight(),
+            new WritingRecordingTransaction(),
+            clock: new FixedClock(),
+            overridePackStore: store);
+        WorkflowOperationResult recovered = await recoveredEngine.UpdateAsync(request);
+
+        Assert.False(recovered.Plan.RequiresReview);
+        Assert.Contains(
+            recovered.Plan.Audit,
+            static entry => entry.Code == "LEARNED_OVERRIDE_ACTIVE"
+                && entry.Provenance?.Contains("durable", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public async Task Non_update_operation_finalizes_pending_learning_before_mutation()
+    {
+        using var temporary = new TemporaryDirectory();
+        string storeDirectory = Path.Combine(temporary.Path, "override-store");
+        var store = new FileOverridePackStore(new OverridePackStoreOptions
+        {
+            RootDirectory = storeDirectory,
+        });
+        PackageIdentifier package = new("Example.App");
+        string marker = Path.Combine(temporary.Path, "marker.yaml");
+        await File.WriteAllTextAsync(marker, "before");
+        await using IOverridePackWriteStage stage = await store.StageAsync(
+            new(
+                package,
+                new OverridePack
+                {
+                    PackageIdentifier = package,
+                    PreservedFields = ["DefaultLocale.PublisherUrl"],
+                },
+                ExpectedContentSha256: null,
+                ExpectedFormatVersion: null,
+                OutputDirectory: temporary.Path,
+                ManifestChanges:
+                [
+                    new WorkflowFileChange(
+                        PlannedChangeKind.Update,
+                        "marker.yaml",
+                        "after"u8,
+                        ExpectedFileState.Present,
+                        WorkflowFileChange.Hash("before"u8)),
+                ]),
+            CancellationToken.None);
+        await File.WriteAllTextAsync(marker, "after");
+        await stage.RetainForRecoveryAsync();
+        PackageSnapshot snapshot = Snapshot(CreatePackage("1.0.0", "A"));
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(snapshot),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new RecoveryAwareRecordingTransaction(),
+            clock: new FixedClock(),
+            overridePackStore: store);
+
+        WorkflowOperationResult removed = await engine.RemoveAsync(new RemoveOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            ExecutionMode = WorkflowExecutionMode.Apply,
+            PackageIdentifier = package,
+            PackageVersion = new PackageVersion("1.0.0"),
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        });
+        OverridePackStoreSnapshot active = await store.LoadAsync(
+            package,
+            allowRecoveryWrites: false,
+            CancellationToken.None);
+
+        Assert.True(
+            removed.Applied,
+            $"{removed.Code}: {removed.ErrorMessage} {removed.Plan.Validation.ToText()}");
+        Assert.NotNull(active.Pack);
+        Assert.False(active.PendingActivation);
+    }
+
+    [Fact]
     public async Task Root_scope_value_correction_is_learned_without_false_layout_change()
     {
         using var temporary = new TemporaryDirectory();
@@ -884,7 +1165,7 @@ public sealed class LocalWorkflowEngineTests
             new DictionarySnapshotSource(previous),
             new RootScopeLearningRuleRunner(),
             new CapturingPreflight(),
-            new RecordingTransaction(),
+            new WritingRecordingTransaction(),
             clock: new FixedClock(),
             overridePackStore: store);
         var request = new UpdateOperationRequest
@@ -912,6 +1193,140 @@ public sealed class LocalWorkflowEngineTests
         Assert.Equal("Scope", rootScope.SemanticPath);
         Assert.Null(rootScope.InstallerSelectorSha256);
         Assert.False(subsequent.Plan.RequiresReview);
+    }
+
+    [Fact]
+    public async Task Newly_approved_value_supersedes_stale_active_learning()
+    {
+        using var temporary = new TemporaryDirectory();
+        var store = new FileOverridePackStore(new OverridePackStoreOptions
+        {
+            RootDirectory = Path.Combine(temporary.Path, "override-store"),
+        });
+        PackageIdentifier package = new("Example.App");
+        const string BotUrl = "https://bot.example.test";
+        const string OldHumanUrl = "https://old-human.example.test";
+        const string NewHumanUrl = "https://new-human.example.test";
+        _ = await store.WriteAsync(
+            new(
+                package,
+                new OverridePack
+                {
+                    PackageIdentifier = package,
+                    LearnedFields =
+                    [
+                        new()
+                        {
+                            DocumentKey = "defaultLocale",
+                            SemanticPath = "PublisherUrl",
+                            Value = OldHumanUrl,
+                            ValueSha256 = HashText(OldHumanUrl),
+                            BotValueSha256 = HashText(BotUrl),
+                            SourceFingerprint = new string('A', 64),
+                            Source = "manifest:PublisherUrl",
+                        },
+                    ],
+                },
+                ExpectedContentSha256: null,
+                ExpectedFormatVersion: null),
+            CancellationToken.None);
+        PackageManifests original = CreatePackage("1.0.0", "A");
+        original.DefaultLocale.PublisherUrl = BotUrl;
+        PackageManifests merged = ManifestSnapshotForTest.Clone(original);
+        merged.DefaultLocale.PublisherUrl = NewHumanUrl;
+        PackageSnapshot previous = Snapshot(merged) with { OriginalBotSubmission = original };
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(previous),
+            new PublisherLearningRuleRunner(BotUrl),
+            new CapturingPreflight(),
+            new WritingRecordingTransaction(),
+            clock: new FixedClock(),
+            overridePackStore: store);
+        var request = new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            ExecutionMode = WorkflowExecutionMode.Apply,
+            PackageIdentifier = package,
+            PreviousVersion = new PackageVersion("1.0.0"),
+            PackageVersion = "2.0.0",
+            Assets = [Asset("2.0.0", "A")],
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        };
+        WorkflowOperationResult preview = await engine.UpdateAsync(
+            request with { ExecutionMode = WorkflowExecutionMode.Plan });
+        UpdateOperationRequest approved = Assert.IsType<UpdateOperationRequest>(
+            ReviewApproval.Bind(request, preview.Plan));
+
+        WorkflowOperationResult applied = await engine.UpdateAsync(approved);
+
+        Assert.True(applied.Applied, applied.Plan.Validation.ToText());
+        DefaultLocaleManifest locale = ManifestYamlReader.ReadDefaultLocale(
+            System.Text.Encoding.UTF8.GetString(
+                applied.Plan.AfterDocuments.Single(document =>
+                        ManifestYamlReader.TryDetectType(
+                            System.Text.Encoding.UTF8.GetString(document.Content.AsSpan()))
+                        == ManifestType.DefaultLocale)
+                    .Content.AsSpan()));
+        Assert.Equal(NewHumanUrl, locale.PublisherUrl);
+        OverridePack active = Assert.IsType<OverridePack>(
+            (await store.LoadAsync(package, false, CancellationToken.None)).Pack);
+        Assert.Equal(NewHumanUrl, Assert.Single(active.LearnedFields).Value);
+    }
+
+    [Fact]
+    public async Task No_change_approval_persists_learning_with_forced_apply_mode()
+    {
+        using var temporary = new TemporaryDirectory();
+        var store = new FileOverridePackStore(new OverridePackStoreOptions
+        {
+            RootDirectory = Path.Combine(temporary.Path, "override-store"),
+        });
+        PackageManifests original = CreatePackage("1.0.0", "A");
+        original.Installer.Installers![0].Scope = Scope.User;
+        PackageManifests merged = ManifestSnapshotForTest.Clone(original);
+        merged.Installer.Installers![0].Scope = Scope.Machine;
+        PackageSnapshot previous = Snapshot(merged) with
+        {
+            OriginalBotSubmission = original,
+            Documents = Documents(merged, "winmatsch"),
+        };
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(previous),
+            new NoChangeLearningRuleRunner(),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            clock: new FixedClock(),
+            overridePackStore: store);
+        var request = new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            ExecutionMode = WorkflowExecutionMode.Apply,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PreviousVersion = new PackageVersion("1.0.0"),
+            PackageVersion = "1.0.0",
+            Assets = [Asset("1.0.0", "A")],
+            NetworkValidationMode = NetworkValidationMode.Skip,
+            RuleRuntime = new RuleRuntimeConfiguration(
+                commandOverrides: new Dictionary<string, RuleMode>
+                {
+                    [RuleIds.ApplyOverridePackFields] = RuleMode.Disabled,
+                }),
+        };
+        WorkflowOperationResult preview = await engine.UpdateAsync(
+            request with { ExecutionMode = WorkflowExecutionMode.Plan });
+        UpdateOperationRequest approved = Assert.IsType<UpdateOperationRequest>(
+            ReviewApproval.Bind(request, preview.Plan));
+
+        WorkflowOperationResult applied = await engine.UpdateAsync(approved);
+
+        Assert.Empty(applied.Plan.FileChanges);
+        Assert.Equal(WorkflowResultCode.NoChanges, applied.Code);
+        Assert.True(applied.Applied);
+        Assert.NotNull(
+            (await store.LoadAsync(
+                request.PackageIdentifier,
+                allowRecoveryWrites: false,
+                CancellationToken.None)).Pack);
     }
 
     [Fact]
@@ -1338,6 +1753,10 @@ public sealed class LocalWorkflowEngineTests
             FinalUrl = "https://example.test/app-x64.exe",
         };
 
+    private static string HashText(string value)
+        => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(value)));
+
     private sealed class DictionarySnapshotSource(params PackageSnapshot[] snapshots) : IManifestSnapshotSource
     {
         private readonly IReadOnlyList<PackageSnapshot> _snapshots = snapshots;
@@ -1404,6 +1823,95 @@ public sealed class LocalWorkflowEngineTests
                 request.Runtime,
                 request.OverridePacks);
             _ = pipeline.Run(context);
+            return new(
+                context.Manifests,
+                new(
+                    [.. context.Executions],
+                    [.. context.Changes],
+                    [.. context.Findings],
+                    [.. context.HumanCorrectionReviews],
+                    [.. context.Trace]));
+        }
+    }
+
+    private sealed class ChangedGeneratorRuleRunner : IWorkflowRuleRunner
+    {
+        public WorkflowRuleResult Run(WorkflowRuleRequest request)
+        {
+            request.Manifests.Installer.Installers![0].Scope = null;
+            var context = new ManifestContext
+            {
+                Manifests = request.Manifests,
+                Previous = request.Previous,
+                OriginalBotSubmission = request.OriginalBotSubmission,
+                Evidence = request.InstallerEvidence,
+                Options = request.Options,
+            };
+            RulePipeline pipeline = RulePipeline.Create(
+                [new ApplyOverridePackFieldsRule(request.OverridePacks)],
+                request.Runtime,
+                request.OverridePacks);
+            _ = pipeline.Run(context);
+            return new(
+                context.Manifests,
+                new(
+                    [.. context.Executions],
+                    [.. context.Changes],
+                    [.. context.Findings],
+                    [.. context.HumanCorrectionReviews],
+                    [.. context.Trace]));
+        }
+    }
+
+    private sealed class PublisherLearningRuleRunner(
+        string generatedPublisherUrl) : IWorkflowRuleRunner
+    {
+        public WorkflowRuleResult Run(WorkflowRuleRequest request)
+        {
+            request.Manifests.DefaultLocale.PublisherUrl = generatedPublisherUrl;
+            var context = new ManifestContext
+            {
+                Manifests = request.Manifests,
+                Previous = request.Previous,
+                OriginalBotSubmission = request.OriginalBotSubmission,
+                Evidence = request.InstallerEvidence,
+                Options = request.Options,
+            };
+            RulePipeline pipeline = RulePipeline.Create(
+                [new ApplyOverridePackFieldsRule(request.OverridePacks)],
+                request.Runtime,
+                request.OverridePacks);
+            _ = pipeline.Run(context);
+            return new(
+                context.Manifests,
+                new(
+                    [.. context.Executions],
+                    [.. context.Changes],
+                    [.. context.Findings],
+                    [.. context.HumanCorrectionReviews],
+                    [.. context.Trace]));
+        }
+    }
+
+    private sealed class NoChangeLearningRuleRunner : IWorkflowRuleRunner
+    {
+        public WorkflowRuleResult Run(WorkflowRuleRequest request)
+        {
+            request.Manifests.Installer.Installers![0].Scope = Scope.User;
+            var context = new ManifestContext
+            {
+                Manifests = request.Manifests,
+                Previous = request.Previous,
+                OriginalBotSubmission = request.OriginalBotSubmission,
+                Evidence = request.InstallerEvidence,
+                Options = request.Options,
+            };
+            RulePipeline pipeline = RulePipeline.Create(
+                [new ApplyOverridePackFieldsRule(request.OverridePacks)],
+                request.Runtime,
+                request.OverridePacks);
+            _ = pipeline.Run(context);
+            context.Manifests.Installer.Installers![0].Scope = Scope.Machine;
             return new(
                 context.Manifests,
                 new(
@@ -1602,6 +2110,135 @@ public sealed class LocalWorkflowEngineTests
         }
     }
 
+    private sealed class WritingRecordingTransaction :
+        IWorkflowFileTransaction,
+        IWorkflowFileTransactionRecovery
+    {
+        public int Calls { get; private set; }
+
+        public async Task ApplyAsync(
+            string outputDirectory,
+            string operationLockKey,
+            ImmutableArray<WorkflowFileChange> changes,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            foreach (WorkflowFileChange change in changes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string path = Path.Combine(
+                    outputDirectory,
+                    change.RepositoryPath.Replace('/', Path.DirectorySeparatorChar));
+                if (change.Kind == PlannedChangeKind.Delete)
+                {
+                    File.Delete(path);
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllBytesAsync(
+                    path,
+                    change.Content.ToArray(),
+                    cancellationToken);
+            }
+        }
+
+        public Task RecoverAsync(
+            string outputDirectory,
+            string operationLockKey,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecoveryAwareRecordingTransaction :
+        IWorkflowFileTransaction,
+        IWorkflowFileTransactionRecovery
+    {
+        public Task ApplyAsync(
+            string outputDirectory,
+            string operationLockKey,
+            ImmutableArray<WorkflowFileChange> changes,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
+        public Task RecoverAsync(
+            string outputDirectory,
+            string operationLockKey,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class ManifestWritingPackBlockingTransaction(
+        string activePackPath) : IWorkflowFileTransaction
+    {
+        public async Task ApplyAsync(
+            string outputDirectory,
+            string operationLockKey,
+            ImmutableArray<WorkflowFileChange> changes,
+            CancellationToken cancellationToken)
+        {
+            foreach (WorkflowFileChange change in changes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string path = Path.Combine(
+                    outputDirectory,
+                    change.RepositoryPath.Replace('/', Path.DirectorySeparatorChar));
+                if (change.Kind == PlannedChangeKind.Delete)
+                {
+                    File.Delete(path);
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllBytesAsync(
+                    path,
+                    change.Content.ToArray(),
+                    cancellationToken);
+            }
+
+            Directory.CreateDirectory(activePackPath);
+        }
+    }
+
+    private sealed class ManifestWritingProvenanceFailingTransaction : IWorkflowFileTransaction
+    {
+        public async Task ApplyAsync(
+            string outputDirectory,
+            string operationLockKey,
+            ImmutableArray<WorkflowFileChange> changes,
+            CancellationToken cancellationToken)
+        {
+            foreach (WorkflowFileChange change in changes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string path = Path.Combine(
+                    outputDirectory,
+                    change.RepositoryPath.Replace('/', Path.DirectorySeparatorChar));
+                if (change.Kind == PlannedChangeKind.Delete)
+                {
+                    File.Delete(path);
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllBytesAsync(path, change.Content.ToArray(), cancellationToken);
+            }
+
+            throw new WorkflowCommittedProvenanceException(
+                "Manifest committed but provenance failed.",
+                new IOException("provenance failure"));
+        }
+    }
+
     private sealed class RejectingTransaction : IWorkflowFileTransaction
     {
         public Task ApplyAsync(
@@ -1668,6 +2305,44 @@ public sealed class LocalWorkflowEngineTests
                 rollbackException: null,
                 cleanupException: new IOException("cleanup failure"),
                 journalRetained: true);
+    }
+
+    private sealed class IoRecoveryFailingTransaction :
+        IWorkflowFileTransaction,
+        IWorkflowFileTransactionRecovery
+    {
+        public Task RecoverAsync(
+            string outputDirectory,
+            string operationLockKey,
+            CancellationToken cancellationToken)
+            => Task.FromException(new InvalidDataException("malformed recovery journal"));
+
+        public Task ApplyAsync(
+            string outputDirectory,
+            string operationLockKey,
+            ImmutableArray<WorkflowFileChange> changes,
+            CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Apply must not run after recovery failure.");
+    }
+
+    private sealed class ConflictingRecoveryTransaction :
+        IWorkflowFileTransaction,
+        IWorkflowFileTransactionRecovery
+    {
+        public Task RecoverAsync(
+            string outputDirectory,
+            string operationLockKey,
+            CancellationToken cancellationToken)
+            => Task.FromException(new WorkflowOperationException(
+                WorkflowResultCode.Conflict,
+                "Another operation owns the package lock."));
+
+        public Task ApplyAsync(
+            string outputDirectory,
+            string operationLockKey,
+            ImmutableArray<WorkflowFileChange> changes,
+            CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Apply must not run after recovery conflict.");
     }
 
     private sealed class FixedClock : IWorkflowClock

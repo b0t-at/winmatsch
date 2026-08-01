@@ -151,7 +151,11 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         }
     }
 
-    public RateLimitInfo? LastRateLimit => null;
+    public RateLimitInfo? LastRateLimit { get; set; }
+
+    public RepositoryMetadataInfo? RepositoryMetadata { get; set; }
+
+    public Exception? RepositoryMetadataFailure { get; set; }
 
     public event EventHandler<RateLimitInfo>? RateLimitObserved
     {
@@ -266,6 +270,22 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
                 "not found",
                 HttpStatusCode.NotFound,
                 null));
+    }
+
+    public Task<RepositoryMetadataInfo> GetRepositoryMetadataAsync(
+        RepositoryCoordinates repository,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (RepositoryMetadataFailure is not null)
+        {
+            return Task.FromException<RepositoryMetadataInfo>(RepositoryMetadataFailure);
+        }
+
+        return RepositoryMetadata is not null
+            ? Task.FromResult(RepositoryMetadata)
+            : Task.FromException<RepositoryMetadataInfo>(
+                new GitHubApiException("not found", HttpStatusCode.NotFound, requestId: null));
     }
 
     public async Task<BranchState> GetDefaultBranchAsync(

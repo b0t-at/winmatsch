@@ -43,6 +43,8 @@ public sealed class ManifestContext
     /// </summary>
     public PackageManifests? OriginalBotSubmission { get; init; }
 
+    internal PackageManifests? GeneratedInput { get; set; }
+
     /// <summary>Analysis evidence per installer URL; empty when installers were not downloaded.</summary>
     public IReadOnlyList<InstallerEvidence> Evidence { get; init; } = [];
 

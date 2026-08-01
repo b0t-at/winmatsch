@@ -8,6 +8,7 @@ using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.GitHub.Auth;
 using WinMatsch.Rules;
+using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Validation;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.Discovery;
@@ -20,6 +21,14 @@ namespace WinMatsch.Cli.Tests;
 
 public sealed class MutationCommandModuleTests
 {
+    private static readonly ImmutableArray<WorkflowAuditEntry> _learnedOverrideAudit =
+    [
+        new(
+            "LEARNED_OVERRIDE_ACTIVE",
+            "Example.App",
+            "fingerprint"),
+    ];
+
     public static TheoryData<string> Commands =>
         new()
         {
@@ -270,7 +279,7 @@ public sealed class MutationCommandModuleTests
             .. json ? new[] { "--format", "json" } : Array.Empty<string>(),
         ];
 
-        CliRunResult result = await harness.RunAsync(args);
+        CliRunResult result = await harness.RunAsync(args.ToArray());
 
         Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
         Assert.Empty(submission.Requests);
@@ -293,6 +302,41 @@ public sealed class MutationCommandModuleTests
 
         Assert.Equal(ExitCodes.MissingInput, result.ExitCode);
         Assert.Equal(string.Empty, result.StandardOutput);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Learned_override_status_is_emitted_through_audit_contract(bool json)
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => FakeMutationWorkflow.Result(
+                request,
+                audit: _learnedOverrideAudit),
+        };
+        CliHarness harness = CreateHarness(workflow);
+        List<string> args =
+        [
+            "update",
+            "Example.App",
+            "1.0",
+            "--dry-run",
+        ];
+        if (json)
+        {
+            args.Add("--format");
+            args.Add("json");
+        }
+
+        CliRunResult result = await harness.RunAsync(args.ToArray());
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains(
+            json ? "\"audit\"" : "Audit:",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.Contains("LEARNED_OVERRIDE_ACTIVE", result.StandardOutput, StringComparison.Ordinal);
         Assert.Empty(harness.Interaction.Questions);
     }
 
@@ -372,6 +416,28 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(3, workflow.Requests.Count);
         Assert.False(workflow.Requests[0].ApproveReview);
         Assert.True(workflow.Requests[1].ApproveReview);
+    }
+
+    [Fact]
+    public async Task Approved_no_change_learning_reaches_apply_and_skips_remote()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => request.ApproveReview
+                ? LearnedNoChanges(request)
+                : Review(request),
+        };
+        var submissions = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submissions);
+        harness.Interaction.EnqueueConfirm(true);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--submit", "--yes"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(3, workflow.Requests.Count);
+        Assert.Equal(WorkflowExecutionMode.Apply, workflow.Requests[2].ExecutionMode);
+        Assert.Empty(submissions.Requests);
     }
 
     [Fact]
@@ -928,6 +994,36 @@ public sealed class MutationCommandModuleTests
                     new string('A', 64)),
             ]);
 
+    private static WorkflowOperationResult LearnedNoChanges(
+        WorkflowOperationRequest request)
+    {
+        WorkflowOperationResult result = FakeMutationWorkflow.Result(
+            request,
+            WorkflowResultCode.NoChanges);
+        RuleRunSummary reviews = Review(request).Plan.Rules;
+        var pack = new OverridePack
+        {
+            PackageIdentifier = result.Plan.PackageIdentifier,
+        };
+        return result with
+        {
+            Applied = request.ExecutionMode == WorkflowExecutionMode.Apply,
+            Plan = result.Plan with
+            {
+                FileChanges = [],
+                BeforeDocuments = result.Plan.AfterDocuments,
+                Preflight = result.Plan.Preflight with { Changes = [] },
+                Rules = reviews,
+                ReviewApproved = true,
+                LearnedOverride = new(
+                    pack,
+                    ExpectedContentSha256: null,
+                    ExpectedFormatVersion: null,
+                    ApprovedFields: []),
+            },
+        };
+    }
+
     private static WorkflowOperationResult LocaleResult(WorkflowOperationRequest request)
     {
         var identifier = new PackageIdentifier("Example.App");
@@ -1037,7 +1133,8 @@ internal sealed class FakeMutationWorkflow : IMutationWorkflow
         ValidationReport? validation = null,
         ImmutableArray<WorkflowQuestion> questions = default,
         ImmutableArray<HumanCorrectionReview> reviews = default,
-        string content = "PackageIdentifier: Example.App\nPackageVersion: 1.0\n")
+        string content = "PackageIdentifier: Example.App\nPackageVersion: 1.0\n",
+        ImmutableArray<WorkflowAuditEntry> audit = default)
     {
         (PackageIdentifier identifier, PackageVersion version) = Identity(request);
         var document = new RawManifestDocument(
@@ -1067,6 +1164,7 @@ internal sealed class FakeMutationWorkflow : IMutationWorkflow
             Rules = new([], [], [], reviews.IsDefault ? [] : reviews, []),
             Questions = questions.IsDefault ? [] : questions,
             ReviewApproved = request.ApproveReview,
+            Audit = audit.IsDefault ? [] : audit,
         };
         return new()
         {

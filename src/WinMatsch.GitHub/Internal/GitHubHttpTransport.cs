@@ -211,13 +211,14 @@ internal sealed class GitHubHttpTransport
                         continue;
                     }
 
-                    GitHubApiErrorKind errorKind =
-                        IsGraphQlEndpoint(uri) &&
-                        response.StatusCode is HttpStatusCode.NotFound
-                            or HttpStatusCode.MethodNotAllowed
-                            or HttpStatusCode.NotImplemented
-                            ? GitHubApiErrorKind.GraphQlUnavailable
-                            : GitHubApiErrorKind.Unknown;
+                    GitHubApiErrorKind errorKind = IsRateLimited(response)
+                        ? GitHubApiErrorKind.RateLimited
+                        : IsGraphQlEndpoint(uri) &&
+                            response.StatusCode is HttpStatusCode.NotFound
+                                or HttpStatusCode.MethodNotAllowed
+                                or HttpStatusCode.NotImplemented
+                                ? GitHubApiErrorKind.GraphQlUnavailable
+                                : GitHubApiErrorKind.Unknown;
                     throw await CreateExceptionAsync(
                         response,
                         errorKind,
@@ -305,23 +306,35 @@ internal sealed class GitHubHttpTransport
 
     private void ObserveRateLimit(HttpResponseMessage response)
     {
-        if (!TryGetIntHeader(response.Headers, "X-RateLimit-Limit", out int limit) ||
-            !TryGetIntHeader(response.Headers, "X-RateLimit-Remaining", out int remaining) ||
-            !TryGetLongHeader(response.Headers, "X-RateLimit-Reset", out long reset))
+        if (!TryGetRateLimit(response, out RateLimitInfo rateLimit))
         {
             return;
         }
 
+        RateLimitObserved?.Invoke(this, rateLimit);
+    }
+
+    private static bool TryGetRateLimit(
+        HttpResponseMessage response,
+        out RateLimitInfo rateLimit)
+    {
+        if (!TryGetIntHeader(response.Headers, "X-RateLimit-Limit", out int limit)
+            || !TryGetIntHeader(response.Headers, "X-RateLimit-Remaining", out int remaining)
+            || !TryGetLongHeader(response.Headers, "X-RateLimit-Reset", out long reset))
+        {
+            rateLimit = null!;
+            return false;
+        }
+
         TryGetIntHeader(response.Headers, "X-RateLimit-Used", out int used);
         string resource = TryGetHeader(response.Headers, "X-RateLimit-Resource") ?? "core";
-        RateLimitObserved?.Invoke(
-            this,
-            new RateLimitInfo(
-                resource,
-                limit,
-                remaining,
-                used,
-                DateTimeOffset.FromUnixTimeSeconds(reset)));
+        rateLimit = new(
+            resource,
+            limit,
+            remaining,
+            used,
+            DateTimeOffset.FromUnixTimeSeconds(reset));
+        return true;
     }
 
     private static bool IsTransient(HttpResponseMessage response)
@@ -333,6 +346,15 @@ internal sealed class GitHubHttpTransport
                   TryGetHeader(response.Headers, "X-RateLimit-Remaining"),
                   "0",
                   StringComparison.Ordinal)));
+
+    private static bool IsRateLimited(HttpResponseMessage response)
+        => response.StatusCode == HttpStatusCode.TooManyRequests
+            || (response.StatusCode == HttpStatusCode.Forbidden
+                && (response.Headers.RetryAfter is not null
+                   || string.Equals(
+                       TryGetHeader(response.Headers, "X-RateLimit-Remaining"),
+                       "0",
+                       StringComparison.Ordinal)));
 
     private static RetryConditionHeaderValue? GetServerRetryAfter(HttpResponseMessage response)
     {
@@ -380,12 +402,32 @@ internal sealed class GitHubHttpTransport
             (string.IsNullOrWhiteSpace(body)
                 ? $"GitHub returned HTTP {(int)response.StatusCode}."
                 : body);
+        RateLimitInfo? rateLimit = TryGetRateLimit(response, out RateLimitInfo parsedRateLimit)
+            ? parsedRateLimit
+            : null;
         return new GitHubApiException(
             message,
             response.StatusCode,
             GetRequestId(response),
             details,
-            errorKind: errorKind);
+            errorKind: errorKind,
+            rateLimit: rateLimit,
+            retryAfter: GetResponseRetryAfter(response));
+    }
+
+    private static TimeSpan? GetResponseRetryAfter(HttpResponseMessage response)
+    {
+        RetryConditionHeaderValue? retryAfter = response.Headers.RetryAfter;
+        if (retryAfter?.Delta is { } delay)
+        {
+            return delay;
+        }
+
+        return retryAfter?.Date is { } retryAt
+            ? retryAt - DateTimeOffset.UtcNow is { } remaining && remaining > TimeSpan.Zero
+                ? remaining
+                : TimeSpan.Zero
+            : null;
     }
 
     private static Uri? TryGetNextUri(HttpResponseHeaders headers)

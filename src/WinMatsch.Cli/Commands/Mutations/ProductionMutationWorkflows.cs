@@ -53,7 +53,13 @@ internal sealed class ProductionMutationWorkflow(
         IWorkflowReleaseSource? releases = CreateReleaseSource(request, gitHub);
         LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
             downloader,
-            releases);
+            releases,
+            overridePackStoreOptions: configuration.OverrideStoreDirectory is null
+                ? null
+                : new OverridePackStoreOptions
+                {
+                    RootDirectory = configuration.OverrideStoreDirectory,
+                });
         return await new LocalMutationWorkflow(engine)
             .ExecuteAsync(request, cancellationToken)
             .ConfigureAwait(false);
@@ -77,10 +83,13 @@ internal sealed class ProductionMutationWorkflow(
         if (!release.ReleaseUrls.IsEmpty)
         {
             RepositoryCoordinates repository = ParseGitHubRepository(release.ReleaseUrls[0]);
+            IGitHubRepositoryClient requiredGitHub = gitHub
+                ?? throw new InvalidOperationException(
+                    "GitHub release discovery requires an invocation-scoped GitHub client.");
             return new GitHubWorkflowReleaseSource(
-                gitHub ?? throw new InvalidOperationException(
-                    "GitHub release discovery requires an invocation-scoped GitHub client."),
-                repository);
+                requiredGitHub,
+                repository,
+                new GitHubRepositoryReleaseMetadataSource(requiredGitHub));
         }
 
         return release.InstallerUrls.IsEmpty ? null : new DirectWorkflowReleaseSource();

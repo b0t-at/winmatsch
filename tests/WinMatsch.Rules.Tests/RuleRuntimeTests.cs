@@ -1,4 +1,6 @@
 using System.Collections.Immutable;
+using System.Security.Cryptography;
+using System.Text;
 using WinMatsch.Core;
 using WinMatsch.Rules.OverridePacks;
 using Xunit;
@@ -301,6 +303,46 @@ public class RuleRuntimeTests
             context.HumanCorrectionReviews,
             review => review.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal)
                 && review.HumanValue == "HUMAN-B");
+    }
+
+    [Fact]
+    public void Learned_bot_hash_uses_paired_original_installer_after_reorder()
+    {
+        static Installer Installer(
+            Architecture architecture,
+            string url,
+            Scope scope)
+            => TestManifests.CreateInstaller(
+                architecture,
+                url: url,
+                scope: scope);
+
+        PackageManifests originalBot = TestManifests.Create(
+            Installer(Architecture.X64, "https://example.test/app-x64-1.0.exe", Scope.User),
+            Installer(Architecture.X86, "https://example.test/app-x86-1.0.exe", Scope.User));
+        PackageManifests merged = TestManifests.Create(
+            Installer(Architecture.X86, "https://example.test/app-x86-1.0.exe", Scope.User),
+            Installer(Architecture.X64, "https://example.test/app-x64-1.0.exe", Scope.Machine));
+        PackageManifests generated = TestManifests.Create(
+            Installer(Architecture.X64, "https://example.test/app-x64-2.0.exe", Scope.User),
+            Installer(Architecture.X86, "https://example.test/app-x86-2.0.exe", Scope.User));
+        var context = new ManifestContext
+        {
+            Manifests = generated,
+            Previous = merged,
+            OriginalBotSubmission = originalBot,
+        };
+        RulePipeline.Create([], new RuleRuntimeConfiguration(), OverridePackSet.Empty).Run(context);
+        HumanCorrectionReview review = Assert.Single(
+            context.HumanCorrectionReviews,
+            static item => item.FieldPath.EndsWith(".Scope", StringComparison.Ordinal));
+
+        LearnedFieldOverride learned = Assert.Single(
+            LearnedOverrideBuilder.Create(originalBot, merged, [review]));
+
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("user"))),
+            learned.BotValueSha256);
     }
 
     [Fact]

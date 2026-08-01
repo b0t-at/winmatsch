@@ -23,22 +23,14 @@ internal static class LearnedInstallerSelector
         Installer installer = installers[installerIndex];
         string version = root.PackageVersion?.Value ?? "";
         string normalizedUrl = NormalizeUrl(installer.InstallerUrl, version);
-        string identity = string.Join(
-            '\u001f',
-            normalizedUrl,
-            correctedField == "Architecture" ? "" : installer.Architecture?.ToString() ?? "",
-            correctedField == "InstallerType"
-                ? ""
-                : (installer.InstallerType ?? root.InstallerType)?.ToString() ?? "",
-            correctedField == "NestedInstallerType"
-                ? ""
-                : (installer.NestedInstallerType ?? root.NestedInstallerType)?.ToString() ?? "",
-            correctedField == "Scope"
-                ? ""
-                : (installer.Scope ?? root.Scope)?.ToString() ?? "",
-            correctedField == "InstallerLocale"
-                ? ""
-                : (installer.InstallerLocale ?? root.InstallerLocale)?.Value ?? "");
+        int occurrence = installers
+            .Take(installerIndex + 1)
+            .Count(candidate => string.Equals(
+                NormalizeUrl(candidate.InstallerUrl, version),
+                normalizedUrl,
+                StringComparison.OrdinalIgnoreCase)) - 1;
+        _ = correctedField;
+        string identity = $"{normalizedUrl}\u001f{occurrence}";
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
     }
 

@@ -37,6 +37,10 @@ internal sealed class RestRepositoryDto
     public RestRepositorySummaryDto? Parent { get; set; }
 
     public RestRepositoryOwnerDto Owner { get; set; } = new();
+
+    public RestLicenseSummaryDto? License { get; set; }
+
+    public List<string> Topics { get; set; } = [];
 }
 
 internal sealed class RestRepositorySummaryDto
@@ -48,6 +52,21 @@ internal sealed class RestRepositorySummaryDto
 internal sealed class RestRepositoryOwnerDto
 {
     public string Login { get; set; } = "";
+
+    [JsonPropertyName("html_url")]
+    public string HtmlUrl { get; set; } = "";
+}
+
+internal sealed class RestLicenseSummaryDto
+{
+    [JsonPropertyName("spdx_id")]
+    public string? SpdxId { get; set; }
+}
+
+internal sealed class RestLicenseContentDto
+{
+    [JsonPropertyName("html_url")]
+    public string? HtmlUrl { get; set; }
 }
 
 internal sealed class RestContentDto

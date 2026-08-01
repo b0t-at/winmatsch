@@ -11,6 +11,7 @@ public enum PackageVersionSource
 {
     PackageOverride,
     InstallerProductVersion,
+    InstallerFileVersion,
     ReleaseTag,
     UrlToken,
 }
@@ -58,6 +59,7 @@ public static partial class PackageVersionResolver
         var candidates = ImmutableArray.CreateBuilder<PackageVersionCandidate>();
 
         input.OverridePacks.TryGet(input.PackageIdentifier, out OverridePack? pack);
+        PackageVersionSource? preferredSource = GetSelectedSource(pack?.VersionSource);
         string? packageOverride = input.ExplicitPackageVersion ?? ParseLiteralOverride(pack?.VersionSource);
         if (!string.IsNullOrWhiteSpace(packageOverride)
             && !PackageVersion.TryCreate(packageOverride.Trim(), out _))
@@ -82,13 +84,39 @@ public static partial class PackageVersionResolver
         foreach (DiscoveredAsset asset in input.Assets)
         {
             if (asset.Analysis is { IsProductVersionTrustworthy: true } analysis
-                && IsConsistentBinaryVersion(input.PackageIdentifier, asset, analysis, diagnostics))
+                && IsConsistentBinaryVersion(
+                    input.PackageIdentifier,
+                    asset,
+                    analysis.ProductVersion,
+                    analysis.ProductVersionEvidenceKind,
+                    enforceReleaseConsistency:
+                        preferredSource != PackageVersionSource.InstallerProductVersion,
+                    diagnostics))
             {
                 AddCandidate(
                     analysis.ProductVersion,
                     PackageVersionSource.InstallerProductVersion,
                     analysis.ProductVersionConfidence,
                     $"analysis:{analysis.ProductVersionEvidenceKind}:{asset.DownloadUri.AbsoluteUri}",
+                    candidates,
+                    diagnostics);
+            }
+
+            if (asset.Analysis is { IsFileVersionTrustworthy: true } fileAnalysis
+                && IsConsistentBinaryVersion(
+                    input.PackageIdentifier,
+                    asset,
+                    fileAnalysis.FileVersion,
+                    fileAnalysis.FileVersionEvidenceKind,
+                    enforceReleaseConsistency:
+                        preferredSource != PackageVersionSource.InstallerFileVersion,
+                    diagnostics))
+            {
+                AddCandidate(
+                    fileAnalysis.FileVersion,
+                    PackageVersionSource.InstallerFileVersion,
+                    fileAnalysis.FileVersionConfidence,
+                    $"analysis:{fileAnalysis.FileVersionEvidenceKind}:{asset.DownloadUri.AbsoluteUri}",
                     candidates,
                     diagnostics);
             }
@@ -189,11 +217,9 @@ public static partial class PackageVersionResolver
 
             foreach (string prefix in prefixes)
             {
-                if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-                    && value.Length > prefix.Length
-                    && IsPrefixSeparator(value[prefix.Length]))
+                if (TryStripPackagePrefix(value, prefix, out string? stripped))
                 {
-                    value = value[(prefix.Length + 1)..];
+                    value = stripped;
                     changed = true;
                     break;
                 }
@@ -345,13 +371,22 @@ public static partial class PackageVersionResolver
     private static bool IsConsistentBinaryVersion(
         PackageIdentifier packageIdentifier,
         DiscoveredAsset asset,
-        AssetAnalysisEvidence analysis,
+        string? version,
+        InstallerVersionEvidenceKind evidenceKind,
+        bool enforceReleaseConsistency,
         ImmutableArray<string>.Builder diagnostics)
     {
-        if (analysis.ProductVersionEvidenceKind is not (
+        if (evidenceKind is not (
                 InstallerVersionEvidenceKind.PeVersionInfoProductVersion
-                or InstallerVersionEvidenceKind.ArchiveConsensus)
-            || string.IsNullOrWhiteSpace(analysis.ProductVersion))
+                or InstallerVersionEvidenceKind.PeVersionInfoFileVersion
+                or InstallerVersionEvidenceKind.ArchiveConsensus
+                or InstallerVersionEvidenceKind.ArchiveFileVersionConsensus)
+            || string.IsNullOrWhiteSpace(version))
+        {
+            return true;
+        }
+
+        if (!enforceReleaseConsistency)
         {
             return true;
         }
@@ -359,15 +394,16 @@ public static partial class PackageVersionResolver
         string? normalizedTag = NormalizeReleaseTag(asset.ReleaseTag, packageIdentifier);
         if (string.IsNullOrWhiteSpace(normalizedTag)
             || ReleaseBuildTagRegex().IsMatch(normalizedTag)
+            || !SemanticVersionTagRegex().IsMatch(normalizedTag)
             || !PackageVersion.TryCreate(normalizedTag, out PackageVersion? tagVersion)
-            || !PackageVersion.TryCreate(analysis.ProductVersion.Trim(), out PackageVersion? binaryVersion)
+            || !PackageVersion.TryCreate(version.Trim(), out PackageVersion? binaryVersion)
             || binaryVersion!.IsEquivalentTo(tagVersion!))
         {
             return true;
         }
 
         diagnostics.Add(
-            $"VERSION_BINARY_INCONSISTENT:{analysis.ProductVersion}:{asset.ReleaseTag}:{asset.DownloadUri.AbsoluteUri}");
+            $"VERSION_BINARY_INCONSISTENT:{version}:{asset.ReleaseTag}:{asset.DownloadUri.AbsoluteUri}");
         return false;
     }
 
@@ -395,19 +431,12 @@ public static partial class PackageVersionResolver
         [
             PackageVersionSource.PackageOverride,
             PackageVersionSource.InstallerProductVersion,
+            PackageVersionSource.InstallerFileVersion,
             PackageVersionSource.ReleaseTag,
             PackageVersionSource.UrlToken,
         ];
 
-        PackageVersionSource? selected = versionSource?.Trim().ToLowerInvariant() switch
-        {
-            "installer" or "installer.productversion" or "product-version" =>
-                PackageVersionSource.InstallerProductVersion,
-            "release" or "release.tag" or "release-tag" or "tag" =>
-                PackageVersionSource.ReleaseTag,
-            "url" or "url.token" or "url-token" => PackageVersionSource.UrlToken,
-            _ => null,
-        };
+        PackageVersionSource? selected = GetSelectedSource(versionSource);
 
         return selected is null
             ? defaults
@@ -419,7 +448,65 @@ public static partial class PackageVersionResolver
             ];
     }
 
+    private static PackageVersionSource? GetSelectedSource(string? versionSource)
+        => versionSource?.Trim().ToLowerInvariant() switch
+        {
+            "installer" or "installer.productversion" or "product-version" =>
+                PackageVersionSource.InstallerProductVersion,
+            "installer.fileversion" or "file-version" =>
+                PackageVersionSource.InstallerFileVersion,
+            "release" or "release.tag" or "release-tag" or "tag" =>
+                PackageVersionSource.ReleaseTag,
+            "url" or "url.token" or "url-token" => PackageVersionSource.UrlToken,
+            _ => null,
+        };
+
     private static bool IsPrefixSeparator(char value) => value is '-' or '_' or '/' or ' ' or '.';
+
+    private static bool TryStripPackagePrefix(
+        string value,
+        string prefix,
+        out string stripped)
+    {
+        int valueIndex = 0;
+        foreach (char prefixCharacter in prefix)
+        {
+            if (!char.IsAsciiLetterOrDigit(prefixCharacter))
+            {
+                continue;
+            }
+
+            while (valueIndex < value.Length
+                   && !char.IsAsciiLetterOrDigit(value[valueIndex]))
+            {
+                valueIndex++;
+            }
+
+            if (valueIndex >= value.Length
+                || char.ToUpperInvariant(value[valueIndex])
+                    != char.ToUpperInvariant(prefixCharacter))
+            {
+                stripped = value;
+                return false;
+            }
+
+            valueIndex++;
+        }
+
+        if (valueIndex >= value.Length || !IsPrefixSeparator(value[valueIndex]))
+        {
+            stripped = value;
+            return false;
+        }
+
+        while (valueIndex < value.Length && IsPrefixSeparator(value[valueIndex]))
+        {
+            valueIndex++;
+        }
+
+        stripped = value[valueIndex..];
+        return stripped.Length > 0;
+    }
 
     [GeneratedRegex(
         @"(?<![A-Za-z0-9])v?(?<version>[0-9]+(?:[._][0-9]+)+(?:-(?:alpha|beta|preview|rc)[0-9]*)?)(?![A-Za-z0-9])",
@@ -433,4 +520,9 @@ public static partial class PackageVersionResolver
         @"^(?:b|build[-_.]?)\d+$|(?:^|[-_.])(?:build|nightly|snapshot)(?:[-_.]|$)|\d{4}-\d{2}-\d{2}",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ReleaseBuildTagRegex();
+
+    [GeneratedRegex(
+        @"^[vV]?\d+(?:\.\d+)+(?:-(?:alpha|beta|preview|rc)\d*)?$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SemanticVersionTagRegex();
 }

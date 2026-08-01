@@ -7,6 +7,7 @@ namespace WinMatsch.GitHub.Internal;
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(RestUserDto))]
 [JsonSerializable(typeof(RestRepositoryDto))]
+[JsonSerializable(typeof(RestLicenseContentDto))]
 [JsonSerializable(typeof(RestContentDto))]
 [JsonSerializable(typeof(RestTreeDto))]
 [JsonSerializable(typeof(List<RestReleaseDto>))]

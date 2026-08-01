@@ -17,6 +17,7 @@ public class ConfigurationResolverTests
         Assert.Empty(configuration.DisabledRules);
         Assert.True(configuration.CacheEnabled);
         Assert.Null(configuration.CacheDirectory);
+        Assert.Null(configuration.OverrideStoreDirectory);
         Assert.Equal(TimeSpan.FromHours(4), configuration.FreshnessDelay);
         Assert.Equal(OutputFormat.Text, configuration.OutputFormat);
         Assert.Null(configuration.OutputDirectory);
@@ -35,14 +36,30 @@ public class ConfigurationResolverTests
     [Fact]
     public void Command_layer_wins_over_all_others()
     {
-        var command = new ConfigurationLayer { ConcurrentDownloads = 9, Repository = "cmd/repo" };
-        var environment = new ConfigurationLayer { ConcurrentDownloads = 5, Repository = "env/repo" };
-        var user = new ConfigurationLayer { ConcurrentDownloads = 3, Repository = "user/repo" };
+        var command = new ConfigurationLayer
+        {
+            ConcurrentDownloads = 9,
+            Repository = "cmd/repo",
+            OverrideStoreDirectory = "cmd-overrides",
+        };
+        var environment = new ConfigurationLayer
+        {
+            ConcurrentDownloads = 5,
+            Repository = "env/repo",
+            OverrideStoreDirectory = "env-overrides",
+        };
+        var user = new ConfigurationLayer
+        {
+            ConcurrentDownloads = 3,
+            Repository = "user/repo",
+            OverrideStoreDirectory = "user-overrides",
+        };
 
         WinMatschConfiguration configuration = ConfigurationResolver.Resolve(command, environment, user);
 
         Assert.Equal(9, configuration.ConcurrentDownloads);
         Assert.Equal("cmd/repo", configuration.Repository.ToString());
+        Assert.Equal("cmd-overrides", configuration.OverrideStoreDirectory);
     }
 
     [Fact]

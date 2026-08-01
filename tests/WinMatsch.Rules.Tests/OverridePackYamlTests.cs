@@ -7,6 +7,22 @@ namespace WinMatsch.Rules.Tests;
 
 public class OverridePackYamlTests
 {
+    [Theory]
+    [InlineData("installer.fileVersion")]
+    [InlineData("file-version")]
+    public void File_version_sources_are_supported(string versionSource)
+    {
+        var pack = new OverridePack
+        {
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            VersionSource = versionSource,
+        };
+
+        OverridePack parsed = OverridePackYaml.Read(OverridePackYaml.Write(pack));
+
+        Assert.Equal(versionSource, parsed.VersionSource);
+    }
+
     [Fact]
     public void Complete_override_pack_round_trips_canonically()
     {

@@ -16,6 +16,7 @@ public class EnvironmentConfigurationTests
             ["WINMATSCH_RULES_DISABLED"] = "slow-check",
             ["WINMATSCH_CACHE_ENABLED"] = "false",
             ["WINMATSCH_CACHE_DIRECTORY"] = "C:/cache",
+            ["WINMATSCH_OVERRIDE_STORE_DIRECTORY"] = "C:/overrides",
             ["WINMATSCH_FRESHNESS_DELAY"] = "1.12:00:00",
             ["WINMATSCH_OUTPUT_FORMAT"] = "json",
             ["WINMATSCH_OUTPUT_DIRECTORY"] = "reports",
@@ -30,6 +31,7 @@ public class EnvironmentConfigurationTests
         Assert.Equal(["slow-check"], layer.DisabledRules);
         Assert.False(layer.CacheEnabled);
         Assert.Equal("C:/cache", layer.CacheDirectory);
+        Assert.Equal("C:/overrides", layer.OverrideStoreDirectory);
         Assert.Equal(new TimeSpan(1, 12, 0, 0), layer.FreshnessDelay);
         Assert.Equal(OutputFormat.Json, layer.OutputFormat);
         Assert.Equal("reports", layer.OutputDirectory);

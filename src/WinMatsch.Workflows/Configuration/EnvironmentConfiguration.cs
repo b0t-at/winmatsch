@@ -12,6 +12,7 @@ public static class EnvironmentConfiguration
     public const string DisabledRulesVariable = "WINMATSCH_RULES_DISABLED";
     public const string CacheEnabledVariable = "WINMATSCH_CACHE_ENABLED";
     public const string CacheDirectoryVariable = "WINMATSCH_CACHE_DIRECTORY";
+    public const string OverrideStoreDirectoryVariable = "WINMATSCH_OVERRIDE_STORE_DIRECTORY";
     public const string FreshnessDelayVariable = "WINMATSCH_FRESHNESS_DELAY";
     public const string OutputFormatVariable = "WINMATSCH_OUTPUT_FORMAT";
     public const string OutputDirectoryVariable = "WINMATSCH_OUTPUT_DIRECTORY";
@@ -32,6 +33,7 @@ public static class EnvironmentConfiguration
             DisabledRules = ParseValue(lookup, DisabledRulesVariable, ConfigurationValues.ParseRuleList),
             CacheEnabled = ParseValue(lookup, CacheEnabledVariable, ConfigurationValues.ParseBoolean),
             CacheDirectory = GetValue(lookup, CacheDirectoryVariable),
+            OverrideStoreDirectory = GetValue(lookup, OverrideStoreDirectoryVariable),
             FreshnessDelay = ParseValue(lookup, FreshnessDelayVariable, ConfigurationValues.ParseFreshnessDelay),
             OutputFormat = ParseValue(lookup, OutputFormatVariable, ConfigurationValues.ParseOutputFormat),
             OutputDirectory = GetValue(lookup, OutputDirectoryVariable),

@@ -15,6 +15,15 @@ public sealed record RepositoryInfo(
     BranchState DefaultBranch,
     RepositoryCoordinates? Parent);
 
+public sealed record RepositoryMetadataInfo(
+    RepositoryCoordinates Coordinates,
+    Uri WebUri,
+    Uri OwnerUri,
+    bool IsPrivate,
+    string? LicenseSpdxId,
+    Uri? LicenseUri,
+    IReadOnlyList<string> Topics);
+
 public sealed record BranchState(
     string Name,
     string HeadSha,

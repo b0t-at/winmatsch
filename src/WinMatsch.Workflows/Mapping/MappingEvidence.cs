@@ -26,7 +26,9 @@ public enum InstallerVersionEvidenceKind
     Unspecified,
     PackageMetadata,
     PeVersionInfoProductVersion,
+    PeVersionInfoFileVersion,
     ArchiveConsensus,
+    ArchiveFileVersionConsensus,
 }
 
 /// <summary>A stable snapshot of downloaded bytes and their HTTP identity.</summary>
@@ -77,6 +79,14 @@ public sealed record AssetAnalysisEvidence
     public InstallerVersionEvidenceKind ProductVersionEvidenceKind { get; init; }
 
     public EvidenceConfidence ProductVersionConfidence { get; init; } = EvidenceConfidence.Low;
+
+    public string? FileVersion { get; init; }
+
+    public bool IsFileVersionTrustworthy { get; init; }
+
+    public InstallerVersionEvidenceKind FileVersionEvidenceKind { get; init; }
+
+    public EvidenceConfidence FileVersionConfidence { get; init; } = EvidenceConfidence.Low;
 
     /// <summary>Whether dependency analysis inspected every relevant payload within its bounds.</summary>
     public bool DependencyAnalysisComplete { get; init; } = true;
@@ -201,7 +211,10 @@ public sealed record AssetAnalysisEvidence
         IEnumerable<string>? boundedArchiveEntries = null,
         bool isProductVersionTrustworthy = false,
         InstallerVersionEvidenceKind productVersionEvidenceKind = InstallerVersionEvidenceKind.Unspecified,
-        EvidenceConfidence productVersionConfidence = EvidenceConfidence.Low)
+        EvidenceConfidence productVersionConfidence = EvidenceConfidence.Low,
+        bool isFileVersionTrustworthy = false,
+        InstallerVersionEvidenceKind fileVersionEvidenceKind = InstallerVersionEvidenceKind.Unspecified,
+        EvidenceConfidence fileVersionConfidence = EvidenceConfidence.Low)
     {
         ArgumentNullException.ThrowIfNull(analysis);
         ArgumentNullException.ThrowIfNull(content);
@@ -242,6 +255,10 @@ public sealed record AssetAnalysisEvidence
             IsProductVersionTrustworthy = isProductVersionTrustworthy,
             ProductVersionEvidenceKind = productVersionEvidenceKind,
             ProductVersionConfidence = productVersionConfidence,
+            FileVersion = analysis.FileVersion,
+            IsFileVersionTrustworthy = isFileVersionTrustworthy,
+            FileVersionEvidenceKind = fileVersionEvidenceKind,
+            FileVersionConfidence = fileVersionConfidence,
             DependencyAnalysisComplete = dependencyAnalysis?.IsComplete ?? true,
             InstallerShapes =
             [

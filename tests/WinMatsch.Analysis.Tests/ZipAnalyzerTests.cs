@@ -134,6 +134,24 @@ public class ZipAnalyzerTests
     }
 
     [Fact]
+    public void Single_nested_cumulus_exe_preserves_separate_file_version()
+    {
+        byte[] portableExe = PeFixtures.BuildExe(
+            version: new VersionStrings(
+                ProductName: "Cumulus MX",
+                ProductVersion: "Cumulus MX build 4088",
+                FileVersion: "4.5.2.0",
+                OriginalFilename: "CumulusMX.exe",
+                FileDescription: "Cumulus MX"));
+        using MemoryStream zip = BuildZip(("CumulusMX.exe", portableExe));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(zip, "cumulus.zip");
+
+        Assert.Equal("Cumulus MX build 4088", analysis.ProductVersion);
+        Assert.Equal("4.5.2.0", analysis.FileVersion);
+    }
+
+    [Fact]
     public void Single_nested_installer_exe_keeps_nested_type_exe()
     {
         byte[] installerExe = PeFixtures.BuildExe(

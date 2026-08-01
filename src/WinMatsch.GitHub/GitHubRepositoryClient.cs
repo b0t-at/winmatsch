@@ -209,6 +209,54 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         => (await GetRepositoryAsync(repository, cancellationToken).ConfigureAwait(false))
             .DefaultBranch;
 
+    public async Task<RepositoryMetadataInfo> GetRepositoryMetadataAsync(
+        RepositoryCoordinates repository,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        string route = $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}";
+        RestRepositoryDto dto = await _transport.GetAsync(
+            route,
+            GitHubJsonContext.Default.RestRepositoryDto,
+            cancellationToken).ConfigureAwait(false);
+        Uri? licenseUri = null;
+        if (dto.License is not null)
+        {
+            try
+            {
+                RestLicenseContentDto license = await _transport.GetAsync(
+                    $"{route}/license",
+                    GitHubJsonContext.Default.RestLicenseContentDto,
+                    cancellationToken).ConfigureAwait(false);
+                licenseUri = string.IsNullOrWhiteSpace(license.HtmlUrl)
+                    ? null
+                    : ParseAbsoluteUri(license.HtmlUrl, "repository license URL");
+            }
+            catch (GitHubApiException exception)
+                when (exception.ErrorKind == GitHubApiErrorKind.ResourceNotFound)
+            {
+                // Repository metadata is still useful when a license file disappears between reads.
+            }
+        }
+
+        return new(
+            RepositoryCoordinates.Parse(dto.FullName),
+            ParseAbsoluteUri(dto.HtmlUrl, "repository URL"),
+            ParseAbsoluteUri(dto.Owner.HtmlUrl, "repository owner URL"),
+            dto.Private,
+            string.Equals(dto.License?.SpdxId, "NOASSERTION", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : dto.License?.SpdxId,
+            licenseUri,
+            [
+                .. dto.Topics
+                    .Where(static topic => !string.IsNullOrWhiteSpace(topic))
+                    .Select(static topic => topic.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Order(StringComparer.OrdinalIgnoreCase),
+            ]);
+    }
+
     public async Task<RepositoryContent> GetContentAsync(
         RepositoryCoordinates repository,
         string path,

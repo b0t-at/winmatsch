@@ -47,6 +47,16 @@ public sealed class PackageVersionResolverTests
     }
 
     [Fact]
+    public void Normalizes_punctuation_insensitive_package_prefix()
+    {
+        Assert.Equal(
+            "1.2.6",
+            PackageVersionResolver.NormalizeReleaseTag(
+                "yubikey-manager-qt-1.2.6",
+                new PackageIdentifier("Yubico.YubikeyManagerQt")));
+    }
+
+    [Fact]
     public void Conflicting_trustworthy_product_versions_are_ambiguous()
     {
         PackageVersionResolution result = PackageVersionResolver.Resolve(new()
@@ -215,6 +225,118 @@ public sealed class PackageVersionResolverTests
         Assert.Equal(PackageVersionSource.InstallerProductVersion, result.Source);
     }
 
+    [Theory]
+    [InlineData(DetectedInstallerFormat.GenericInstallerExe, InstallerVersionEvidenceKind.PeVersionInfoFileVersion)]
+    [InlineData(DetectedInstallerFormat.Zip, InstallerVersionEvidenceKind.ArchiveFileVersionConsensus)]
+    public void File_version_fallback_wins_over_cumulus_build_tag(
+        DetectedInstallerFormat format,
+        InstallerVersionEvidenceKind kind)
+    {
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = new("CumulusMX.CumulusMX"),
+            Assets =
+            [
+                CreateAsset(
+                    "b4088",
+                    format == DetectedInstallerFormat.Zip
+                        ? "https://example.test/cumulusmx.zip"
+                        : "https://example.test/cumulusmx.exe",
+                    productVersion: "Cumulus MX build 4088",
+                    fileVersion: "4.5.2.0",
+                    fileTrustworthy: true,
+                    fileVersionKind: kind,
+                    fileVersionConfidence: format == DetectedInstallerFormat.Zip
+                        ? EvidenceConfidence.Medium
+                        : EvidenceConfidence.High,
+                    format: format),
+            ],
+        });
+
+        Assert.Equal("4.5.2.0", result.Version?.Value);
+        Assert.Equal(PackageVersionSource.InstallerFileVersion, result.Source);
+    }
+
+    [Fact]
+    public void Pe_version_policy_uses_valid_file_version_after_rejecting_mixed_product_value()
+    {
+        InstallerVersionTrustDecision decision = InstallerVersionTrustEvaluator.Evaluate(
+            new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.GenericInstallerExe,
+                ProductVersion = "4.5.2 Cumulus MX",
+                FileVersion = "4.5.2.0",
+                Installers = [new Installer { Architecture = Architecture.X64, InstallerType = InstallerType.Exe }],
+            },
+            new InstallerVersionTrustPolicy());
+
+        Assert.True(decision.IsTrustworthy);
+        Assert.False(decision.UsesProductVersion);
+        Assert.Equal(InstallerVersionEvidenceKind.PeVersionInfoFileVersion, decision.Kind);
+        Assert.Contains("FALLBACK", decision.Diagnostic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Explicit_file_version_source_can_override_valid_product_version()
+    {
+        PackageIdentifier package = new("Vendor.Product");
+        var packs = new OverridePackSet(
+        [
+            new OverridePack
+            {
+                PackageIdentifier = package,
+                VersionSource = "installer.fileVersion",
+            },
+        ]);
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = package,
+            OverridePacks = packs,
+            Assets =
+            [
+                CreateAsset(
+                    "v9.0.0",
+                    "https://example.test/product.exe",
+                    productVersion: "4.5.1",
+                    trustworthy: true,
+                    versionKind: InstallerVersionEvidenceKind.PeVersionInfoProductVersion,
+                    versionConfidence: EvidenceConfidence.High,
+                    fileVersion: "4.5.2",
+                    fileTrustworthy: true,
+                    fileVersionKind: InstallerVersionEvidenceKind.PeVersionInfoFileVersion,
+                    fileVersionConfidence: EvidenceConfidence.High),
+            ],
+        });
+        InstallerAnalysis analysis = new()
+        {
+            Format = DetectedInstallerFormat.GenericInstallerExe,
+            ProductVersion = "4.5.1",
+            FileVersion = "4.5.2",
+            Installers =
+            [
+                new Installer
+                {
+                    Architecture = Architecture.X64,
+                    InstallerType = InstallerType.Exe,
+                },
+            ],
+        };
+
+        InstallerVersionTrustDecision product =
+            InstallerVersionTrustEvaluator.Evaluate(
+                analysis,
+                new InstallerVersionTrustPolicy());
+        InstallerVersionTrustDecision file =
+            InstallerVersionTrustEvaluator.EvaluateFileVersion(
+                analysis,
+                new InstallerVersionTrustPolicy());
+
+        Assert.True(product.IsTrustworthy);
+        Assert.True(file.IsTrustworthy);
+        Assert.Equal("4.5.2", result.Version?.Value);
+        Assert.Equal(PackageVersionSource.InstallerFileVersion, result.Source);
+    }
+
     [Fact]
     public void Inconsistent_pe_version_does_not_override_semantic_release_tag()
     {
@@ -238,9 +360,33 @@ public sealed class PackageVersionResolverTests
         Assert.Contains(result.Diagnostics, static value => value.StartsWith("VERSION_BINARY_INCONSISTENT", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Nonsemantic_prefixed_tag_does_not_veto_trusted_binary_version()
+    {
+        PackageVersionResolution result = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = new("Vendor.Product"),
+            Assets =
+            [
+                CreateAsset(
+                    "nightly-channel-4088",
+                    "https://example.test/product.exe",
+                    "4.5.2",
+                    trustworthy: true,
+                    versionKind: InstallerVersionEvidenceKind.PeVersionInfoProductVersion,
+                    versionConfidence: EvidenceConfidence.High),
+            ],
+        });
+
+        Assert.Equal("4.5.2", result.Version?.Value);
+        Assert.Equal(PackageVersionSource.InstallerProductVersion, result.Source);
+    }
+
     [Theory]
     [InlineData("0.0.0")]
     [InlineData("1.2.3-internal")]
+    [InlineData("1.2.3+internal.1")]
+    [InlineData("2.0.0+placeholder")]
     [InlineData("debug-2.0.0")]
     public void Pe_version_policy_rejects_placeholders_and_internal_values(string value)
     {
@@ -312,7 +458,12 @@ public sealed class PackageVersionResolverTests
         string? productVersion = null,
         bool trustworthy = false,
         InstallerVersionEvidenceKind versionKind = InstallerVersionEvidenceKind.Unspecified,
-        EvidenceConfidence versionConfidence = EvidenceConfidence.Low)
+        EvidenceConfidence versionConfidence = EvidenceConfidence.Low,
+        string? fileVersion = null,
+        bool fileTrustworthy = false,
+        InstallerVersionEvidenceKind fileVersionKind = InstallerVersionEvidenceKind.Unspecified,
+        EvidenceConfidence fileVersionConfidence = EvidenceConfidence.Low,
+        DetectedInstallerFormat format = DetectedInstallerFormat.GenericInstallerExe)
     {
         var uri = new Uri(url);
         var identity = new DownloadContentIdentity(
@@ -340,13 +491,17 @@ public sealed class PackageVersionResolverTests
                 DateTimeOffset.UnixEpoch),
             Analysis = new AssetAnalysisEvidence
             {
-                Format = DetectedInstallerFormat.GenericInstallerExe,
+                Format = format,
                 AnalyzedContentIdentity = identity,
                 AnalyzedUrl = uri.AbsoluteUri,
                 ProductVersion = productVersion,
                 IsProductVersionTrustworthy = trustworthy,
                 ProductVersionEvidenceKind = versionKind,
                 ProductVersionConfidence = versionConfidence,
+                FileVersion = fileVersion,
+                IsFileVersionTrustworthy = fileTrustworthy,
+                FileVersionEvidenceKind = fileVersionKind,
+                FileVersionConfidence = fileVersionConfidence,
                 InstallerShapes = [new() { InstallerType = InstallerType.Exe }],
             },
         };
