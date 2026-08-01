@@ -1,0 +1,12 @@
+# Created with winmatsch synthetic regression fixture
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: Waytech.CloudDrive2
+PackageVersion: 0.9.8
+PackageLocale: en-US
+Publisher: WinMatsch synthetic fixture
+PackageName: CloudDrive2
+License: MIT
+ShortDescription: Synthetic regression fixture for clouddrive2.
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

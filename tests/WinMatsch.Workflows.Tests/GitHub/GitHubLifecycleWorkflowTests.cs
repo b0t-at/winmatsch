@@ -1344,8 +1344,12 @@ public sealed class GitHubLifecycleWorkflowTests
         Assert.False(result.Applied);
     }
 
-    [Fact]
-    public void Duplicate_hash_evidence_requires_annotated_override()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void Duplicate_hash_evidence_requires_annotated_override(int _)
     {
         string hash = new string('A', 64);
         LocalOperationPlan local = GitHubLifecycleTestSupport.Plan() with

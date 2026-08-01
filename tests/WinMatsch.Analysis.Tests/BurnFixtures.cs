@@ -241,7 +241,13 @@ internal static class BurnFixtures
         private readonly List<(int TypeId, byte[] Data)> _resources;
 
         public StubBuilder(Machine machine, byte[] wixburnData, List<(int TypeId, byte[] Data)> resources)
-            : base(new PEHeaderBuilder(machine: machine, imageCharacteristics: Characteristics.ExecutableImage), deterministicIdProvider: null)
+            : base(
+                new PEHeaderBuilder(
+                    machine: machine,
+                    imageCharacteristics: Characteristics.ExecutableImage),
+                deterministicIdProvider: static _ => new BlobContentId(
+                    new Guid("28FF516A-D0D2-4B2A-9DF6-A07D50AC0D90"),
+                    0x5EED5678))
         {
             _wixburnData = wixburnData;
             _resources = resources;

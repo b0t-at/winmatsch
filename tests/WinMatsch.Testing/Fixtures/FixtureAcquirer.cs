@@ -43,7 +43,7 @@ public sealed class FixtureAcquirer(HttpClient httpClient, ITestFileSystem fileS
         ArgumentNullException.ThrowIfNull(asset);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.CacheDirectory);
-        ValidateSha256(asset.Sha256);
+        ValidateSha256(asset.UpstreamSha256);
 
         string fileName = Path.GetFileName(asset.FileName);
         if (!string.Equals(fileName, asset.FileName, StringComparison.Ordinal))
@@ -56,9 +56,9 @@ public sealed class FixtureAcquirer(HttpClient httpClient, ITestFileSystem fileS
         fileSystem.CreateDirectory(options.CacheDirectory);
         string cachePath = Path.Combine(
             options.CacheDirectory,
-            $"{asset.Sha256.ToLowerInvariant()}-{fileName}");
+            $"{asset.UpstreamSha256.ToLowerInvariant()}-{fileName}");
 
-        if (fileSystem.FileExists(cachePath) && HasExpectedChecksum(cachePath, asset.Sha256))
+        if (fileSystem.FileExists(cachePath) && HasExpectedChecksum(cachePath, asset.UpstreamSha256))
         {
             return new FixtureAcquisitionResult(
                 FixtureAcquisitionStatus.Available,
@@ -102,7 +102,7 @@ public sealed class FixtureAcquirer(HttpClient httpClient, ITestFileSystem fileS
                 await source.CopyToAsync(destination, cancellationToken);
             }
 
-            if (!HasExpectedChecksum(partialPath, asset.Sha256))
+            if (!HasExpectedChecksum(partialPath, asset.UpstreamSha256))
             {
                 return new FixtureAcquisitionResult(
                     FixtureAcquisitionStatus.Unavailable,

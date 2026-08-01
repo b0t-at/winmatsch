@@ -1,0 +1,18 @@
+# Created with winmatsch synthetic regression fixture
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: jdx.mise
+PackageVersion: 2025.12.2
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: mise/bin/mise.exe
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/jdx/mise/releases/download/v2025.12.2/mise-v2025.12.2-windows-x64.zip
+  InstallerSha256: A58EBD4BDC72A3023D0241F4062D78B21237EAF3DE2F9E36DB49620FB15948BA
+- Architecture: arm64
+  InstallerUrl: https://github.com/jdx/mise/releases/download/v2025.12.2/mise-v2025.12.2-windows-arm64.zip
+  InstallerSha256: 1785939572CC0EB806F641D58D554415F740664ECD234B73A91F656FD2799BAF
+ManifestType: installer
+ManifestVersion: 1.12.0

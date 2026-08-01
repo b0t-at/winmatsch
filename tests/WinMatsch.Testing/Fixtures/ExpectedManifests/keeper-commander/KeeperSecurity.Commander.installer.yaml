@@ -1,0 +1,14 @@
+# Created with winmatsch synthetic regression fixture
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: KeeperSecurity.Commander
+PackageVersion: 17.1.3
+InstallerLocale: en-US
+InstallerType: inno
+Scope: machine
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/Keeper-Security/Commander/releases/download/v17.1.3/keeper-commander-windows-v17.1.3.exe
+  InstallerSha256: 604BFD4B52AB1CB6E3E28A6D16C6B65BA9425AE5860CB3027121BF047A612757
+ManifestType: installer
+ManifestVersion: 1.12.0

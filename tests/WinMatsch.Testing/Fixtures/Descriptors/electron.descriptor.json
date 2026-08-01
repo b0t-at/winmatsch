@@ -1,13 +1,16 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "electron",
   "package": {
     "identifier": "OpenJS.Electron",
     "version": "35.2.0"
   },
   "regression": {
-    "summary": "Electron's win32 platform token must not override the right-hand architecture token.",
-    "ruleIds": ["ARCH-3", "MAP-2"],
+    "summary": "Electron\u0027s win32 platform token must not override the right-hand architecture token.",
+    "ruleIds": [
+      "ARCH-3",
+      "MAP-2"
+    ],
     "expectedBehavior": "Map win32-ia32, win32-x64, and win32-arm64 to three distinct installers."
   },
   "provenance": {
@@ -26,23 +29,46 @@
       "fileName": "electron-v35.2.0-win32-ia32.zip",
       "url": "https://github.com/electron/electron/releases/download/v35.2.0/electron-v35.2.0-win32-ia32.zip",
       "sha256": "7B487C27A29A19D7789ECC05A46FD9E496AA2D118E6A9DC95B1585A173C77032",
+      "syntheticSha256": "DAA713AFD86EBC12DDA0A7EFCC13FBBA3FC3CAB13B609E305DF0B868810791B2",
       "expectedArchitecture": "x86",
-      "expectedInstallerType": "zip"
+      "expectedInstallerType": "zip",
+      "synthetic": {
+        "nestedPayloadPaths": [
+          "electron.exe"
+        ]
+      }
     },
     {
       "fileName": "electron-v35.2.0-win32-x64.zip",
       "url": "https://github.com/electron/electron/releases/download/v35.2.0/electron-v35.2.0-win32-x64.zip",
       "sha256": "1C798D3093CCA780A3EE6A14E0E658F960E097135A495521CE9A183A05A6FF41",
+      "syntheticSha256": "B9BE4F7882C550D29A558A187761F970878EFC15411BB24AD093BC09697779AB",
       "expectedArchitecture": "x64",
-      "expectedInstallerType": "zip"
+      "expectedInstallerType": "zip",
+      "synthetic": {
+        "nestedPayloadPaths": [
+          "electron.exe"
+        ]
+      }
     },
     {
       "fileName": "electron-v35.2.0-win32-arm64.zip",
       "url": "https://github.com/electron/electron/releases/download/v35.2.0/electron-v35.2.0-win32-arm64.zip",
       "sha256": "60AC8812AF38E74DF076121C8D57ACD94AE24AF43C56F18DFCFFB16564F67FF5",
+      "syntheticSha256": "671EAF73C9C1639C0102C576CF2FE12576606D336344BC2791BA91F243AB2EE3",
       "expectedArchitecture": "arm64",
-      "expectedInstallerType": "zip"
+      "expectedInstallerType": "zip",
+      "synthetic": {
+        "nestedPayloadPaths": [
+          "electron.exe"
+        ]
+      }
     }
   ],
-  "expectedSnapshot": "Fixtures/Expected/electron.expected.json"
+  "scenario": {
+    "locale": {
+      "packageName": "Electron"
+    }
+  },
+  "expectedManifestDirectory": "electron"
 }

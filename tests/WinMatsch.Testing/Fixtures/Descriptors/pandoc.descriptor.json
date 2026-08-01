@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "pandoc",
   "package": {
     "identifier": "JohnMacFarlane.Pandoc",
@@ -7,7 +7,10 @@
   },
   "regression": {
     "summary": "A shared MSI is intentionally represented by user and machine entries distinguished by scope and ALLUSERS.",
-    "ruleIds": ["SCOPE-1", "DUP-2"],
+    "ruleIds": [
+      "SCOPE-1",
+      "DUP-2"
+    ],
     "expectedBehavior": "Preserve two x64 entries with per-installer scope and ALLUSERS=1/2 switches."
   },
   "provenance": {
@@ -26,9 +29,33 @@
       "fileName": "pandoc-3.6.2-windows-x86_64.msi",
       "url": "https://github.com/jgm/pandoc/releases/download/3.6.2/pandoc-3.6.2-windows-x86_64.msi",
       "sha256": "E9A8036CC298AE3D92105D5909C805A0A069CC988E7938703C4041B3E24A13AA",
+      "syntheticSha256": "643E4C0ECFDAE4409C78721D013D8D1F220EF8596E82DD7C3BB9EDC3221BB017",
       "expectedArchitecture": "x64",
       "expectedInstallerType": "wix"
     }
   ],
-  "expectedSnapshot": "Fixtures/Expected/pandoc.expected.json"
+  "scenario": {
+    "operation": "update",
+    "previousVersion": "3.6.1",
+    "previousInstallers": [
+      {
+        "assetFileName": "pandoc-3.6.2-windows-x86_64.msi",
+        "architecture": "x64",
+        "installerType": "wix",
+        "scope": "user",
+        "customSwitch": "ALLUSERS=2"
+      },
+      {
+        "assetFileName": "pandoc-3.6.2-windows-x86_64.msi",
+        "architecture": "x64",
+        "installerType": "wix",
+        "scope": "machine",
+        "customSwitch": "ALLUSERS=1"
+      }
+    ],
+    "locale": {
+      "packageName": "Pandoc"
+    }
+  },
+  "expectedManifestDirectory": "pandoc"
 }

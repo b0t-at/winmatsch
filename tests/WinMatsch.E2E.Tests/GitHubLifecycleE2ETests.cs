@@ -6,6 +6,7 @@ using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.Validation;
 using WinMatsch.Workflows;
+using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
 using WinMatsch.Workflows.Tests.GitHub;
@@ -131,7 +132,7 @@ public sealed class GitHubLifecycleE2ETests
     }
 
     [EnvironmentFact("WINMATSCH_E2E_TEST_REPOSITORY")]
-    public async Task Configurable_test_fork_contract_reads_only_and_never_sends_mutation_documents()
+    public async Task Configurable_test_fork_runs_production_read_discovery_and_lifecycle_plan_without_mutation()
     {
         string repositoryValue = Environment.GetEnvironmentVariable("WINMATSCH_E2E_TEST_REPOSITORY")!;
         string token = Environment.GetEnvironmentVariable("WINMATSCH_E2E_GITHUB_TOKEN")
@@ -140,13 +141,26 @@ public sealed class GitHubLifecycleE2ETests
         var recorder = new RecordingNetworkHandler(new HttpClientHandler());
         using var client = new GitHubRepositoryClient(new HttpClient(recorder), token);
 
+        GitHubUser user = await client.GetAuthenticatedUserAsync();
         RepositoryInfo info = await client.GetRepositoryAsync(repository);
-        Assert.Single(recorder.Requests);
-        Assert.Equal(HttpMethod.Post, recorder.Requests[0].Method);
-        Assert.Equal("https://api.github.com/graphql", recorder.Requests[0].Uri.AbsoluteUri);
-        Assert.Contains("\"query\"", recorder.Requests[0].Body, StringComparison.Ordinal);
-        Assert.DoesNotContain("mutation(", recorder.Requests[0].Body, StringComparison.OrdinalIgnoreCase);
-        recorder.Requests.Clear();
+        BranchState branch = await client.GetDefaultBranchAsync(repository);
+        IReadOnlyList<GitHubRelease> releases = await client.GetReleasesAsync(repository);
+        IReadOnlyList<RepositoryTreeEntry> tree = await client.GetTreeAsync(
+            repository,
+            branch.HeadSha,
+            recursive: false);
+        IReadOnlyList<PullRequestInfo> pullRequests = await client.SearchPullRequestsAsync(
+            repository,
+            new PullRequestSearch(
+                PullRequestState.Open,
+                ExactTitleToken: $"winmatsch-read-only-{Guid.NewGuid():N}"));
+        ImmutableArray<DiscoveredAsset> discovered = await new GitHubWorkflowReleaseSource(
+                client,
+                repository)
+            .DiscoverAsync(
+                new PackageIdentifier("WinMatsch.ReadOnlyFixture"),
+                new ReleaseRequest(null, [], []),
+                CancellationToken.None);
         GitHubLifecycleResult plan = await new GitHubLifecycleWorkflow(
                 client,
                 new NoOpPreflight(),
@@ -159,7 +173,37 @@ public sealed class GitHubLifecycleE2ETests
             });
 
         Assert.Equal(GitHubLifecycleResultCode.Planned, plan.Code);
-        Assert.Empty(recorder.Requests);
+        Assert.False(string.IsNullOrWhiteSpace(user.Login));
+        Assert.Equal(repository, info.Coordinates);
+        Assert.False(string.IsNullOrWhiteSpace(branch.HeadSha));
+        Assert.NotNull(releases);
+        Assert.NotNull(tree);
+        Assert.Empty(pullRequests);
+        Assert.Equal(
+            ReleaseAssetDiscovery.Discover(releases).Select(static asset => asset.DownloadUri),
+            discovered.Select(static asset => asset.DownloadUri));
+        Assert.True(recorder.Requests.Count >= 7);
+        Assert.Contains(recorder.Requests, static request => request.Method == HttpMethod.Get);
+        Assert.Contains(
+            recorder.Requests,
+            static request => request.Method == HttpMethod.Post
+                && request.Uri.AbsoluteUri == "https://api.github.com/graphql");
+        Assert.All(
+            recorder.Requests,
+            static request =>
+            {
+                Assert.False(
+                    request.Method == HttpMethod.Delete
+                    || request.Method == HttpMethod.Patch
+                    || request.Method == HttpMethod.Put);
+                if (request.Method == HttpMethod.Post)
+                {
+                    Assert.Equal("https://api.github.com/graphql", request.Uri.AbsoluteUri);
+                    Assert.Contains("\"query\"", request.Body, StringComparison.Ordinal);
+                    Assert.DoesNotContain("mutation ", request.Body, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain("mutation(", request.Body, StringComparison.OrdinalIgnoreCase);
+                }
+            });
     }
 
     [EnvironmentFact("WINMATSCH_E2E_LIVE_MUTATION", "1")]

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "super-productivity",
   "package": {
     "identifier": "JohannesMillan.superProductivity",
@@ -7,7 +7,11 @@
   },
   "regression": {
     "summary": "Tokenless and explicitly tagged Electron/NSIS assets must not collapse to duplicate x64 entries.",
-    "ruleIds": ["ARCH-1", "ARCH-2", "DUP-1"],
+    "ruleIds": [
+      "ARCH-1",
+      "ARCH-2",
+      "DUP-1"
+    ],
     "expectedBehavior": "Map -x64 to x64, -arm64 to arm64, and the tokenless setup asset to x86."
   },
   "provenance": {
@@ -26,6 +30,7 @@
       "fileName": "Super-Productivity-Setup-x64.exe",
       "url": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-x64.exe",
       "sha256": "CE8E856D5A83F9092DEDA2C30D0B9F001C5EA5EBDC1AE917DF66CA66B86C7554",
+      "syntheticSha256": "879ABA463A1C5950B7CDC009E426385CB26D84883B66465ABCC8C4851DC1A5FD",
       "expectedArchitecture": "x64",
       "expectedInstallerType": "nullsoft"
     },
@@ -33,6 +38,7 @@
       "fileName": "Super-Productivity-Setup.exe",
       "url": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup.exe",
       "sha256": "98F2FD1E455E03B0F5F3F09A389A53A5828D246F1B43651F10C0960FCD3DB2BC",
+      "syntheticSha256": "505FDA62BBA3DEDC4243DBC88F9DBEBB9A7DA44BF6F5CCD3889C3F039ECB708C",
       "expectedArchitecture": "x86",
       "expectedInstallerType": "nullsoft"
     },
@@ -40,9 +46,15 @@
       "fileName": "Super-Productivity-Setup-arm64.exe",
       "url": "https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-arm64.exe",
       "sha256": "FF37E36FC0E3BB557FF24DB3A7E697C8C49B54887D52B8081FEDEB1EAA5EFD6F",
+      "syntheticSha256": "D09A44F90B33189CD30527FB6AEAF504950F7B19F60D4946B876A40250A2FD32",
       "expectedArchitecture": "arm64",
       "expectedInstallerType": "nullsoft"
     }
   ],
-  "expectedSnapshot": "Fixtures/Expected/super-productivity.expected.json"
+  "scenario": {
+    "locale": {
+      "packageName": "Super Productivity"
+    }
+  },
+  "expectedManifestDirectory": "super-productivity"
 }

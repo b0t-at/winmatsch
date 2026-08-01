@@ -22,8 +22,8 @@ public sealed class TestDoubleTests
     public void In_memory_file_system_commits_streams_and_moves_atomically()
     {
         var fileSystem = new InMemoryFileSystem();
-        const string source = "C:\\tmp\\source.bin";
-        const string destination = "C:\\cache\\destination.bin";
+        string source = Path.Combine("tmp", "source.bin");
+        string destination = Path.Combine("cache", "destination.bin");
 
         using (Stream stream = fileSystem.CreateFile(source))
         {

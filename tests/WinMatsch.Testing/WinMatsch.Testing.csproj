@@ -7,6 +7,13 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Fixtures\**\*.json" />
+    <EmbeddedResource Include="Fixtures\**\*.yaml">
+      <WithCulture>false</WithCulture>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WinMatsch.Core\WinMatsch.Core.csproj" />
   </ItemGroup>
 
 </Project>

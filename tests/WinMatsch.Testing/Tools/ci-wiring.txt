@@ -1,0 +1,15 @@
+Windows compiled corpus CI wiring (do not run in the normal hermetic matrix):
+
+1. Use a windows-2025 runner with Windows SDK 10.0.26100.0.
+2. Run:
+   pwsh -File tests\WinMatsch.Testing\Tools\Build-WindowsInstallerCorpus.ps1 `
+     -OutputDirectory "$env:RUNNER_TEMP\winmatsch-compiled-corpus" -AcquireTools
+3. Set WINMATSCH_E2E_COMPILE_WINDOWS_FIXTURES=1.
+4. Run:
+   dotnet test tests\WinMatsch.E2E.Tests\WinMatsch.E2E.Tests.csproj `
+     --filter FullyQualifiedName~WindowsCompiledCorpusTests `
+     --logger "trx;LogFileName=windows-compiled-corpus.trx"
+5. Upload the TRX and the script's filename/SHA-256 output on failure.
+
+The job must remain separate from the cross-platform hermetic suite because it installs
+signed compiler toolchains and resolves the pinned WiX Bal extension from NuGet.

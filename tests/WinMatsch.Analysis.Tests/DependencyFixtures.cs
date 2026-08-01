@@ -24,6 +24,7 @@ internal static class DependencyFixtures
             foreach ((string path, byte[] content) in entries)
             {
                 ZipArchiveEntry entry = archive.CreateEntry(path);
+                entry.LastWriteTime = new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
                 using Stream destination = entry.Open();
                 destination.Write(content);
             }
@@ -231,7 +232,9 @@ internal static class DependencyFixtures
                 new PEHeaderBuilder(
                     machine: machine,
                     imageCharacteristics: Characteristics.ExecutableImage),
-                deterministicIdProvider: null)
+                deterministicIdProvider: static _ => new BlobContentId(
+                    new Guid("A92CD521-23DC-4887-9589-3454FC21D98A"),
+                    0x5EED1234))
         {
             _imports = imports;
         }

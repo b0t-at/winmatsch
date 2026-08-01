@@ -1,12 +1,10 @@
-using System.Collections.Immutable;
-using WinMatsch.Analysis;
-using WinMatsch.Core;
-using WinMatsch.Downloads;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using WinMatsch.Testing.Fixtures;
-using WinMatsch.Testing.Infrastructure;
-using WinMatsch.Workflows.Discovery;
-using WinMatsch.Workflows.Mapping;
-using WinMatsch.Workflows.Versioning;
+using WinMatsch.Validation;
+using WinMatsch.Workflows.Operations;
 using Xunit;
 
 namespace WinMatsch.E2E.Tests;
@@ -31,193 +29,169 @@ public sealed class RegressionDescriptorE2ETests
     ];
 
     [Fact]
-    public void Complete_metadata_corpus_drives_mapping_snapshots_and_remains_non_applicable()
+    public async Task Synthetic_substitutes_run_the_complete_production_pipeline_to_exact_yaml_goldens()
     {
-        Assert.Equal(
-            _expectedIds,
-            FixtureCatalog.All.Select(static fixture => fixture.Descriptor.Id));
-        foreach (string id in _expectedIds)
+        Assert.Equal(_expectedIds, FixtureCatalog.All.Select(static fixture => fixture.Descriptor.Id));
+        foreach (RegressionFixture fixture in FixtureCatalog.All)
         {
-            RegressionFixture fixture = FixtureCatalog.Get(id);
-            ImmutableArray<DiscoveredAsset> assets =
-            [
-                .. fixture.Descriptor.Assets.Select((asset, index) =>
-                    CreateAsset(fixture, asset, index)),
-            ];
-            AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(new AssetMappingRequest
+            IReadOnlyDictionary<string, byte[]> assets = RegressionFixturePipeline.BuildAssets(fixture);
+            if (Environment.GetEnvironmentVariable("WINMATSCH_UPDATE_REGRESSION_GOLDENS") == "1")
             {
-                PackageIdentifier = new PackageIdentifier(fixture.Descriptor.Package.Identifier),
-                Version = new PackageVersionResolution(
-                    new PackageVersion(fixture.Descriptor.Package.Version),
-                    PackageVersionSource.PackageOverride,
-                    EvidenceConfidence.Explicit,
-                    false,
-                    [],
-                    []),
-                Assets = assets,
-            });
+                WriteSyntheticHashes(fixture, assets);
+            }
+            using var temporary = new TemporaryDirectory();
+            RegressionFixturePipeline.WritePreviousManifests(fixture, temporary.Path);
+            LocalWorkflowEngine engine = RegressionFixturePipeline.CreateEngine(
+                fixture,
+                assets,
+                out FixtureHttpMessageHandler handler,
+                out FixtureReleaseSource releaseSource);
+            WorkflowOperationRequest request = RegressionFixturePipeline.CreateRequest(fixture, temporary.Path);
 
-            Assert.False(plan.CanApply);
-            Assert.Contains(
-                plan.Diagnostics,
-                static diagnostic => diagnostic.Code == "ANALYSIS_METADATA_ONLY");
-            Assert.NotEmpty(fixture.Descriptor.Regression.RuleIds);
-            Assert.NotEmpty(fixture.Expected.Installers);
+            WorkflowOperationResult result = request switch
+            {
+                NewOperationRequest create => await engine.NewAsync(create),
+                UpdateOperationRequest update => await engine.UpdateAsync(update),
+                _ => throw new InvalidDataException($"Unsupported fixture operation '{request.GetType().Name}'."),
+            };
+
+            Assert.True(
+                result.Code == WorkflowResultCode.Succeeded,
+                $"{fixture.Descriptor.Id}:{Environment.NewLine}{RegressionFixturePipeline.Describe(result)}");
+            Assert.False(result.Applied);
+            Assert.Equal(fixture.Descriptor.Assets.Count, releaseSource.DiscoveredCount);
             Assert.All(
-                fixture.Expected.Installers,
-                installer => Assert.Contains(
-                    fixture.Descriptor.Assets,
-                    asset => asset.IncludeInExpectedManifest
-                        && asset.Url == installer.InstallerUrl
-                        && asset.Sha256 == installer.InstallerSha256));
-        }
+                fixture.Descriptor.Assets,
+                asset => Assert.Contains(
+                    handler.Requests,
+                    requestRecord => requestRecord.Method == HttpMethod.Get
+                        && requestRecord.Uri == asset.Url));
+            Assert.NotEmpty(fixture.Descriptor.Regression.RuleIds);
+            Assert.Contains(
+                result.Plan.Rules.Executions,
+                static execution => execution.RuleId == "PIPE-1");
+            Assert.Contains(result.Plan.Audit, static entry => entry.Code.StartsWith("MAP_", StringComparison.Ordinal));
+            Assert.DoesNotContain(
+                result.Plan.Validation.Findings,
+                static finding => finding.Severity == ValidationSeverity.Error);
 
-        Assert.Equal(
-            ["user", "machine"],
-            FixtureCatalog.Get("pandoc").Expected.Installers.Select(static item => item.Scope));
-        Assert.Single(
-            FixtureCatalog.Get("surrealdb").Expected.Installers
-                .Select(static item => item.InstallerUrl)
-                .Distinct());
-        Assert.Contains(
-            FixtureCatalog.Get("uhk-agent").Descriptor.Assets,
-            static asset => !asset.IncludeInExpectedManifest);
-        Assert.All(
-            FixtureCatalog.Get("clouddrive2").Expected.AppsAndFeaturesEntries,
-            static entry => Assert.Null(entry.DisplayVersion));
-        Assert.All(
-            FixtureCatalog.Get("sonarr").Expected.AppsAndFeaturesEntries,
-            static entry => Assert.Null(entry.DisplayVersion));
+            if (Environment.GetEnvironmentVariable("WINMATSCH_UPDATE_REGRESSION_GOLDENS") == "1")
+            {
+                WriteGoldens(fixture, result.Plan.AfterDocuments);
+            }
+            else
+            {
+                AssertGoldens(fixture, result.Plan.AfterDocuments);
+            }
+        }
     }
 
     [Fact]
-    public async Task Acquisition_is_checksum_pinned_and_hermetic_by_default()
+    public async Task Upstream_binary_acquisition_remains_checksum_pinned_and_opt_in()
     {
-        var handler = new StubHttpMessageHandler(
-            _ => throw new InvalidOperationException("Default regression tests must not use network."));
-        var fileSystem = new InMemoryFileSystem();
-        var acquirer = new FixtureAcquirer(new HttpClient(handler), fileSystem);
+        using var temporary = new TemporaryDirectory();
+        var acquirer = new FixtureAcquirer(new HttpClient(), Testing.Infrastructure.PhysicalTestFileSystem.Instance);
+        bool allowNetwork = Environment.GetEnvironmentVariable("WINMATSCH_E2E_ACQUIRE_FIXTURES") == "1";
 
         foreach (FixtureAsset asset in FixtureCatalog.All.SelectMany(static fixture => fixture.Descriptor.Assets))
         {
             FixtureAcquisitionResult result = await acquirer.AcquireAsync(
                 asset,
-                new FixtureAcquisitionOptions { CacheDirectory = "C:\\bounded-fixture-cache" });
-            Assert.Equal(FixtureAcquisitionStatus.Unavailable, result.Status);
-            Assert.Contains("network acquisition is disabled", result.Message, StringComparison.OrdinalIgnoreCase);
+                new FixtureAcquisitionOptions
+                {
+                    CacheDirectory = temporary.Path,
+                    AllowNetwork = allowNetwork,
+                });
+            if (allowNetwork)
+            {
+                Assert.True(result.IsAvailable, result.Message);
+            }
+            else
+            {
+                Assert.Equal(FixtureAcquisitionStatus.Unavailable, result.Status);
+                Assert.Contains("network acquisition is disabled", result.Message, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+    }
+
+    private static void AssertGoldens(
+        RegressionFixture fixture,
+        IReadOnlyList<RawManifestDocument> actual)
+    {
+        Dictionary<string, byte[]> byFileName = actual.ToDictionary(
+            static document => Path.GetFileName(document.RepositoryPath),
+            static document => document.Content.ToArray(),
+            StringComparer.Ordinal);
+        Assert.Equal(fixture.ExpectedManifests.Keys, byFileName.Keys);
+        foreach ((string fileName, byte[] expected) in fixture.ExpectedManifests)
+        {
+            Assert.True(
+                expected.SequenceEqual(byFileName[fileName]),
+                $"Fixture '{fixture.Descriptor.Id}' manifest '{fileName}' differs from its complete YAML golden."
+                + $"{Environment.NewLine}Expected:{Environment.NewLine}{Encoding.UTF8.GetString(expected)}"
+                + $"{Environment.NewLine}Actual:{Environment.NewLine}{Encoding.UTF8.GetString(byFileName[fileName])}");
+        }
+    }
+
+    private static void WriteGoldens(
+        RegressionFixture fixture,
+        IReadOnlyList<RawManifestDocument> documents)
+    {
+        string root = FindRepositoryRoot();
+        string directory = Path.Combine(
+            root,
+            "tests",
+            "WinMatsch.Testing",
+            "Fixtures",
+            "ExpectedManifests",
+            fixture.Descriptor.ExpectedManifestDirectory);
+        Directory.CreateDirectory(directory);
+        foreach (RawManifestDocument document in documents)
+        {
+            File.WriteAllBytes(
+                Path.Combine(directory, Path.GetFileName(document.RepositoryPath)),
+                document.Content.ToArray());
+        }
+    }
+
+    private static void WriteSyntheticHashes(
+        RegressionFixture fixture,
+        IReadOnlyDictionary<string, byte[]> assets)
+    {
+        string path = Path.Combine(
+            FindRepositoryRoot(),
+            "tests",
+            "WinMatsch.Testing",
+            "Fixtures",
+            "Descriptors",
+            $"{fixture.Descriptor.Id}.descriptor.json");
+        JsonObject root = JsonNode.Parse(File.ReadAllText(path))?.AsObject()
+            ?? throw new InvalidDataException($"Descriptor '{path}' is empty.");
+        JsonArray nodes = root["assets"]?.AsArray()
+            ?? throw new InvalidDataException($"Descriptor '{path}' has no assets.");
+        Assert.Equal(fixture.Descriptor.Assets.Count, nodes.Count);
+        for (int index = 0; index < fixture.Descriptor.Assets.Count; index++)
+        {
+            FixtureAsset asset = fixture.Descriptor.Assets[index];
+            nodes[index]!["syntheticSha256"] =
+                Convert.ToHexString(SHA256.HashData(assets[asset.Url.AbsoluteUri]));
         }
 
-        Assert.Empty(handler.Requests);
-        Assert.Empty(fileSystem.Paths);
+        File.WriteAllText(
+            path,
+            root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine,
+            new UTF8Encoding(false));
     }
 
-    [EnvironmentFact("WINMATSCH_E2E_ACQUIRE_FIXTURES", "1")]
-    public async Task Opt_in_acquisition_requires_an_available_checksum_pinned_fixture()
+    private static string FindRepositoryRoot()
     {
-        using var temporary = new TemporaryDirectory();
-        var acquirer = new FixtureAcquirer(
-            new HttpClient(),
-            PhysicalTestFileSystem.Instance);
-        FixtureAsset asset = FixtureCatalog.Get("buf").Descriptor.Assets[0];
-
-        FixtureAcquisitionResult result = await acquirer.AcquireAsync(
-            asset,
-            new FixtureAcquisitionOptions
-            {
-                CacheDirectory = temporary.Path,
-                AllowNetwork = true,
-            });
-
-        Assert.True(
-            result.IsAvailable,
-            "Opt-in fixture acquisition was enabled but did not produce a verified fixture: "
-            + result.Message);
-        Assert.NotNull(result.Path);
-        Assert.True(File.Exists(result.Path));
-    }
-
-    private static DiscoveredAsset CreateAsset(
-        RegressionFixture fixture,
-        FixtureAsset asset,
-        int index)
-    {
-        InstallerType installerType = ParseInstallerType(asset.ExpectedInstallerType);
-        var identity = new DownloadContentIdentity(new Sha256Hash(asset.Sha256), 1);
-        var content = new AssetContentEvidence(
-            identity,
-            asset.Url.AbsoluteUri,
-            asset.Url.AbsoluteUri,
-            "application/octet-stream",
-            fixture.Descriptor.Provenance.ObservedAt);
-        return new DiscoveredAsset
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "WinMatsch.slnx")))
         {
-            ReleaseId = 1,
-            ReleaseTag = $"v{fixture.Descriptor.Package.Version}",
-            ReleaseName = fixture.Descriptor.Package.Version,
-            ReleaseUri = new Uri("https://fixtures.invalid/release"),
-            IsPrerelease = false,
-            ReleasePublishedAt = fixture.Descriptor.Provenance.ObservedAt,
-            AssetId = index + 1,
-            AssetName = asset.FileName,
-            DownloadUri = asset.Url,
-            DeclaredContentType = "application/octet-stream",
-            DeclaredSize = 1,
-            AssetCreatedAt = fixture.Descriptor.Provenance.ObservedAt,
-            Content = content,
-            Analysis = new AssetAnalysisEvidence
-            {
-                Format = FormatFor(installerType),
-                AnalyzedContentIdentity = identity,
-                AnalyzedUrl = asset.Url.AbsoluteUri,
-                Origin = AnalysisEvidenceOrigin.MetadataFixture,
-                InstallerShapes =
-                [
-                    new AnalyzedInstallerShape
-                    {
-                        Architecture = asset.IncludeInExpectedManifest
-                            && fixture.Descriptor.Id != "super-productivity"
-                            ? ParseArchitecture(asset.ExpectedArchitecture)
-                            : null,
-                        InstallerType = installerType,
-                    },
-                ],
-            },
-        };
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName
+            ?? throw new InvalidOperationException("Could not locate the repository root for golden generation.");
     }
-
-    private static Architecture ParseArchitecture(string value) => value.ToLowerInvariant() switch
-    {
-        "x86" => Architecture.X86,
-        "x64" => Architecture.X64,
-        "arm" => Architecture.Arm,
-        "arm64" => Architecture.Arm64,
-        "neutral" => Architecture.Neutral,
-        _ => throw new ArgumentOutOfRangeException(nameof(value)),
-    };
-
-    private static InstallerType ParseInstallerType(string value) => value.ToLowerInvariant() switch
-    {
-        "appx" => InstallerType.Appx,
-        "burn" => InstallerType.Burn,
-        "exe" => InstallerType.Exe,
-        "inno" => InstallerType.Inno,
-        "msi" => InstallerType.Msi,
-        "msix" => InstallerType.Msix,
-        "nullsoft" => InstallerType.Nullsoft,
-        "portable" => InstallerType.Portable,
-        "wix" => InstallerType.Wix,
-        "zip" => InstallerType.Zip,
-        _ => throw new ArgumentOutOfRangeException(nameof(value)),
-    };
-
-    private static DetectedInstallerFormat FormatFor(InstallerType type) => type switch
-    {
-        InstallerType.Inno => DetectedInstallerFormat.InnoSetup,
-        InstallerType.Nullsoft => DetectedInstallerFormat.Nullsoft,
-        InstallerType.Portable => DetectedInstallerFormat.PortableExe,
-        InstallerType.Wix => DetectedInstallerFormat.Msi,
-        InstallerType.Msi => DetectedInstallerFormat.Msi,
-        InstallerType.Zip => DetectedInstallerFormat.Zip,
-        _ => DetectedInstallerFormat.GenericInstallerExe,
-    };
 }

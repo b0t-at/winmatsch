@@ -1,0 +1,12 @@
+# Created with winmatsch synthetic regression fixture
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: OliverBetz.ExifTool
+PackageVersion: "12.87"
+PackageLocale: en-US
+Publisher: WinMatsch synthetic fixture
+PackageName: ExifTool
+License: MIT
+ShortDescription: Synthetic regression fixture for exiftool.
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

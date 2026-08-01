@@ -191,6 +191,41 @@ public sealed class InstallerCorpusProcessTests
         CliProcess.AssertSafe(validate);
     }
 
+    [Fact]
+    public async Task Real_process_parse_failure_never_echoes_injected_realistic_secrets()
+    {
+        string nonce = Guid.NewGuid().ToString("N");
+        string ghp = $"ghp_{nonce}ABCDEFGH";
+        string githubPat = $"github_pat_{nonce}_ABCDEFGH";
+        string jwt = $"eyJhbGciOiJIUzI1NiJ9.eyJqdGkiOiI{nonce}In0.{nonce}signature";
+        string presigned =
+            $"https://downloads.invalid/setup.exe?X-Amz-Credential={nonce}%2Fscope"
+            + $"&X-Amz-Signature={nonce}signature";
+
+        ProcessResult result = await CliProcess.RunAsync(
+        [
+            "new",
+            "Example.SecretSafety",
+            "--token",
+            ghp,
+            "--url",
+            $"{presigned}|x64||",
+            "--prtitle",
+            jwt,
+            "--created-with",
+            githubPat,
+            "--not-a-real-option",
+            "--format",
+            "json",
+            "--interaction",
+            "never",
+            "--no-color",
+        ]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        CliProcess.AssertSafe(result, ghp, githubPat, jwt, nonce);
+    }
+
     private static byte[] Build(string fileName) => fileName switch
     {
         "fixture.msi" => MsiFixtures.BuildMsi(

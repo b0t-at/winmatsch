@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "clouddrive2",
   "package": {
     "identifier": "Waytech.CloudDrive2",
@@ -7,7 +7,9 @@
   },
   "regression": {
     "summary": "A static ARP DisplayVersion overlaps every package version and must not be emitted.",
-    "ruleIds": ["ARP-2"],
+    "ruleIds": [
+      "ARP-2"
+    ],
     "expectedBehavior": "Preserve the ARP product code but omit DisplayVersion 1.0."
   },
   "provenance": {
@@ -26,6 +28,7 @@
       "fileName": "CloudDrive2Setup-X64-0.9.8.exe",
       "url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-X64-0.9.8.exe",
       "sha256": "762C0CDE3C285C8317503452A2EC1FDCA9276056DD1443412C8418DC217F0D6B",
+      "syntheticSha256": "422C09BC27137689E7AE803F5CF8998368F6332ECFF0E07C3072DAF2A7898C47",
       "expectedArchitecture": "x64",
       "expectedInstallerType": "inno"
     },
@@ -33,9 +36,35 @@
       "fileName": "CloudDrive2Setup-Arm64-0.9.8.exe",
       "url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-Arm64-0.9.8.exe",
       "sha256": "4C5E6803A5615D023F084CD4B95D445DD9B335EAF2CAC2315459B08C9E44FEC4",
+      "syntheticSha256": "36B6D3113A51702E294D308ED806391BA882C876AF5089BC3C0816877A400223",
       "expectedArchitecture": "arm64",
       "expectedInstallerType": "inno"
     }
   ],
-  "expectedSnapshot": "Fixtures/Expected/clouddrive2.expected.json"
+  "scenario": {
+    "operation": "update",
+    "previousVersion": "0.9.7",
+    "previousInstallers": [
+      {
+        "assetFileName": "CloudDrive2Setup-X64-0.9.8.exe",
+        "architecture": "x64",
+        "installerType": "inno",
+        "displayName": "CloudDrive2 0.9.7",
+        "displayVersion": "0.9.7",
+        "productCode": "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+      },
+      {
+        "assetFileName": "CloudDrive2Setup-Arm64-0.9.8.exe",
+        "architecture": "arm64",
+        "installerType": "inno",
+        "displayName": "CloudDrive2 0.9.7",
+        "displayVersion": "0.9.7",
+        "productCode": "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+      }
+    ],
+    "locale": {
+      "packageName": "CloudDrive2"
+    }
+  },
+  "expectedManifestDirectory": "clouddrive2"
 }

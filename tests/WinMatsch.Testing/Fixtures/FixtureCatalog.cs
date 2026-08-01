@@ -7,6 +7,7 @@ namespace WinMatsch.Testing.Fixtures;
 public static class FixtureCatalog
 {
     private const string DescriptorSuffix = ".descriptor.json";
+    private const string ExpectedManifestMarker = ".Fixtures.ExpectedManifests.";
     private static readonly Lazy<List<RegressionFixture>> _allFixtures = new(LoadAll);
 
     public static IReadOnlyList<RegressionFixture> All => _allFixtures.Value;
@@ -17,15 +18,6 @@ public static class FixtureCatalog
 
         return All.Single(
             fixture => string.Equals(fixture.Descriptor.Id, id, StringComparison.OrdinalIgnoreCase));
-    }
-
-    public static IReadOnlyList<HttpInteractionRecording> LoadRecordings()
-    {
-        using Stream stream = OpenResource("Fixtures.Recordings.http-recordings.json");
-        return JsonSerializer.Deserialize(
-            stream,
-            FixtureJsonContext.Default.ListHttpInteractionRecording)
-            ?? throw new InvalidDataException("The embedded HTTP recording collection is empty.");
     }
 
     private static List<RegressionFixture> LoadAll()
@@ -43,13 +35,9 @@ public static class FixtureCatalog
                 descriptorStream,
                 FixtureJsonContext.Default.FixtureDescriptor)
                 ?? throw new InvalidDataException($"Embedded descriptor '{resourceName}' is empty.");
+            descriptor = Normalize(descriptor);
 
-            using Stream snapshotStream = OpenResource(descriptor.ExpectedSnapshot.Replace('/', '.'));
-            ExpectedManifestSnapshot expected = JsonSerializer.Deserialize(
-                snapshotStream,
-                FixtureJsonContext.Default.ExpectedManifestSnapshot)
-                ?? throw new InvalidDataException(
-                    $"Expected snapshot '{descriptor.ExpectedSnapshot}' is empty.");
+            IReadOnlyDictionary<string, byte[]> expected = LoadExpectedManifests(descriptor);
 
             Validate(descriptor, expected);
             fixtures.Add(new RegressionFixture(descriptor, expected));
@@ -58,51 +46,102 @@ public static class FixtureCatalog
         return fixtures;
     }
 
-    private static Stream OpenResource(string resourceSuffix)
+    private static FixtureDescriptor Normalize(FixtureDescriptor descriptor)
     {
-        Assembly assembly = typeof(FixtureCatalog).Assembly;
-        string resourceName = assembly.GetManifestResourceNames().Single(
-            name => name.EndsWith(resourceSuffix, StringComparison.Ordinal));
-        return assembly.GetManifestResourceStream(resourceName)
-            ?? throw new InvalidDataException($"Embedded resource '{resourceName}' could not be opened.");
+        FixtureScenario scenario = descriptor.Scenario ?? new();
+        FixtureLocale locale = scenario.Locale ?? new();
+        return descriptor with
+        {
+            Assets =
+            [
+                .. descriptor.Assets.Select(static asset =>
+                {
+                    FixtureSyntheticAsset synthetic = asset.Synthetic ?? new();
+                    return asset with
+                    {
+                        Synthetic = synthetic with
+                        {
+                            NestedPayloadPaths = synthetic.NestedPayloadPaths ?? [],
+                            Imports = synthetic.Imports ?? [],
+                            PayloadArchitectures = synthetic.PayloadArchitectures ?? [],
+                        },
+                    };
+                }),
+            ],
+            Scenario = scenario with
+            {
+                Operation = string.IsNullOrWhiteSpace(scenario.Operation) ? "new" : scenario.Operation,
+                PreviousInstallers = scenario.PreviousInstallers ?? [],
+                Locale = locale with
+                {
+                    PackageLocale = string.IsNullOrWhiteSpace(locale.PackageLocale)
+                        ? "en-US"
+                        : locale.PackageLocale,
+                    Publisher = string.IsNullOrWhiteSpace(locale.Publisher)
+                        ? "WinMatsch synthetic fixture"
+                        : locale.Publisher,
+                    License = string.IsNullOrWhiteSpace(locale.License) ? "MIT" : locale.License,
+                },
+            },
+        };
     }
 
-    private static void Validate(FixtureDescriptor descriptor, ExpectedManifestSnapshot expected)
+    private static Dictionary<string, byte[]> LoadExpectedManifests(FixtureDescriptor descriptor)
     {
-        if (descriptor.SchemaVersion != 1)
+        Assembly assembly = typeof(FixtureCatalog).Assembly;
+        string resourceDirectory = descriptor.ExpectedManifestDirectory.Replace('-', '_');
+        string marker = $"{ExpectedManifestMarker}{resourceDirectory}.";
+        return assembly.GetManifestResourceNames()
+            .Where(name => name.Contains(marker, StringComparison.Ordinal)
+                && name.EndsWith(".yaml", StringComparison.Ordinal))
+            .Order(StringComparer.Ordinal)
+            .ToDictionary(
+                name => name[(name.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..],
+                name =>
+                {
+                    using Stream stream = assembly.GetManifestResourceStream(name)
+                        ?? throw new InvalidDataException($"Embedded resource '{name}' could not be opened.");
+                    using var buffer = new MemoryStream();
+                    stream.CopyTo(buffer);
+                    return buffer.ToArray();
+                },
+                StringComparer.Ordinal);
+    }
+
+    private static void Validate(
+        FixtureDescriptor descriptor,
+        IReadOnlyDictionary<string, byte[]> expected)
+    {
+        if (descriptor.SchemaVersion != 2)
         {
             throw new InvalidDataException(
                 $"Fixture '{descriptor.Id}' uses unsupported schema version {descriptor.SchemaVersion}.");
         }
 
-        if (!string.Equals(
-                descriptor.Package.Identifier,
-                expected.PackageIdentifier,
-                StringComparison.Ordinal)
-            || !string.Equals(
-                descriptor.Package.Version,
-                expected.PackageVersion,
-                StringComparison.Ordinal))
+        bool updatingGoldens =
+            Environment.GetEnvironmentVariable("WINMATSCH_UPDATE_REGRESSION_GOLDENS") == "1";
+        if (!updatingGoldens
+            && (expected.Count != 3
+            || expected.Values.Any(static bytes => bytes.Length == 0)
+            || !expected.Values.Any(static bytes => Contains(bytes, "ManifestType: installer"))
+            || !expected.Values.Any(static bytes => Contains(bytes, "ManifestType: defaultLocale"))
+            || !expected.Values.Any(static bytes => Contains(bytes, "ManifestType: version"))))
         {
             throw new InvalidDataException(
-                $"Fixture '{descriptor.Id}' package coordinates do not match its expected snapshot.");
+                $"Fixture '{descriptor.Id}' must embed a complete three-file merged-manifest golden.");
         }
 
         ValidateSha256(descriptor.Id, descriptor.Provenance.ManifestSha256);
 
         foreach (FixtureAsset asset in descriptor.Assets)
         {
-            ValidateSha256(descriptor.Id, asset.Sha256);
-        }
-
-        foreach (ExpectedInstallerSnapshot installer in expected.Installers)
-        {
-            ValidateSha256(descriptor.Id, installer.InstallerSha256);
+            ValidateSha256(descriptor.Id, asset.UpstreamSha256);
+            ValidateSha256(descriptor.Id, asset.SyntheticSha256);
         }
 
         string[] duplicateUrls = descriptor.Assets
             .GroupBy(asset => asset.Url.AbsoluteUri, StringComparer.Ordinal)
-            .Where(group => group.Select(asset => asset.Sha256).Distinct(StringComparer.Ordinal).Count() > 1)
+            .Where(group => group.Select(asset => asset.UpstreamSha256).Distinct(StringComparer.Ordinal).Count() > 1)
             .Select(group => group.Key)
             .ToArray();
         if (duplicateUrls.Length > 0)
@@ -111,6 +150,9 @@ public static class FixtureCatalog
                 $"Fixture '{descriptor.Id}' assigns different hashes to the same URL.");
         }
     }
+
+    private static bool Contains(byte[] bytes, string value)
+        => System.Text.Encoding.UTF8.GetString(bytes).Contains(value, StringComparison.Ordinal);
 
     private static void ValidateSha256(string fixtureId, string value)
     {

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "sonarr",
   "package": {
     "identifier": "TeamSonarr.Sonarr",
@@ -7,7 +7,9 @@
   },
   "regression": {
     "summary": "A static major-only ARP DisplayVersion overlaps successive package versions and must be omitted.",
-    "ruleIds": ["ARP-2"],
+    "ruleIds": [
+      "ARP-2"
+    ],
     "expectedBehavior": "Preserve the ARP product code but omit DisplayVersion 4."
   },
   "provenance": {
@@ -26,6 +28,7 @@
       "fileName": "Sonarr.main.4.0.15.2941.win-x86-installer.exe",
       "url": "https://github.com/Sonarr/Sonarr/releases/download/v4.0.15.2941/Sonarr.main.4.0.15.2941.win-x86-installer.exe",
       "sha256": "BEB740135FD52FDD99167239987161E5D7DB6A87FD9D1AA81C2BA435542B2FFD",
+      "syntheticSha256": "38575A0255E75FA7D3A11506F08D692558A755B9828913645BCFF7FE37191C58",
       "expectedArchitecture": "x86",
       "expectedInstallerType": "inno"
     },
@@ -33,9 +36,35 @@
       "fileName": "Sonarr.main.4.0.15.2941.win-x64-installer.exe",
       "url": "https://github.com/Sonarr/Sonarr/releases/download/v4.0.15.2941/Sonarr.main.4.0.15.2941.win-x64-installer.exe",
       "sha256": "74F6D99775683C8F7E85C42A97000490413CDDA8F7A1D3AA53C8E4AE5C5F30FF",
+      "syntheticSha256": "6A064CEA6972E8496FF356CBDA53D22C932D1AD238B2FB999E3C6328D5A28C34",
       "expectedArchitecture": "x64",
       "expectedInstallerType": "inno"
     }
   ],
-  "expectedSnapshot": "Fixtures/Expected/sonarr.expected.json"
+  "scenario": {
+    "operation": "update",
+    "previousVersion": "4.0.14.2939",
+    "previousInstallers": [
+      {
+        "assetFileName": "Sonarr.main.4.0.15.2941.win-x86-installer.exe",
+        "architecture": "x86",
+        "installerType": "inno",
+        "displayName": "Sonarr 4.0.14.2939",
+        "displayVersion": "4.0.14.2939",
+        "productCode": "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+      },
+      {
+        "assetFileName": "Sonarr.main.4.0.15.2941.win-x64-installer.exe",
+        "architecture": "x64",
+        "installerType": "inno",
+        "displayName": "Sonarr 4.0.14.2939",
+        "displayVersion": "4.0.14.2939",
+        "productCode": "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+      }
+    ],
+    "locale": {
+      "packageName": "Sonarr"
+    }
+  },
+  "expectedManifestDirectory": "sonarr"
 }

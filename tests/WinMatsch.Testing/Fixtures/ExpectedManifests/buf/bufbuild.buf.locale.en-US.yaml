@@ -1,0 +1,12 @@
+# Created with winmatsch synthetic regression fixture
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: bufbuild.buf
+PackageVersion: 1.64.0
+PackageLocale: en-US
+Publisher: WinMatsch synthetic fixture
+PackageName: buf
+License: MIT
+ShortDescription: Synthetic regression fixture for buf.
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

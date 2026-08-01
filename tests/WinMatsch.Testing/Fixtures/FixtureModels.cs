@@ -4,7 +4,7 @@ namespace WinMatsch.Testing.Fixtures;
 
 public sealed record RegressionFixture(
     FixtureDescriptor Descriptor,
-    ExpectedManifestSnapshot Expected);
+    IReadOnlyDictionary<string, byte[]> ExpectedManifests);
 
 public sealed record FixtureDescriptor
 {
@@ -20,7 +20,9 @@ public sealed record FixtureDescriptor
 
     public required IReadOnlyList<FixtureAsset> Assets { get; init; }
 
-    public required string ExpectedSnapshot { get; init; }
+    public required FixtureScenario Scenario { get; init; }
+
+    public required string ExpectedManifestDirectory { get; init; }
 }
 
 public sealed record PackageCoordinate
@@ -66,73 +68,86 @@ public sealed record FixtureAsset
 
     public required Uri Url { get; init; }
 
-    public required string Sha256 { get; init; }
+    [JsonPropertyName("sha256")]
+    public required string UpstreamSha256 { get; init; }
+
+    public required string SyntheticSha256 { get; init; }
 
     public required string ExpectedArchitecture { get; init; }
 
     public required string ExpectedInstallerType { get; init; }
 
-    [JsonPropertyName("includeInExpectedManifest")]
-    public bool? IncludeInExpectedManifestOverride { get; init; }
-
-    [JsonIgnore]
-    public bool IncludeInExpectedManifest => IncludeInExpectedManifestOverride ?? true;
+    public FixtureSyntheticAsset Synthetic { get; init; } = new();
 }
 
-public sealed record ExpectedManifestSnapshot
+public sealed record FixtureSyntheticAsset
 {
-    public required string PackageIdentifier { get; init; }
+    public string? Kind { get; init; }
 
-    public required string PackageVersion { get; init; }
+    public IReadOnlyList<string> NestedPayloadPaths { get; init; } = [];
 
-    public string? InstallerType { get; init; }
+    public IReadOnlyList<string> Imports { get; init; } = [];
 
-    public string? NestedInstallerType { get; init; }
+    public IReadOnlyList<string> PayloadArchitectures { get; init; } = [];
 
-    public IReadOnlyList<string> NestedInstallerFiles { get; init; } = [];
+    public string? ArchitectureExpression { get; init; }
 
-    public IReadOnlyList<ExpectedAppsAndFeaturesEntry> AppsAndFeaturesEntries { get; init; } = [];
-
-    public required IReadOnlyList<ExpectedInstallerSnapshot> Installers { get; init; }
-
-    public ExpectedLocaleSnapshot? Locale { get; init; }
+    public string? ExplicitArchitecture { get; init; }
 }
 
-public sealed record ExpectedInstallerSnapshot
+public sealed record FixtureScenario
 {
+    public string Operation { get; init; } = "new";
+
+    public string? PreviousVersion { get; init; }
+
+    public IReadOnlyList<FixturePreviousInstaller> PreviousInstallers { get; init; } = [];
+
+    public FixtureLocale Locale { get; init; } = new();
+
+    public bool ApproveReview { get; init; } = true;
+}
+
+public sealed record FixtureLocale
+{
+    public string PackageLocale { get; init; } = "en-US";
+
+    public string Publisher { get; init; } = "WinMatsch synthetic fixture";
+
+    public string? PackageName { get; init; }
+
+    public string License { get; init; } = "MIT";
+
+    public string? ShortDescription { get; init; }
+
+    public string? ReleaseNotes { get; init; }
+
+    public string? ReleaseNotesUrl { get; init; }
+}
+
+public sealed record FixturePreviousInstaller
+{
+    public required string AssetFileName { get; init; }
+
     public required string Architecture { get; init; }
 
-    public string? InstallerType { get; init; }
+    public required string InstallerType { get; init; }
 
-    public required Uri InstallerUrl { get; init; }
-
-    public required string InstallerSha256 { get; init; }
+    public string? NestedInstallerType { get; init; }
 
     public string? Scope { get; init; }
 
     public string? CustomSwitch { get; init; }
 
-    public IReadOnlyList<string> NestedInstallerFiles { get; init; } = [];
-
-    public IReadOnlyList<string> PackageDependencies { get; init; } = [];
-
-    public IReadOnlyList<ExpectedAppsAndFeaturesEntry> AppsAndFeaturesEntries { get; init; } = [];
-}
-
-public sealed record ExpectedAppsAndFeaturesEntry
-{
     public string? DisplayName { get; init; }
 
     public string? DisplayVersion { get; init; }
 
     public string? ProductCode { get; init; }
-}
 
-public sealed record ExpectedLocaleSnapshot
-{
-    public string? ReleaseNotes { get; init; }
+    public IReadOnlyList<string> NestedInstallerFiles { get; init; } = [];
 
-    public Uri? ReleaseNotesUrl { get; init; }
+    public IReadOnlyList<string> PackageDependencies { get; init; } = [];
 }
 
 [JsonSourceGenerationOptions(
@@ -140,6 +155,4 @@ public sealed record ExpectedLocaleSnapshot
     PropertyNameCaseInsensitive = false,
     ReadCommentHandling = System.Text.Json.JsonCommentHandling.Skip)]
 [JsonSerializable(typeof(FixtureDescriptor))]
-[JsonSerializable(typeof(ExpectedManifestSnapshot))]
-[JsonSerializable(typeof(List<HttpInteractionRecording>))]
 internal sealed partial class FixtureJsonContext : JsonSerializerContext;

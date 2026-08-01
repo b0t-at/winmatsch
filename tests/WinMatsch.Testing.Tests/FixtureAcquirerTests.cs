@@ -9,7 +9,8 @@ namespace WinMatsch.Testing.Tests;
 
 public sealed class FixtureAcquirerTests
 {
-    private const string CacheDirectory = "C:\\fixture-cache";
+    private static readonly string _cacheDirectory =
+        Path.Combine(Path.GetTempPath(), "winmatsch-fixture-cache");
 
     [Fact]
     public async Task Hermetic_default_reports_uncached_fixture_as_unavailable_without_HTTP()
@@ -21,7 +22,7 @@ public sealed class FixtureAcquirerTests
 
         FixtureAcquisitionResult result = await acquirer.AcquireAsync(
             CreateAsset("payload"u8.ToArray()),
-            new FixtureAcquisitionOptions { CacheDirectory = CacheDirectory });
+            new FixtureAcquisitionOptions { CacheDirectory = _cacheDirectory });
 
         Assert.False(result.IsAvailable);
         Assert.Equal(FixtureAcquisitionStatus.Unavailable, result.Status);
@@ -38,14 +39,14 @@ public sealed class FixtureAcquirerTests
             _ => throw new InvalidOperationException("HTTP must not be used."));
         var fileSystem = new InMemoryFileSystem();
         string expectedPath = Path.Combine(
-            CacheDirectory,
-            $"{asset.Sha256.ToLowerInvariant()}-{asset.FileName}");
+            _cacheDirectory,
+            $"{asset.UpstreamSha256.ToLowerInvariant()}-{asset.FileName}");
         fileSystem.WriteAllBytes(expectedPath, contents);
         var acquirer = new FixtureAcquirer(new HttpClient(handler), fileSystem);
 
         FixtureAcquisitionResult result = await acquirer.AcquireAsync(
             asset,
-            new FixtureAcquisitionOptions { CacheDirectory = CacheDirectory });
+            new FixtureAcquisitionOptions { CacheDirectory = _cacheDirectory });
 
         Assert.True(result.IsAvailable);
         Assert.Equal(FixtureAcquisitionSource.Cache, result.Source);
@@ -68,7 +69,7 @@ public sealed class FixtureAcquirerTests
         var acquirer = new FixtureAcquirer(new HttpClient(handler), fileSystem);
         var options = new FixtureAcquisitionOptions
         {
-            CacheDirectory = CacheDirectory,
+            CacheDirectory = _cacheDirectory,
             AllowNetwork = true,
         };
 
@@ -98,7 +99,7 @@ public sealed class FixtureAcquirerTests
             asset,
             new FixtureAcquisitionOptions
             {
-                CacheDirectory = CacheDirectory,
+                CacheDirectory = _cacheDirectory,
                 AllowNetwork = true,
             });
 
@@ -118,7 +119,7 @@ public sealed class FixtureAcquirerTests
             CreateAsset("payload"u8.ToArray()),
             new FixtureAcquisitionOptions
             {
-                CacheDirectory = CacheDirectory,
+                CacheDirectory = _cacheDirectory,
                 AllowNetwork = true,
             });
 
@@ -135,7 +136,7 @@ public sealed class FixtureAcquirerTests
         var acquirer = new FixtureAcquirer(new HttpClient(handler), fileSystem);
         FixtureAsset asset = CreateAsset("payload"u8.ToArray()) with
         {
-            Sha256 = "..\\outside-cache",
+            UpstreamSha256 = "..\\outside-cache",
         };
 
         await Assert.ThrowsAsync<ArgumentException>(
@@ -143,7 +144,7 @@ public sealed class FixtureAcquirerTests
                 asset,
                 new FixtureAcquisitionOptions
                 {
-                    CacheDirectory = CacheDirectory,
+                    CacheDirectory = _cacheDirectory,
                     AllowNetwork = true,
                 }));
 
@@ -155,7 +156,8 @@ public sealed class FixtureAcquirerTests
     {
         FileName = "fixture.bin",
         Url = new Uri("https://fixtures.invalid/fixture.bin"),
-        Sha256 = Convert.ToHexString(SHA256.HashData(contents)),
+        UpstreamSha256 = Convert.ToHexString(SHA256.HashData(contents)),
+        SyntheticSha256 = Convert.ToHexString(SHA256.HashData(contents)),
         ExpectedArchitecture = "x64",
         ExpectedInstallerType = "portable",
     };

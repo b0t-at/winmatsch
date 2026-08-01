@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Text;
+using System.Text.Json;
 using WinMatsch.Analysis;
 using WinMatsch.Cli.Commands.Mutations;
 using WinMatsch.Cli.Tests.Harness;
@@ -1575,6 +1576,47 @@ public sealed class MutationCommandModuleTests
             StringComparison.Ordinal);
         Assert.DoesNotContain("primary-secret", result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("recovery-secret", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Json_output_removes_unique_github_jwt_and_presigned_secrets()
+    {
+        string nonce = Guid.NewGuid().ToString("N");
+        string ghp = $"ghp_{nonce}ABCDEFGH";
+        string githubPat = $"github_pat_{nonce}_ABCDEFGH";
+        string jwt = $"eyJhbGciOiJIUzI1NiJ9.eyJqdGkiOiI{nonce}In0.{nonce}signature";
+        string presigned =
+            $"https://downloads.invalid/app.exe?X-Amz-Credential={nonce}%2Fscope"
+            + $"&X-Amz-Signature={nonce}signature";
+        string[] secrets = [ghp, githubPat, jwt, nonce];
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => FakeMutationWorkflow.Result(
+                request,
+                validation: new ValidationReport(
+                [
+                    new(
+                        "SECRET",
+                        ValidationSeverity.Warning,
+                        $"token={ghp}; secret={githubPat}; Authorization: Bearer {jwt}"),
+                ]),
+                content: $"value: {githubPat}\nInstallerUrl: {presigned}\n"),
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--dry-run", "--format", "json"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        using JsonDocument _ = JsonDocument.Parse(result.StandardOutput);
+        Assert.All(
+            secrets,
+            secret =>
+            {
+                Assert.DoesNotContain(secret, result.StandardOutput, StringComparison.Ordinal);
+                Assert.DoesNotContain(secret, result.StandardError, StringComparison.Ordinal);
+            });
+        Assert.Contains("[REDACTED]", result.StandardOutput, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -88,11 +88,13 @@ internal static class CliProcess
         return new(process.ExitCode, await stdout, await stderr);
     }
 
-    public static void AssertSafe(ProcessResult result, string secret = "e2e-secret-token")
+    public static void AssertSafe(ProcessResult result, params string[] secrets)
     {
         string output = result.StandardOutput + result.StandardError;
         Assert.DoesNotContain("\u001b[", output, StringComparison.Ordinal);
-        Assert.DoesNotContain(secret, output, StringComparison.Ordinal);
+        Assert.All(
+            secrets,
+            secret => Assert.DoesNotContain(secret, output, StringComparison.Ordinal));
         Assert.DoesNotContain("   at ", output, StringComparison.Ordinal);
         Assert.DoesNotContain("Unhandled exception", output, StringComparison.OrdinalIgnoreCase);
     }
@@ -152,6 +154,23 @@ internal sealed class EnvironmentFactAttribute : FactAttribute
             Skip = requiredValue is null
                 ? $"Set {variable} to enable this opt-in contract."
                 : $"Set {variable}={requiredValue} to enable this opt-in contract.";
+        }
+    }
+}
+
+internal sealed class WindowsEnvironmentFactAttribute : FactAttribute
+{
+    public WindowsEnvironmentFactAttribute(string variable, string requiredValue)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Skip = "This opt-in compiler corpus requires Windows.";
+            return;
+        }
+
+        if (Environment.GetEnvironmentVariable(variable) != requiredValue)
+        {
+            Skip = $"Set {variable}={requiredValue} to enable this opt-in contract.";
         }
     }
 }

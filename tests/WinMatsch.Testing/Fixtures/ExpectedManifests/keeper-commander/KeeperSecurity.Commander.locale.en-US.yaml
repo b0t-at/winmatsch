@@ -1,0 +1,12 @@
+# Created with winmatsch synthetic regression fixture
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: KeeperSecurity.Commander
+PackageVersion: 17.1.3
+PackageLocale: en-US
+Publisher: WinMatsch synthetic fixture
+PackageName: Keeper Commander
+License: MIT
+ShortDescription: Synthetic regression fixture for keeper-commander.
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

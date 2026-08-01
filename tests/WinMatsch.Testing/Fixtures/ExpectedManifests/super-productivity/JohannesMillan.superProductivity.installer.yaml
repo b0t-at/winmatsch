@@ -1,0 +1,20 @@
+# Created with winmatsch synthetic regression fixture
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: JohannesMillan.superProductivity
+PackageVersion: 18.2.8
+InstallerLocale: en-US
+InstallerType: nullsoft
+Scope: machine
+Installers:
+- Architecture: x86
+  InstallerUrl: https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup.exe
+  InstallerSha256: 505FDA62BBA3DEDC4243DBC88F9DBEBB9A7DA44BF6F5CCD3889C3F039ECB708C
+- Architecture: x64
+  InstallerUrl: https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-x64.exe
+  InstallerSha256: 879ABA463A1C5950B7CDC009E426385CB26D84883B66465ABCC8C4851DC1A5FD
+- Architecture: arm64
+  InstallerUrl: https://github.com/johannesjo/super-productivity/releases/download/v18.2.8/Super-Productivity-Setup-arm64.exe
+  InstallerSha256: D09A44F90B33189CD30527FB6AEAF504950F7B19F60D4946B876A40250A2FD32
+ManifestType: installer
+ManifestVersion: 1.12.0

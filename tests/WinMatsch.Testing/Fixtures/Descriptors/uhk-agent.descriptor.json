@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "uhk-agent",
   "package": {
     "identifier": "UltimateGadgetLaboratories.UHKAgent",
@@ -7,7 +7,11 @@
   },
   "regression": {
     "summary": "A universal Electron/NSIS asset is redundant when explicit ia32 and x64 assets exist.",
-    "ruleIds": ["ARCH-2", "ARCH-5", "DUP-2"],
+    "ruleIds": [
+      "ARCH-2",
+      "ARCH-5",
+      "DUP-2"
+    ],
     "expectedBehavior": "Keep the ia32 and x64 installers and omit the tokenless universal installer."
   },
   "provenance": {
@@ -26,6 +30,7 @@
       "fileName": "UHK.Agent-5.0.0-win-ia32.exe",
       "url": "https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win-ia32.exe",
       "sha256": "7806A4245846F69F9E11432DD7173237529F0FE49639D181E82E2CE4D95604E1",
+      "syntheticSha256": "32FFB7C4A4BFF7E6132E6575EBE4DFF1140F39B4FCDB85395CE494019EAB253F",
       "expectedArchitecture": "x86",
       "expectedInstallerType": "nullsoft"
     },
@@ -33,17 +38,30 @@
       "fileName": "UHK.Agent-5.0.0-win.exe",
       "url": "https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win.exe",
       "sha256": "63053D44E0BC750C325D7F7727C52D3E2AA8AB4F38C1F58F827473C37E0AFC4A",
+      "syntheticSha256": "11C412D2D07C0C49628DF06AF4C58CE1855CD84E02A99920738F2255788692DF",
       "expectedArchitecture": "neutral",
       "expectedInstallerType": "nullsoft",
-      "includeInExpectedManifest": false
+      "synthetic": {
+        "payloadArchitectures": [
+          "x86",
+          "x64"
+        ],
+        "explicitArchitecture": "neutral"
+      }
     },
     {
       "fileName": "UHK.Agent-5.0.0-win-x64.exe",
       "url": "https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win-x64.exe",
       "sha256": "52446DAC2CAED17A6A499584F9842B277F2B24A8E1DFAB2817C0043B4BFD00E4",
+      "syntheticSha256": "80A09696118FFA8DB4A7195B9CF34364FD91642132953DB41CCEFF486E2D306D",
       "expectedArchitecture": "x64",
       "expectedInstallerType": "nullsoft"
     }
   ],
-  "expectedSnapshot": "Fixtures/Expected/uhk-agent.expected.json"
+  "scenario": {
+    "locale": {
+      "packageName": "UHK Agent"
+    }
+  },
+  "expectedManifestDirectory": "uhk-agent"
 }

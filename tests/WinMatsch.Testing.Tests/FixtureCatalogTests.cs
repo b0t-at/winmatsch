@@ -1,3 +1,5 @@
+using System.Text;
+using WinMatsch.Core;
 using WinMatsch.Testing.Fixtures;
 using Xunit;
 
@@ -23,125 +25,73 @@ public sealed class FixtureCatalogTests
     ];
 
     [Fact]
-    public void Catalog_contains_the_complete_named_regression_corpus()
+    public void Catalog_contains_complete_descriptors_and_full_yaml_golden_sets()
     {
-        string[] ids = FixtureCatalog.All
-            .Select(fixture => fixture.Descriptor.Id)
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-
-        Assert.Equal(_expectedFixtureIds, ids);
-    }
-
-    [Fact]
-    public void Included_assets_match_the_expected_manifest_snapshot()
-    {
+        Assert.Equal(
+            _expectedFixtureIds,
+            FixtureCatalog.All.Select(static fixture => fixture.Descriptor.Id));
         foreach (RegressionFixture fixture in FixtureCatalog.All)
         {
-            var expectedAssets = fixture.Expected.Installers
-                .Select(installer => (installer.InstallerUrl, installer.InstallerSha256))
-                .ToHashSet();
-
-            foreach (FixtureAsset asset in fixture.Descriptor.Assets)
-            {
-                bool isExpected = expectedAssets.Contains((asset.Url, asset.Sha256));
-                Assert.True(
-                    asset.IncludeInExpectedManifest == isExpected,
-                    $"Fixture '{fixture.Descriptor.Id}' asset '{asset.FileName}' "
-                    + $"has IncludeInExpectedManifest={asset.IncludeInExpectedManifest} "
-                    + $"but expected snapshot membership is {isExpected}.");
-            }
+            Assert.Equal(3, fixture.ExpectedManifests.Count);
+            string yaml = string.Join(
+                "\n",
+                fixture.ExpectedManifests.Values.Select(Encoding.UTF8.GetString));
+            Assert.Contains(
+                $"PackageIdentifier: {fixture.Descriptor.Package.Identifier}",
+                yaml,
+                StringComparison.Ordinal);
+            Assert.True(
+                yaml.Contains(
+                    $"PackageVersion: {fixture.Descriptor.Package.Version}",
+                    StringComparison.Ordinal)
+                || yaml.Contains(
+                    $"PackageVersion: \"{fixture.Descriptor.Package.Version}\"",
+                    StringComparison.Ordinal));
+            Assert.Contains("ManifestType: installer", yaml, StringComparison.Ordinal);
+            Assert.Contains("ManifestType: defaultLocale", yaml, StringComparison.Ordinal);
+            Assert.Contains("ManifestType: version", yaml, StringComparison.Ordinal);
         }
     }
 
     [Fact]
-    public void Provenance_is_https_and_commit_pinned()
+    public void Descriptor_semantics_are_shared_and_ambiguity_is_explicit()
+    {
+        Assert.Equal(Architecture.X64, FixtureSemantics.ParseArchitecture("x64"));
+        Assert.Equal(InstallerType.Nullsoft, FixtureSemantics.ParseInstallerType("nullsoft"));
+        Assert.Equal(Scope.Machine, FixtureSemantics.ParseScope("machine"));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => FixtureSemantics.ParseArchitecture("implicit-guess"));
+
+        FixtureAsset tokenless = FixtureCatalog.Get("super-productivity").Descriptor.Assets
+            .Single(static asset => asset.FileName == "Super-Productivity-Setup.exe");
+        Assert.Equal("x86", tokenless.ExpectedArchitecture);
+        Assert.Null(tokenless.Synthetic.ExplicitArchitecture);
+
+        FixtureAsset ambiguous = FixtureCatalog.Get("uhk-agent").Descriptor.Assets
+            .Single(static asset => asset.FileName.EndsWith("-win.exe", StringComparison.Ordinal));
+        Assert.Equal(["x86", "x64"], ambiguous.Synthetic.PayloadArchitectures);
+        Assert.Equal("neutral", ambiguous.Synthetic.ExplicitArchitecture);
+    }
+
+    [Fact]
+    public void Provenance_and_upstream_acquisition_are_https_and_commit_or_checksum_pinned()
     {
         foreach (RegressionFixture fixture in FixtureCatalog.All)
         {
             FixtureProvenance provenance = fixture.Descriptor.Provenance;
-
             Assert.Equal(Uri.UriSchemeHttps, provenance.ManifestUrl.Scheme);
             Assert.Contains(provenance.HeadCommit, provenance.ManifestUrl.AbsoluteUri);
             Assert.Equal(40, provenance.HeadCommit.Length);
             Assert.Equal(40, provenance.MergeCommit.Length);
             Assert.NotEqual(default, provenance.ObservedAt);
+            Assert.All(
+                fixture.Descriptor.Assets,
+                static asset =>
+                {
+                    Assert.Equal(Uri.UriSchemeHttps, asset.Url.Scheme);
+                    Assert.Equal(64, asset.UpstreamSha256.Length);
+                    Assert.Equal(64, asset.SyntheticSha256.Length);
+                });
         }
-    }
-
-    [Fact]
-    public void Regression_specific_expected_shapes_are_preserved()
-    {
-        RegressionFixture uhk = FixtureCatalog.Get("uhk-agent");
-        Assert.Equal(2, uhk.Expected.Installers.Count);
-        Assert.Contains(
-            uhk.Descriptor.Assets,
-            asset => !asset.IncludeInExpectedManifest && asset.FileName.EndsWith("-win.exe", StringComparison.Ordinal));
-
-        RegressionFixture pandoc = FixtureCatalog.Get("pandoc");
-        Assert.Equal(["user", "machine"], pandoc.Expected.Installers.Select(installer => installer.Scope));
-
-        RegressionFixture surrealDb = FixtureCatalog.Get("surrealdb");
-        Assert.Single(surrealDb.Expected.Installers.Select(installer => installer.InstallerUrl).Distinct());
-        Assert.Equal(["x64", "x86"], surrealDb.Expected.Installers.Select(installer => installer.Architecture));
-
-        Assert.All(
-            FixtureCatalog.Get("clouddrive2").Expected.AppsAndFeaturesEntries,
-            entry => Assert.Null(entry.DisplayVersion));
-        Assert.All(
-            FixtureCatalog.Get("sonarr").Expected.AppsAndFeaturesEntries,
-            entry => Assert.Null(entry.DisplayVersion));
-
-        string releaseNotes = FixtureCatalog.Get("mise").Expected.Locale?.ReleaseNotes
-            ?? throw new InvalidDataException("mise release notes are missing.");
-        Assert.Contains("\u2022 ", releaseNotes);
-        Assert.DoesNotContain("\n- ", releaseNotes);
-    }
-
-    [Fact]
-    public void Sanitized_recordings_exclude_credentials_and_cover_all_assets()
-    {
-        IReadOnlyList<HttpInteractionRecording> recordings = FixtureCatalog.LoadRecordings();
-        string serialized = string.Join(
-            "\n",
-            recordings.Select(
-                recording =>
-                    $"{recording.Method} {recording.Uri} "
-                    + $"{string.Join(' ', recording.ResponseHeaders)} "
-                    + $"{recording.Body?.GetRawText()}"));
-
-        Assert.NotEmpty(recordings);
-        Assert.DoesNotContain("authorization", serialized, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("cookie", serialized, StringComparison.OrdinalIgnoreCase);
-        Assert.All(
-            recordings,
-            recording =>
-            {
-                Assert.Equal(Uri.UriSchemeHttps, recording.Uri.Scheme);
-                Assert.All(
-                    recording.ResponseHeaders.Keys,
-                    name => Assert.Equal("Content-Type", name, ignoreCase: true));
-            });
-
-        foreach (FixtureAsset asset in FixtureCatalog.All.SelectMany(fixture => fixture.Descriptor.Assets))
-        {
-            Assert.Contains(asset.Url.AbsoluteUri, serialized, StringComparison.Ordinal);
-        }
-    }
-
-    [Fact]
-    public async Task Recorded_handler_replays_sanitized_GitHub_response()
-    {
-        IReadOnlyList<HttpInteractionRecording> recordings = FixtureCatalog.LoadRecordings();
-        HttpInteractionRecording recording = recordings.First(item => item.Id == "electron-release");
-        var handler = new RecordedHttpMessageHandler(recordings);
-        using var client = new HttpClient(handler);
-
-        using HttpResponseMessage response = await client.GetAsync(recording.Uri);
-        string body = await response.Content.ReadAsStringAsync();
-
-        Assert.True(response.IsSuccessStatusCode);
-        Assert.Contains("win32-arm64", body);
-        Assert.Single(handler.Requests);
     }
 }
