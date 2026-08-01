@@ -410,9 +410,9 @@ public sealed class GitHubFeedbackWorkflow
         }
 
         return result with
-            {
-                Diagnostics = reconciliationDiagnostics.ToImmutable(),
-            };
+        {
+            Diagnostics = reconciliationDiagnostics.ToImmutable(),
+        };
     }
 
     public static FeedbackClassification Classify(
