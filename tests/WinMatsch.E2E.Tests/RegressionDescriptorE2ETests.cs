@@ -8,7 +8,6 @@ using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.Versioning;
 using Xunit;
-using Xunit.Sdk;
 
 namespace WinMatsch.E2E.Tests;
 
@@ -113,7 +112,7 @@ public sealed class RegressionDescriptorE2ETests
     }
 
     [EnvironmentFact("WINMATSCH_E2E_ACQUIRE_FIXTURES", "1")]
-    public async Task Opt_in_acquisition_remains_checksum_pinned_and_skips_clearly_when_offline()
+    public async Task Opt_in_acquisition_requires_an_available_checksum_pinned_fixture()
     {
         using var temporary = new TemporaryDirectory();
         var acquirer = new FixtureAcquirer(
@@ -129,18 +128,10 @@ public sealed class RegressionDescriptorE2ETests
                 AllowNetwork = true,
             });
 
-        if (!result.IsAvailable)
-        {
-            bool clearlyOffline =
-                result.Message.Contains(
-                    "network acquisition is unavailable",
-                    StringComparison.OrdinalIgnoreCase)
-                || result.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase);
-            Assert.True(clearlyOffline, result.Message);
-            throw SkipException.ForSkip(
-                $"Checksum-pinned fixture acquisition skipped: {result.Message}");
-        }
-
+        Assert.True(
+            result.IsAvailable,
+            "Opt-in fixture acquisition was enabled but did not produce a verified fixture: "
+            + result.Message);
         Assert.NotNull(result.Path);
         Assert.True(File.Exists(result.Path));
     }
