@@ -32,6 +32,10 @@ public sealed class LocalWorkflowEngineTests
             first.Plan.FileChanges.Select(static change => Convert.ToHexString(change.Content.AsSpan())),
             second.Plan.FileChanges.Select(static change => Convert.ToHexString(change.Content.AsSpan())));
         Assert.True(first.Plan.Audit.SequenceEqual(second.Plan.Audit));
+        Assert.Contains(
+            first.Plan.Audit,
+            static entry => entry.Code == "CREATED_AT"
+                && entry.Message == "2026-01-02T03:04:05.0000000+00:00");
         Assert.False(Directory.Exists(Path.Combine(temporary.Path, "manifests")));
     }
 
@@ -262,6 +266,95 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Snapshot_lock_contention_returns_a_structured_conflict()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        WritePackage(temporary.Path, package);
+        using IDisposable held = AtomicWorkflowFileTransaction.AcquirePackageLock(
+            temporary.Path,
+            package.Version.PackageIdentifier!.Value);
+        var engine = new LocalWorkflowEngine(
+            new LocalManifestSnapshotSource(),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new AtomicWorkflowFileTransaction(),
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.RemoveAsync(new RemoveOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            PackageIdentifier = package.Version.PackageIdentifier!,
+            PackageVersion = package.Version.PackageVersion!,
+        });
+
+        Assert.Equal(WorkflowResultCode.Conflict, result.Code);
+        Assert.False(result.Applied);
+        Assert.Contains(result.Plan.Validation.Findings, static finding => finding.Code == "WF_CONFLICT");
+    }
+
+    [Fact]
+    public void Local_lock_also_coordinates_with_the_legacy_lock_location()
+    {
+        using var temporary = new TemporaryDirectory();
+        string identity = DirectoryPin.GetLegacyIdentity(temporary.Path);
+        string lockDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "winmatsch-operation-locks",
+            identity);
+        string fileName =
+            $"{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("EXAMPLE.APP")))}.lock";
+        Directory.CreateDirectory(lockDirectory);
+        using var legacy = new FileStream(
+            Path.Combine(lockDirectory, fileName),
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None);
+
+        WorkflowOperationException exception = Assert.Throws<WorkflowOperationException>(
+            () => AtomicWorkflowFileTransaction.AcquirePackageLock(
+                temporary.Path,
+                "Example.App"));
+
+        Assert.Equal(WorkflowResultCode.Conflict, exception.Code);
+        legacy.Dispose();
+        Directory.Delete(lockDirectory, recursive: true);
+    }
+
+    [Fact]
+    public async Task Snapshot_cancellation_remains_cancellation()
+    {
+        using var temporary = new TemporaryDirectory();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(),
+            new RecordingTransaction());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => engine.NewAsync(
+                NewRequest(temporary.Path, WorkflowExecutionMode.Plan),
+                cancellation.Token));
+    }
+
+    [Fact]
+    public void Non_windows_lock_identity_canonicalizes_symbolic_links()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var temporary = new TemporaryDirectory();
+        string target = Path.Combine(temporary.Path, "target");
+        string alias = Path.Combine(temporary.Path, "alias");
+        Directory.CreateDirectory(target);
+        Directory.CreateSymbolicLink(alias, target);
+
+        Assert.Equal(DirectoryPin.GetIdentity(target), DirectoryPin.GetIdentity(alias));
+    }
+
+    [Fact]
     public async Task Atomic_transaction_rolls_back_after_partial_install_failure()
     {
         using var temporary = new TemporaryDirectory();
@@ -286,6 +379,63 @@ public sealed class LocalWorkflowEngineTests
         Assert.Equal("before", await File.ReadAllTextAsync(original));
         Assert.False(File.Exists(Path.Combine(temporary.Path, "blocked", "file.txt")));
         Assert.Empty(Directory.EnumerateDirectories(temporary.Path, ".winmatsch-transaction-*"));
+    }
+
+    [Fact]
+    public async Task Transaction_preserves_apply_and_rollback_failures()
+    {
+        using var temporary = new TemporaryDirectory();
+        await File.WriteAllTextAsync(Path.Combine(temporary.Path, "a.txt"), "before-a");
+        await File.WriteAllTextAsync(Path.Combine(temporary.Path, "b.txt"), "before-b");
+        var fileSystem = new FaultingTransactionFileSystem
+        {
+            FailInstallFileName = "b.txt",
+            FailRollback = true,
+        };
+        var transaction = new AtomicWorkflowFileTransaction(null, fileSystem);
+
+        WorkflowRecoveryException exception = await Assert.ThrowsAsync<WorkflowRecoveryException>(
+            () => transaction.ApplyAsync(
+                temporary.Path,
+                "Example.App",
+                TwoFileChanges(),
+                CancellationToken.None));
+
+        Assert.Equal("Simulated apply failure.", exception.PrimaryException.Message);
+        Assert.Contains(
+            exception.RecoveryExceptions,
+            static failure => failure.Message == "Simulated rollback failure.");
+        Assert.True(exception.JournalRetained);
+        Assert.IsType<AggregateException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task Transaction_preserves_apply_and_cleanup_failures()
+    {
+        using var temporary = new TemporaryDirectory();
+        await File.WriteAllTextAsync(Path.Combine(temporary.Path, "a.txt"), "before-a");
+        await File.WriteAllTextAsync(Path.Combine(temporary.Path, "b.txt"), "before-b");
+        var fileSystem = new FaultingTransactionFileSystem
+        {
+            FailInstallFileName = "b.txt",
+            FailCleanup = true,
+        };
+        var transaction = new AtomicWorkflowFileTransaction(null, fileSystem);
+
+        WorkflowRecoveryException exception = await Assert.ThrowsAsync<WorkflowRecoveryException>(
+            () => transaction.ApplyAsync(
+                temporary.Path,
+                "Example.App",
+                TwoFileChanges(),
+                CancellationToken.None));
+
+        Assert.Equal("Simulated apply failure.", exception.PrimaryException.Message);
+        Assert.Contains(
+            exception.RecoveryExceptions,
+            static failure => failure.Message == "Simulated cleanup failure.");
+        Assert.True(exception.JournalRetained);
+        Assert.Equal("before-a", await File.ReadAllTextAsync(Path.Combine(temporary.Path, "a.txt")));
+        Assert.Equal("before-b", await File.ReadAllTextAsync(Path.Combine(temporary.Path, "b.txt")));
     }
 
     [Fact]
@@ -351,6 +501,28 @@ public sealed class LocalWorkflowEngineTests
         Assert.Equal(WorkflowResultCode.ValidationFailed, result.Code);
         Assert.Equal(0, transaction.Calls);
         Assert.Contains(result.Plan.Validation.Findings, static finding => finding.Code == "RULE_TEST001");
+    }
+
+    [Fact]
+    public async Task Recovery_failure_is_returned_with_root_and_cleanup_details()
+    {
+        using var temporary = new TemporaryDirectory();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new RecoveryFailingTransaction(),
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.NewAsync(
+            NewRequest(temporary.Path, WorkflowExecutionMode.Apply));
+
+        Assert.Equal(WorkflowResultCode.ApplyFailed, result.Code);
+        Assert.Equal("root apply failure", result.ErrorMessage);
+        WorkflowRecoveryDetails recovery = Assert.IsType<WorkflowRecoveryDetails>(result.Recovery);
+        Assert.Equal("root apply failure", recovery.PrimaryError);
+        Assert.Equal(["cleanup failure"], recovery.RecoveryErrors.ToArray());
+        Assert.True(recovery.JournalRetained);
     }
 
     [Fact]
@@ -472,6 +644,36 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Legacy_manifests_committed_journal_finishes_without_creating_provenance()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        WritePackage(temporary.Path, package);
+        string repositoryPath =
+            $"{ManifestPaths.GetVersionDirectory(package.Version.PackageIdentifier!, package.Version.PackageVersion!)}/{ManifestPaths.GetInstallerFileName(package.Version.PackageIdentifier!)}";
+        string packageKey = package.Version.PackageIdentifier!.Value.ToUpperInvariant();
+        string prefix =
+            $".winmatsch-transaction-{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(packageKey)))[..16]}";
+        string transaction = Path.Combine(temporary.Path, $"{prefix}-legacy");
+        Directory.CreateDirectory(Path.Combine(transaction, "provenance"));
+        string encodedPath = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(repositoryPath));
+        await File.WriteAllTextAsync(
+            Path.Combine(transaction, "journal"),
+            $"manifests-committed{Environment.NewLine}"
+            + $"{PlannedChangeKind.Update}|1|{encodedPath}{Environment.NewLine}");
+
+        PackageSnapshot? recovered = await new LocalManifestSnapshotSource().LoadAsync(
+            temporary.Path,
+            package.Version.PackageIdentifier!,
+            package.Version.PackageVersion!,
+            CancellationToken.None);
+
+        Assert.NotNull(recovered);
+        Assert.Null(recovered.OriginalBotSubmission);
+        Assert.False(Directory.Exists(transaction));
+    }
+
+    [Fact]
     public async Task Pre_enriched_asset_with_supplied_artifact_passes_production_preflight()
     {
         using var temporary = new TemporaryDirectory();
@@ -566,6 +768,23 @@ public sealed class LocalWorkflowEngineTests
             preflight ?? new CapturingPreflight(),
             transaction,
             clock: new FixedClock());
+
+    private static ImmutableArray<WorkflowFileChange> TwoFileChanges()
+        =>
+        [
+            new(
+                PlannedChangeKind.Update,
+                "a.txt",
+                "after-a"u8,
+                ExpectedFileState.Present,
+                WorkflowFileChange.Hash("before-a"u8)),
+            new(
+                PlannedChangeKind.Update,
+                "b.txt",
+                "after-b"u8,
+                ExpectedFileState.Present,
+                WorkflowFileChange.Hash("before-b"u8)),
+        ];
 
     private static NewOperationRequest NewRequest(string output, WorkflowExecutionMode mode)
         => new()
@@ -860,6 +1079,64 @@ public sealed class LocalWorkflowEngineTests
             Calls++;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class FaultingTransactionFileSystem : IWorkflowTransactionFileSystem
+    {
+        public string? FailInstallFileName { get; init; }
+
+        public bool FailRollback { get; init; }
+
+        public bool FailCleanup { get; init; }
+
+        public void DeleteDirectory(string path, bool recursive)
+        {
+            if (FailCleanup
+                && Path.GetFileName(path).StartsWith(
+                    ".winmatsch-transaction-",
+                    StringComparison.Ordinal))
+            {
+                throw new IOException("Simulated cleanup failure.");
+            }
+
+            Directory.Delete(path, recursive);
+        }
+
+        public void DeleteFile(string path) => File.Delete(path);
+
+        public void MoveFile(string source, string destination)
+        {
+            string stageSegment = $"{Path.DirectorySeparatorChar}stage{Path.DirectorySeparatorChar}";
+            string backupSegment = $"{Path.DirectorySeparatorChar}backup{Path.DirectorySeparatorChar}";
+            if (FailInstallFileName is not null
+                && source.Contains(stageSegment, StringComparison.Ordinal)
+                && Path.GetFileName(destination) == FailInstallFileName)
+            {
+                throw new IOException("Simulated apply failure.");
+            }
+
+            if (FailRollback && source.Contains(backupSegment, StringComparison.Ordinal))
+            {
+                throw new UnauthorizedAccessException("Simulated rollback failure.");
+            }
+
+            File.Move(source, destination);
+        }
+    }
+
+    private sealed class RecoveryFailingTransaction : IWorkflowFileTransaction
+    {
+        public Task ApplyAsync(
+            string outputDirectory,
+            string operationLockKey,
+            ImmutableArray<WorkflowFileChange> changes,
+            CancellationToken cancellationToken)
+            => throw new WorkflowRecoveryException(
+                "recovery failed",
+                new IOException("root apply failure"),
+                rollbackException: null,
+                cleanupException: new IOException("cleanup failure"),
+                journalRetained: true);
     }
 
     private sealed class FixedClock : IWorkflowClock

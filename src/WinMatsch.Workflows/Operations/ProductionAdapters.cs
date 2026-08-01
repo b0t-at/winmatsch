@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -10,6 +12,7 @@ using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
+using WinMatsch.Validation;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.Mapping;
 
@@ -152,6 +155,430 @@ public sealed class InstallerWorkflowArtifactProcessor(
     }
 }
 
+internal sealed class DurableInstallerPreflightNetwork :
+    IPreflightNetwork,
+    IWorkflowPreflightDiagnosticSource
+{
+    private const int MaximumStaleArtifactsPerPass = 16;
+    private const int MaximumNoStoreLeasesToInspect = 128;
+    private const string NoStoreLeaseMarker = ".no-store-lease-v1";
+    private static readonly TimeSpan _artifactRetention = TimeSpan.FromDays(30);
+    private static readonly TimeSpan _noStoreLeaseDuration = TimeSpan.FromMinutes(5);
+    private readonly InstallerDownloader _downloader;
+    private readonly string _stateDirectory;
+    private readonly IWorkflowScratchCleanup _scratchCleanup;
+    private readonly ConcurrentQueue<ValidationFinding> _diagnostics = new();
+
+    public DurableInstallerPreflightNetwork(InstallerDownloader downloader)
+        : this(downloader, DefaultStateDirectory(), BoundedWorkflowScratchCleanup.Instance)
+    {
+    }
+
+    internal DurableInstallerPreflightNetwork(
+        InstallerDownloader downloader,
+        string stateDirectory,
+        IWorkflowScratchCleanup scratchCleanup)
+    {
+        _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+        _stateDirectory = Path.GetFullPath(stateDirectory);
+        _scratchCleanup = scratchCleanup ?? throw new ArgumentNullException(nameof(scratchCleanup));
+    }
+
+    public Task<DownloadProbeResult> ProbeAsync(string url, CancellationToken cancellationToken)
+        => _downloader.ProbeAsync(url, cancellationToken);
+
+    public async Task<DownloadRevalidationResult> RevalidateAsync(
+        DownloadResult previous,
+        CancellationToken cancellationToken)
+    {
+        if (File.Exists(previous.FilePath))
+        {
+            return await _downloader.RevalidateAsync(
+                previous,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        PruneExpiredNoStoreLeases();
+        string scratchDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-preflight-revalidation-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(scratchDirectory);
+        DownloadRevalidationResult? result = null;
+        Exception? primaryFailure = null;
+        bool retainScratchForNoStore = false;
+        try
+        {
+            DownloadResult current = await _downloader.DownloadFreshAsync(
+                previous.InitialUrl,
+                scratchDirectory,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            retainScratchForNoStore = !current.MayBeStored;
+            if (retainScratchForNoStore)
+            {
+                WriteNoStoreLease(
+                    scratchDirectory,
+                    DateTimeOffset.UtcNow.Add(_noStoreLeaseDuration));
+            }
+
+            string durablePath = retainScratchForNoStore
+                ? current.FilePath
+                : PreserveArtifact(current);
+            result = new()
+            {
+                Status = current.ContentIdentity == previous.ContentIdentity
+                    ? DownloadRevalidationStatus.Unchanged
+                    : DownloadRevalidationStatus.ContentChanged,
+                Result = CopyDownload(current, durablePath),
+            };
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+        }
+
+        WorkflowScratchCleanupState cleanup =
+            retainScratchForNoStore && primaryFailure is null
+                ? _scratchCleanup.Schedule(scratchDirectory, _noStoreLeaseDuration)
+                : _scratchCleanup.Cleanup(scratchDirectory);
+        if (cleanup.Scheduled)
+        {
+            _diagnostics.Enqueue(new(
+                "WF_PREFLIGHT_SCRATCH_CLEANUP_SCHEDULED",
+                ValidationSeverity.Info,
+                cleanup.Diagnostic ?? "Scratch cleanup was scheduled."));
+        }
+
+        if (primaryFailure is not null)
+        {
+            if (primaryFailure is not OperationCanceledException && cleanup.Scheduled)
+            {
+                throw new WorkflowPreflightRecoveryException(primaryFailure, cleanup);
+            }
+
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+        }
+
+        return result!;
+    }
+
+    public ImmutableArray<ValidationFinding> DrainDiagnostics()
+    {
+        var findings = ImmutableArray.CreateBuilder<ValidationFinding>();
+        while (_diagnostics.TryDequeue(out ValidationFinding? finding))
+        {
+            findings.Add(finding);
+        }
+
+        return findings.ToImmutable();
+    }
+
+    private string PreserveArtifact(DownloadResult current)
+    {
+        Directory.CreateDirectory(_stateDirectory);
+        PruneStaleArtifacts();
+        string path = Path.Combine(
+            _stateDirectory,
+            $"{current.Sha256}-{current.SizeInBytes}.bin");
+        if (File.Exists(path))
+        {
+            VerifyArtifact(path, current.ContentIdentity);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+            return path;
+        }
+
+        string temporary = $"{path}.tmp-{Guid.NewGuid():N}";
+        try
+        {
+            File.Copy(current.FilePath, temporary);
+            FlushFile(temporary);
+            try
+            {
+                File.Move(temporary, path);
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                File.Delete(temporary);
+                VerifyArtifact(path, current.ContentIdentity);
+            }
+
+            return path;
+        }
+        catch (Exception primaryException)
+        {
+            if (File.Exists(temporary))
+            {
+                try
+                {
+                    File.Delete(temporary);
+                }
+                catch (Exception cleanupException)
+                {
+                    throw new IOException(
+                        "Durable preflight artifact creation and temporary cleanup both failed.",
+                        new AggregateException(primaryException, cleanupException));
+                }
+            }
+
+            throw;
+        }
+    }
+
+    private static void WriteNoStoreLease(
+        string scratchDirectory,
+        DateTimeOffset expiresAt)
+    {
+        string marker = Path.Combine(scratchDirectory, NoStoreLeaseMarker);
+        File.WriteAllText(
+            marker,
+            expiresAt.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            new UTF8Encoding(false));
+        FlushFile(marker);
+    }
+
+    private static void PruneExpiredNoStoreLeases()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        foreach (string directory in Directory
+                     .EnumerateDirectories(
+                         Path.GetTempPath(),
+                         "winmatsch-preflight-revalidation-*",
+                         SearchOption.TopDirectoryOnly)
+                     .Take(MaximumNoStoreLeasesToInspect)
+                     .Select(static directory => new
+                     {
+                         Directory = directory,
+                         Marker = Path.Combine(directory, NoStoreLeaseMarker),
+                     })
+                     .Where(static candidate => File.Exists(candidate.Marker))
+                     .Select(static candidate => new
+                     {
+                         candidate.Directory,
+                         ExpiresAt = TryReadLeaseExpiration(candidate.Marker),
+                     })
+                     .Where(candidate => candidate.ExpiresAt is { } expiration && expiration <= now)
+                     .OrderBy(static candidate => candidate.ExpiresAt)
+                     .Take(MaximumStaleArtifactsPerPass)
+                     .Select(static candidate => candidate.Directory))
+        {
+            try
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
+    private static DateTimeOffset? TryReadLeaseExpiration(string marker)
+    {
+        try
+        {
+            return long.TryParse(
+                File.ReadAllText(marker),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out long milliseconds)
+                ? DateTimeOffset.FromUnixTimeMilliseconds(milliseconds)
+                : null;
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private void PruneStaleArtifacts()
+    {
+        DateTime cutoff = DateTime.UtcNow - _artifactRetention;
+        foreach (string path in Directory.EnumerateFiles(_stateDirectory)
+                     .Where(static path =>
+                         path.EndsWith(".bin", StringComparison.Ordinal)
+                         || Path.GetFileName(path).Contains(".bin.tmp-", StringComparison.Ordinal))
+                     .Where(path => File.GetLastWriteTimeUtc(path) < cutoff)
+                     .OrderBy(File.GetLastWriteTimeUtc)
+                     .Take(MaximumStaleArtifactsPerPass))
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
+    private static void VerifyArtifact(string path, DownloadContentIdentity expected)
+    {
+        var info = new FileInfo(path);
+        if (info.Length != expected.SizeInBytes)
+        {
+            throw new InvalidDataException("The durable preflight artifact has an unexpected size.");
+        }
+
+        using FileStream stream = File.OpenRead(path);
+        var actual = new DownloadContentIdentity(
+            new Sha256Hash(Convert.ToHexString(SHA256.HashData(stream))),
+            info.Length);
+        if (actual != expected)
+        {
+            throw new InvalidDataException("The durable preflight artifact has an unexpected SHA-256.");
+        }
+    }
+
+    private static void FlushFile(string path)
+    {
+        using FileStream stream = new(
+            path,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.Read,
+            bufferSize: 1,
+            FileOptions.WriteThrough);
+        stream.Flush(flushToDisk: true);
+    }
+
+    private static DownloadResult CopyDownload(DownloadResult source, string filePath)
+        => new()
+        {
+            FilePath = filePath,
+            FileName = source.FileName,
+            Sha256 = source.Sha256,
+            SizeInBytes = source.SizeInBytes,
+            LastModified = source.LastModified,
+            ETag = source.ETag,
+            ResponseDate = source.ResponseDate,
+            FreshUntil = source.FreshUntil,
+            RetrievedAt = source.RetrievedAt,
+            InitialUrl = source.InitialUrl,
+            FinalUrl = source.FinalUrl,
+            ContentType = source.ContentType,
+            IsFromCache = source.IsFromCache,
+            MayBeStored = source.MayBeStored,
+        };
+
+    private static string DefaultStateDirectory()
+    {
+        string localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localData))
+        {
+            localData = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".local",
+                "share");
+        }
+
+        return Path.Combine(localData, "winmatsch", "preflight-artifacts");
+    }
+}
+
+internal readonly record struct WorkflowScratchCleanupState(
+    bool Scheduled,
+    string? Diagnostic = null)
+{
+    public static WorkflowScratchCleanupState Completed { get; } = new(Scheduled: false);
+}
+
+internal interface IWorkflowScratchCleanup
+{
+    public WorkflowScratchCleanupState Cleanup(string directory);
+
+    public WorkflowScratchCleanupState Schedule(string directory, TimeSpan retention);
+}
+
+internal sealed class BoundedWorkflowScratchCleanup : IWorkflowScratchCleanup
+{
+    private static readonly TimeSpan[] _retryDelays =
+    [
+        TimeSpan.FromMilliseconds(100),
+        TimeSpan.FromMilliseconds(500),
+        TimeSpan.FromSeconds(2),
+    ];
+
+    public static BoundedWorkflowScratchCleanup Instance { get; } = new();
+
+    public WorkflowScratchCleanupState Cleanup(string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return WorkflowScratchCleanupState.Completed;
+        }
+
+        try
+        {
+            Directory.Delete(directory, recursive: true);
+            return WorkflowScratchCleanupState.Completed;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            _ = Task.Run(() => RetryAsync(directory));
+            return new(
+                Scheduled: true,
+                $"Scratch cleanup was scheduled after {exception.GetType().Name}.");
+        }
+    }
+
+    public WorkflowScratchCleanupState Schedule(string directory, TimeSpan retention)
+    {
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(retention).ConfigureAwait(false);
+            await RetryAsync(directory).ConfigureAwait(false);
+        });
+        return new(
+            Scheduled: true,
+            $"Scratch cleanup was scheduled after a {retention.TotalMinutes:0}-minute no-store lease.");
+    }
+
+    private static async Task RetryAsync(string directory)
+    {
+        foreach (TimeSpan delay in _retryDelays)
+        {
+            await Task.Delay(delay).ConfigureAwait(false);
+            try
+            {
+                if (Directory.Exists(directory))
+                {
+                    Directory.Delete(directory, recursive: true);
+                }
+
+                return;
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+}
+
+internal sealed class WorkflowPreflightRecoveryException : IOException
+{
+    public WorkflowPreflightRecoveryException(
+        Exception primaryException,
+        WorkflowScratchCleanupState cleanup)
+        : base(
+            $"Immediate installer revalidation failed: {primaryException.Message}",
+            new AggregateException(
+                primaryException,
+                new IOException(cleanup.Diagnostic ?? "Scratch cleanup was scheduled.")))
+    {
+        PrimaryException = primaryException;
+        Cleanup = cleanup;
+    }
+
+    public Exception PrimaryException { get; }
+
+    public WorkflowScratchCleanupState Cleanup { get; }
+}
+
 public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
 {
     private readonly IOriginalSubmissionStore _originalSubmissions;
@@ -188,6 +615,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
         PackageIdentifier packageIdentifier,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         string root = Path.GetFullPath(outputDirectory);
         if (!Directory.Exists(root))
         {
@@ -220,7 +648,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
             PackageSnapshot? snapshot = LoadCore(root, packageIdentifier, version!, cancellationToken);
             if (snapshot is not null)
             {
-                snapshots.Add(snapshot);
+                snapshots.Add((PackageSnapshot)snapshot);
             }
         }
 
@@ -270,10 +698,19 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _locks =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly IOriginalSubmissionStore? _originalSubmissions;
+    private readonly IWorkflowTransactionFileSystem _fileSystem;
 
     public AtomicWorkflowFileTransaction(IOriginalSubmissionStore? originalSubmissions = null)
+        : this(originalSubmissions, WorkflowTransactionFileSystem.Instance)
+    {
+    }
+
+    internal AtomicWorkflowFileTransaction(
+        IOriginalSubmissionStore? originalSubmissions,
+        IWorkflowTransactionFileSystem fileSystem)
     {
         _originalSubmissions = originalSubmissions;
+        _fileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
     }
 
     public async Task ApplyAsync(
@@ -290,7 +727,10 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         }
 
         string root = Path.GetFullPath(outputDirectory);
-        string normalizedLockKey = $"{root}\u001f{operationLockKey.ToUpperInvariant()}";
+        string rootIdentity = Directory.Exists(root)
+            ? DirectoryPin.GetIdentity(root)
+            : Path.GetFullPath(root);
+        string normalizedLockKey = $"{rootIdentity}\u001f{operationLockKey.ToUpperInvariant()}";
         SemaphoreSlim gate = _locks.GetOrAdd(normalizedLockKey, static _ => new SemaphoreSlim(1, 1));
         if (!await gate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
         {
@@ -308,9 +748,11 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         var pinnedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         RepositoryOperationLock? processLock = null;
         bool cleanupAllowed = false;
-        bool committed = false;
         Exception? committedCleanupFailure = null;
         Exception? committedProvenanceFailure = null;
+        Exception? primaryFailure = null;
+        Exception? rollbackFailure = null;
+        Exception? uncommittedCleanupFailure = null;
         try
         {
             SecurePath.ValidateOutputRoot(root);
@@ -358,7 +800,7 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 if (entry.HadDestination)
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(entry.Backup)!);
-                    File.Move(entry.Destination, entry.Backup);
+                    _fileSystem.MoveFile(entry.Destination, entry.Backup);
                     entry.BackupCreated = true;
                     VerifyCapturedBackup(entry);
                 }
@@ -372,7 +814,7 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                         Path.GetDirectoryName(entry.Destination)!,
                         directoryPins,
                         pinnedDirectories);
-                    File.Move(entry.Stage, entry.Destination);
+                    _fileSystem.MoveFile(entry.Stage, entry.Destination);
                     entry.DestinationInstalled = true;
                     FlushFile(entry.Destination);
                 }
@@ -383,22 +825,33 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             if (_originalSubmissions is null)
             {
                 WriteJournal(transactionRoot, "committed", installed);
-                committed = true;
                 cleanupAllowed = true;
             }
             else
             {
                 string provenanceRoot = Path.Combine(transactionRoot, "provenance");
                 StageProvenanceSnapshots(root, provenanceRoot, changes);
+                string captureId = Path.GetFileName(transactionRoot);
+                CommittedWorkflowPath[] committedPaths = ToCommittedPaths(changes);
+                _originalSubmissions.PrepareCapture(
+                    root,
+                    captureId,
+                    provenanceRoot,
+                    committedPaths);
                 WriteJournal(transactionRoot, "manifests-committed", installed);
-                committed = true;
                 try
                 {
                     _originalSubmissions.CaptureChangedVersions(
                         root,
+                        captureId,
                         provenanceRoot,
-                        ToCommittedPaths(changes));
+                        committedPaths);
                     WriteJournal(transactionRoot, "committed", installed);
+                    _originalSubmissions.CompleteCapture(
+                        root,
+                        captureId,
+                        provenanceRoot,
+                        committedPaths);
                     cleanupAllowed = true;
                 }
                 catch (Exception exception) when (
@@ -408,48 +861,75 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 }
             }
         }
-        catch
+        catch (Exception exception)
         {
+            primaryFailure = exception;
             try
             {
                 RollBack(installed);
                 cleanupAllowed = true;
             }
-            catch
+            catch (Exception recoveryException)
             {
                 cleanupAllowed = false;
-                throw;
+                rollbackFailure = recoveryException;
             }
-
-            throw;
         }
         finally
         {
-            try
+            if (cleanupAllowed && Directory.Exists(transactionRoot))
             {
-                if (cleanupAllowed && Directory.Exists(transactionRoot))
+                try
                 {
-                    try
-                    {
-                        Directory.Delete(transactionRoot, recursive: true);
-                    }
-                    catch (IOException exception) when (committed)
-                    {
-                        committedCleanupFailure = exception;
-                    }
-                    catch (UnauthorizedAccessException exception) when (committed)
-                    {
-                        committedCleanupFailure = exception;
-                    }
+                    _fileSystem.DeleteDirectory(transactionRoot, recursive: true);
+                }
+                catch (Exception exception)
+                {
+                    RecordCleanupFailure(exception);
                 }
             }
-            finally
+
+            try
             {
                 DisposePins(directoryPins);
+            }
+            catch (Exception exception)
+            {
+                RecordCleanupFailure(exception);
+            }
 
+            try
+            {
                 processLock?.Dispose();
+            }
+            catch (Exception exception)
+            {
+                RecordCleanupFailure(exception);
+            }
+
+            try
+            {
                 gate.Release();
             }
+            catch (Exception exception)
+            {
+                RecordCleanupFailure(exception);
+            }
+        }
+
+        if (primaryFailure is not null)
+        {
+            if (rollbackFailure is not null || uncommittedCleanupFailure is not null)
+            {
+                throw new WorkflowRecoveryException(
+                    "The local manifest transaction failed and recovery was incomplete.",
+                    primaryFailure,
+                    rollbackFailure,
+                    uncommittedCleanupFailure,
+                    Directory.Exists(transactionRoot));
+            }
+
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
         }
 
         if (committedCleanupFailure is not null && committedProvenanceFailure is not null)
@@ -472,25 +952,40 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 "The manifest transaction committed, but its recovery directory could not be removed.",
                 committedCleanupFailure);
         }
+
+        void RecordCleanupFailure(Exception exception)
+        {
+            if (primaryFailure is not null)
+            {
+                uncommittedCleanupFailure = CombineFailures(uncommittedCleanupFailure, exception);
+            }
+            else
+            {
+                committedCleanupFailure = CombineFailures(committedCleanupFailure, exception);
+            }
+        }
     }
 
-    private static void RollBack(IReadOnlyList<TransactionEntry> entries)
+    private void RollBack(IReadOnlyList<TransactionEntry> entries)
     {
         for (int index = entries.Count - 1; index >= 0; index--)
         {
             TransactionEntry entry = entries[index];
             if (entry.DestinationInstalled && File.Exists(entry.Destination))
             {
-                File.Delete(entry.Destination);
+                _fileSystem.DeleteFile(entry.Destination);
             }
 
             if (entry.BackupCreated && File.Exists(entry.Backup))
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(entry.Destination)!);
-                File.Move(entry.Backup, entry.Destination);
+                _fileSystem.MoveFile(entry.Backup, entry.Destination);
             }
         }
     }
+
+    private static Exception CombineFailures(Exception? current, Exception next)
+        => current is null ? next : new AggregateException(current, next);
 
     private static void VerifyPrecondition(TransactionEntry entry)
     {
@@ -657,7 +1152,8 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                     '|',
                     entry.Change.Kind,
                     entry.HadDestination ? "1" : "0",
-                    Convert.ToBase64String(Encoding.UTF8.GetBytes(entry.Change.RepositoryPath)))),
+                    Convert.ToBase64String(Encoding.UTF8.GetBytes(entry.Change.RepositoryPath)),
+                    entry.Change.Provenance)),
                 "",
             ]);
         File.WriteAllText(temporaryPath, content, new UTF8Encoding(false));
@@ -688,80 +1184,173 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             var pins = new List<IDisposable>();
             var pinnedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             PinDirectoryChain(root, transaction, pins, pinnedDirectories);
-            string journalPath = Path.Combine(transaction, "journal");
-            if (!File.Exists(journalPath))
+            try
             {
-                DisposePins(pins);
-                Directory.Delete(transaction, recursive: true);
-                continue;
-            }
-
-            string[] lines = File.ReadAllLines(journalPath);
-            string status = lines.FirstOrDefault() ?? "";
-            bool committed = string.Equals(status, "committed", StringComparison.Ordinal);
-            if (string.Equals(status, "manifests-committed", StringComparison.Ordinal))
-            {
-                if (originalSubmissions is null)
+                string journalPath = Path.Combine(transaction, "journal");
+                if (!File.Exists(journalPath))
                 {
-                    throw new InvalidDataException(
-                        $"Transaction journal '{journalPath}' requires provenance recovery.");
+                    DisposePins(pins);
+                    DeleteRecoveredTransaction(transaction);
+                    continue;
                 }
 
-                originalSubmissions.CaptureChangedVersions(
-                    root,
-                    Path.Combine(transaction, "provenance"),
-                    ParseCommittedPaths(lines, journalPath));
-                committed = true;
-            }
-
-            if (!committed)
-            {
-                foreach (string line in lines.Skip(1).Where(static line => line.Length > 0).Reverse())
+                string[] lines = File.ReadAllLines(journalPath);
+                string status = lines.FirstOrDefault() ?? "";
+                string captureId = Path.GetFileName(transaction);
+                List<CommittedWorkflowPath> committedPaths = ParseCommittedPaths(lines, journalPath);
+                bool legacyJournal = lines
+                    .Skip(1)
+                    .Where(static line => line.Length > 0)
+                    .All(static line => line.Split('|').Length == 3);
+                bool committed = string.Equals(status, "committed", StringComparison.Ordinal);
+                if (string.Equals(status, "manifests-committed", StringComparison.Ordinal))
                 {
-                    string[] parts = line.Split('|');
-                    if (parts.Length != 3
-                        || !Enum.TryParse(parts[0], out PlannedChangeKind kind))
+                    if (legacyJournal)
                     {
-                        throw new InvalidDataException($"Invalid transaction journal '{journalPath}'.");
+                        WriteRecoveredJournalStatus(journalPath, lines, "committed");
+                        committed = true;
                     }
-
-                    bool hadDestination = parts[1] == "1";
-                    string repositoryPath = Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]));
-                    string destination = SecurePath.Resolve(root, repositoryPath, requireExistingLeaf: false);
-                    string backup = SecurePath.Resolve(
-                        Path.Combine(transaction, "backup"),
-                        repositoryPath,
-                        requireExistingLeaf: false);
-                    PinExistingDirectoryChain(root, destination, pins, pinnedDirectories);
-                    PinDirectoryChain(
-                        root,
-                        Path.GetDirectoryName(backup)!,
-                        pins,
-                        pinnedDirectories);
-                    if (hadDestination && File.Exists(backup))
+                    else
                     {
-                        if (File.Exists(destination))
+                        if (originalSubmissions is null)
+                        {
+                            throw new InvalidDataException(
+                                $"Transaction journal '{journalPath}' requires provenance recovery.");
+                        }
+
+                        if (!originalSubmissions.IsCapturePrepared(
+                                root,
+                                captureId,
+                                Path.Combine(transaction, "provenance"),
+                                committedPaths))
+                        {
+                            throw new InvalidDataException(
+                                $"Transaction journal '{journalPath}' has no trusted provenance recovery marker.");
+                        }
+
+                        originalSubmissions.CaptureChangedVersions(
+                            root,
+                            captureId,
+                            Path.Combine(transaction, "provenance"),
+                            committedPaths);
+                        WriteRecoveredJournalStatus(journalPath, lines, "committed");
+                        committed = true;
+                    }
+                }
+
+                if (!committed)
+                {
+                    foreach (string line in lines.Skip(1).Where(static line => line.Length > 0).Reverse())
+                    {
+                        string[] parts = line.Split('|');
+                        if (parts.Length is not (3 or 4)
+                            || !Enum.TryParse(parts[0], out PlannedChangeKind kind))
+                        {
+                            throw new InvalidDataException($"Invalid transaction journal '{journalPath}'.");
+                        }
+
+                        bool hadDestination = parts[1] == "1";
+                        string repositoryPath = Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]));
+                        string destination = SecurePath.Resolve(root, repositoryPath, requireExistingLeaf: false);
+                        string backup = SecurePath.Resolve(
+                            Path.Combine(transaction, "backup"),
+                            repositoryPath,
+                            requireExistingLeaf: false);
+                        PinExistingDirectoryChain(root, destination, pins, pinnedDirectories);
+                        PinDirectoryChain(
+                            root,
+                            Path.GetDirectoryName(backup)!,
+                            pins,
+                            pinnedDirectories);
+                        if (hadDestination && File.Exists(backup))
+                        {
+                            if (File.Exists(destination))
+                            {
+                                File.Delete(destination);
+                            }
+
+                            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                            PinDirectoryChain(
+                                root,
+                                Path.GetDirectoryName(destination)!,
+                                pins,
+                                pinnedDirectories);
+                            File.Move(backup, destination);
+                        }
+                        else if (!hadDestination && kind != PlannedChangeKind.Delete && File.Exists(destination))
                         {
                             File.Delete(destination);
                         }
-
-                        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                        PinDirectoryChain(
-                            root,
-                            Path.GetDirectoryName(destination)!,
-                            pins,
-                            pinnedDirectories);
-                        File.Move(backup, destination);
-                    }
-                    else if (!hadDestination && kind != PlannedChangeKind.Delete && File.Exists(destination))
-                    {
-                        File.Delete(destination);
                     }
                 }
+
+                if (originalSubmissions is not null)
+                {
+                    originalSubmissions.CompleteCapture(
+                        root,
+                        captureId,
+                        Path.Combine(transaction, "provenance"),
+                        committedPaths);
+                }
+
+                DisposePins(pins);
+                DeleteRecoveredTransaction(transaction);
+            }
+            catch
+            {
+                DisposePins(pins);
+                throw;
+            }
+        }
+    }
+
+    private static void WriteRecoveredJournalStatus(
+        string journalPath,
+        IReadOnlyList<string> lines,
+        string status)
+    {
+        string temporary = $"{journalPath}.tmp";
+        File.WriteAllLines(temporary, [status, .. lines.Skip(1)], new UTF8Encoding(false));
+        using (FileStream stream = new(
+                   temporary,
+                   FileMode.Open,
+                   FileAccess.ReadWrite,
+                   FileShare.Read,
+                   bufferSize: 1,
+                   FileOptions.WriteThrough))
+        {
+            stream.Flush(flushToDisk: true);
+        }
+
+        File.Move(temporary, journalPath, overwrite: true);
+    }
+
+    private static void DeleteRecoveredTransaction(string transaction)
+    {
+        TimeSpan[] delays =
+        [
+            TimeSpan.Zero,
+            TimeSpan.FromMilliseconds(25),
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMilliseconds(250),
+        ];
+        for (int attempt = 0; attempt < delays.Length; attempt++)
+        {
+            if (delays[attempt] > TimeSpan.Zero)
+            {
+                Thread.Sleep(delays[attempt]);
             }
 
-            DisposePins(pins);
-            Directory.Delete(transaction, recursive: true);
+            try
+            {
+                Directory.Delete(transaction, recursive: true);
+                return;
+            }
+            catch (Exception exception) when (
+                attempt < delays.Length - 1
+                && exception is IOException or UnauthorizedAccessException)
+            {
+            }
         }
     }
 
@@ -773,15 +1362,20 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         foreach (string line in lines.Skip(1).Where(static line => line.Length > 0))
         {
             string[] parts = line.Split('|');
-            if (parts.Length != 3
-                || !Enum.TryParse(parts[0], out PlannedChangeKind kind))
+            if (parts.Length is not (3 or 4)
+                || !Enum.TryParse(parts[0], out PlannedChangeKind kind)
+                || (parts.Length == 4
+                    && !Enum.TryParse(parts[3], out WorkflowChangeProvenance _)))
             {
                 throw new InvalidDataException($"Invalid transaction journal '{journalPath}'.");
             }
 
             paths.Add(new(
                 kind,
-                Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))));
+                Encoding.UTF8.GetString(Convert.FromBase64String(parts[2])),
+                parts.Length == 4
+                    ? Enum.Parse<WorkflowChangeProvenance>(parts[3])
+                    : WorkflowChangeProvenance.Untrusted));
         }
 
         return paths;
@@ -792,7 +1386,8 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
         => changes
             .Select(static change => new CommittedWorkflowPath(
                 change.Kind,
-                change.RepositoryPath))
+                change.RepositoryPath,
+                change.Provenance))
             .ToArray();
 
     private static void StageProvenanceSnapshots(
@@ -876,18 +1471,31 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
 
     private sealed class RepositoryOperationLock : IDisposable
     {
-        private readonly FileStream _stream;
+        private const int MaximumStaleFilesPerAcquire = 16;
+        private readonly FileStream _currentStream;
+        private readonly FileStream _legacyStream;
         private readonly IDisposable _rootPin;
-        private readonly IDisposable _lockDirectoryPin;
+        private readonly IDisposable _currentLockDirectoryPin;
+        private readonly IDisposable _legacyLockDirectoryPin;
+        private readonly string _lockDirectory;
+        private readonly string _lockPath;
 
         private RepositoryOperationLock(
-            FileStream stream,
+            FileStream currentStream,
+            FileStream legacyStream,
             IDisposable rootPin,
-            IDisposable lockDirectoryPin)
+            IDisposable currentLockDirectoryPin,
+            IDisposable legacyLockDirectoryPin,
+            string lockDirectory,
+            string lockPath)
         {
-            _stream = stream;
+            _currentStream = currentStream;
+            _legacyStream = legacyStream;
             _rootPin = rootPin;
-            _lockDirectoryPin = lockDirectoryPin;
+            _currentLockDirectoryPin = currentLockDirectoryPin;
+            _legacyLockDirectoryPin = legacyLockDirectoryPin;
+            _lockDirectory = lockDirectory;
+            _lockPath = lockPath;
         }
 
         public static RepositoryOperationLock Acquire(string root, string key)
@@ -895,31 +1503,46 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             SecurePath.RejectReparsePoints(root, root);
             IDisposable rootPin = DirectoryPin.Acquire(root);
             string lockDirectory = Path.Combine(
-                Path.GetTempPath(),
+                ExternalLockRoot(),
                 "winmatsch-operation-locks",
                 DirectoryPin.GetIdentity(root));
-            IDisposable? lockDirectoryPin = null;
+            string legacyLockDirectory = Path.Combine(
+                Path.GetTempPath(),
+                "winmatsch-operation-locks",
+                DirectoryPin.GetLegacyIdentity(root));
+            string fileName =
+                $"{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key.ToUpperInvariant())))}.lock";
+            IDisposable? currentLockDirectoryPin = null;
+            IDisposable? legacyLockDirectoryPin = null;
+            FileStream? currentStream = null;
+            FileStream? legacyStream = null;
+            string lockPath = Path.Combine(lockDirectory, fileName);
             try
             {
                 Directory.CreateDirectory(lockDirectory);
-                lockDirectoryPin = DirectoryPin.Acquire(lockDirectory);
-                string lockPath = Path.Combine(
-                    lockDirectory,
-                    $"{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key.ToUpperInvariant())))}.lock");
-                return new RepositoryOperationLock(
-                    new FileStream(
-                        lockPath,
-                        FileMode.OpenOrCreate,
-                        FileAccess.ReadWrite,
-                        FileShare.None,
-                        bufferSize: 1,
-                        FileOptions.WriteThrough),
+                Directory.CreateDirectory(legacyLockDirectory);
+                currentLockDirectoryPin = DirectoryPin.Acquire(lockDirectory);
+                legacyLockDirectoryPin = DirectoryPin.Acquire(legacyLockDirectory);
+                using FileStream coordinator = AcquireCleanupCoordinator(lockDirectory);
+                CleanupStaleFiles(lockDirectory, MaximumStaleFilesPerAcquire);
+                currentStream = OpenLock(lockPath);
+                legacyStream = OpenLock(Path.Combine(legacyLockDirectory, fileName));
+                return new(
+                    currentStream,
+                    legacyStream,
                     rootPin,
-                    lockDirectoryPin);
+                    currentLockDirectoryPin,
+                    legacyLockDirectoryPin,
+                    lockDirectory,
+                    lockPath);
             }
             catch (IOException exception)
             {
-                lockDirectoryPin?.Dispose();
+                legacyStream?.Dispose();
+                currentStream?.Dispose();
+                TryDeleteReleasedLock(lockDirectory, lockPath);
+                legacyLockDirectoryPin?.Dispose();
+                currentLockDirectoryPin?.Dispose();
                 rootPin.Dispose();
                 throw new WorkflowOperationException(
                     WorkflowResultCode.Conflict,
@@ -928,7 +1551,11 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             }
             catch
             {
-                lockDirectoryPin?.Dispose();
+                legacyStream?.Dispose();
+                currentStream?.Dispose();
+                TryDeleteReleasedLock(lockDirectory, lockPath);
+                legacyLockDirectoryPin?.Dispose();
+                currentLockDirectoryPin?.Dispose();
                 rootPin.Dispose();
                 throw;
             }
@@ -936,9 +1563,130 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
 
         public void Dispose()
         {
-            _stream.Dispose();
-            _lockDirectoryPin.Dispose();
-            _rootPin.Dispose();
+            var failures = new List<Exception>();
+            DisposeOne(_legacyStream);
+            DisposeOne(_currentStream);
+            try
+            {
+                TryDeleteReleasedLock(_lockDirectory, _lockPath);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+
+            DisposeOne(_legacyLockDirectoryPin);
+            DisposeOne(_currentLockDirectoryPin);
+            DisposeOne(_rootPin);
+            if (failures.Count > 0)
+            {
+                throw new IOException(
+                    "One or more local operation lock resources could not be released.",
+                    new AggregateException(failures));
+            }
+
+            void DisposeOne(IDisposable disposable)
+            {
+                try
+                {
+                    disposable.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
+            }
+        }
+
+        private static FileStream OpenLock(string path)
+            => new(
+                path,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                bufferSize: 1,
+                FileOptions.WriteThrough);
+
+        private static FileStream AcquireCleanupCoordinator(string lockDirectory)
+        {
+            string path = Path.Combine(lockDirectory, ".cleanup");
+            var timeout = Stopwatch.StartNew();
+            while (true)
+            {
+                try
+                {
+                    return new FileStream(
+                        path,
+                        FileMode.OpenOrCreate,
+                        FileAccess.ReadWrite,
+                        FileShare.None,
+                        bufferSize: 1,
+                        FileOptions.WriteThrough);
+                }
+                catch (IOException) when (timeout.Elapsed < TimeSpan.FromSeconds(1))
+                {
+                    Thread.Sleep(10);
+                }
+            }
+        }
+
+        private static void CleanupStaleFiles(string lockDirectory, int maximumFiles)
+        {
+            foreach (string path in Directory.EnumerateFiles(lockDirectory, "*.lock")
+                         .OrderBy(File.GetLastWriteTimeUtc)
+                         .Take(maximumFiles))
+            {
+                TryDeleteUnlocked(path);
+            }
+        }
+
+        private static void TryDeleteReleasedLock(string lockDirectory, string lockPath)
+        {
+            try
+            {
+                using FileStream coordinator = AcquireCleanupCoordinator(lockDirectory);
+                TryDeleteUnlocked(lockPath);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+
+        private static void TryDeleteUnlocked(string path)
+        {
+            try
+            {
+                using (new FileStream(
+                           path,
+                           FileMode.Open,
+                           FileAccess.ReadWrite,
+                           FileShare.None,
+                           bufferSize: 1,
+                           FileOptions.WriteThrough))
+                {
+                }
+
+                File.Delete(path);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+
+        private static string ExternalLockRoot()
+        {
+            string localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(localData))
+            {
+                localData = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".local",
+                    "share");
+            }
+
+            return Path.Combine(localData, "winmatsch");
         }
     }
 }
@@ -960,7 +1708,7 @@ internal static class DirectoryPin
     {
         if (!OperatingSystem.IsWindows())
         {
-            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(path))));
+            return GetUnixIdentity(path);
         }
 
         using SafeFileHandle handle = OpenAndValidate(path);
@@ -971,6 +1719,40 @@ internal static class DirectoryPin
         }
 
         return $"{information.VolumeSerialNumber:X8}-{information.FileIndexHigh:X8}{information.FileIndexLow:X8}";
+    }
+
+    public static string GetLegacyIdentity(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        if (OperatingSystem.IsWindows())
+        {
+            return GetIdentity(path);
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fullPath)));
+    }
+
+    private static string GetUnixIdentity(string path)
+    {
+        nint buffer = Marshal.AllocHGlobal(512);
+        try
+        {
+            if (Stat(Path.GetFullPath(path), buffer) != 0)
+            {
+                int error = Marshal.GetLastPInvokeError();
+                throw new IOException($"Unable to identify directory '{path}' (errno {error}).");
+            }
+
+            ulong device = OperatingSystem.IsMacOS()
+                ? unchecked((uint)Marshal.ReadInt32(buffer, 0))
+                : unchecked((ulong)Marshal.ReadInt64(buffer, 0));
+            ulong inode = unchecked((ulong)Marshal.ReadInt64(buffer, 8));
+            return $"UNIX-{device:X16}-{inode:X16}";
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     private static SafeFileHandle OpenAndValidate(string path)
@@ -1069,6 +1851,9 @@ internal static class DirectoryPin
     private static extern bool GetFileInformationByHandle(
         SafeFileHandle file,
         out ByHandleFileInformation fileInformation);
+
+    [DllImport("libc", EntryPoint = "stat", SetLastError = true)]
+    private static extern int Stat(string path, nint buffer);
 #pragma warning restore SYSLIB1054
 
     private sealed class NoopDisposable : IDisposable
@@ -1191,6 +1976,26 @@ internal static class SecurePath
     }
 }
 
+internal interface IWorkflowTransactionFileSystem
+{
+    public void DeleteDirectory(string path, bool recursive);
+
+    public void DeleteFile(string path);
+
+    public void MoveFile(string source, string destination);
+}
+
+internal sealed class WorkflowTransactionFileSystem : IWorkflowTransactionFileSystem
+{
+    public static WorkflowTransactionFileSystem Instance { get; } = new();
+
+    public void DeleteDirectory(string path, bool recursive) => Directory.Delete(path, recursive);
+
+    public void DeleteFile(string path) => File.Delete(path);
+
+    public void MoveFile(string source, string destination) => File.Move(source, destination);
+}
+
 public sealed class WorkflowOperationException : Exception
 {
     public WorkflowOperationException(WorkflowResultCode code, string message, Exception? innerException = null)
@@ -1200,6 +2005,39 @@ public sealed class WorkflowOperationException : Exception
     }
 
     public WorkflowResultCode Code { get; }
+}
+
+public sealed class WorkflowRecoveryException : IOException
+{
+    public WorkflowRecoveryException(
+        string message,
+        Exception primaryException,
+        Exception? rollbackException,
+        Exception? cleanupException,
+        bool journalRetained)
+        : base(
+            message,
+            new AggregateException(
+            [
+                primaryException,
+                .. rollbackException is null ? [] : new[] { rollbackException },
+                .. cleanupException is null ? [] : new[] { cleanupException },
+            ]))
+    {
+        PrimaryException = primaryException;
+        RecoveryExceptions =
+        [
+            .. rollbackException is null ? [] : new[] { rollbackException },
+            .. cleanupException is null ? [] : new[] { cleanupException },
+        ];
+        JournalRetained = journalRetained;
+    }
+
+    public Exception PrimaryException { get; }
+
+    public ImmutableArray<Exception> RecoveryExceptions { get; }
+
+    public bool JournalRetained { get; }
 }
 
 public abstract class WorkflowCommittedException : IOException

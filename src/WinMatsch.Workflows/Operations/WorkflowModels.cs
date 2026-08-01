@@ -50,7 +50,8 @@ public sealed record WorkflowFileChange
         string repositoryPath,
         ReadOnlySpan<byte> content = default,
         ExpectedFileState expectedState = ExpectedFileState.Unspecified,
-        string? expectedSha256 = null)
+        string? expectedSha256 = null,
+        WorkflowChangeProvenance provenance = WorkflowChangeProvenance.Untrusted)
     {
         Kind = kind;
         RepositoryPath = WorkflowPath.NormalizeRepositoryPath(repositoryPath);
@@ -63,6 +64,7 @@ public sealed record WorkflowFileChange
                     nameof(expectedState))
             : expectedState;
         ExpectedSha256 = expectedSha256;
+        Provenance = provenance;
         if (expectedState == ExpectedFileState.Present
             && string.IsNullOrWhiteSpace(expectedSha256))
         {
@@ -82,8 +84,16 @@ public sealed record WorkflowFileChange
 
     public string? ExpectedSha256 { get; }
 
+    public WorkflowChangeProvenance Provenance { get; }
+
     public static string Hash(ReadOnlySpan<byte> content)
         => Convert.ToHexString(SHA256.HashData(content));
+}
+
+public enum WorkflowChangeProvenance
+{
+    Untrusted,
+    ToolGenerated,
 }
 
 public enum ExpectedFileState
@@ -197,7 +207,14 @@ public sealed record WorkflowOperationResult
     public bool Applied { get; init; }
 
     public string? ErrorMessage { get; init; }
+
+    public WorkflowRecoveryDetails? Recovery { get; init; }
 }
+
+public sealed record WorkflowRecoveryDetails(
+    string PrimaryError,
+    ImmutableArray<string> RecoveryErrors,
+    bool JournalRetained);
 
 public abstract record WorkflowOperationRequest
 {

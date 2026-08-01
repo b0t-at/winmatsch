@@ -46,14 +46,34 @@ public sealed class LocalWorkflowEngine
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return CreateOrUpdateAsync(request, previous: null, cancellationToken);
+        PackageVersion version = PackageVersion.TryCreate(request.PackageVersion ?? "0", out PackageVersion? parsed)
+            ? parsed!
+            : new PackageVersion("0");
+        return ExecuteSnapshotOperationAsync(
+            "new",
+            request,
+            request.PackageIdentifier,
+            version,
+            () => CreateOrUpdateAsync(request, previous: null, cancellationToken));
     }
 
-    public async Task<WorkflowOperationResult> UpdateAsync(
+    public Task<WorkflowOperationResult> UpdateAsync(
         UpdateOperationRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        return ExecuteSnapshotOperationAsync(
+            "update",
+            request,
+            request.PackageIdentifier,
+            request.PreviousVersion,
+            () => UpdateCoreAsync(request, cancellationToken));
+    }
+
+    private async Task<WorkflowOperationResult> UpdateCoreAsync(
+        UpdateOperationRequest request,
+        CancellationToken cancellationToken)
+    {
         PackageSnapshot? previous = await _manifests.LoadAsync(
             request.OutputDirectory,
             request.PackageIdentifier,
@@ -67,11 +87,23 @@ public sealed class LocalWorkflowEngine
         return await CreateOrUpdateAsync(request, previous, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<WorkflowOperationResult> RemoveAsync(
+    public Task<WorkflowOperationResult> RemoveAsync(
         RemoveOperationRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        return ExecuteSnapshotOperationAsync(
+            "remove",
+            request,
+            request.PackageIdentifier,
+            request.PackageVersion,
+            () => RemoveCoreAsync(request, cancellationToken));
+    }
+
+    private async Task<WorkflowOperationResult> RemoveCoreAsync(
+        RemoveOperationRequest request,
+        CancellationToken cancellationToken)
+    {
         PackageSnapshot? snapshot = await _manifests.LoadAsync(
             request.OutputDirectory,
             request.PackageIdentifier,
@@ -90,7 +122,8 @@ public sealed class LocalWorkflowEngine
                     PlannedChangeKind.Delete,
                     document.RepositoryPath,
                     expectedState: ExpectedFileState.Present,
-                    expectedSha256: WorkflowFileChange.Hash(document.Content.AsSpan()))),
+                    expectedSha256: WorkflowFileChange.Hash(document.Content.AsSpan()),
+                    provenance: WorkflowChangeProvenance.ToolGenerated)),
         ];
         ValidationReport validation = await _preflight.ValidateAsync(
             new()
@@ -136,6 +169,19 @@ public sealed class LocalWorkflowEngine
             return InvalidResult("submit", request, exception.Message);
         }
 
+        return await ExecuteSnapshotOperationAsync(
+            "submit",
+            request,
+            parsed.Identifier,
+            parsed.Version,
+            () => SubmitParsedAsync(request, parsed, cancellationToken)).ConfigureAwait(false);
+    }
+
+    private async Task<WorkflowOperationResult> SubmitParsedAsync(
+        SubmitOperationRequest request,
+        ParsedRawSet parsed,
+        CancellationToken cancellationToken)
+    {
         PackageSnapshot? before = await _manifests.LoadAsync(
             request.OutputDirectory,
             parsed.Identifier,
@@ -199,7 +245,10 @@ public sealed class LocalWorkflowEngine
             installerArtifacts = acquired.ToImmutable();
         }
 
-        ImmutableArray<WorkflowFileChange> changes = Diff(before?.Documents ?? [], after);
+        ImmutableArray<WorkflowFileChange> changes = Diff(
+            before?.Documents ?? [],
+            after,
+            toolGenerated: request.Normalize);
         ValidationReport validation = await ValidateAsync(
             request,
             before?.Documents ?? [],
@@ -231,12 +280,28 @@ public sealed class LocalWorkflowEngine
     public Task<WorkflowOperationResult> NewLocaleAsync(
         NewLocaleOperationRequest request,
         CancellationToken cancellationToken = default)
-        => LocaleAsync(request, update: false, cancellationToken);
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return ExecuteSnapshotOperationAsync(
+            "new-locale",
+            request,
+            request.PackageIdentifier,
+            request.PackageVersion,
+            () => LocaleAsync(request, update: false, cancellationToken));
+    }
 
     public Task<WorkflowOperationResult> UpdateLocaleAsync(
         UpdateLocaleOperationRequest request,
         CancellationToken cancellationToken = default)
-        => LocaleAsync(request, update: true, cancellationToken);
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return ExecuteSnapshotOperationAsync(
+            "update-locale",
+            request,
+            request.PackageIdentifier,
+            request.PackageVersion,
+            () => LocaleAsync(request, update: true, cancellationToken));
+    }
 
     private async Task<WorkflowOperationResult> CreateOrUpdateAsync(
         WorkflowOperationRequest operationRequest,
@@ -434,7 +499,10 @@ public sealed class LocalWorkflowEngine
         candidate = rules.Manifests;
         ImmutableArray<RawManifestDocument> after = Serialize(candidate, operationRequest.CreatedWith);
         ImmutableArray<RawManifestDocument> beforeDocuments = existing?.Documents ?? [];
-        ImmutableArray<WorkflowFileChange> changes = Diff(beforeDocuments, after);
+        ImmutableArray<WorkflowFileChange> changes = Diff(
+            beforeDocuments,
+            after,
+            toolGenerated: true);
         if (update?.ReplacePreviousVersion == true
             && !string.Equals(previous!.PackageVersion.Value, newVersion.Value, StringComparison.Ordinal))
         {
@@ -445,7 +513,8 @@ public sealed class LocalWorkflowEngine
                         PlannedChangeKind.Delete,
                         document.RepositoryPath,
                         expectedState: ExpectedFileState.Present,
-                        expectedSha256: WorkflowFileChange.Hash(document.Content.AsSpan()))),
+                        expectedSha256: WorkflowFileChange.Hash(document.Content.AsSpan()),
+                        provenance: WorkflowChangeProvenance.ToolGenerated)),
                 .. changes,
             ];
             beforeDocuments = [.. previous.Documents, .. beforeDocuments];
@@ -600,7 +669,10 @@ public sealed class LocalWorkflowEngine
                 .Append(changedLocale)
                 .OrderBy(static document => document.RepositoryPath, StringComparer.Ordinal),
         ];
-        ImmutableArray<WorkflowFileChange> changes = Diff(snapshot.Documents, after);
+        ImmutableArray<WorkflowFileChange> changes = Diff(
+            snapshot.Documents,
+            after,
+            toolGenerated: true);
         ValidationReport validation = await ValidateAsync(
             operationRequest,
             snapshot.Documents,
@@ -693,12 +765,72 @@ public sealed class LocalWorkflowEngine
                 ErrorMessage = exception.Message,
             };
         }
+        catch (WorkflowRecoveryException exception)
+        {
+            return new()
+            {
+                Code = WorkflowResultCode.ApplyFailed,
+                Plan = plan,
+                Applied = false,
+                ErrorMessage = exception.PrimaryException.Message,
+                Recovery = new(
+                    exception.PrimaryException.Message,
+                    [.. exception.RecoveryExceptions.Select(static failure => failure.Message)],
+                    exception.JournalRetained),
+            };
+        }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            throw new WorkflowOperationException(
-                WorkflowResultCode.ApplyFailed,
-                "The local manifest transaction failed and was rolled back.",
-                exception);
+            return new()
+            {
+                Code = WorkflowResultCode.ApplyFailed,
+                Plan = plan,
+                Applied = false,
+                ErrorMessage = exception.Message,
+                Recovery = new(exception.Message, [], JournalRetained: false),
+            };
+        }
+    }
+
+    private static async Task<WorkflowOperationResult> ExecuteSnapshotOperationAsync(
+        string operation,
+        WorkflowOperationRequest request,
+        PackageIdentifier identifier,
+        PackageVersion version,
+        Func<Task<WorkflowOperationResult>> action)
+    {
+        try
+        {
+            return await action().ConfigureAwait(false);
+        }
+        catch (WorkflowOperationException exception)
+        {
+            return new()
+            {
+                Code = exception.Code,
+                Plan = Plan(
+                    operation,
+                    request,
+                    identifier,
+                    version,
+                    [],
+                    [],
+                    [],
+                    new ValidationReport(
+                    [
+                        new(
+                            exception.Code == WorkflowResultCode.Conflict
+                                ? "WF_CONFLICT"
+                                : "WF_OPERATION_FAILED",
+                            ValidationSeverity.Error,
+                            exception.Message),
+                    ]),
+                    RuleRunSummary.Empty,
+                    [],
+                    []),
+                Applied = false,
+                ErrorMessage = exception.Message,
+            };
         }
     }
 
@@ -995,7 +1127,8 @@ public sealed class LocalWorkflowEngine
 
     private static ImmutableArray<WorkflowFileChange> Diff(
         ImmutableArray<RawManifestDocument> before,
-        ImmutableArray<RawManifestDocument> after)
+        ImmutableArray<RawManifestDocument> after,
+        bool toolGenerated)
     {
         Dictionary<string, RawManifestDocument> oldFiles = before.ToDictionary(
             static document => document.RepositoryPath,
@@ -1012,7 +1145,10 @@ public sealed class LocalWorkflowEngine
                     PlannedChangeKind.Add,
                     path,
                     document.Content.AsSpan(),
-                    ExpectedFileState.Absent));
+                    ExpectedFileState.Absent,
+                    provenance: toolGenerated
+                        ? WorkflowChangeProvenance.ToolGenerated
+                        : WorkflowChangeProvenance.Untrusted));
             }
             else if (!old.Content.AsSpan().SequenceEqual(document.Content.AsSpan()))
             {
@@ -1021,7 +1157,10 @@ public sealed class LocalWorkflowEngine
                     path,
                     document.Content.AsSpan(),
                     ExpectedFileState.Present,
-                    WorkflowFileChange.Hash(old.Content.AsSpan())));
+                    WorkflowFileChange.Hash(old.Content.AsSpan()),
+                    toolGenerated
+                        ? WorkflowChangeProvenance.ToolGenerated
+                        : WorkflowChangeProvenance.Untrusted));
             }
         }
 
@@ -1032,7 +1171,10 @@ public sealed class LocalWorkflowEngine
                 PlannedChangeKind.Delete,
                 path,
                 expectedState: ExpectedFileState.Present,
-                expectedSha256: WorkflowFileChange.Hash(old.Content.AsSpan())));
+                expectedSha256: WorkflowFileChange.Hash(old.Content.AsSpan()),
+                provenance: toolGenerated
+                    ? WorkflowChangeProvenance.ToolGenerated
+                    : WorkflowChangeProvenance.Untrusted));
         }
 
         return changes.ToImmutable();

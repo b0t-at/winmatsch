@@ -1308,7 +1308,7 @@ public static class AssetMappingPlanner
     {
         public DiscoveredAsset Asset { get; } = asset;
 
-        public Architecture? Architecture { get; set; } = architecture;
+        public Architecture? Architecture { get; } = architecture;
 
         public InstallerType? Type { get; } = type;
 

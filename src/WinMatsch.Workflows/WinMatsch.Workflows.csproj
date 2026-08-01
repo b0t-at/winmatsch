@@ -17,4 +17,8 @@
     <PackageReference Include="YamlDotNet" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="WinMatsch.Workflows.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -124,6 +124,11 @@ public interface IWorkflowPreflight
         CancellationToken cancellationToken);
 }
 
+internal interface IWorkflowPreflightDiagnosticSource
+{
+    public ImmutableArray<ValidationFinding> DrainDiagnostics();
+}
+
 public interface IWorkflowFileTransaction
 {
     public Task ApplyAsync(
@@ -174,9 +179,23 @@ public sealed class RulePipelineWorkflowRunner(
     }
 }
 
-public sealed class PreflightGateWorkflowAdapter(PreflightGate gate) : IWorkflowPreflight
+public sealed class PreflightGateWorkflowAdapter : IWorkflowPreflight
 {
-    private readonly PreflightGate _gate = gate ?? throw new ArgumentNullException(nameof(gate));
+    private readonly PreflightGate _gate;
+    private readonly IWorkflowPreflightDiagnosticSource? _diagnostics;
+
+    public PreflightGateWorkflowAdapter(PreflightGate gate)
+        : this(gate, diagnostics: null)
+    {
+    }
+
+    internal PreflightGateWorkflowAdapter(
+        PreflightGate gate,
+        IWorkflowPreflightDiagnosticSource? diagnostics)
+    {
+        _gate = gate ?? throw new ArgumentNullException(nameof(gate));
+        _diagnostics = diagnostics;
+    }
 
     public async Task<ValidationReport> ValidateAsync(
         WorkflowPreflightRequest request,
@@ -187,15 +206,16 @@ public sealed class PreflightGateWorkflowAdapter(PreflightGate gate) : IWorkflow
             && !request.BeforeDocuments.IsEmpty
             && request.Changes.All(static change => change.Kind == PlannedChangeKind.Delete))
         {
-            return new ValidationReport();
+            return AppendDiagnostics(new ValidationReport());
         }
 
         ValidationReport report = await _gate.ValidateAsync(CreateRequest(request), cancellationToken)
             .ConfigureAwait(false);
-        return IsInstallerUnchanged(request) ? RemoveArtifactRevalidationFindings(report) : report;
+        report = IsInstallerUnchanged(request) ? RemoveArtifactRevalidationFindings(report) : report;
+        return AppendDiagnostics(report);
     }
 
-    public Task<ValidationReport> ExecuteAsync(
+    public async Task<ValidationReport> ExecuteAsync(
         WorkflowPreflightRequest request,
         Func<CancellationToken, Task> boundary,
         CancellationToken cancellationToken)
@@ -205,15 +225,17 @@ public sealed class PreflightGateWorkflowAdapter(PreflightGate gate) : IWorkflow
             && !request.BeforeDocuments.IsEmpty
             && request.Changes.All(static change => change.Kind == PlannedChangeKind.Delete))
         {
-            return ExecuteRemovalAsync(request, boundary, cancellationToken);
+            return AppendDiagnostics(
+                await ExecuteRemovalAsync(request, boundary, cancellationToken).ConfigureAwait(false));
         }
 
-        return IsInstallerUnchanged(request)
-            ? ExecuteUnchangedInstallerAsync(request, boundary, cancellationToken)
-            : _gate.ExecuteAsync(
+        ValidationReport report = IsInstallerUnchanged(request)
+            ? await ExecuteUnchangedInstallerAsync(request, boundary, cancellationToken).ConfigureAwait(false)
+            : await _gate.ExecuteAsync(
                 CreateRequest(request),
                 new DelegatePreflightBoundary(boundary),
-                cancellationToken);
+                cancellationToken).ConfigureAwait(false);
+        return AppendDiagnostics(report);
     }
 
     private static async Task<ValidationReport> ExecuteRemovalAsync(
@@ -260,6 +282,11 @@ public sealed class PreflightGateWorkflowAdapter(PreflightGate gate) : IWorkflow
     private static ValidationReport RemoveArtifactRevalidationFindings(ValidationReport report)
         => new(report.Findings.Where(static finding =>
             finding.Code is not ("VLD6001" or "VLD6002" or "VLD6005")));
+
+    private ValidationReport AppendDiagnostics(ValidationReport report)
+        => _diagnostics is null
+            ? report
+            : new ValidationReport([.. report.Findings, .. _diagnostics.DrainDiagnostics()]);
 
     private static PreflightRequest CreateRequest(WorkflowPreflightRequest request)
         => new()

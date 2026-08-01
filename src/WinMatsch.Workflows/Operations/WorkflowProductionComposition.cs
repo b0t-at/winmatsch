@@ -16,8 +16,10 @@ public static class WorkflowProductionComposition
     {
         ArgumentNullException.ThrowIfNull(downloader);
         var originalSubmissions = new FileOriginalSubmissionStore();
+        var network = new DurableInstallerPreflightNetwork(downloader);
         var preflight = new PreflightGateWorkflowAdapter(
-            new PreflightGate(new InstallerDownloaderPreflightNetwork(downloader)));
+            new PreflightGate(network),
+            network);
         return new(
             new LocalManifestSnapshotSource(originalSubmissions),
             new RulePipelineWorkflowRunner(ProductionRuleComposer.Compose),
@@ -36,8 +38,10 @@ public static class WorkflowProductionComposition
     {
         ArgumentNullException.ThrowIfNull(gitHub);
         ArgumentNullException.ThrowIfNull(downloader);
+        var network = new DurableInstallerPreflightNetwork(downloader);
         var preflight = new PreflightGateWorkflowAdapter(
-            new PreflightGate(new InstallerDownloaderPreflightNetwork(downloader)));
+            new PreflightGate(network),
+            network);
         return new(
             gitHub,
             preflight,
