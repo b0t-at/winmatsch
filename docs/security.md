@@ -46,13 +46,15 @@ instead. Secret buffers are zeroed after use where the platform allows it.
 Tokens are wrapped in a type whose string form is always `[REDACTED]`, so a
 token value cannot leak through logging, JSON serialization, or exception
 messages by construction; equality checks are constant-time. On top of that,
-a sanitizer scrubs the rule audit trail, manifest previews, and mutation JSON
-output: GitHub token shapes (`ghp_…`, `github_pat_…`, …), bearer and basic
-authorization values, JWTs, password- and API-key-style key/value
-assignments, and URL user-info and query strings — including recursively
-percent- or backslash-escaped variants. Sensitive manifest field paths (for
-example installer switches, which can embed passwords) are redacted wholesale
-in audit output.
+the rule audit trail passes a sanitizer that scrubs GitHub token shapes
+(`ghp_…`, `github_pat_…`, …), bearer and basic authorization values, JWTs,
+password- and API-key-style key/value assignments, and URL user-info and
+query strings — including recursively percent- or backslash-escaped
+variants — and redacts sensitive manifest field paths wholesale (for example
+installer switches, which can embed passwords). Manifest previews and
+mutation JSON output pass a narrower scrub covering token shapes,
+authorization values, password- and API-key-style assignments, and URL
+secrets.
 
 Redaction of free-form text is defense in depth, not an absolute guarantee:
 do not put secrets into installer URLs, manifest fields, or command

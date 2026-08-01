@@ -36,7 +36,7 @@ official manifest schemas, and — only when you explicitly ask — submits it t
 
 | Guarantee | Detail |
 |---|---|
-| Plan first | `--dry-run` validates and shows what would change; it never writes to disk beyond the cache, and never touches GitHub. |
+| Plan first | `--dry-run` validates and shows what would change; it never writes to disk beyond the cache, and never changes GitHub state (read-only API calls may still occur). |
 | Explicit mutation | Manifest changes are pushed only with `--submit`; maintenance commands (`sync`, `complete --apply-safe`) plan first and apply only after confirmation. Confirmation never defaults to yes. |
 | No secret echo | Tokens are validated, stored in the OS keyring, and rendered as `[REDACTED]` by construction; the audit trail, previews, and JSON output pass a secret-scrubbing sanitizer. |
 | Bounded parsing | Untrusted installers and archives are parsed with hard limits (entry counts, sizes, nesting depth) to resist archive bombs. |
