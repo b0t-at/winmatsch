@@ -190,6 +190,11 @@ public sealed partial class PayloadDependencyAnalyzer
 
     private PayloadDependencyAnalysis AnalyzeArchive(Stream stream, CancellationToken cancellationToken)
     {
+        ZipArchiveBounds.Validate(
+            stream,
+            "The dependency-analysis archive",
+            _options.MaximumArchiveEntries,
+            _options.MaximumCentralDirectoryBytes);
         var archiveStream = new BudgetedArchiveStream(stream);
         using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
         if (archive.Entries.Count > _options.MaximumArchiveEntries)
@@ -200,6 +205,7 @@ public sealed partial class PayloadDependencyAnalyzer
 
         var pePayloads = new List<PePayload>();
         var runtimeConfigs = new List<RuntimeConfigPayload>();
+        var unavailableRuntimeConfigs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var hostFxrPayloads = new List<PePayload>();
         var evidence = new List<DependencyEvidence>();
         var diagnostics = new List<AnalysisDiagnostic>();
@@ -250,6 +256,10 @@ public sealed partial class PayloadDependencyAnalyzer
             }
             if (read.Content is null)
             {
+                if (isRuntimeConfig)
+                {
+                    unavailableRuntimeConfigs.Add(path);
+                }
                 string signal = $"analysis-unavailable:{read.Reason}";
                 evidence.AddRange(CreateUnavailableEvidence(path, signal, isRuntimeConfig));
                 diagnostics.Add(new AnalysisDiagnostic(
@@ -284,12 +294,15 @@ public sealed partial class PayloadDependencyAnalyzer
             }
 
             PePayload? nearbyHostFxr = FindNearbyHostFxr(payload.Path, hostFxrPayloads);
+            bool runtimeConfigUnavailable = unavailableRuntimeConfigs.Contains(
+                GetExpectedRuntimeConfigPath(payload.Path));
             evidence.AddRange(CreatePeEvidence(
                 payload,
                 runtimeConfig,
                 nearbyHostFxr,
                 allowAbsent: true,
-                additionalSignal: null));
+                additionalSignal: null,
+                runtimeConfigUnavailable));
         }
 
         foreach (RuntimeConfigPayload runtimeConfig in runtimeConfigs)
@@ -322,7 +335,8 @@ public sealed partial class PayloadDependencyAnalyzer
         RuntimeConfigPayload? runtimeConfig,
         PePayload? nearbyHostFxr,
         bool allowAbsent,
-        string? additionalSignal)
+        string? additionalSignal,
+        bool runtimeConfigUnavailable = false)
     {
         PeImportInspection pe = payload.Inspection;
         List<string> vcSignals = pe.ImportedModules
@@ -361,6 +375,10 @@ public sealed partial class PayloadDependencyAnalyzer
         {
             runtimeSignals.Add("pe:managed-image");
         }
+        if (runtimeConfigUnavailable)
+        {
+            runtimeSignals.Add("runtimeconfig:analysis-unavailable");
+        }
 
         if (IsHostFxr(payload.Path))
         {
@@ -371,7 +389,9 @@ public sealed partial class PayloadDependencyAnalyzer
             runtimeSignals.Add($"bundled-hostfxr:{nearbyHostFxr.Path}");
         }
 
-        DependencyEvidenceStatus dotNetStatus = runtimeConfig is not null
+        DependencyEvidenceStatus dotNetStatus = runtimeConfigUnavailable
+            ? DependencyEvidenceStatus.Unavailable
+            : runtimeConfig is not null
             ? runtime.Status
             : nearbyHostFxr is not null || IsHostFxr(payload.Path)
                 ? DependencyEvidenceStatus.Ambiguous
@@ -572,11 +592,16 @@ public sealed partial class PayloadDependencyAnalyzer
         string pePath,
         IReadOnlyList<RuntimeConfigPayload> runtimeConfigs)
     {
-        string directory = GetDirectory(pePath);
-        string baseName = Path.GetFileNameWithoutExtension(pePath);
-        string expected = CombinePath(directory, baseName + RuntimeConfigSuffix);
+        string expected = GetExpectedRuntimeConfigPath(pePath);
         return runtimeConfigs.FirstOrDefault(
             config => string.Equals(config.Path, expected, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string GetExpectedRuntimeConfigPath(string pePath)
+    {
+        string directory = GetDirectory(pePath);
+        string baseName = Path.GetFileNameWithoutExtension(pePath);
+        return CombinePath(directory, baseName + RuntimeConfigSuffix);
     }
 
     private static PePayload? FindNearbyHostFxr(string pePath, IReadOnlyList<PePayload> hostFxrPayloads)

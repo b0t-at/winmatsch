@@ -9,12 +9,25 @@ internal static class ZipArchiveBounds
     private const uint Zip64EndOfCentralDirectorySignature = 0x06064B50;
     private const uint Zip64LocatorSignature = 0x07064B50;
     private const int MaxCommentLength = ushort.MaxValue;
-    private const int MaxEntryCount = 4096;
-    private const long MaxCentralDirectoryBytes = 16L * 1024 * 1024;
+    private const int DefaultMaxEntryCount = 4096;
+    private const long DefaultMaxCentralDirectoryBytes = 16L * 1024 * 1024;
 
     public static void Validate(Stream stream, string description)
+        => Validate(
+            stream,
+            description,
+            DefaultMaxEntryCount,
+            DefaultMaxCentralDirectoryBytes);
+
+    public static void Validate(
+        Stream stream,
+        string description,
+        int maximumEntryCount,
+        long maximumCentralDirectoryBytes)
     {
         ArgumentNullException.ThrowIfNull(stream);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumEntryCount);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCentralDirectoryBytes);
         long savedPosition = stream.Position;
         try
         {
@@ -59,15 +72,15 @@ internal static class ZipArchiveBounds
                 ReadZip64(stream, eocdOffset, description, out entryCount, out directorySize, out directoryOffset);
             }
 
-            if (entryCount > MaxEntryCount)
+            if (entryCount > (ulong)maximumEntryCount)
             {
-                throw new InvalidDataException($"{description} contains more than {MaxEntryCount} ZIP entries.");
+                throw new InvalidDataException($"{description} contains more than {maximumEntryCount} ZIP entries.");
             }
 
-            if (directorySize > MaxCentralDirectoryBytes)
+            if (directorySize > (ulong)maximumCentralDirectoryBytes)
             {
                 throw new InvalidDataException(
-                    $"{description} has a ZIP central directory larger than {MaxCentralDirectoryBytes} bytes.");
+                    $"{description} has a ZIP central directory larger than {maximumCentralDirectoryBytes} bytes.");
             }
 
             if (directoryOffset > (ulong)eocdOffset

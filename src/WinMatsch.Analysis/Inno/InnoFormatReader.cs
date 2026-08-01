@@ -752,9 +752,9 @@ internal static partial class InnoFormatReader
             search = payloadOffset;
         }
 
-        if (attempts == options.MaximumPayloadMarkerAttempts
-            && search <= data.Length - magic.Length
-            && data.AsSpan(search).IndexOf(magic) >= 0)
+        bool hasUnprocessedMarker = search <= data.Length - magic.Length
+            && data.AsSpan(search).IndexOf(magic) >= 0;
+        if (hasUnprocessedMarker && attempts == options.MaximumPayloadMarkerAttempts)
         {
             complete = false;
             diagnostics.Add(new AnalysisDiagnostic(
@@ -762,7 +762,20 @@ internal static partial class InnoFormatReader
                 $"Inno Setup payload inspection stopped after {options.MaximumPayloadMarkerAttempts} compressed-payload markers.",
                 RequiresManualAnalysis: true));
         }
-        else if (!complete && diagnostics.All(static diagnostic => diagnostic.Code != "INNO007"))
+        else if (hasUnprocessedMarker && result.Count >= options.MaximumPayloadCandidates)
+        {
+            candidateLimitExceeded = true;
+        }
+        else if (hasUnprocessedMarker && budget.Remaining < 2)
+        {
+            complete = false;
+            diagnostics.Add(new AnalysisDiagnostic(
+                "INNO009",
+                "The Inno Setup aggregate payload-inspection budget was exhausted before every compressed payload marker could be checked.",
+                RequiresManualAnalysis: true));
+        }
+        else if (!complete
+            && diagnostics.All(static diagnostic => diagnostic.Code is not "INNO007" and not "INNO009"))
         {
             diagnostics.Add(new AnalysisDiagnostic(
                 "INNO009",

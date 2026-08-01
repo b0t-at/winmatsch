@@ -8,6 +8,7 @@ public sealed class PayloadDependencyAnalyzerOptions
     public const long DefaultMaximumTotalPayloadBytes = 256L * 1024 * 1024;
     public const long DefaultMaximumCompressedPayloadBytes = 64L * 1024 * 1024;
     public const long DefaultMaximumTotalCompressedBytes = 256L * 1024 * 1024;
+    public const long DefaultMaximumCentralDirectoryBytes = 16L * 1024 * 1024;
     public const int DefaultMaximumArchiveReadOperations = 16_384;
     public const int DefaultMaximumRuntimeConfigBytes = 4 * 1024 * 1024;
     public const int DefaultMaximumImportDescriptors = 1024;
@@ -22,6 +23,8 @@ public sealed class PayloadDependencyAnalyzerOptions
     public long MaximumCompressedPayloadBytes { get; init; } = DefaultMaximumCompressedPayloadBytes;
 
     public long MaximumTotalCompressedBytes { get; init; } = DefaultMaximumTotalCompressedBytes;
+
+    public long MaximumCentralDirectoryBytes { get; init; } = DefaultMaximumCentralDirectoryBytes;
 
     /// <summary>
     /// Maximum decompressor read calls across relevant archive entries. This bounds work even
@@ -43,6 +46,7 @@ public sealed class PayloadDependencyAnalyzerOptions
         ArgumentOutOfRangeException.ThrowIfGreaterThan(MaximumPayloadBytes, int.MaxValue);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaximumCompressedPayloadBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaximumTotalCompressedBytes);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaximumCentralDirectoryBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaximumArchiveReadOperations);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaximumRuntimeConfigBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaximumImportDescriptors);

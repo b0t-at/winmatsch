@@ -653,6 +653,54 @@ public class InnoProbeTests
     }
 
     [Fact]
+    public void Candidate_guard_diagnoses_unprocessed_compressed_payload_markers()
+    {
+        byte[] compressedArm64 = InnoFixtures.BuildMarkerPayload(
+            0,
+            DependencyFixtures.BuildPe(Machine.Arm64));
+        byte[] payload = AdvancedInstallerFixtures.Concat(
+            DependencyFixtures.BuildPe(Machine.Amd64),
+            DependencyFixtures.BuildPe(Machine.Amd64),
+            compressedArm64);
+        byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            HeaderCompression = 1,
+            AdditionalPayloadBytes = payload,
+        });
+        var probe = new InnoProbe(new InnoProbeOptions { MaximumPayloadCandidates = 2 });
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(installer, probe));
+
+        Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
+        Assert.False(metadata.ArchitectureIsConclusive);
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO013");
+    }
+
+    [Fact]
+    public void Exact_raw_scan_budget_diagnoses_unprocessed_compressed_payload_markers()
+    {
+        byte[] markerPayload = InnoFixtures.BuildMarkerPayload(
+            0,
+            DependencyFixtures.BuildPe(Machine.Amd64));
+        byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "x86compatible",
+            HeaderCompression = 1,
+            AdditionalPayloadBytes = markerPayload,
+        });
+        var probe = new InnoProbe(new InnoProbeOptions
+        {
+            MaximumAggregatePayloadBytes = markerPayload.Length,
+        });
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(installer, probe));
+
+        Assert.False(metadata.ArchitectureIsConclusive);
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO009");
+    }
+
+    [Fact]
     public void Aggregate_payload_scan_budget_caps_decompression_work()
     {
         byte[] markerPayload = InnoFixtures.BuildMarkerPayload(0, PeFixtures.BuildExe(Machine.Amd64));

@@ -102,13 +102,15 @@ internal static class PeImportReader
             uint sizeOfImage = BinaryPrimitives.ReadUInt32LittleEndian(optional.AsSpan(56));
             uint sizeOfHeaders = BinaryPrimitives.ReadUInt32LittleEndian(optional.AsSpan(60));
             uint directoryCount = BinaryPrimitives.ReadUInt32LittleEndian(optional.AsSpan(numberOfDirectoriesOffset));
+            int directoryCapacity = (optional.Length - dataDirectoryOffset) / 8;
             long sectionTableEnd = peOffset + 24L + optionalSize + (sectionCount * 40L);
             if (sectionAlignment == 0
                 || fileAlignment == 0
                 || sizeOfImage < sizeOfHeaders
                 || sizeOfImage % sectionAlignment != 0
                 || sizeOfHeaders < sectionTableEnd
-                || sizeOfHeaders > stream.Length)
+                || sizeOfHeaders > stream.Length
+                || directoryCount > directoryCapacity)
             {
                 return Incomplete();
             }
@@ -123,14 +125,27 @@ internal static class PeImportReader
 
             bool isManaged = false;
             if (directoryCount > 14
-                && TryReadDirectory(optional, dataDirectoryOffset, 14, out uint clrRva, out uint clrSize)
-                && clrRva != 0
-                && clrSize >= 20
-                && TryMapRva(clrRva, sizeOfHeaders, sections, stream.Length, out long clrOffset, out long clrAvailable))
+                && TryReadDirectory(optional, dataDirectoryOffset, 14, out uint clrRva, out uint clrSize))
             {
-                Span<byte> clrPrefix = stackalloc byte[20];
-                if (clrAvailable >= clrPrefix.Length && TryReadAt(stream, clrOffset, clrPrefix))
+                if ((clrRva == 0) != (clrSize == 0))
                 {
+                    return new PeImportInspection(architecture, [], false, false);
+                }
+
+                if (clrRva != 0)
+                {
+                    if (clrSize < 20
+                        || !TryMapRva(clrRva, sizeOfHeaders, sections, stream.Length, out long clrOffset, out long clrAvailable))
+                    {
+                        return new PeImportInspection(architecture, [], false, false);
+                    }
+
+                    Span<byte> clrPrefix = stackalloc byte[20];
+                    if (clrAvailable < clrPrefix.Length || !TryReadAt(stream, clrOffset, clrPrefix))
+                    {
+                        return new PeImportInspection(architecture, [], false, false);
+                    }
+
                     isManaged = true;
                     uint flags = BinaryPrimitives.ReadUInt32LittleEndian(clrPrefix[16..]);
                     if (machine == Machine.I386
@@ -148,9 +163,13 @@ internal static class PeImportReader
                 return new PeImportInspection(architecture, [], isManaged, false);
             }
 
-            if (importRva == 0 || importSize == 0)
+            if (importRva == 0 && importSize == 0)
             {
                 return new PeImportInspection(architecture, [], isManaged, true);
+            }
+            if (importRva == 0 || importSize == 0)
+            {
+                return new PeImportInspection(architecture, [], isManaged, false);
             }
 
             if (!TryMapRva(importRva, sizeOfHeaders, sections, stream.Length, out long descriptorOffset, out long descriptorAvailable))

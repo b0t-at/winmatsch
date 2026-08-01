@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Reflection.PortableExecutable;
 using System.Text;
 using WinMatsch.Analysis.Dependencies;
@@ -198,6 +199,64 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Half_populated_import_directory_is_ambiguous_not_absent()
+    {
+        byte[] pe = DependencyFixtures.BuildPe(Machine.Amd64);
+        int peOffset = BinaryPrimitives.ReadInt32LittleEndian(pe.AsSpan(0x3C));
+        int optionalOffset = peOffset + 24;
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 120), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 124), 20);
+        using MemoryStream archive = DependencyFixtures.BuildZip(("malformed.exe", pe));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "malformed.zip");
+
+        Assert.All(
+            analysis.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Ambiguous, evidence.Status));
+    }
+
+    [Fact]
+    public void Data_directory_count_beyond_optional_header_is_ambiguous()
+    {
+        byte[] pe = DependencyFixtures.BuildPe(Machine.Amd64);
+        int peOffset = BinaryPrimitives.ReadInt32LittleEndian(pe.AsSpan(0x3C));
+        int optionalOffset = peOffset + 24;
+        int optionalSize = BinaryPrimitives.ReadUInt16LittleEndian(pe.AsSpan(peOffset + 20));
+        int capacity = (optionalSize - 112) / 8;
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(optionalOffset + 108), checked((uint)capacity + 1));
+        using MemoryStream archive = DependencyFixtures.BuildZip(("malformed.exe", pe));
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "malformed.zip");
+
+        Assert.All(analysis.Evidence, evidence =>
+        {
+            Assert.Null(evidence.Architecture);
+            Assert.Equal(DependencyEvidenceStatus.Ambiguous, evidence.Status);
+        });
+    }
+
+    [Fact]
+    public void Unavailable_runtimeconfig_prevents_contradictory_dotnet_absent_evidence()
+    {
+        var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
+        {
+            MaximumRuntimeConfigBytes = 4,
+        });
+        using MemoryStream archive = DependencyFixtures.BuildZip(
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64)),
+            ("app.runtimeconfig.json", DependencyFixtures.RuntimeConfig("8.0.0")));
+
+        PayloadDependencyAnalysis analysis = analyzer.Analyze(archive, "runtime.zip");
+
+        DependencyEvidence evidence = Find(
+            analysis,
+            "app.exe",
+            DependencyEvidenceKind.DotNetRuntime);
+        Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status);
+        Assert.Contains("runtimeconfig:analysis-unavailable", evidence.Signals);
+    }
+
+    [Fact]
     public void Malformed_pe_metadata_is_ambiguous_not_absent()
     {
         using MemoryStream archive = DependencyFixtures.BuildZip(("broken.exe", [1, 2, 3, 4]));
@@ -310,7 +369,23 @@ public class PayloadDependencyAnalyzerTests
         InvalidDataException exception = Assert.Throws<InvalidDataException>(
             () => analyzer.Analyze(archive, "many.zip"));
 
-        Assert.Contains("2 entries", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("more than 1", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Central_directory_size_is_bounded_before_zip_entries_materialize()
+    {
+        var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
+        {
+            MaximumCentralDirectoryBytes = 1024,
+        });
+        using var archive = new MemoryStream(
+            SquirrelFixtures.BuildDirectoryBomb(entryCount: 1, centralDirectorySize: 2048));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => analyzer.Analyze(archive, "directory-bomb.zip"));
+
+        Assert.Contains("central directory larger", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -540,6 +615,8 @@ public class PayloadDependencyAnalyzerTests
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumCompressedPayloadBytes = -1 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalCompressedBytes = 0 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumTotalCompressedBytes = -1 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumCentralDirectoryBytes = 0 });
+        AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumCentralDirectoryBytes = -1 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumArchiveReadOperations = 0 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumArchiveReadOperations = -1 });
         AssertInvalid(new PayloadDependencyAnalyzerOptions { MaximumRuntimeConfigBytes = 0 });
