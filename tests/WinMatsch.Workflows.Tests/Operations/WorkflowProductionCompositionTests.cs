@@ -401,6 +401,19 @@ public sealed class WorkflowProductionCompositionTests
             Assert.Contains("committed", exception.Message, StringComparison.OrdinalIgnoreCase);
             Assert.NotEmpty(Directory.EnumerateFiles(output, "*.yaml", SearchOption.AllDirectories));
             Assert.NotEmpty(Directory.EnumerateDirectories(output, ".winmatsch-transaction-*"));
+            string localePath = Path.Combine(
+                output,
+                ManifestPaths.GetVersionDirectory(
+                        new PackageIdentifier("Example.Composed"),
+                        new PackageVersion("1.0.0"))
+                    .Replace('/', Path.DirectorySeparatorChar),
+                "Example.Composed.locale.en-US.yaml");
+            File.WriteAllText(
+                localePath,
+                File.ReadAllText(localePath).Replace(
+                    "Publisher: Original Publisher",
+                    "Publisher: Human After Commit",
+                    StringComparison.Ordinal));
 
             PackageSnapshot recovered = Assert.IsType<PackageSnapshot>(
                 await new LocalManifestSnapshotSource(new FileOriginalSubmissionStore(state)).LoadAsync(
@@ -408,6 +421,7 @@ public sealed class WorkflowProductionCompositionTests
                     new PackageIdentifier("Example.Composed"),
                     new PackageVersion("1.0.0"),
                     CancellationToken.None));
+            Assert.Equal("Human After Commit", recovered.Manifests.DefaultLocale.Publisher);
             Assert.Equal("Original Publisher", recovered.OriginalBotSubmission!.DefaultLocale.Publisher);
             Assert.Empty(Directory.EnumerateDirectories(output, ".winmatsch-transaction-*"));
         }
@@ -579,6 +593,7 @@ public sealed class WorkflowProductionCompositionTests
 
         public void CaptureChangedVersions(
             string outputDirectory,
+            string snapshotDirectory,
             IReadOnlyList<CommittedWorkflowPath> changes)
             => throw new IOException("Simulated provenance write failure.");
     }

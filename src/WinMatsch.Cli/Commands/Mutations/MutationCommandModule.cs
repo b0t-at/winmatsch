@@ -512,6 +512,14 @@ public sealed class MutationCommandModule : ICommandModule
         {
             request = WithExecutionMode(request, WorkflowExecutionMode.Apply);
             local = await RunLocalAsync(workflow, request, context).ConfigureAwait(false);
+            if (releaseProvenance is not null)
+            {
+                local = local with
+                {
+                    Plan = local.Plan with { Release = releaseProvenance },
+                };
+            }
+
             if (!local.Applied)
             {
                 MutationOutput.Write(context, local, remote: null);

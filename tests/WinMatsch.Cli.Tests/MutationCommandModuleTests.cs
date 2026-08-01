@@ -185,7 +185,7 @@ public sealed class MutationCommandModuleTests
         harness.EnvironmentVariables["WINMATSCH_FRESHNESS_DELAY"] = "00:42:00";
 
         CliRunResult result = await harness.RunAsync(
-            ["update", "Example.App", "1.0", "--edit", "--dry-run", "--submit", "--yes"]);
+            ["update", "Example.App", "1.0", "--edit", "--submit", "--yes"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         GitHubSubmissionRequest request = Assert.Single(submission.Requests);

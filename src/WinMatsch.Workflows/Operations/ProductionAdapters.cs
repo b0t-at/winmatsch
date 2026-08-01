@@ -388,12 +388,15 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
             }
             else
             {
+                string provenanceRoot = Path.Combine(transactionRoot, "provenance");
+                StageProvenanceSnapshots(root, provenanceRoot, changes);
                 WriteJournal(transactionRoot, "manifests-committed", installed);
                 committed = true;
                 try
                 {
                     _originalSubmissions.CaptureChangedVersions(
                         root,
+                        provenanceRoot,
                         ToCommittedPaths(changes));
                     WriteJournal(transactionRoot, "committed", installed);
                     cleanupAllowed = true;
@@ -706,6 +709,7 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
 
                 originalSubmissions.CaptureChangedVersions(
                     root,
+                    Path.Combine(transaction, "provenance"),
                     ParseCommittedPaths(lines, journalPath));
                 committed = true;
             }
@@ -790,6 +794,51 @@ public sealed class AtomicWorkflowFileTransaction : IWorkflowFileTransaction
                 change.Kind,
                 change.RepositoryPath))
             .ToArray();
+
+    private static void StageProvenanceSnapshots(
+        string root,
+        string provenanceRoot,
+        IEnumerable<WorkflowFileChange> changes)
+    {
+        foreach (string relativeDirectory in changes
+                     .Select(static change => Path.GetDirectoryName(
+                         change.RepositoryPath.Replace('/', Path.DirectorySeparatorChar)))
+                     .Where(static directory => !string.IsNullOrWhiteSpace(directory))
+                     .Select(static directory => directory!)
+                     .Distinct(StringComparer.Ordinal))
+        {
+            string source = SecurePath.Resolve(root, relativeDirectory, requireExistingLeaf: false);
+            if (!Directory.Exists(source))
+            {
+                continue;
+            }
+
+            string[] manifests =
+            [
+                .. Directory.EnumerateFiles(source)
+                    .Where(static path => Path.GetExtension(path) is { } extension
+                        && (extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase)
+                            || extension.Equals(".yml", StringComparison.OrdinalIgnoreCase)))
+                    .Order(StringComparer.Ordinal),
+            ];
+            if (manifests.Length == 0)
+            {
+                continue;
+            }
+
+            string destination = SecurePath.Resolve(
+                provenanceRoot,
+                relativeDirectory,
+                requireExistingLeaf: false);
+            Directory.CreateDirectory(destination);
+            foreach (string manifest in manifests)
+            {
+                string staged = Path.Combine(destination, Path.GetFileName(manifest));
+                File.Copy(manifest, staged);
+                FlushFile(staged);
+            }
+        }
+    }
 
     private static void DeleteEmptyManifestDirectories(string root, IEnumerable<TransactionEntry> entries)
     {

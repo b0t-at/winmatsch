@@ -13,6 +13,7 @@ public interface IOriginalSubmissionStore
 
     public void CaptureChangedVersions(
         string outputDirectory,
+        string snapshotDirectory,
         IReadOnlyList<CommittedWorkflowPath> changes);
 }
 
@@ -49,21 +50,25 @@ public sealed class FileOriginalSubmissionStore : IOriginalSubmissionStore
 
     public void CaptureChangedVersions(
         string outputDirectory,
+        string snapshotDirectory,
         IReadOnlyList<CommittedWorkflowPath> changes)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(snapshotDirectory);
         ArgumentNullException.ThrowIfNull(changes);
         string root = Path.GetFullPath(outputDirectory);
+        string snapshotRoot = Path.GetFullPath(snapshotDirectory);
         foreach (string relativeDirectory in changes
                      .Select(static change => Path.GetDirectoryName(
-                         change.RepositoryPath.Replace('/', Path.DirectorySeparatorChar)))
+                         WorkflowPath.NormalizeRepositoryPath(change.RepositoryPath)
+                             .Replace('/', Path.DirectorySeparatorChar)))
                      .Where(static directory => !string.IsNullOrWhiteSpace(directory))
                      .Select(static directory => directory!)
                      .Distinct(StringComparer.Ordinal))
         {
-            string source = Path.GetFullPath(Path.Combine(root, relativeDirectory));
+            string source = Path.GetFullPath(Path.Combine(snapshotRoot, relativeDirectory));
             if (!source.StartsWith(
-                    root + Path.DirectorySeparatorChar,
+                    snapshotRoot + Path.DirectorySeparatorChar,
                     OperatingSystem.IsWindows()
                         ? StringComparison.OrdinalIgnoreCase
                         : StringComparison.Ordinal))
