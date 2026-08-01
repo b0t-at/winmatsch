@@ -9,7 +9,7 @@ internal static class DownloadDestination
     private const int SharingViolationErrorCode = 32;
     private const int SharingViolationRetryCount = 7;
 
-    private static readonly TimeSpan[] SharingViolationRetryDelays =
+    private static readonly TimeSpan[] _sharingViolationRetryDelays =
     [
         TimeSpan.FromMilliseconds(5),
         TimeSpan.FromMilliseconds(10),
@@ -20,7 +20,7 @@ internal static class DownloadDestination
         TimeSpan.FromMilliseconds(320),
     ];
 
-    private static readonly ConcurrentDictionary<string, DestinationGate> DestinationGates =
+    private static readonly ConcurrentDictionary<string, DestinationGate> _destinationGates =
         new(StringComparer.OrdinalIgnoreCase);
 
     public static async Task<string> PublishAsync(
@@ -127,7 +127,7 @@ internal static class DownloadDestination
     {
         while (true)
         {
-            DestinationGate gate = DestinationGates.GetOrAdd(
+            DestinationGate gate = _destinationGates.GetOrAdd(
                 destinationPath,
                 static _ => new DestinationGate());
             lock (gate.SyncRoot)
@@ -173,7 +173,7 @@ internal static class DownloadDestination
             }
 
             gate.IsRetired = true;
-            _ = ((ICollection<KeyValuePair<string, DestinationGate>>)DestinationGates).Remove(
+            _ = ((ICollection<KeyValuePair<string, DestinationGate>>)_destinationGates).Remove(
                 new KeyValuePair<string, DestinationGate>(destinationPath, gate));
         }
     }
@@ -228,7 +228,7 @@ internal static class DownloadDestination
                     await beforeRetry(path, retry + 1, cancellationToken).ConfigureAwait(false);
                 }
 
-                await Task.Delay(SharingViolationRetryDelays[retry], cancellationToken).ConfigureAwait(false);
+                await Task.Delay(_sharingViolationRetryDelays[retry], cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
