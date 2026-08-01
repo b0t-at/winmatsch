@@ -51,6 +51,21 @@ public sealed record PlannedInstaller
     public ImmutableArray<PlannedNestedInstallerFile> NestedInstallerFiles { get; init; } = [];
 
     public bool? ArchiveBinariesDependOnPath { get; init; }
+
+    internal bool SemanticallyMatches(PreviousInstallerEntry previous)
+    {
+        ArgumentNullException.ThrowIfNull(previous);
+        return string.Equals(Url.AbsoluteUri, previous.Url.AbsoluteUri, StringComparison.Ordinal)
+            && Sha256 == previous.Sha256
+            && Architecture == previous.Architecture
+            && InstallerType == previous.InstallerType
+            && NestedInstallerType == previous.NestedInstallerType
+            && Scope == previous.Scope
+            && InstallerLocale == previous.InstallerLocale
+            && string.Equals(DisplayVersion, previous.DisplayVersion, StringComparison.Ordinal)
+            && NestedInstallerFiles.SequenceEqual(previous.NestedInstallerFiles)
+            && ArchiveBinariesDependOnPath == previous.ArchiveBinariesDependOnPath;
+    }
 }
 
 public sealed record PlannedNestedInstallerFile(string RelativeFilePath, string? PortableCommandAlias);

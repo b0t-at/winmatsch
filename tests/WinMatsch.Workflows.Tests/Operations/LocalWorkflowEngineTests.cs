@@ -453,28 +453,202 @@ public sealed class LocalWorkflowEngineTests
         Assert.Empty(Directory.EnumerateFileSystemEntries(temporary.Path));
     }
 
-    [Fact]
-    public async Task Update_with_unchanged_url_and_hash_is_a_no_op()
+    [Theory]
+    [InlineData("\n", "winmatsch")]
+    [InlineData("\r\n", "winmatsch")]
+    [InlineData("\n", "custom tool")]
+    public async Task Update_with_unchanged_url_and_hash_is_a_no_op(
+        string lineEnding,
+        string createdWith)
     {
         using var temporary = new TemporaryDirectory();
         PackageManifests package = CreatePackage("1.0.0", "A");
-        PackageSnapshot snapshot = Snapshot(package) with { Documents = Documents(package, "winmatsch") };
+        PackageSnapshot snapshot = Snapshot(package) with
+        {
+            Documents = Documents(package, createdWith, lineEnding),
+        };
         var source = new DictionarySnapshotSource(snapshot);
         LocalWorkflowEngine engine = CreateEngine(source, new RecordingTransaction());
         DiscoveredAsset asset = Asset("1.0.0", "A");
 
-        WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
-        {
-            OutputDirectory = temporary.Path,
-            PackageIdentifier = new PackageIdentifier("Example.App"),
-            PreviousVersion = new PackageVersion("1.0.0"),
-            PackageVersion = "1.0.0",
-            Assets = [asset],
-            NetworkValidationMode = NetworkValidationMode.Skip,
-        });
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, asset, createdWith));
 
         Assert.Equal(WorkflowResultCode.NoChanges, result.Code);
         Assert.Empty(result.Plan.FileChanges);
+    }
+
+    [Fact]
+    public async Task Update_preserves_explicit_empty_installer_collections_for_a_no_op()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        Installer installer = Assert.Single(package.Installer.Installers!);
+        installer.NestedInstallerFiles = [];
+        installer.AppsAndFeaturesEntries = [];
+        PackageSnapshot snapshot = Snapshot(package) with { Documents = Documents(package, "winmatsch") };
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(snapshot),
+            new RecordingTransaction());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.0.0", "A")));
+
+        Assert.Equal(WorkflowResultCode.NoChanges, result.Code);
+        Assert.Empty(result.Plan.FileChanges);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("custom tool")]
+    public async Task Update_does_not_hide_created_with_attribution_changes(string? previousCreatedWith)
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        PackageSnapshot snapshot = Snapshot(package) with
+        {
+            Documents = Documents(package, previousCreatedWith),
+        };
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(snapshot),
+            new RecordingTransaction());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.0.0", "A")));
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.Equal(snapshot.Documents.Length, result.Plan.FileChanges.Length);
+        Assert.All(result.Plan.FileChanges, static change =>
+        {
+            Assert.Equal(WorkflowChangeProvenance.ToolGenerated, change.Provenance);
+            Assert.Contains(
+                "# Created with winmatsch\n",
+                System.Text.Encoding.UTF8.GetString(change.Content.AsSpan()),
+                StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task Update_does_not_hide_header_order_changes()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        PackageSnapshot snapshot = Snapshot(package) with
+        {
+            Documents = TransformDocuments(
+                Documents(package, "winmatsch"),
+                static yaml =>
+                {
+                    int firstLineEnd = yaml.IndexOf('\n');
+                    int secondLineEnd = yaml.IndexOf('\n', firstLineEnd + 1);
+                    return yaml[(firstLineEnd + 1)..(secondLineEnd + 1)]
+                        + yaml[..(firstLineEnd + 1)]
+                        + yaml[(secondLineEnd + 1)..];
+                }),
+        };
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(snapshot),
+            new RecordingTransaction());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.0.0", "A")));
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.Equal(snapshot.Documents.Length, result.Plan.FileChanges.Length);
+    }
+
+    [Fact]
+    public async Task Update_normalizes_mixed_line_endings_instead_of_hiding_the_style_change()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        PackageSnapshot snapshot = Snapshot(package) with
+        {
+            Documents = TransformDocuments(
+                Documents(package, "winmatsch"),
+                static yaml =>
+                {
+                    int firstLineEnd = yaml.IndexOf('\n');
+                    return yaml[..firstLineEnd] + "\r\n" + yaml[(firstLineEnd + 1)..];
+                }),
+        };
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(snapshot),
+            new RecordingTransaction());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.0.0", "A")));
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.Equal(snapshot.Documents.Length, result.Plan.FileChanges.Length);
+        Assert.All(result.Plan.FileChanges, static change =>
+        {
+            string yaml = System.Text.Encoding.UTF8.GetString(change.Content.AsSpan());
+            Assert.DoesNotContain("\n", yaml.Replace("\r\n", "", StringComparison.Ordinal), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task Update_keeps_changed_metadata_byte_exact_through_preflight()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        PackageSnapshot snapshot = Snapshot(package) with
+        {
+            Documents = Documents(package, "winmatsch", "\r\n"),
+        };
+        var preflight = new CapturingPreflight();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(snapshot),
+            new MutatingRuleRunner(static manifests => manifests.DefaultLocale.PackageName = "Changed App"),
+            preflight,
+            new RecordingTransaction(),
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.0.0", "A")));
+
+        WorkflowFileChange change = Assert.Single(result.Plan.FileChanges);
+        RawManifestDocument before = snapshot.Documents.Single(document =>
+            document.RepositoryPath == change.RepositoryPath);
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.Equal(WorkflowFileChange.Hash(before.Content.AsSpan()), change.ExpectedSha256);
+        Assert.Equal(WorkflowChangeProvenance.ToolGenerated, change.Provenance);
+        string yaml = System.Text.Encoding.UTF8.GetString(change.Content.AsSpan());
+        Assert.Contains("PackageName: Changed App\r\n", yaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", yaml.Replace("\r\n", "", StringComparison.Ordinal), StringComparison.Ordinal);
+        RawManifestDocument preflightDocument = preflight.Last!.AfterDocuments.Single(document =>
+            document.RepositoryPath == change.RepositoryPath);
+        Assert.True(change.Content.AsSpan().SequenceEqual(preflightDocument.Content.AsSpan()));
+    }
+
+    [Fact]
+    public async Task Update_does_not_hide_changed_installer_hash()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        PackageSnapshot snapshot = Snapshot(package) with { Documents = Documents(package, "winmatsch") };
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(snapshot),
+            new RecordingTransaction());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.0.0", "B")) with
+            {
+                AllowStableUrlContentChange = true,
+            });
+
+        WorkflowFileChange change = Assert.Single(result.Plan.FileChanges);
+        RawManifestDocument before = snapshot.Documents.Single(document =>
+            document.RepositoryPath == change.RepositoryPath);
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.EndsWith(".installer.yaml", change.RepositoryPath, StringComparison.Ordinal);
+        Assert.Equal(WorkflowFileChange.Hash(before.Content.AsSpan()), change.ExpectedSha256);
+        Assert.Equal(WorkflowChangeProvenance.ToolGenerated, change.Provenance);
+        Assert.Contains(
+            "InstallerSha256: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            System.Text.Encoding.UTF8.GetString(change.Content.AsSpan()),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -806,6 +980,21 @@ public sealed class LocalWorkflowEngineTests
             NetworkValidationMode = NetworkValidationMode.Skip,
         };
 
+    private static UpdateOperationRequest UpdateRequest(
+        string output,
+        DiscoveredAsset asset,
+        string createdWith = "winmatsch")
+        => new()
+        {
+            OutputDirectory = output,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PreviousVersion = new PackageVersion("1.0.0"),
+            PackageVersion = "1.0.0",
+            Assets = [asset],
+            CreatedWith = createdWith,
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        };
+
     private static DiscoveredAsset Asset(string version, string hashSeed)
     {
         string hash = string.Concat(Enumerable.Repeat(hashSeed, 64));
@@ -905,7 +1094,8 @@ public sealed class LocalWorkflowEngineTests
 
     private static ImmutableArray<RawManifestDocument> Documents(
         PackageManifests package,
-        string? createdWith)
+        string? createdWith,
+        string lineEnding = "\n")
     {
         string directory = ManifestPaths.GetVersionDirectory(
             package.Version.PackageIdentifier!,
@@ -917,10 +1107,24 @@ public sealed class LocalWorkflowEngineTests
                     new ManifestWriteOptions { CreatedWith = createdWith })
                 .Select(pair => new RawManifestDocument(
                     $"{directory}/{pair.Key}",
-                    System.Text.Encoding.UTF8.GetBytes(pair.Value)))
+                    System.Text.Encoding.UTF8.GetBytes(
+                        lineEnding == "\n"
+                            ? pair.Value
+                            : pair.Value.Replace("\n", lineEnding, StringComparison.Ordinal))))
                 .OrderBy(static document => document.RepositoryPath, StringComparer.Ordinal),
         ];
     }
+
+    private static ImmutableArray<RawManifestDocument> TransformDocuments(
+        ImmutableArray<RawManifestDocument> documents,
+        Func<string, string> transform)
+        =>
+        [
+            .. documents.Select(document => new RawManifestDocument(
+                document.RepositoryPath,
+                System.Text.Encoding.UTF8.GetBytes(
+                    transform(System.Text.Encoding.UTF8.GetString(document.Content.AsSpan()))))),
+        ];
 
     private static void WritePackage(string root, PackageManifests package)
     {
@@ -985,6 +1189,15 @@ public sealed class LocalWorkflowEngineTests
     {
         public WorkflowRuleResult Run(WorkflowRuleRequest request)
             => new(request.Manifests, summary);
+    }
+
+    private sealed class MutatingRuleRunner(Action<PackageManifests> mutate) : IWorkflowRuleRunner
+    {
+        public WorkflowRuleResult Run(WorkflowRuleRequest request)
+        {
+            mutate(request.Manifests);
+            return new(request.Manifests, RuleRunSummary.Empty);
+        }
     }
 
     private sealed class WritingArtifactProcessor : IWorkflowArtifactProcessor

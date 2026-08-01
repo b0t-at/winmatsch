@@ -389,12 +389,15 @@ public sealed class LocalWorkflowEngine
             Assets = enrichedAssets.ToImmutable(),
         });
         ImmutableArray<UrlOverride> urlOverrides = create?.UrlOverrides ?? update!.UrlOverrides;
+        ImmutableArray<PreviousInstallerEntry> previousInstallers = previous is null
+            ? []
+            : PreviousInstallerEntry.FromManifests(previous.Manifests);
         AssetMappingPlan mapping = AssetMappingPlanner.CreatePlan(new()
         {
             PackageIdentifier = identifier,
             Version = versionResolution,
             Assets = enrichedAssets.ToImmutable(),
-            PreviousInstallers = previous is null ? [] : PreviousInstallerEntry.FromManifests(previous.Manifests),
+            PreviousInstallers = previousInstallers,
             OverridePacks = operationRequest.OverridePacks,
             UrlOverrides = urlOverrides,
             AllowStructuralRewrite = update?.AllowStructuralRewrite ?? false,
@@ -473,7 +476,10 @@ public sealed class LocalWorkflowEngine
         else
         {
             candidate = CloneWithVersion(previous.Manifests, newVersion);
-            candidate.Installer.Installers = CreateInstallers(mapping);
+            candidate.Installer.Installers = CreateInstallers(
+                mapping,
+                candidate.Installer.Installers,
+                previousInstallers);
         }
 
         ImmutableArray<InstallerEvidence> installerEvidence =
@@ -497,8 +503,11 @@ public sealed class LocalWorkflowEngine
             installerEvidence,
             policyEvidence);
         candidate = rules.Manifests;
-        ImmutableArray<RawManifestDocument> after = Serialize(candidate, operationRequest.CreatedWith);
         ImmutableArray<RawManifestDocument> beforeDocuments = existing?.Documents ?? [];
+        ImmutableArray<RawManifestDocument> after = Serialize(
+            candidate,
+            operationRequest.CreatedWith,
+            beforeDocuments);
         ImmutableArray<WorkflowFileChange> changes = Diff(
             beforeDocuments,
             after,
@@ -657,7 +666,10 @@ public sealed class LocalWorkflowEngine
             [],
             operationRequest.PolicyEvidence);
         candidate = rules.Manifests;
-        ImmutableArray<RawManifestDocument> serialized = Serialize(candidate, operationRequest.CreatedWith);
+        ImmutableArray<RawManifestDocument> serialized = Serialize(
+            candidate,
+            operationRequest.CreatedWith,
+            snapshot.Documents);
         LanguageTag outputLocale = locale.PackageLocale!;
         string localeFile = $"{ManifestPaths.GetVersionDirectory(identifier, version)}/{ManifestPaths.GetLocaleFileName(identifier, outputLocale)}";
         RawManifestDocument changedLocale = serialized.Single(document =>
@@ -889,7 +901,7 @@ public sealed class LocalWorkflowEngine
             {
                 PackageIdentifier = identifier,
                 PackageVersion = version,
-                Installers = CreateInstallers(mapping),
+                Installers = CreateInstallers(mapping, null, []),
             },
             DefaultLocale = new DefaultLocaleManifest
             {
@@ -916,12 +928,26 @@ public sealed class LocalWorkflowEngine
             Locales = [],
         };
 
-    private static List<Installer> CreateInstallers(AssetMappingPlan mapping)
+    private static List<Installer> CreateInstallers(
+        AssetMappingPlan mapping,
+        List<Installer>? previousInstallerModels,
+        ImmutableArray<PreviousInstallerEntry> previousInstallers)
         => mapping.Decisions
             .Where(static decision => decision.Installer is not null)
-            .Select(static decision =>
+            .Select(decision =>
             {
                 PlannedInstaller planned = decision.Installer!;
+                PreviousInstallerEntry? previous = decision.PreviousPosition is { } position
+                    ? previousInstallers.SingleOrDefault(installer => installer.Position == position)
+                    : null;
+                if (previous is not null
+                    && previousInstallerModels is not null
+                    && previous.Position < previousInstallerModels.Count
+                    && planned.SemanticallyMatches(previous))
+                {
+                    return previousInstallerModels[previous.Position];
+                }
+
                 return new Installer
                 {
                     InstallerUrl = planned.Url.AbsoluteUri,
@@ -1015,19 +1041,34 @@ public sealed class LocalWorkflowEngine
         }
     }
 
-    private static ImmutableArray<RawManifestDocument> Serialize(PackageManifests manifests, string createdWith)
+    private static ImmutableArray<RawManifestDocument> Serialize(
+        PackageManifests manifests,
+        string createdWith,
+        ImmutableArray<RawManifestDocument> existingDocuments = default)
     {
         string directory = ManifestPaths.GetVersionDirectory(
             manifests.Version.PackageIdentifier!,
             manifests.Version.PackageVersion!);
+        Dictionary<string, RawManifestDocument> existingByPath = existingDocuments.IsDefaultOrEmpty
+            ? new Dictionary<string, RawManifestDocument>(StringComparer.Ordinal)
+            : existingDocuments.ToDictionary(
+                static document => document.RepositoryPath,
+                StringComparer.Ordinal);
         return
         [
             .. PackageManifestIO.SerializeFiles(
                     manifests,
                     new ManifestWriteOptions { CreatedWith = createdWith })
-                .Select(pair => new RawManifestDocument(
-                    $"{directory}/{pair.Key}",
-                    StrictUtf8.Encode(pair.Value)))
+                .Select(pair =>
+                {
+                    string repositoryPath = $"{directory}/{pair.Key}";
+                    string yaml = existingByPath.TryGetValue(repositoryPath, out RawManifestDocument? existing)
+                        ? ManifestYamlText.PreserveExistingLineEndings(
+                            pair.Value,
+                            StrictUtf8.Decode(existing.Content.AsSpan()))
+                        : pair.Value;
+                    return new RawManifestDocument(repositoryPath, StrictUtf8.Encode(yaml));
+                })
                 .OrderBy(static document => document.RepositoryPath, StringComparer.Ordinal),
         ];
     }
