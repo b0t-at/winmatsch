@@ -21,6 +21,11 @@ public sealed record PackageVersionCandidate(
     EvidenceConfidence Confidence,
     string Provenance);
 
+public sealed record UrlVersionEvidence(
+    string? Version,
+    bool IsAmbiguous,
+    ImmutableArray<string> Candidates);
+
 public sealed record PackageVersionResolution(
     PackageVersion? Version,
     PackageVersionSource? Source,
@@ -95,8 +100,15 @@ public static partial class PackageVersionResolver
                 candidates,
                 diagnostics);
 
+            UrlVersionEvidence urlVersion = AnalyzeUrlVersion(asset.DownloadUri);
+            if (urlVersion.IsAmbiguous)
+            {
+                diagnostics.Add(
+                    $"VERSION_URL_AMBIGUOUS:{asset.DownloadUri.AbsoluteUri}:{string.Join(",", urlVersion.Candidates)}");
+            }
+
             AddCandidate(
-                ExtractUrlVersion(asset.DownloadUri),
+                urlVersion.Version,
                 PackageVersionSource.UrlToken,
                 EvidenceConfidence.Low,
                 $"url:{asset.DownloadUri.AbsoluteUri}",
@@ -192,6 +204,9 @@ public static partial class PackageVersionResolver
     }
 
     public static string? ExtractUrlVersion(Uri uri)
+        => AnalyzeUrlVersion(uri).Version;
+
+    public static UrlVersionEvidence AnalyzeUrlVersion(Uri uri)
     {
         ArgumentNullException.ThrowIfNull(uri);
         string[] segments = uri.Segments
@@ -205,34 +220,47 @@ public static partial class PackageVersionResolver
             fileName = fileName[..^extension.Length];
         }
 
-        string? version = FindContextualVersion(fileName);
-        if (version is null)
+        ImmutableArray<string> versions = FindContextualVersions(fileName);
+        if (versions.IsEmpty)
         {
             int download = Array.FindLastIndex(
                 segments,
                 static segment => string.Equals(segment, "download", StringComparison.OrdinalIgnoreCase));
             if (download >= 0 && download + 1 < segments.Length)
             {
-                version = FindContextualVersion(segments[download + 1]);
+                versions = FindContextualVersions(segments[download + 1]);
             }
         }
 
-        if (version is null)
+        if (versions.IsEmpty)
         {
-            return null;
+            return new(null, false, []);
         }
 
-        if (version.EndsWith("_32", StringComparison.Ordinal)
-            || version.EndsWith("_64", StringComparison.Ordinal))
+        var representatives = new List<string>();
+        foreach (string version in versions)
         {
-            version = version[..^3];
+            string normalized = NormalizeUrlVersion(version);
+            if (!PackageVersion.TryCreate(normalized, out PackageVersion? parsed)
+                || representatives.Any(existing =>
+                    PackageVersion.TryCreate(existing, out PackageVersion? existingVersion)
+                    && existingVersion!.IsEquivalentTo(parsed!)))
+            {
+                continue;
+            }
+
+            representatives.Add(normalized);
         }
 
-        return version.Replace('_', '.');
+        representatives.Sort(StringComparer.Ordinal);
+        return representatives.Count == 1
+            ? new(representatives[0], false, [.. representatives])
+            : new(null, representatives.Count > 1, [.. representatives]);
     }
 
-    private static string? FindContextualVersion(string value)
+    private static ImmutableArray<string> FindContextualVersions(string value)
     {
+        var versions = ImmutableArray.CreateBuilder<string>();
         MatchCollection matches = UrlVersionRegex().Matches(value);
         foreach (Match match in matches.Cast<Match>())
         {
@@ -241,11 +269,22 @@ public static partial class PackageVersionResolver
                 .ToLowerInvariant();
             if (context is not ("win" or "windows" or "win32" or "win64"))
             {
-                return match.Groups["version"].Value;
+                versions.Add(match.Groups["version"].Value);
             }
         }
 
-        return null;
+        return [.. versions];
+    }
+
+    private static string NormalizeUrlVersion(string version)
+    {
+        if (version.EndsWith("_32", StringComparison.Ordinal)
+            || version.EndsWith("_64", StringComparison.Ordinal))
+        {
+            version = version[..^3];
+        }
+
+        return version.Replace('_', '.');
     }
 
     private static void AddCandidate(

@@ -29,6 +29,8 @@ public sealed class AssetMappingFixtureTests
     [MemberData(nameof(RequiredFixtures))]
     public void Preserves_expected_fixture_layouts_without_claiming_live_validation(string fixtureId)
     {
+        // These published snapshots cover deterministic topology only. MetadataFixture evidence
+        // deliberately blocks apply; content-analyzer behavior is covered by hermetic synthetic tests.
         RegressionFixture fixture = FixtureCatalog.Get(fixtureId);
         ImmutableArray<DiscoveredAsset> assets =
         [
@@ -89,96 +91,6 @@ public sealed class AssetMappingFixtureTests
         Assert.False(asset.Analysis?.IsProductVersionTrustworthy);
         Assert.Empty(asset.Analysis?.PayloadEvidence ?? []);
         Assert.Equal(AnalysisEvidenceOrigin.MetadataFixture, asset.Analysis?.Origin);
-    }
-
-    [Fact]
-    public void Buf_fixture_models_exe_to_multi_file_zip_transition()
-    {
-        RegressionFixture fixture = FixtureCatalog.Get("buf");
-        ImmutableArray<DiscoveredAsset> assets =
-        [
-            .. fixture.Descriptor.Assets.Select((asset, index) => CreateAsset(fixture, asset, index)),
-        ];
-        var previous = new PreviousInstallerEntry
-        {
-            Position = 0,
-            Url = new("https://example.test/buf-1.63.0-windows-x64.exe"),
-            Sha256 = new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-            Architecture = Architecture.X64,
-            InstallerType = InstallerType.Exe,
-            PackageVersion = new("1.63.0"),
-        };
-
-        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(new()
-        {
-            PackageIdentifier = new(fixture.Descriptor.Package.Identifier),
-            Version = ResolvedVersion(fixture.Descriptor.Package.Version),
-            Assets = assets,
-            PreviousInstallers = [previous],
-            AllowStructuralRewrite = true,
-        });
-
-        Assert.Contains(plan.Decisions, static decision => decision.Kind == AssetMappingDecisionKind.Removed);
-        AssetMappingDecision[] proposed = plan.Decisions
-            .Where(static decision => decision.Kind == AssetMappingDecisionKind.Proposed)
-            .ToArray();
-        Assert.Equal(2, proposed.Length);
-        Assert.All(proposed, static decision =>
-        {
-            Assert.Equal(InstallerType.Zip, decision.Installer?.InstallerType);
-            Assert.Equal(InstallerType.Portable, decision.Installer?.NestedInstallerType);
-            Assert.Equal(3, decision.Installer?.NestedInstallerFiles.Length);
-        });
-    }
-
-    [Fact]
-    public void Uhk_fixture_keeps_untagged_universal_asset_unresolved()
-    {
-        RegressionFixture fixture = FixtureCatalog.Get("uhk-agent");
-        ImmutableArray<DiscoveredAsset> assets =
-        [
-            .. fixture.Descriptor.Assets.Select((asset, index) => CreateAsset(fixture, asset, index)),
-        ];
-
-        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(new()
-        {
-            PackageIdentifier = new(fixture.Descriptor.Package.Identifier),
-            Version = ResolvedVersion(fixture.Descriptor.Package.Version),
-            Assets = assets,
-        });
-
-        Assert.Equal(2, plan.Decisions.Count(static decision => decision.Kind == AssetMappingDecisionKind.Proposed));
-        Assert.Contains(
-            plan.UnresolvedQuestions,
-            static question => question.AssetUrl!.EndsWith("-win.exe", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public void Super_productivity_fixture_does_not_infer_untagged_setup_architecture()
-    {
-        RegressionFixture fixture = FixtureCatalog.Get("super-productivity");
-        ImmutableArray<DiscoveredAsset> assets =
-        [
-            .. fixture.Descriptor.Assets.Select((asset, index) => CreateAsset(fixture, asset, index)),
-        ];
-
-        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(new()
-        {
-            PackageIdentifier = new(fixture.Descriptor.Package.Identifier),
-            Version = ResolvedVersion(fixture.Descriptor.Package.Version),
-            Assets = assets,
-        });
-
-        Assert.Contains(
-            plan.UnresolvedQuestions,
-            static question => question.AssetUrl!.EndsWith("Super-Productivity-Setup.exe", StringComparison.Ordinal));
-        Assert.Equal(
-            [Architecture.X64, Architecture.Arm64],
-            plan.Decisions
-                .Where(static decision => decision.Kind == AssetMappingDecisionKind.Proposed)
-                .Select(static decision => decision.Installer!.Architecture)
-                .Order()
-                .ToArray());
     }
 
     private static DiscoveredAsset CreateAsset(

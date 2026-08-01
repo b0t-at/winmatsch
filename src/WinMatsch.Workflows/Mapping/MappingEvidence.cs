@@ -82,31 +82,36 @@ public sealed record AssetAnalysisEvidence
     public ImmutableArray<string> Validate()
     {
         var errors = ImmutableArray.CreateBuilder<string>();
+        if (ArchiveEntries.Length > MaximumArchiveEntries
+            || NestedInstallerCandidates.Length > MaximumArchiveEntries
+            || InstallerShapes.Length > MaximumEvidenceItems
+            || PayloadEvidence.Length > MaximumEvidenceItems
+            || Diagnostics.Length > MaximumEvidenceItems)
+        {
+            return [$"Analysis evidence collection exceeds the {MaximumEvidenceItems} item limit."];
+        }
+
         long totalItems = ArchiveEntries.Length
             + NestedInstallerCandidates.Length
             + InstallerShapes.Length
             + PayloadEvidence.Length
-            + Diagnostics.Length
-            + InstallerShapes.Sum(static shape => (long)shape.NestedInstallerFiles.Length)
-            + PayloadEvidence.Sum(static evidence => (long)evidence.Signals.Length);
-        if (totalItems > MaximumEvidenceItems)
+            + Diagnostics.Length;
+        foreach (AnalyzedInstallerShape shape in InstallerShapes)
         {
-            errors.Add($"Total analysis evidence count exceeds {MaximumEvidenceItems}.");
+            totalItems += shape.NestedInstallerFiles.Length;
+            if (totalItems > MaximumEvidenceItems)
+            {
+                return [$"Total analysis evidence count exceeds {MaximumEvidenceItems}."];
+            }
         }
 
-        if (ArchiveEntries.Length > MaximumArchiveEntries)
+        foreach (PayloadPathEvidence evidence in PayloadEvidence)
         {
-            errors.Add($"Archive entry count exceeds {MaximumArchiveEntries}.");
-        }
-
-        if (NestedInstallerCandidates.Length > MaximumArchiveEntries)
-        {
-            errors.Add($"Nested installer candidate count exceeds {MaximumArchiveEntries}.");
-        }
-
-        if (InstallerShapes.Length > MaximumArchiveEntries)
-        {
-            errors.Add($"Analyzed installer shape count exceeds {MaximumArchiveEntries}.");
+            totalItems += evidence.Signals.Length;
+            if (totalItems > MaximumEvidenceItems)
+            {
+                return [$"Total analysis evidence count exceeds {MaximumEvidenceItems}."];
+            }
         }
 
         foreach (string path in ArchiveEntries
@@ -234,13 +239,18 @@ public sealed record AssetAnalysisEvidence
                                 .Where(static file => !string.IsNullOrWhiteSpace(file.RelativeFilePath))
                                 .Select(static file => new PlannedNestedInstallerFile(
                                     NormalizeArchivePath(file.RelativeFilePath!),
-                                    file.PortableCommandAlias)),
+                                    file.PortableCommandAlias))
+                                .OrderBy(static file => file.RelativeFilePath, StringComparer.Ordinal)
+                                .ThenBy(static file => file.PortableCommandAlias, StringComparer.Ordinal),
                         ],
                         ArchiveBinariesDependOnPath = installer.ArchiveBinariesDependOnPath,
                     })
                     .OrderBy(static shape => shape.Architecture)
                     .ThenBy(static shape => shape.InstallerType)
-                    .ThenBy(static shape => shape.Scope),
+                    .ThenBy(static shape => shape.Scope)
+                    .ThenBy(static shape => shape.InstallerLocale?.Value, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(static shape => shape.NestedInstallerType)
+                    .ThenBy(static shape => FormatShape(shape), StringComparer.Ordinal),
             ],
             ArchiveEntries = SnapshotArchivePaths(boundedArchiveEntries ?? []),
             NestedInstallerCandidates = SnapshotArchivePaths(
@@ -326,6 +336,12 @@ public sealed record AssetAnalysisEvidence
         => paths
             .GroupBy(static path => path, StringComparer.OrdinalIgnoreCase)
             .Any(static group => group.Distinct(StringComparer.Ordinal).Skip(1).Any());
+
+    private static string FormatShape(AnalyzedInstallerShape shape)
+        => string.Join(
+            '|',
+            shape.NestedInstallerFiles.Select(
+                static file => $"{file.RelativeFilePath}=>{file.PortableCommandAlias}"));
 }
 
 /// <summary>One correlated architecture/type/scope variant emitted for an analyzed asset.</summary>

@@ -67,7 +67,9 @@ internal static class NestedInstallerPathResolver
         }
 
         var resolved = ImmutableArray.CreateBuilder<PlannedNestedInstallerFile>();
-        foreach (PlannedNestedInstallerFile nested in previous.NestedInstallerFiles)
+        foreach (PlannedNestedInstallerFile nested in previous.NestedInstallerFiles
+                     .OrderBy(static file => file.RelativeFilePath, StringComparer.Ordinal)
+                     .ThenBy(static file => file.PortableCommandAlias, StringComparer.Ordinal))
         {
             string[] exact = actualPaths
                 .Where(path => string.Equals(path, nested.RelativeFilePath, StringComparison.OrdinalIgnoreCase))
@@ -79,7 +81,12 @@ internal static class NestedInstallerPathResolver
             string[] templated = actualPaths
                 .Where(path => templatedPaths.Contains(path, StringComparer.OrdinalIgnoreCase))
                 .ToArray();
-            string[] matches = exact.Concat(templated).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            string[] matches = exact
+                .Concat(templated)
+                .GroupBy(static path => path, StringComparer.OrdinalIgnoreCase)
+                .Select(static group => group.Order(StringComparer.Ordinal).First())
+                .Order(StringComparer.Ordinal)
+                .ToArray();
             if (matches.Length != 1)
             {
                 return NestedPathResolution.Unresolved(
@@ -130,7 +137,14 @@ internal static class NestedInstallerPathResolver
                 "Nested installer paths and non-empty aliases must be distinct.");
         }
 
-        return new(files, null, null);
+        return new(
+            [
+                .. files
+                    .OrderBy(static file => file.RelativeFilePath, StringComparer.Ordinal)
+                    .ThenBy(static file => file.PortableCommandAlias, StringComparer.Ordinal),
+            ],
+            null,
+            null);
     }
 
     private static string[] GenerateVersionTemplates(string path, string oldVersion, string newVersion)
@@ -149,6 +163,12 @@ internal static class NestedInstallerPathResolver
         var templates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach ((string oldToken, string newToken) in representations)
         {
+            string? allReplaced = ReplaceAllBounded(path, oldToken, newToken);
+            if (allReplaced is not null)
+            {
+                templates.Add(allReplaced);
+            }
+
             int index = path.IndexOf(oldToken, StringComparison.OrdinalIgnoreCase);
             while (index >= 0)
             {
@@ -165,6 +185,37 @@ internal static class NestedInstallerPathResolver
         }
 
         return [.. templates.Order(StringComparer.Ordinal)];
+    }
+
+    private static string? ReplaceAllBounded(string path, string oldToken, string newToken)
+    {
+        var result = new System.Text.StringBuilder(path.Length);
+        int copiedUntil = 0;
+        int replacements = 0;
+        int index = path.IndexOf(oldToken, StringComparison.OrdinalIgnoreCase);
+        while (index >= 0)
+        {
+            int end = index + oldToken.Length;
+            bool boundedBefore = index == 0 || !char.IsAsciiLetterOrDigit(path[index - 1]);
+            bool boundedAfter = end == path.Length || !char.IsAsciiLetterOrDigit(path[end]);
+            if (boundedBefore && boundedAfter)
+            {
+                result.Append(path, copiedUntil, index - copiedUntil);
+                result.Append(newToken);
+                copiedUntil = end;
+                replacements++;
+            }
+
+            index = path.IndexOf(oldToken, index + 1, StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (replacements == 0)
+        {
+            return null;
+        }
+
+        result.Append(path, copiedUntil, path.Length - copiedUntil);
+        return result.ToString();
     }
 }
 

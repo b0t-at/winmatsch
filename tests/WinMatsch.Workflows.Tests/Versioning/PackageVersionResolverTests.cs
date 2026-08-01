@@ -151,12 +151,17 @@ public sealed class PackageVersionResolverTests
     }
 
     [Fact]
-    public void Package_version_token_wins_over_trailing_dependency_version()
+    public void Multiple_package_and_dependency_versions_are_ambiguous()
     {
-        Assert.Equal(
-            "2.0.0",
-            PackageVersionResolver.ExtractUrlVersion(
-                new Uri("https://example.test/tool-v2.0.0-jre-17.0.exe")));
+        UrlVersionEvidence evidence = PackageVersionResolver.AnalyzeUrlVersion(
+            new Uri("https://example.test/tool-v2.0.0-jre-17.0.exe"));
+
+        Assert.True(evidence.IsAmbiguous);
+        Assert.Null(evidence.Version);
+        Assert.Collection(
+            evidence.Candidates,
+            candidate => Assert.Equal("17.0", candidate),
+            candidate => Assert.Equal("2.0.0", candidate));
     }
 
     [Fact]

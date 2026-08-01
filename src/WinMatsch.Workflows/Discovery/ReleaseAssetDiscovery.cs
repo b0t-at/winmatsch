@@ -34,6 +34,8 @@ public sealed record DiscoveredAsset
     public AssetContentEvidence? Content { get; init; }
 
     public AssetAnalysisEvidence? Analysis { get; init; }
+
+    public bool HasOperatingSystemConflict { get; init; }
 }
 
 /// <summary>External evidence associated with a release asset URL.</summary>
@@ -99,27 +101,30 @@ public static class ReleaseAssetDiscovery
                 .Where(static release => !release.IsDraft)
                 .SelectMany(
                     static release => release.Assets.Select(asset => (Release: release, Asset: asset)))
-                .Where(static pair => IsWindowsAsset(pair.Asset))
                 .Select(pair =>
                 {
                     evidenceByUrl.TryGetValue(pair.Asset.DownloadUri.AbsoluteUri, out ReleaseAssetEvidence? evidence);
-                    return new DiscoveredAsset
-                    {
-                        ReleaseId = pair.Release.Id,
-                        ReleaseTag = pair.Release.TagName,
-                        ReleaseName = pair.Release.Name,
-                        ReleaseUri = pair.Release.WebUri,
-                        IsPrerelease = pair.Release.IsPrerelease,
-                        ReleasePublishedAt = pair.Release.PublishedAt,
-                        AssetId = pair.Asset.Id,
-                        AssetName = pair.Asset.Name,
-                        DownloadUri = pair.Asset.DownloadUri,
-                        DeclaredContentType = pair.Asset.ContentType,
-                        DeclaredSize = pair.Asset.Size,
-                        AssetCreatedAt = pair.Asset.CreatedAt,
-                        Content = evidence?.Content,
-                        Analysis = evidence?.Analysis,
-                    };
+                    WindowsAssetClassification classification = ClassifyWindowsAsset(pair.Asset, evidence);
+                    return (pair.Release, pair.Asset, Evidence: evidence, Classification: classification);
+                })
+                .Where(static item => item.Classification.Include)
+                .Select(item => new DiscoveredAsset
+                {
+                    ReleaseId = item.Release.Id,
+                    ReleaseTag = item.Release.TagName,
+                    ReleaseName = item.Release.Name,
+                    ReleaseUri = item.Release.WebUri,
+                    IsPrerelease = item.Release.IsPrerelease,
+                    ReleasePublishedAt = item.Release.PublishedAt,
+                    AssetId = item.Asset.Id,
+                    AssetName = item.Asset.Name,
+                    DownloadUri = item.Asset.DownloadUri,
+                    DeclaredContentType = item.Asset.ContentType,
+                    DeclaredSize = item.Asset.Size,
+                    AssetCreatedAt = item.Asset.CreatedAt,
+                    Content = item.Evidence?.Content,
+                    Analysis = item.Evidence?.Analysis,
+                    HasOperatingSystemConflict = item.Classification.HasConflict,
                 })
                 .OrderByDescending(static asset => asset.ReleasePublishedAt)
                 .ThenByDescending(static asset => asset.ReleaseId)
@@ -128,27 +133,18 @@ public static class ReleaseAssetDiscovery
         ];
     }
 
-    private static bool IsWindowsAsset(ReleaseAsset asset)
+    private static WindowsAssetClassification ClassifyWindowsAsset(
+        ReleaseAsset asset,
+        ReleaseAssetEvidence? evidence)
     {
         string extension = Path.GetExtension(asset.Name);
-        if (_windowsExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
         bool hasWindowsSignal = _windowsTokens.Any(token => ContainsBounded(asset.Name, token));
-        if (hasWindowsSignal)
-        {
-            return true;
-        }
-
-        if (_nonWindowsTokens.Any(token => ContainsBounded(asset.Name, token)))
-        {
-            return false;
-        }
-
-        ArchitectureTokenEvidence architecture = ArchitectureTokenClassifier.Classify(asset.Name);
-        return architecture.Architecture is not null || architecture.IsAmbiguous;
+        bool hasNonWindowsSignal = _nonWindowsTokens.Any(token => ContainsBounded(asset.Name, token));
+        bool hasWindowsOnlyExtension = _windowsExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase);
+        bool hasAnalyzedWindowsContent = evidence?.Analysis is not null;
+        return new(
+            hasWindowsOnlyExtension || hasWindowsSignal || hasAnalyzedWindowsContent,
+            hasNonWindowsSignal && (hasWindowsOnlyExtension || hasWindowsSignal || hasAnalyzedWindowsContent));
     }
 
     private static bool ContainsBounded(string value, string token)
@@ -168,4 +164,6 @@ public static class ReleaseAssetDiscovery
 
         return false;
     }
+
+    private readonly record struct WindowsAssetClassification(bool Include, bool HasConflict);
 }

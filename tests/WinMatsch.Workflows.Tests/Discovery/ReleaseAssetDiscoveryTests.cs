@@ -63,7 +63,7 @@ public sealed class ReleaseAssetDiscoveryTests
     }
 
     [Fact]
-    public void Product_name_containing_source_is_not_dropped_when_architecture_is_explicit()
+    public void Product_name_containing_source_is_not_dropped_when_windows_is_explicit()
     {
         GitHubRelease release = CreateRelease(
             1,
@@ -71,8 +71,8 @@ public sealed class ReleaseAssetDiscoveryTests
             DateTimeOffset.UnixEpoch,
             new ReleaseAsset(
                 1,
-                "Resource-Editor-source-x64.zip",
-                new("https://example.test/Resource-Editor-source-x64.zip"),
+                "Resource-Editor-source-windows-x64.zip",
+                new("https://example.test/Resource-Editor-source-windows-x64.zip"),
                 "application/zip",
                 1,
                 0,
@@ -80,7 +80,7 @@ public sealed class ReleaseAssetDiscoveryTests
 
         DiscoveredAsset asset = Assert.Single(ReleaseAssetDiscovery.Discover([release]));
 
-        Assert.Equal("Resource-Editor-source-x64.zip", asset.AssetName);
+        Assert.Equal("Resource-Editor-source-windows-x64.zip", asset.AssetName);
     }
 
     [Fact]
@@ -111,14 +111,33 @@ public sealed class ReleaseAssetDiscoveryTests
             DateTimeOffset.UnixEpoch,
             new ReleaseAsset(
                 1,
-                "tool-x64-arm64.zip",
-                new("https://example.test/tool-x64-arm64.zip"),
+                "tool-windows-x64-arm64.zip",
+                new("https://example.test/tool-windows-x64-arm64.zip"),
                 "application/zip",
                 1,
                 0,
                 DateTimeOffset.UnixEpoch));
 
         Assert.Single(ReleaseAssetDiscovery.Discover([release]));
+    }
+
+    [Fact]
+    public void Architecture_only_archive_is_not_assumed_to_be_windows()
+    {
+        GitHubRelease release = CreateRelease(
+            1,
+            "v1.0.0",
+            DateTimeOffset.UnixEpoch,
+            new ReleaseAsset(
+                1,
+                "tool-x64.zip",
+                new("https://example.test/tool-x64.zip"),
+                "application/zip",
+                1,
+                0,
+                DateTimeOffset.UnixEpoch));
+
+        Assert.Empty(ReleaseAssetDiscovery.Discover([release]));
     }
 
     [Fact]
@@ -138,6 +157,27 @@ public sealed class ReleaseAssetDiscoveryTests
                 DateTimeOffset.UnixEpoch));
 
         Assert.Single(ReleaseAssetDiscovery.Discover([release]));
+    }
+
+    [Fact]
+    public void Conflicting_operating_system_tokens_are_retained_and_marked()
+    {
+        GitHubRelease release = CreateRelease(
+            1,
+            "v1.0.0",
+            DateTimeOffset.UnixEpoch,
+            new ReleaseAsset(
+                1,
+                "tool-windows-linux-x64.zip",
+                new("https://example.test/tool-windows-linux-x64.zip"),
+                "application/zip",
+                1,
+                0,
+                DateTimeOffset.UnixEpoch));
+
+        DiscoveredAsset asset = Assert.Single(ReleaseAssetDiscovery.Discover([release]));
+
+        Assert.True(asset.HasOperatingSystemConflict);
     }
 
     private static GitHubRelease CreateRelease(

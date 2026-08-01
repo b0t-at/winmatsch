@@ -635,12 +635,57 @@ public sealed class AssetMappingPlannerTests
         AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], previous) with
         {
             AllowStructuralRewrite = true,
+            AllowStableUrlContentChange = true,
         });
 
-        Assert.All(
-            plan.Decisions.Where(static decision => decision.Installer is not null),
-            static decision => Assert.Equal(Architecture.X64, decision.Installer!.Architecture));
-        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_DUPLICATE_INSTALLER_KEY");
+        Assert.True(plan.CanApply);
+        Assert.Single(plan.Decisions, static decision => decision.Kind == AssetMappingDecisionKind.Removed);
+        Assert.Equal(
+            Architecture.X64,
+            Assert.Single(plan.Decisions, static decision => decision.Installer is not null).Installer!.Architecture);
+    }
+
+    [Fact]
+    public void Entry_targeted_override_retires_other_shared_url_entry()
+    {
+        PackageIdentifier package = new("Vendor.Product");
+        Uri shared = new("https://example.test/2.0.0/tool-x64.exe");
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            Previous(0, shared.AbsoluteUri, Architecture.X86, InstallerType.Exe),
+            Previous(1, shared.AbsoluteUri, Architecture.X64, InstallerType.Exe),
+        ];
+        DiscoveredAsset asset = Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64);
+        var packs = new OverridePackSet(
+        [
+            new OverridePack
+            {
+                PackageIdentifier = package,
+                AssetMappings =
+                [
+                    new()
+                    {
+                        AssetPattern = "*",
+                        Entry = "x64",
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Exe,
+                    },
+                ],
+            },
+        ]);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], previous) with
+        {
+            PackageIdentifier = package,
+            OverridePacks = packs,
+            AllowStableUrlContentChange = true,
+        });
+
+        Assert.True(plan.CanApply);
+        Assert.Single(plan.Decisions, static decision => decision.Kind == AssetMappingDecisionKind.Removed);
+        Assert.Equal(
+            Architecture.X64,
+            Assert.Single(plan.Decisions, static decision => decision.Installer is not null).Installer!.Architecture);
     }
 
     [Fact]
@@ -728,7 +773,7 @@ public sealed class AssetMappingPlannerTests
         {
             PackageVersion = new("2.0"),
             NestedInstallerType = InstallerType.Portable,
-            NestedInstallerFiles = [new("runtime-12.0/tool-2.0.exe", "tool")],
+            NestedInstallerFiles = [new("package-2.0/runtime-12.0/tool-2.0.exe", "tool")],
         };
         DiscoveredAsset asset = Asset("tool-3.0-x64.zip", InstallerType.Zip, Architecture.X64);
         asset = asset with
@@ -744,16 +789,59 @@ public sealed class AssetMappingPlannerTests
                         NestedInstallerType = InstallerType.Portable,
                     },
                 ],
-                ArchiveEntries = ["runtime-12.0/tool-3.0.exe"],
-                NestedInstallerCandidates = ["runtime-12.0/tool-3.0.exe"],
+                ArchiveEntries = ["package-3.0/runtime-12.0/tool-3.0.exe"],
+                NestedInstallerCandidates = ["package-3.0/runtime-12.0/tool-3.0.exe"],
             },
         };
 
         AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous], "3.0"));
 
         Assert.Equal(
-            "runtime-12.0/tool-3.0.exe",
+            "package-3.0/runtime-12.0/tool-3.0.exe",
             Assert.Single(Assert.Single(plan.Decisions).Installer!.NestedInstallerFiles).RelativeFilePath);
+    }
+
+    [Fact]
+    public void Correlated_shape_reordering_produces_identical_plan()
+    {
+        DiscoveredAsset asset = Asset("tool.msixbundle", InstallerType.Msix, Architecture.X64);
+        AnalyzedInstallerShape x86 = new()
+        {
+            Architecture = Architecture.X86,
+            InstallerType = InstallerType.Msix,
+        };
+        AnalyzedInstallerShape x64 = new()
+        {
+            Architecture = Architecture.X64,
+            InstallerType = InstallerType.Msix,
+        };
+        DiscoveredAsset forward = asset with
+        {
+            Analysis = asset.Analysis! with { InstallerShapes = [x86, x64] },
+        };
+        DiscoveredAsset reversed = asset with
+        {
+            Analysis = asset.Analysis! with { InstallerShapes = [x64, x86] },
+        };
+
+        AssetMappingPlan first = AssetMappingPlanner.CreatePlan(Request([forward]));
+        AssetMappingPlan second = AssetMappingPlanner.CreatePlan(Request([reversed]));
+
+        Assert.Equal(first.DeterministicKey, second.DeterministicKey);
+    }
+
+    [Fact]
+    public void Operating_system_conflict_blocks_apply()
+    {
+        DiscoveredAsset asset = Asset("tool-windows-linux-x64.zip", InstallerType.Zip, Architecture.X64) with
+        {
+            HasOperatingSystemConflict = true,
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset]));
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "ASSET_OS_CONFLICT");
     }
 
     [Fact]

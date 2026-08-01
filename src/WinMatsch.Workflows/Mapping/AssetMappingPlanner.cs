@@ -48,42 +48,56 @@ public static class AssetMappingPlanner
 
         var usedByPosition = new Dictionary<int, Candidate>();
         var positionsByPhysicalAsset = new Dictionary<string, List<PreviousInstallerEntry>>(StringComparer.Ordinal);
+        var assignedCandidates = new HashSet<Candidate>();
         foreach (PreviousInstallerEntry previous in request.PreviousInstallers.OrderBy(static entry => entry.Position))
         {
-            Candidate[] exactByUrl = candidates
+            Candidate[] availableCandidates = request.AllowStructuralRewrite
+                ? [.. candidates.Where(candidate => !assignedCandidates.Contains(candidate))]
+                : candidates;
+            Candidate[] exactByUrl = availableCandidates
                 .Where(candidate => UriEquals(candidate.Asset.DownloadUri, previous.Url))
                 .ToArray();
             Candidate[] compatibleExact = exactByUrl
                 .Where(candidate => IsCompatible(previous, candidate))
                 .ToArray();
             bool preserveIntentionalDuplicate = request.PreviousInstallers.Count(
-                entry => UriEquals(entry.Url, previous.Url)) > 1;
+                    entry => UriEquals(entry.Url, previous.Url)) > 1
+                && !request.AllowStructuralRewrite;
             Candidate[] exact = compatibleExact.Length > 0
                 ? compatibleExact
                 : exactByUrl.Length == 1
-                    && (preserveIntentionalDuplicate
-                        || exactByUrl[0].Architecture is null
-                        || exactByUrl[0].Type is null)
+                    && ((preserveIntentionalDuplicate && exactByUrl[0].Entry is null)
+                        || ((exactByUrl[0].Architecture is null
+                                || exactByUrl[0].Type is null)
+                            && exactByUrl[0].Entry is null))
                     ? exactByUrl
                     : exactByUrl.Length > 1
                         ? exactByUrl
                         : [];
             Candidate[] matches = exact.Length > 0
                 ? exact
-                : candidates.Where(candidate => IsCompatible(previous, candidate)).ToArray();
+                : availableCandidates.Where(candidate => IsCompatible(previous, candidate)).ToArray();
             if (matches.Length == 0
-                && candidates.Length == 1
+                && availableCandidates.Length == 1
                 && request.PreviousInstallers.Length == 1)
             {
-                matches = candidates;
+                matches = availableCandidates;
             }
 
             if (matches.Length != 1)
             {
                 string code = matches.Length == 0 ? "MAP_REMOVED" : "MAP_AMBIGUOUS";
+                bool retiredByEntryOverride = matches.Length == 0
+                    && exactByUrl.Length > 0
+                    && exactByUrl.All(candidate =>
+                        candidate.Entry is not null && !EntryMatches(previous, candidate.Entry));
+                bool approvedRemoval = matches.Length == 0
+                    && (request.AllowStructuralRewrite || retiredByEntryOverride);
                 diagnostics.Add(new(
                     code,
-                    matches.Length == 0
+                    approvedRemoval
+                        ? AssetMappingDiagnosticSeverity.Information
+                        : matches.Length == 0
                         ? AssetMappingDiagnosticSeverity.Warning
                         : AssetMappingDiagnosticSeverity.Error,
                     matches.Length == 0
@@ -91,14 +105,18 @@ public static class AssetMappingPlanner
                         : $"Previous installer {previous.Position} matches multiple structurally compatible assets.",
                     previous.Url.AbsoluteUri,
                     previous.Position));
-                questions.Add(new(
-                    code,
-                    matches.Length == 0
-                        ? "Confirm removal or provide an explicit asset mapping override."
-                        : "Select the release asset for this previous installer.",
-                    [.. matches.Select(static candidate => candidate.Asset.DownloadUri.AbsoluteUri).Order(StringComparer.Ordinal)],
-                    previous.Url.AbsoluteUri,
-                    previous.Position));
+                if (!approvedRemoval)
+                {
+                    questions.Add(new(
+                        code,
+                        matches.Length == 0
+                            ? "Confirm removal or provide an explicit asset mapping override."
+                            : "Select the release asset for this previous installer.",
+                        [.. matches.Select(static candidate => candidate.Asset.DownloadUri.AbsoluteUri).Order(StringComparer.Ordinal)],
+                        previous.Url.AbsoluteUri,
+                        previous.Position));
+                }
+
                 decisions.Add(new(
                     matches.Length == 0 ? AssetMappingDecisionKind.Removed : AssetMappingDecisionKind.Unresolved,
                     previous.Position,
@@ -145,6 +163,7 @@ public static class AssetMappingPlanner
 
             priorUsers.Add(previous);
             usedByPosition[previous.Position] = candidate;
+            assignedCandidates.Add(candidate);
             AddMappedDecision(request, previous, candidate, decisions, diagnostics, questions);
         }
 
@@ -234,6 +253,12 @@ public static class AssetMappingPlanner
             [
                 .. decisions
                     .OrderBy(static decision => decision.PreviousPosition ?? int.MaxValue)
+                    .ThenBy(static decision => decision.Installer?.Architecture)
+                    .ThenBy(static decision => decision.Installer?.InstallerType)
+                    .ThenBy(static decision => decision.Installer?.Scope)
+                    .ThenBy(static decision => decision.Installer?.InstallerLocale?.Value, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(static decision => decision.Installer?.NestedInstallerType)
+                    .ThenBy(static decision => FormatNestedInstaller(decision.Installer), StringComparer.Ordinal)
                     .ThenBy(static decision => decision.Installer?.Url.AbsoluteUri, StringComparer.Ordinal)
                     .ThenBy(static decision => decision.Kind),
             ],
@@ -320,7 +345,8 @@ public static class AssetMappingPlanner
                 asset.DownloadUri.AbsoluteUri));
         }
 
-        foreach (string analysisError in asset.Analysis?.Validate() ?? [])
+        ImmutableArray<string> analysisErrors = asset.Analysis?.Validate() ?? [];
+        foreach (string analysisError in analysisErrors)
         {
             diagnostics.Add(new(
                 "ANALYSIS_EVIDENCE_INVALID",
@@ -330,6 +356,25 @@ public static class AssetMappingPlanner
             questions.Add(new(
                 "ANALYSIS_EVIDENCE_INVALID",
                 "Re-analyze the asset with bounded, normalized archive evidence.",
+                [],
+                asset.DownloadUri.AbsoluteUri));
+        }
+
+        if (!analysisErrors.IsEmpty)
+        {
+            yield break;
+        }
+
+        if (asset.HasOperatingSystemConflict)
+        {
+            diagnostics.Add(new(
+                "ASSET_OS_CONFLICT",
+                AssetMappingDiagnosticSeverity.Error,
+                "Asset name contains conflicting Windows and non-Windows operating-system evidence.",
+                asset.DownloadUri.AbsoluteUri));
+            questions.Add(new(
+                "ASSET_OS_CONFLICT",
+                "Confirm that this asset targets Windows.",
                 [],
                 asset.DownloadUri.AbsoluteUri));
         }
@@ -409,7 +454,17 @@ public static class AssetMappingPlanner
 
         ValidateCandidateVersion(asset, request.Version, diagnostics);
         AnalyzedInstallerShape?[] shapes = asset.Analysis is { InstallerShapes.IsEmpty: false } analysis
-            ? [.. analysis.InstallerShapes.Cast<AnalyzedInstallerShape?>()]
+            ?
+            [
+                .. analysis.InstallerShapes
+                    .OrderBy(static shape => shape.Architecture)
+                    .ThenBy(static shape => shape.InstallerType)
+                    .ThenBy(static shape => shape.Scope)
+                    .ThenBy(static shape => shape.InstallerLocale?.Value, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(static shape => shape.NestedInstallerType)
+                    .ThenBy(static shape => FormatNestedShape(shape), StringComparer.Ordinal)
+                    .Cast<AnalyzedInstallerShape?>(),
+            ]
             : [null];
         foreach (AnalyzedInstallerShape? shape in shapes)
         {
@@ -890,8 +945,18 @@ public static class AssetMappingPlanner
             return;
         }
 
-        string? urlVersion = PackageVersionResolver.ExtractUrlVersion(asset.DownloadUri);
-        if (urlVersion is not null
+        UrlVersionEvidence evidence = PackageVersionResolver.AnalyzeUrlVersion(asset.DownloadUri);
+        if (evidence.IsAmbiguous)
+        {
+            diagnostics.Add(new(
+                "MAP_VERSION_AMBIGUOUS",
+                AssetMappingDiagnosticSeverity.Error,
+                $"Asset URL contains multiple non-equivalent version tokens: {string.Join(", ", evidence.Candidates)}.",
+                asset.DownloadUri.AbsoluteUri));
+            return;
+        }
+
+        if (evidence.Version is { } urlVersion
             && PackageVersion.TryCreate(urlVersion, out PackageVersion? parsed)
             && !parsed!.IsEquivalentTo(resolution.Version!))
         {
@@ -1053,7 +1118,7 @@ public static class AssetMappingPlanner
                      .OfType<PlannedInstaller>()
                      .GroupBy(
                          static installer =>
-                             $"{installer.Architecture}|{installer.InstallerType}|{installer.Scope}|{installer.InstallerLocale}",
+                             $"{installer.Architecture}|{installer.InstallerType}|{installer.Scope}|{installer.InstallerLocale?.Value.ToUpperInvariant()}",
                          StringComparer.Ordinal))
         {
             if (group.Count() <= 1)
@@ -1080,6 +1145,24 @@ public static class AssetMappingPlanner
 
     private static string GetPhysicalAssetKey(DiscoveredAsset asset)
         => $"{asset.DownloadUri.AbsoluteUri}|{asset.Content?.Identity.Sha256}|{asset.Content?.Identity.SizeInBytes}";
+
+    private static string FormatNestedInstaller(PlannedInstaller? installer)
+        => installer is null
+            ? ""
+            : string.Join(
+                '|',
+                installer.NestedInstallerFiles
+                    .OrderBy(static file => file.RelativeFilePath, StringComparer.Ordinal)
+                    .ThenBy(static file => file.PortableCommandAlias, StringComparer.Ordinal)
+                    .Select(static file => $"{file.RelativeFilePath}=>{file.PortableCommandAlias}"));
+
+    private static string FormatNestedShape(AnalyzedInstallerShape shape)
+        => string.Join(
+            '|',
+            shape.NestedInstallerFiles
+                .OrderBy(static file => file.RelativeFilePath, StringComparer.Ordinal)
+                .ThenBy(static file => file.PortableCommandAlias, StringComparer.Ordinal)
+                .Select(static file => $"{file.RelativeFilePath}=>{file.PortableCommandAlias}"));
 
     private static bool PatternMatches(string pattern, string value)
     {
