@@ -56,6 +56,17 @@ public interface IGitHubRepositoryClient
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Atomically creates a branch and fails if any branch with the same name already exists,
+    /// even when it points at the requested SHA. Use this as a repository-side CAS reservation.
+    /// </summary>
+    public Task<GitReference> CreateUniqueReferenceAsync(
+        RepositoryCoordinates repository,
+        string branchName,
+        string sha,
+        MutationRequest mutation,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Deletes a branch without a head-SHA precondition. GitHub's REST delete endpoint is
     /// unconditional; callers must only use this when unconditional deletion is acceptable.
     /// </summary>

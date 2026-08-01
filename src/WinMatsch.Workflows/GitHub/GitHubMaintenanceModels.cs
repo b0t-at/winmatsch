@@ -24,6 +24,8 @@ public sealed record GitHubMaintenanceResult
     public ImmutableArray<GitHubLifecycleAuditEntry> Audit { get; init; } = [];
 
     public ImmutableArray<GitHubLifecycleDiagnostic> Diagnostics { get; init; } = [];
+
+    public RemoteMutationState RemoteState { get; init; } = new();
 }
 
 public sealed record GitHubSyncRequest(
@@ -129,6 +131,21 @@ public sealed record FeedbackPolicy
     public TimeSpan StaleEscalationWindow { get; init; } = TimeSpan.FromDays(3);
 
     public bool ApplyKnownSafeResponses { get; init; }
+
+    public ImmutableHashSet<string> TrustedCommentAuthors { get; init; } =
+        ImmutableHashSet.Create(
+            StringComparer.OrdinalIgnoreCase,
+            "wingetbot",
+            "winget-bot",
+            "github-actions[bot]");
+
+    public ImmutableHashSet<string> TrustedLabels { get; init; } =
+        ImmutableHashSet.Create(
+            StringComparer.OrdinalIgnoreCase,
+            "duplicate-entry",
+            "hash-mismatch",
+            "dependency-infrastructure",
+            "transient-internal-error");
 }
 
 public sealed record FeedbackRetryMetadata(

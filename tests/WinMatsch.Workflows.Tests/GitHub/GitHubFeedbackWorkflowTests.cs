@@ -22,6 +22,22 @@ public sealed class GitHubFeedbackWorkflowTests
     }
 
     [Fact]
+    public void Untrusted_comment_cannot_trigger_automated_repair()
+    {
+        PullRequestObservation observation = Observation("Installer hash mismatch") with
+        {
+            Comments =
+            [
+                new("untrusted-contributor", "Installer hash mismatch", DateTimeOffset.UtcNow),
+            ],
+        };
+
+        FeedbackClassification classification = GitHubFeedbackWorkflow.Classify(observation);
+
+        Assert.Equal(FeedbackClassification.None, classification);
+    }
+
+    [Fact]
     public async Task Infrastructure_failure_queues_retry_and_never_mutates_manifests()
     {
         var client = new FakeGitHubClient();
@@ -41,6 +57,27 @@ public sealed class GitHubFeedbackWorkflowTests
         Assert.Single(result.RetryMetadata);
         Assert.Equal(0, repairs.Calls);
         Assert.Equal(["comment"], client.Mutations);
+    }
+
+    [Fact]
+    public async Task Infrastructure_response_failure_escalates_instead_of_throwing()
+    {
+        var client = new FakeGitHubClient { FailMutation = "comment" };
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            new FakeRepairPlanner(),
+            new FakeClock());
+
+        FeedbackResult result = await workflow.ProcessAsync(
+            GitHubLifecycleTestSupport.Upstream,
+            [Observation("Dependency service unavailable")],
+            new FeedbackPolicy { ApplyKnownSafeResponses = true });
+
+        Assert.Equal(
+            PullRequestLifecycleAction.EscalateToHuman,
+            result.Statuses[0].RecommendedAction);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH3207");
     }
 
     [Fact]

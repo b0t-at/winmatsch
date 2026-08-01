@@ -389,6 +389,38 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             });
     }
 
+    public Task<GitReference> CreateUniqueReferenceAsync(
+        RepositoryCoordinates repository,
+        string branchName,
+        string sha,
+        MutationRequest mutation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentException.ThrowIfNullOrWhiteSpace(branchName);
+        ValidateSha(sha);
+        ArgumentNullException.ThrowIfNull(mutation);
+        string fingerprint = $"create-unique-ref|{repository}|{branchName}|{sha}";
+        return ExecuteMutationAsync(
+            mutation,
+            fingerprint,
+            async () =>
+            {
+                var request = new CreateReferenceDto
+                {
+                    Ref = $"refs/heads/{branchName}",
+                    Sha = sha,
+                };
+                RestReferenceDto created = await _transport.PostAsync(
+                    $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/git/refs",
+                    request,
+                    GitHubJsonContext.Default.CreateReferenceDto,
+                    GitHubJsonContext.Default.RestReferenceDto,
+                    cancellationToken).ConfigureAwait(false);
+                return new GitReference(RemoveHeadsPrefix(created.Ref), created.Object.Sha);
+            });
+    }
+
     public Task<bool> DeleteReferenceAsync(
         RepositoryCoordinates repository,
         string branchName,

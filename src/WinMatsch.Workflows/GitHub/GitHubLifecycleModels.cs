@@ -154,6 +154,8 @@ public sealed record GitHubSubmissionRequest
     public ImmutableArray<RepositoryInstallerEvidence> RepositoryEvidence { get; init; } = [];
 
     public ImmutableArray<string> VanityUrlAnnotations { get; init; } = [];
+
+    public DateTimeOffset? ReleaseUpdatedAt { get; init; }
 }
 
 public sealed record GitHubSubmissionPlan
@@ -229,5 +231,4 @@ public sealed record GitHubBranchNameContext(
     PackageIdentifier PackageIdentifier,
     PackageVersion PackageVersion,
     GitHubManifestOperation Operation,
-    DateTimeOffset Timestamp,
-    string IdempotencyKey);
+    long? SupersedesPullRequestNumber);

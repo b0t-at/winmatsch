@@ -28,14 +28,12 @@ public sealed class DefaultGitHubBranchNameGenerator : IGitHubBranchNameGenerato
     public string Create(GitHubBranchNameContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        string operation = NormalizeSegment(context.Operation.ToString());
         string package = NormalizeSegment(context.PackageIdentifier.Value);
         string version = NormalizeSegment(context.PackageVersion.Value);
-        string nonce = context.IdempotencyKey.Length > 10
-            ? context.IdempotencyKey[..10]
-            : context.IdempotencyKey;
-        nonce = NormalizeSegment(nonce);
-        return $"winmatsch/{operation}/{package}/{version}/{context.Timestamp:yyyyMMddHHmmss}-{nonce}";
+        string replacement = context.SupersedesPullRequestNumber is { } number
+            ? $"/replacement-{number}"
+            : "";
+        return $"winmatsch/submissions/{package}/{version}{replacement}";
     }
 
     private static string NormalizeSegment(string value)

@@ -55,6 +55,51 @@ public sealed class GitHubMutationOperationsTests
     }
 
     [Fact]
+    public async Task Unique_reference_creation_uses_atomic_post_without_prefetch()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(request =>
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Contains("\"ref\":\"refs/heads/reservation\"", request.Body, StringComparison.Ordinal);
+            return GitHubClientTestSupport.Json(
+                $"{{\"ref\":\"refs/heads/reservation\",\"object\":{{\"sha\":\"{HeadSha}\"}}}}",
+                HttpStatusCode.Created);
+        });
+
+        GitReference reference = await GitHubClientTestSupport.CreateClient(handler)
+            .CreateUniqueReferenceAsync(
+                _repository,
+                "reservation",
+                HeadSha,
+                new MutationRequest("unique-ref-1"),
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal(HeadSha, reference.Sha);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Unique_reference_creation_surfaces_existing_branch_conflict()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """{"message":"Reference already exists"}""",
+            HttpStatusCode.UnprocessableEntity));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler).CreateUniqueReferenceAsync(
+                _repository,
+                "reservation",
+                HeadSha,
+                new MutationRequest("unique-ref-conflict"),
+                TestContext.Current.CancellationToken));
+
+        Assert.True(exception.IsConflict);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
     public async Task Reference_deletion_is_explicitly_unconditional()
     {
         var handler = new ScriptedHttpMessageHandler();

@@ -43,7 +43,25 @@ public sealed class GitHubMaintenanceWorkflowTests
     }
 
     [Fact]
-    public async Task Cleanup_deletes_only_proven_tool_owned_closed_pr_branches()
+    public async Task Sync_failure_returns_uncertain_remote_state()
+    {
+        var client = new FakeGitHubClient { FailMutation = "sync" };
+        client.SetForkHead("cccccccccccccccccccccccccccccccccccccccc");
+
+        GitHubMaintenanceResult result = await new GitHubMaintenanceWorkflow(client, new FakeClock())
+            .SyncAsync(new(
+                GitHubLifecycleTestSupport.Upstream,
+                GitHubLifecycleTestSupport.Fork,
+                WorkflowExecutionMode.Apply,
+                "sync-failure"));
+
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.Equal(RemoteOperationKind.SyncFork, result.RemoteState.LastAttemptedOperation);
+        Assert.True(result.RemoteState.RemoteOutcomeUncertain);
+    }
+
+    [Fact]
+    public async Task Cleanup_identifies_owned_branch_but_refuses_racey_unconditional_delete()
     {
         var client = new FakeGitHubClient();
         PullRequestInfo owned = GitHubLifecycleTestSupport.PullRequest(
@@ -69,10 +87,11 @@ public sealed class GitHubMaintenanceWorkflowTests
             WorkflowExecutionMode.Apply,
             "cleanup-1"));
 
-        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
-        Assert.Equal(["delete"], client.Mutations);
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.Empty(client.Mutations);
         Assert.Single(result.Plan.Operations);
         Assert.Contains("owned", result.Plan.Operations[0].Target, StringComparison.Ordinal);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH3009");
     }
 
     [Fact]
@@ -99,7 +118,11 @@ public sealed class GitHubMaintenanceWorkflowTests
         PullRequestInfo oldPullRequest = GitHubLifecycleTestSupport.PullRequest(
             14,
             branch: "winmatsch/update/example-app/old");
-        PullRequestInfo replacement = GitHubLifecycleTestSupport.PullRequest(15);
+        PullRequestInfo replacement = GitHubLifecycleTestSupport.PullRequest(15) with
+        {
+            Body = GitHubLifecycleTestSupport.PullRequest(15).Body + "\nSupersedes: #14",
+            HeadBranch = "winmatsch/update/example-app/replacement",
+        };
         client.AddPullRequest(oldPullRequest);
         client.AddPullRequest(replacement);
         var workflow = new GitHubMaintenanceWorkflow(client, new FakeClock());
@@ -118,7 +141,36 @@ public sealed class GitHubMaintenanceWorkflowTests
         Assert.Equal(GitHubLifecycleResultCode.InvalidPlan, denied.Code);
         Assert.Equal(GitHubLifecycleResultCode.Succeeded, closed.Code);
         Assert.Equal(["comment", "close"], client.Mutations);
-        Assert.Contains("superseded", closed.Audit[0].Message, StringComparison.Ordinal);
+        Assert.Contains(closed.Audit, audit => audit.Message.Contains("superseded", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Superseded_close_failure_returns_comment_audit_and_uncertain_close_state()
+    {
+        var client = new FakeGitHubClient { FailMutation = "close" };
+        PullRequestInfo oldPullRequest = GitHubLifecycleTestSupport.PullRequest(
+            16,
+            branch: "winmatsch/update/example-app/old");
+        PullRequestInfo replacement = GitHubLifecycleTestSupport.PullRequest(17) with
+        {
+            Body = GitHubLifecycleTestSupport.PullRequest(17).Body + "\nSupersedes: #16",
+            HeadBranch = "winmatsch/update/example-app/replacement",
+        };
+        client.AddPullRequest(oldPullRequest);
+        client.AddPullRequest(replacement);
+
+        GitHubMaintenanceResult result = await new GitHubMaintenanceWorkflow(client, new FakeClock())
+            .CloseSupersededAsync(
+                GitHubLifecycleTestSupport.Upstream,
+                Observation(oldPullRequest, toolOwned: true),
+                replacement,
+                "supersede-partial");
+
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.Single(result.Audit);
+        Assert.Equal(RemoteOperationKind.ClosePullRequest, result.RemoteState.LastAttemptedOperation);
+        Assert.True(result.RemoteState.RemoteOutcomeUncertain);
+        Assert.Equal(["comment"], client.Mutations);
     }
 
     [Fact]

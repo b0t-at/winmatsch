@@ -114,6 +114,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 {
     private readonly Dictionary<RepositoryCoordinates, RepositoryInfo> _repositories = [];
     private readonly Dictionary<(RepositoryCoordinates Repository, string Branch), GitReference> _references = [];
+    private readonly Dictionary<(RepositoryCoordinates Repository, string Path, string Reference), byte[]> _contents = [];
     private readonly List<PullRequestInfo> _pullRequests = [];
     private EventHandler<RateLimitInfo>? _rateLimitObserved;
 
@@ -158,6 +159,8 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     public string? CancelMutation { get; set; }
 
     public bool ForkAhead { get; set; }
+
+    public string PullRequestHeadSha { get; set; } = GitHubLifecycleTestSupport.CommitSha;
 
     public IReadOnlyList<PullRequestInfo> PullRequests => _pullRequests;
 
@@ -205,7 +208,24 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         string path,
         string reference,
         CancellationToken cancellationToken = default)
-        => throw new NotSupportedException();
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_contents.TryGetValue((repository, path, reference), out byte[]? bytes))
+        {
+            return Task.FromException<RepositoryContent>(new GitHubApiException(
+                "not found",
+                HttpStatusCode.NotFound,
+                null));
+        }
+
+        return Task.FromResult(new RepositoryContent(
+            Path.GetFileName(path),
+            path,
+            WorkflowFileChange.Hash(bytes),
+            bytes.Length,
+            "base64",
+            bytes));
+    }
 
     public Task<IReadOnlyList<RepositoryTreeEntry>> GetTreeAsync(
         RepositoryCoordinates repository,
@@ -261,6 +281,27 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         MutationRequest mutation,
         CancellationToken cancellationToken = default)
     {
+        BeforeMutation("branch", cancellationToken);
+        var result = new GitReference(branchName, sha);
+        _references.Add((repository, branchName), result);
+        return Task.FromResult(result);
+    }
+
+    public Task<GitReference> CreateUniqueReferenceAsync(
+        RepositoryCoordinates repository,
+        string branchName,
+        string sha,
+        MutationRequest mutation,
+        CancellationToken cancellationToken = default)
+    {
+        if (_references.ContainsKey((repository, branchName)))
+        {
+            return Task.FromException<GitReference>(new GitHubApiException(
+                "reference exists",
+                HttpStatusCode.UnprocessableEntity,
+                null));
+        }
+
         BeforeMutation("branch", cancellationToken);
         var result = new GitReference(branchName, sha);
         _references.Add((repository, branchName), result);
@@ -381,7 +422,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
             request.Draft,
             request.HeadOwner,
             request.HeadBranch,
-            GitHubLifecycleTestSupport.CommitSha,
+            PullRequestHeadSha,
             request.BaseBranch,
             new Uri("https://github.invalid/upstream/repo/pull/42"),
             DateTimeOffset.UtcNow,
@@ -429,6 +470,13 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public void AddBranch(RepositoryCoordinates repository, string name, string sha)
         => _references[(repository, name)] = new(name, sha);
+
+    public void SetContent(
+        RepositoryCoordinates repository,
+        string path,
+        string reference,
+        ReadOnlySpan<byte> content)
+        => _contents[(repository, path, reference)] = content.ToArray();
 
     public void SetForkHead(string sha)
     {

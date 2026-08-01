@@ -148,6 +148,23 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
+    public async Task Pull_request_with_wrong_head_is_never_reported_as_success()
+    {
+        var client = new FakeGitHubClient
+        {
+            PullRequestHeadSha = "cccccccccccccccccccccccccccccccccccccccc",
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.True(result.RemoteState.RemoteOutcomeUncertain);
+        Assert.False(result.Applied);
+    }
+
+    [Fact]
     public async Task Apply_creates_fresh_branch_commit_and_pull_request()
     {
         var client = new FakeGitHubClient();
@@ -165,6 +182,39 @@ public sealed class GitHubLifecycleWorkflowTests
         Assert.True(result.RemoteState.PullRequestCreated);
         Assert.Equal(1, preflight.BoundaryCalls);
         Assert.Equal(1, artifacts.Calls);
+    }
+
+    [Fact]
+    public async Task Repository_side_branch_reservation_blocks_cross_process_duplicate()
+    {
+        var client = new FakeGitHubClient();
+        client.AddBranch(
+            GitHubLifecycleTestSupport.Fork,
+            "winmatsch/update/example-app/2.0.0/test",
+            GitHubLifecycleTestSupport.UpstreamSha);
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Conflict, result.Code);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public void Production_branch_identity_is_stable_for_the_same_package_version()
+    {
+        var generator = new DefaultGitHubBranchNameGenerator();
+        var context = new GitHubBranchNameContext(
+            new PackageIdentifier("Example.App"),
+            new PackageVersion("2.0+build"),
+            GitHubManifestOperation.Update,
+            null);
+
+        string first = generator.Create(context);
+        string second = generator.Create(context);
+
+        Assert.Equal(first, second);
+        Assert.Equal("winmatsch/submissions/example-app/2-0-build", first);
     }
 
     [Fact]
@@ -242,6 +292,55 @@ public sealed class GitHubLifecycleWorkflowTests
         Assert.Equal(["branch"], client.Mutations);
     }
 
+    [Fact]
+    public async Task Remote_existing_path_precondition_is_checked_at_pinned_upstream_sha()
+    {
+        var client = new FakeGitHubClient();
+        LocalOperationPlan original = GitHubLifecycleTestSupport.Plan();
+        WorkflowFileChange add = original.FileChanges[0];
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            add.RepositoryPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            "newer upstream content"u8);
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Conflict, result.Code);
+        Assert.Equal(["branch"], client.Mutations);
+        Assert.False(result.RemoteState.CommitCreated);
+    }
+
+    [Fact]
+    public async Task Remote_update_hash_must_match_local_before_document()
+    {
+        string path = "manifests/e/Example/App/2.0.0/Example.App.yaml";
+        byte[] expected = "expected"u8.ToArray();
+        var change = new WorkflowFileChange(
+            PlannedChangeKind.Update,
+            path,
+            "updated"u8,
+            ExpectedFileState.Present,
+            WorkflowFileChange.Hash(expected));
+        LocalOperationPlan local = GitHubLifecycleTestSupport.Plan([change]) with
+        {
+            BeforeDocuments = [new RawManifestDocument(path, expected)],
+        };
+        var client = new FakeGitHubClient();
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            path,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            "changed remotely"u8);
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request() with { LocalPlan = local });
+
+        Assert.Equal(GitHubLifecycleResultCode.Conflict, result.Code);
+        Assert.Equal(["branch"], client.Mutations);
+    }
+
     [Theory]
     [InlineData("branch", false, false)]
     [InlineData("commit", true, false)]
@@ -263,7 +362,7 @@ public sealed class GitHubLifecycleWorkflowTests
             result.Code);
         Assert.Equal(branchCreated, result.RemoteState.BranchCreated);
         Assert.Equal(commitCreated, result.RemoteState.CommitCreated);
-        Assert.True(result.RemoteState.RemoteOutcomeUncertain);
+        Assert.Equal(boundary != "commit", result.RemoteState.RemoteOutcomeUncertain);
         Assert.False(result.Applied);
     }
 
@@ -369,17 +468,57 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
+    public void Signed_url_query_values_are_redacted_from_public_text()
+    {
+        string redacted = GitHubSubmissionFormatter.Redact(
+            "https://example.invalid/file?sv=1&sig=TOPSECRET&x-amz-signature=AWSSECRET");
+
+        Assert.DoesNotContain("TOPSECRET", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("AWSSECRET", redacted, StringComparison.Ordinal);
+        Assert.Contains("sig=[REDACTED]", redacted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Release_freshness_delay_requires_evidence_and_blocks_early_submission()
+    {
+        GitHubSubmissionRequest missing = GitHubLifecycleTestSupport.Request() with
+        {
+            Policy = new() { MinimumReleaseFreshness = TimeSpan.FromHours(1) },
+        };
+        GitHubSubmissionRequest early = missing with
+        {
+            ReleaseUpdatedAt = DateTimeOffset.UtcNow,
+        };
+
+        Assert.Contains(
+            GitHubLifecycleWorkflow.Plan(missing).Diagnostics,
+            diagnostic => diagnostic.Code == "GH1014");
+        Assert.Contains(
+            GitHubLifecycleWorkflow.Plan(early).Diagnostics,
+            diagnostic => diagnostic.Code == "GH1015");
+    }
+
+    [Fact]
     public async Task Public_result_output_uses_source_generated_serialization_without_secrets()
     {
         var client = new FakeGitHubClient();
-        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
-            .ExecuteAsync(GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+        var artifacts = new FakeArtifactRevalidator
+        {
+            Result = new(
+                false,
+                [new("GH_SECRET", "Failed https://example.invalid/file?sig=TOPSECRET")]),
+        };
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(
+                client,
+                artifacts: artifacts)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
 
         string json = JsonSerializer.Serialize(
             GitHubLifecycleOutput.FromResult(result),
             GitHubWorkflowJsonContext.Default.GitHubLifecycleOutput);
 
-        Assert.Contains("\"code\": \"Planned\"", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("secret", json, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\"code\": \"ValidationFailed\"", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("TOPSECRET", json, StringComparison.Ordinal);
+        Assert.Contains("sig=[REDACTED]", json, StringComparison.Ordinal);
     }
 }

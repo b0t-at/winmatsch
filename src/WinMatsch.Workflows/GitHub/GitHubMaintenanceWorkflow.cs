@@ -61,15 +61,39 @@ public sealed class GitHubMaintenanceWorkflow
             return new() { Code = GitHubLifecycleResultCode.Planned, Plan = plan };
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        _ = await _gitHub.SyncForkAsync(
-            request.Fork,
-            fork.Name,
-            new MutationRequest($"{request.IdempotencyKey}:sync"),
-            cancellationToken).ConfigureAwait(false);
-        BranchState refreshed = await _gitHub.GetDefaultBranchAsync(
-            request.Fork,
-            cancellationToken).ConfigureAwait(false);
+        BranchState refreshed;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _ = await _gitHub.SyncForkAsync(
+                request.Fork,
+                fork.Name,
+                new MutationRequest($"{request.IdempotencyKey}:sync"),
+                cancellationToken).ConfigureAwait(false);
+            refreshed = await _gitHub.GetDefaultBranchAsync(
+                request.Fork,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is GitHubApiException or OperationCanceledException)
+        {
+            return new()
+            {
+                Code = exception is OperationCanceledException
+                    ? GitHubLifecycleResultCode.Cancelled
+                    : GitHubLifecycleResultCode.RemoteFailure,
+                Plan = plan,
+                Diagnostics =
+                [
+                    new("GH3013", GitHubSubmissionFormatter.Redact(exception.Message)),
+                ],
+                RemoteState = new()
+                {
+                    LastAttemptedOperation = RemoteOperationKind.SyncFork,
+                    RemoteOutcomeUncertain = true,
+                },
+            };
+        }
+
         if (!string.Equals(refreshed.HeadSha, upstream.HeadSha, StringComparison.Ordinal))
         {
             return new()
@@ -123,7 +147,7 @@ public sealed class GitHubMaintenanceWorkflow
                 .. candidates.Select(candidate => new PlannedRemoteOperation(
                     RemoteOperationKind.DeleteBranch,
                     $"{request.Fork}:{candidate.Branch.Name}",
-                    $"Delete tool-owned branch associated with closed PR #{candidate.PullRequest.Number}.")),
+                    $"Manually delete the tool-owned branch associated with closed PR #{candidate.PullRequest.Number}; GitHub offers no atomic expected-SHA delete.")),
             ],
         };
         if (candidates.Count == 0)
@@ -136,45 +160,16 @@ public sealed class GitHubMaintenanceWorkflow
             return new() { Code = GitHubLifecycleResultCode.Planned, Plan = plan };
         }
 
-        var audit = ImmutableArray.CreateBuilder<GitHubLifecycleAuditEntry>();
-        foreach ((BranchState candidate, PullRequestInfo pullRequest) in candidates)
-        {
-            PullRequestInfo freshPullRequest = await _gitHub.GetPullRequestAsync(
-                request.Upstream,
-                pullRequest.Number,
-                cancellationToken).ConfigureAwait(false);
-            GitReference? fresh = await _gitHub.GetReferenceAsync(
-                request.Fork,
-                candidate.Name,
-                cancellationToken).ConfigureAwait(false);
-            if (fresh is null
-                || freshPullRequest.State != PullRequestState.Closed
-                || !string.Equals(fresh.Sha, candidate.HeadSha, StringComparison.Ordinal)
-                || !string.Equals(freshPullRequest.HeadSha, candidate.HeadSha, StringComparison.Ordinal))
-            {
-                return new()
-                {
-                    Code = GitHubLifecycleResultCode.Conflict,
-                    Plan = plan,
-                    Audit = audit.ToImmutable(),
-                    Diagnostics = [new("GH3004", $"Branch '{candidate.Name}' changed during cleanup.")],
-                };
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            _ = await _gitHub.DeleteReferenceAsync(
-                request.Fork,
-                candidate.Name,
-                new MutationRequest($"{request.IdempotencyKey}:delete:{candidate.Name}"),
-                cancellationToken).ConfigureAwait(false);
-            audit.Add(Audit("GH3005", $"Deleted proven tool-owned stale branch '{candidate.Name}'."));
-        }
-
         return new()
         {
-            Code = GitHubLifecycleResultCode.Succeeded,
+            Code = GitHubLifecycleResultCode.HumanEscalationRequired,
             Plan = plan,
-            Audit = audit.ToImmutable(),
+            Diagnostics =
+            [
+                new(
+                    "GH3009",
+                    "Automatic cleanup is disabled because GitHub branch deletion is unconditional and cannot protect a concurrent push."),
+            ],
         };
     }
 
@@ -261,9 +256,17 @@ public sealed class GitHubMaintenanceWorkflow
             upstream,
             oldPullRequest.PullRequest.Number,
             cancellationToken).ConfigureAwait(false);
+        string? oldAssociation = AssociationMarker(freshOld.Body);
         if (freshReplacement.Number == freshOld.Number
             || freshReplacement.State != PullRequestState.Open
             || freshOld.State != PullRequestState.Open
+            || oldAssociation is null
+            || !string.Equals(AssociationMarker(freshReplacement.Body), oldAssociation, StringComparison.Ordinal)
+            || freshReplacement.Body?.Contains(
+                $"Supersedes: #{freshOld.Number}",
+                StringComparison.Ordinal) != true
+            || !freshReplacement.HeadBranch.StartsWith("winmatsch/", StringComparison.Ordinal)
+            || !string.Equals(freshReplacement.BaseBranch, freshOld.BaseBranch, StringComparison.Ordinal)
             || !string.Equals(
                 freshOld.HeadOwner,
                 oldPullRequest.PullRequest.HeadOwner,
@@ -282,29 +285,88 @@ public sealed class GitHubMaintenanceWorkflow
             };
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        _ = await _gitHub.CommentOnPullRequestAsync(
-            upstream,
-            freshOld.Number,
-            $"Superseded by #{freshReplacement.Number}. Closing this tool-owned PR for the stable reason `superseded`.",
-            new MutationRequest($"{idempotencyKey}:superseded-comment"),
-            cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-        _ = await _gitHub.ClosePullRequestAsync(
-            upstream,
-            freshOld.Number,
-            new MutationRequest($"{idempotencyKey}:superseded-close"),
-            cancellationToken).ConfigureAwait(false);
+        var audit = ImmutableArray.CreateBuilder<GitHubLifecycleAuditEntry>();
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _ = await _gitHub.CommentOnPullRequestAsync(
+                upstream,
+                freshOld.Number,
+                $"Superseded by #{freshReplacement.Number}. Closing this tool-owned PR for the stable reason `superseded`.",
+                new MutationRequest($"{idempotencyKey}:superseded-comment"),
+                cancellationToken).ConfigureAwait(false);
+            audit.Add(Audit("GH3008", $"Cross-linked replacement PR #{freshReplacement.Number}."));
+        }
+        catch (Exception exception) when (exception is GitHubApiException or OperationCanceledException)
+        {
+            return PartialMaintenanceFailure(
+                plan,
+                audit,
+                RemoteOperationKind.Comment,
+                "GH3010",
+                exception);
+        }
+
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _ = await _gitHub.ClosePullRequestAsync(
+                upstream,
+                freshOld.Number,
+                new MutationRequest($"{idempotencyKey}:superseded-close"),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is GitHubApiException or OperationCanceledException)
+        {
+            return PartialMaintenanceFailure(
+                plan,
+                audit,
+                RemoteOperationKind.ClosePullRequest,
+                "GH3011",
+                exception);
+        }
+
+        audit.Add(Audit("GH3012", $"Closed tool-owned PR #{freshOld.Number} as superseded."));
         return new()
         {
             Code = GitHubLifecycleResultCode.Succeeded,
             Plan = plan,
-            Audit = [Audit("GH3008", $"Closed tool-owned PR #{freshOld.Number} as superseded by #{freshReplacement.Number}.")],
+            Audit = audit.ToImmutable(),
         };
     }
 
     private GitHubLifecycleAuditEntry Audit(string code, string message)
         => new(_clock.UtcNow, code, message);
+
+    private static string? AssociationMarker(string? body)
+        => body?.Split('\n', StringSplitOptions.TrimEntries)
+            .FirstOrDefault(static line => line.StartsWith(
+                "<!-- winmatsch:package=",
+                StringComparison.Ordinal));
+
+    private static GitHubMaintenanceResult PartialMaintenanceFailure(
+        GitHubMaintenancePlan plan,
+        ImmutableArray<GitHubLifecycleAuditEntry>.Builder audit,
+        RemoteOperationKind operation,
+        string code,
+        Exception exception)
+        => new()
+        {
+            Code = exception is OperationCanceledException
+                ? GitHubLifecycleResultCode.Cancelled
+                : GitHubLifecycleResultCode.RemoteFailure,
+            Plan = plan,
+            Audit = audit.ToImmutable(),
+            Diagnostics =
+            [
+                new(code, GitHubSubmissionFormatter.Redact(exception.Message)),
+            ],
+            RemoteState = new()
+            {
+                LastAttemptedOperation = operation,
+                RemoteOutcomeUncertain = true,
+            },
+        };
 
     private static GitHubMaintenanceResult Result(
         GitHubLifecycleResultCode code,

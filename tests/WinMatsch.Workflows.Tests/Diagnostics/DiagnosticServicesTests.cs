@@ -349,6 +349,14 @@ internal sealed class FakeGitHubRepositoryClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
         => throw new NotSupportedException();
 
+    public Task<GitReference> CreateUniqueReferenceAsync(
+        RepositoryCoordinates repository,
+        string branchName,
+        string sha,
+        MutationRequest mutation,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException();
+
     public Task<bool> DeleteReferenceAsync(
         RepositoryCoordinates repository,
         string branchName,

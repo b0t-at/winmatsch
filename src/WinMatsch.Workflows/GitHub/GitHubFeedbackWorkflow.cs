@@ -40,7 +40,7 @@ public sealed class GitHubFeedbackWorkflow
                 continue;
             }
 
-            FeedbackClassification classification = Classify(observation);
+            FeedbackClassification classification = Classify(observation, policy);
             switch (classification)
             {
                 case FeedbackClassification.DuplicateEntry:
@@ -96,10 +96,6 @@ public sealed class GitHubFeedbackWorkflow
                             break;
                         }
 
-                        statuses.Add(Status(
-                            observation,
-                            PullRequestLifecycleAction.RepairManifest,
-                            "Approved repair was routed through full submission preflight."));
                         if (result.RemoteState.PullRequestNumber is { } replacementNumber)
                         {
                             GitHubLifecycleDiagnostic? supersedeFailure = await CloseSupersededAsync(
@@ -110,9 +106,18 @@ public sealed class GitHubFeedbackWorkflow
                             if (supersedeFailure is not null)
                             {
                                 diagnostics.Add(supersedeFailure);
+                                statuses.Add(Status(
+                                    observation,
+                                    PullRequestLifecycleAction.EscalateToHuman,
+                                    "Replacement exists, but superseded PR hygiene did not complete safely."));
+                                break;
                             }
                         }
 
+                        statuses.Add(Status(
+                            observation,
+                            PullRequestLifecycleAction.RepairManifest,
+                            "Approved repair was routed through full submission preflight."));
                         retries.Add(new(
                             observation.PullRequest.Number,
                             classification,
@@ -135,13 +140,28 @@ public sealed class GitHubFeedbackWorkflow
                         null));
                     if (policy.ApplyKnownSafeResponses)
                     {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        _ = await _gitHub.CommentOnPullRequestAsync(
-                            upstream,
-                            observation.PullRequest.Number,
-                            "WinMatsch detected a transient infrastructure failure. Keeping this PR open; please rerun the failed checks.",
-                            new MutationRequest($"feedback:{observation.PullRequest.Number}:{classification}"),
-                            cancellationToken).ConfigureAwait(false);
+                        try
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            _ = await _gitHub.CommentOnPullRequestAsync(
+                                upstream,
+                                observation.PullRequest.Number,
+                                "WinMatsch detected a transient infrastructure failure. Keeping this PR open; please rerun the failed checks.",
+                                new MutationRequest($"feedback:{observation.PullRequest.Number}:{classification}"),
+                                cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception exception) when (
+                            exception is GitHubApiException or OperationCanceledException)
+                        {
+                            diagnostics.Add(new(
+                                "GH3207",
+                                "Known-safe feedback response has an uncertain remote outcome: " +
+                                GitHubSubmissionFormatter.Redact(exception.Message)));
+                            statuses[^1] = Status(
+                                observation,
+                                PullRequestLifecycleAction.EscalateToHuman,
+                                "Infrastructure feedback response did not complete safely.");
+                        }
                     }
 
                     break;
@@ -181,11 +201,17 @@ public sealed class GitHubFeedbackWorkflow
         return await ProcessAsync(upstream, observations, policy, cancellationToken).ConfigureAwait(false);
     }
 
-    public static FeedbackClassification Classify(PullRequestObservation observation)
+    public static FeedbackClassification Classify(
+        PullRequestObservation observation,
+        FeedbackPolicy? policy = null)
     {
-        IEnumerable<string> evidence = observation.Labels.Concat(
-            observation.Comments.Select(static comment => comment.Body));
-        string combined = string.Join('\n', evidence).ToLowerInvariant();
+        policy ??= new FeedbackPolicy();
+        IEnumerable<string> evidence = observation.Labels
+            .Where(policy.TrustedLabels.Contains)
+            .Concat(observation.Comments
+                .Where(comment => policy.TrustedCommentAuthors.Contains(comment.Author))
+                .Select(static comment => comment.Body));
+        string combined = string.Join('\n', evidence).ToLowerInvariant().Replace('-', ' ');
         if (combined.Contains("duplicate entry", StringComparison.Ordinal)
             || combined.Contains("duplicate manifest", StringComparison.Ordinal))
         {
@@ -247,8 +273,16 @@ public sealed class GitHubFeedbackWorkflow
             upstream,
             observation.PullRequest.Number,
             cancellationToken).ConfigureAwait(false);
+        string? oldAssociation = AssociationMarker(old.Body);
         if (replacement.State != PullRequestState.Open
             || old.State != PullRequestState.Open
+            || oldAssociation is null
+            || !string.Equals(AssociationMarker(replacement.Body), oldAssociation, StringComparison.Ordinal)
+            || replacement.Body?.Contains(
+                $"Supersedes: #{old.Number}",
+                StringComparison.Ordinal) != true
+            || !replacement.HeadBranch.StartsWith("winmatsch/", StringComparison.Ordinal)
+            || !string.Equals(replacement.BaseBranch, old.BaseBranch, StringComparison.Ordinal)
             || !string.Equals(old.HeadOwner, observation.PullRequest.HeadOwner, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(old.HeadBranch, observation.PullRequest.HeadBranch, StringComparison.Ordinal)
             || old.Body?.Contains("<!-- winmatsch:package=", StringComparison.Ordinal) != true)
@@ -258,19 +292,35 @@ public sealed class GitHubFeedbackWorkflow
                 $"Fresh state no longer proves PR #{old.Number} is the tool-owned superseded PR.");
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        _ = await _gitHub.CommentOnPullRequestAsync(
-            upstream,
-            old.Number,
-            $"Superseded by #{replacement.Number}. Closing this tool-owned PR for the stable reason `superseded`.",
-            new MutationRequest($"feedback:{old.Number}:superseded-comment:{replacement.Number}"),
-            cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-        _ = await _gitHub.ClosePullRequestAsync(
-            upstream,
-            old.Number,
-            new MutationRequest($"feedback:{old.Number}:superseded-close:{replacement.Number}"),
-            cancellationToken).ConfigureAwait(false);
-        return null;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _ = await _gitHub.CommentOnPullRequestAsync(
+                upstream,
+                old.Number,
+                $"Superseded by #{replacement.Number}. Closing this tool-owned PR for the stable reason `superseded`.",
+                new MutationRequest($"feedback:{old.Number}:superseded-comment:{replacement.Number}"),
+                cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            _ = await _gitHub.ClosePullRequestAsync(
+                upstream,
+                old.Number,
+                new MutationRequest($"feedback:{old.Number}:superseded-close:{replacement.Number}"),
+                cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception exception) when (exception is GitHubApiException or OperationCanceledException)
+        {
+            return new(
+                "GH3206",
+                "Superseded PR response was partially applied or has an uncertain remote outcome: " +
+                GitHubSubmissionFormatter.Redact(exception.Message));
+        }
     }
+
+    private static string? AssociationMarker(string? body)
+        => body?.Split('\n', StringSplitOptions.TrimEntries)
+            .FirstOrDefault(static line => line.StartsWith(
+                "<!-- winmatsch:package=",
+                StringComparison.Ordinal));
 }

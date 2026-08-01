@@ -80,7 +80,7 @@ public static partial class GitHubSubmissionFormatter
         string redacted = SecretAssignmentRegex().Replace(value, "$1=[REDACTED]");
         redacted = AuthorizationRegex().Replace(redacted, "$1 [REDACTED]");
         redacted = UriUserInfoRegex().Replace(redacted, "$1[REDACTED]@");
-        return SensitiveQueryRegex().Replace(redacted, "$1=[REDACTED]");
+        return QueryValueRegex().Replace(redacted, "$1=[REDACTED]");
     }
 
     private static void AppendValidation(StringBuilder builder, ValidationReport validation)
@@ -130,6 +130,6 @@ public static partial class GitHubSubmissionFormatter
     [GeneratedRegex(@"(https?://)[^/\s:@]+:[^/\s@]+@", RegexOptions.IgnoreCase)]
     private static partial Regex UriUserInfoRegex();
 
-    [GeneratedRegex(@"(?i)([?&](?:token|access_token|key|secret|signature))=[^&\s]+")]
-    private static partial Regex SensitiveQueryRegex();
+    [GeneratedRegex(@"([?&][^=\s&#]+)=[^&\s#]+")]
+    private static partial Regex QueryValueRegex();
 }
