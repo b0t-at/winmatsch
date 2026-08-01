@@ -69,6 +69,12 @@ public sealed class TokenCommandModule : ICommandModule
                     $"The token was not stored: {validation.FailureReason ?? "validation failed."}");
             }
 
+            if (context.IsDryRun)
+            {
+                WriteAddResult(context, validation, stored: false);
+                return ExitCodes.Success;
+            }
+
             try
             {
                 await _store.SetTokenAsync(token, context.CancellationToken).ConfigureAwait(false);
@@ -81,7 +87,7 @@ public sealed class TokenCommandModule : ICommandModule
                     exception);
             }
 
-            WriteAddResult(context, validation);
+            WriteAddResult(context, validation, stored: true);
             return ExitCodes.Success;
         });
         return command;
@@ -98,6 +104,15 @@ public sealed class TokenCommandModule : ICommandModule
             bool removed;
             try
             {
+                if (context.IsDryRun)
+                {
+                    GitHubToken? stored = await _store
+                        .GetTokenAsync(context.CancellationToken)
+                        .ConfigureAwait(false);
+                    WriteRemoveResult(context, removed: stored is not null, applied: false);
+                    return ExitCodes.Success;
+                }
+
                 removed = await _store.RemoveTokenAsync(context.CancellationToken).ConfigureAwait(false);
             }
             catch (TokenStoreException exception)
@@ -107,17 +122,7 @@ public sealed class TokenCommandModule : ICommandModule
                     exception);
             }
 
-            context.Output.WriteFormatted(
-                writer => writer.WriteLine(removed
-                    ? $"Removed the stored token from {_store.ProviderName}."
-                    : $"No token was stored in {_store.ProviderName}; nothing to remove."),
-                writer =>
-                {
-                    writer.WriteStartObject();
-                    writer.WriteString("provider", _store.ProviderName);
-                    writer.WriteBoolean("removed", removed);
-                    writer.WriteEndObject();
-                });
+            WriteRemoveResult(context, removed, applied: true);
             return ExitCodes.Success;
         });
         return command;
@@ -218,11 +223,31 @@ public sealed class TokenCommandModule : ICommandModule
         }
     }
 
-    private void WriteAddResult(CommandContext context, TokenValidationResult validation)
+    private void WriteRemoveResult(CommandContext context, bool removed, bool applied)
+        => context.Output.WriteFormatted(
+            writer => writer.WriteLine((applied, removed) switch
+            {
+                (true, true) => $"Removed the stored token from {_store.ProviderName}.",
+                (true, false) => $"No token was stored in {_store.ProviderName}; nothing to remove.",
+                (false, true) => $"Would remove the stored token from {_store.ProviderName} (dry run; nothing was changed).",
+                (false, false) => $"No token is stored in {_store.ProviderName}; a removal would change nothing (dry run).",
+            }),
+            writer =>
+            {
+                writer.WriteStartObject();
+                writer.WriteString("provider", _store.ProviderName);
+                writer.WriteBoolean("removed", applied && removed);
+                writer.WriteBoolean("dryRun", !applied);
+                writer.WriteEndObject();
+            });
+
+    private void WriteAddResult(CommandContext context, TokenValidationResult validation, bool stored)
         => context.Output.WriteFormatted(
             writer =>
             {
-                writer.WriteLine($"Stored a valid token for {validation.Login} in {_store.ProviderName}.");
+                writer.WriteLine(stored
+                    ? $"Stored a valid token for {validation.Login} in {_store.ProviderName}."
+                    : $"Validated a token for {validation.Login}; it would be stored in {_store.ProviderName} (dry run; nothing was changed).");
                 if (validation.Scopes.Count > 0)
                 {
                     writer.WriteLine($"Scopes: {string.Join(", ", validation.Scopes)}");
@@ -232,7 +257,8 @@ public sealed class TokenCommandModule : ICommandModule
             {
                 writer.WriteStartObject();
                 writer.WriteString("provider", _store.ProviderName);
-                writer.WriteBoolean("stored", true);
+                writer.WriteBoolean("stored", stored);
+                writer.WriteBoolean("dryRun", !stored);
                 writer.WriteString("login", validation.Login);
                 writer.WriteStartArray("scopes");
                 foreach (string scope in validation.Scopes)

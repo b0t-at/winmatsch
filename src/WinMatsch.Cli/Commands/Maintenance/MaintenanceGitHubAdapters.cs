@@ -112,10 +112,10 @@ public interface IInstallerUrlProber
 }
 
 /// <summary>
-/// The production prober over <see cref="InstallerDownloader.ProbeAsync"/>. Permanent HTTP
-/// rejection is the only state that counts as dead; transient transport failures and
-/// unclassified network errors map to states the removal workflow escalates instead of
-/// treating as proof of death.
+/// The production prober over <see cref="InstallerDownloader.ProbeAsync"/>. Only a confirmed
+/// absence status (404 or 410) counts as dead; authentication, authorization, redirect, and
+/// other rejections classify as blocked, and transient transport failures stay transient, so
+/// the removal workflow escalates instead of treating them as proof of death.
 /// </summary>
 public sealed class HttpInstallerUrlProber : IInstallerUrlProber
 {
@@ -136,17 +136,28 @@ public sealed class HttpInstallerUrlProber : IInstallerUrlProber
         }
         catch (DownloadException exception)
         {
-            return exception.FailureKind switch
-            {
-                DownloadFailureKind.PermanentHttp => DeadArtifactState.PermanentlyMissing,
-                DownloadFailureKind.TransientNetwork => DeadArtifactState.TransientFailure,
-                _ => DeadArtifactState.NetworkBlocked,
-            };
+            return Classify(exception);
         }
         catch (HttpRequestException)
         {
             return DeadArtifactState.NetworkBlocked;
         }
+    }
+
+    /// <summary>Maps a download failure to the artifact state the removal workflow acts on.</summary>
+    internal static DeadArtifactState Classify(DownloadException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        if (exception is DownloadHttpException http)
+        {
+            return http.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone
+                ? DeadArtifactState.PermanentlyMissing
+                : DeadArtifactState.NetworkBlocked;
+        }
+
+        return exception.FailureKind == DownloadFailureKind.TransientNetwork
+            ? DeadArtifactState.TransientFailure
+            : DeadArtifactState.NetworkBlocked;
     }
 }
 
@@ -223,7 +234,22 @@ public sealed class GitHubDeadVersionInspector : IDeadVersionInspector
                 [DeadArtifactState.TransientFailure]);
         }
 
-        IReadOnlyList<string> urls = ExtractInstallerUrls(installerManifest.Bytes);
+        IReadOnlyList<string> urls;
+        try
+        {
+            urls = ExtractInstallerUrls(installerManifest.Bytes);
+        }
+        catch (YamlDotNet.Core.YamlException)
+        {
+            // A manifest we cannot parse proves nothing; classify as indeterminate so the
+            // removal workflow escalates instead of planning a deletion.
+            return new DeadVersionInspection(
+                packageIdentifier,
+                packageVersion,
+                ExistsUpstream: true,
+                [DeadArtifactState.TransientFailure]);
+        }
+
         if (urls.Count == 0)
         {
             return new DeadVersionInspection(

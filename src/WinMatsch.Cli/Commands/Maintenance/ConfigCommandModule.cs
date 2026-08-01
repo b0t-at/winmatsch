@@ -226,8 +226,14 @@ public sealed class ConfigCommandModule : ICommandModule
             string yaml = SerializeDeterministic(layer);
             ValidateRoundTrip(yaml, keyName, rawValue);
             ValidateResolvable(layer, keyName, rawValue);
+            if (context.IsDryRun)
+            {
+                WriteMutationResult(context, "set", keyName, rawValue, path, applied: false);
+                return Task.FromResult(ExitCodes.Success);
+            }
+
             WriteAtomic(path, yaml);
-            WriteMutationResult(context, "set", keyName, rawValue, path);
+            WriteMutationResult(context, "set", keyName, rawValue, path, applied: true);
             return Task.FromResult(ExitCodes.Success);
         });
         return command;
@@ -252,8 +258,14 @@ public sealed class ConfigCommandModule : ICommandModule
             ConfigurationLayer layer = LoadUserLayer(context, registry);
             layer = ApplyKey(layer, keyName, null);
             string yaml = SerializeDeterministic(layer);
+            if (context.IsDryRun)
+            {
+                WriteMutationResult(context, "unset", keyName, null, path, applied: false);
+                return Task.FromResult(ExitCodes.Success);
+            }
+
             WriteAtomic(path, yaml);
-            WriteMutationResult(context, "unset", keyName, null, path);
+            WriteMutationResult(context, "unset", keyName, null, path, applied: true);
             return Task.FromResult(ExitCodes.Success);
         });
         return command;
@@ -584,11 +596,16 @@ public sealed class ConfigCommandModule : ICommandModule
         string action,
         string key,
         string? value,
-        string path)
+        string path,
+        bool applied)
         => context.Output.WriteFormatted(
-            writer => writer.WriteLine(action == "set"
-                ? $"Set {key} = {value} in {path}."
-                : $"Removed {key} from {path}."),
+            writer => writer.WriteLine((action, applied) switch
+            {
+                ("set", true) => $"Set {key} = {value} in {path}.",
+                ("set", false) => $"Would set {key} = {value} in {path} (dry run; nothing was written).",
+                (_, true) => $"Removed {key} from {path}.",
+                (_, false) => $"Would remove {key} from {path} (dry run; nothing was written).",
+            }),
             writer =>
             {
                 writer.WriteStartObject();
@@ -604,6 +621,7 @@ public sealed class ConfigCommandModule : ICommandModule
                 }
 
                 writer.WriteString("path", path);
+                writer.WriteBoolean("applied", applied);
                 writer.WriteEndObject();
             });
 

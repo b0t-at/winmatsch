@@ -70,7 +70,8 @@ internal static class MaintenanceCommandHelpers
             or HttpRequestException
             or JsonException
             or DownloadException
-            or TokenStoreException;
+            or TokenStoreException
+            or YamlDotNet.Core.YamlException;
 
     /// <summary>Runs a remote operation converting operational failures and preserving cancellation.</summary>
     public static async Task<T> RunRemoteAsync<T>(

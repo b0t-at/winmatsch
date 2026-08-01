@@ -131,6 +131,39 @@ public sealed class TokenCommandTests
     }
 
     [Fact]
+    public async Task Add_dry_run_validates_but_never_stores()
+    {
+        var harness = new CliHarness();
+        var validator = new RecordingValidator(TokenValidationResult.Valid("octocat"));
+        harness.Modules.Add(new TokenCommandModule(
+            harness.TokenStore,
+            validator,
+            () => new StringReader(Secret)));
+
+        CliRunResult result = await harness.RunAsync(["token", "add", "--stdin", "--dry-run"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Null(harness.TokenStore.StoredToken);
+        Assert.Equal(1, validator.Calls);
+        Assert.Contains("dry run", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain(Secret, result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Remove_dry_run_keeps_the_stored_token()
+    {
+        var harness = new CliHarness();
+        harness.TokenStore.StoredToken = new GitHubToken(Secret);
+        harness.Modules.Add(new TokenCommandModule(harness.TokenStore));
+
+        CliRunResult result = await harness.RunAsync(["token", "remove", "--dry-run"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.NotNull(harness.TokenStore.StoredToken);
+        Assert.Contains("Would remove", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Remove_is_idempotent()
     {
         var harness = new CliHarness();

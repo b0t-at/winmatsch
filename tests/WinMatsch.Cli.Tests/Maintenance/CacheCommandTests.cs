@@ -265,6 +265,34 @@ public sealed class CacheCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Urls_with_embedded_credentials_are_redacted_in_output()
+    {
+        const string signedUrl = "https://user:s3cretpass@example.invalid/app.exe?sig=SECRETSIG&token=SECRETTOK";
+        await StoreEntryAsync(signedUrl, "signed-bytes");
+        CliHarness harness = CreateHarness();
+
+        CliRunResult list = await harness.RunAsync(["cache", "list"]);
+        CliRunResult inspect = await harness.RunAsync(["cache", "inspect", signedUrl]);
+        CliRunResult json = await harness.RunAsync(["cache", "list", "--format", "json"]);
+        CliRunResult missing = await harness.RunAsync(
+            ["cache", "inspect", "https://example.invalid/gone.exe?token=SECRETTOK"]);
+
+        foreach (CliRunResult result in new[] { list, inspect, json, missing })
+        {
+            Assert.DoesNotContain("s3cretpass", result.StandardOutput, StringComparison.Ordinal);
+            Assert.DoesNotContain("SECRETSIG", result.StandardOutput, StringComparison.Ordinal);
+            Assert.DoesNotContain("SECRETTOK", result.StandardOutput, StringComparison.Ordinal);
+            Assert.DoesNotContain("s3cretpass", result.StandardError, StringComparison.Ordinal);
+            Assert.DoesNotContain("SECRETSIG", result.StandardError, StringComparison.Ordinal);
+            Assert.DoesNotContain("SECRETTOK", result.StandardError, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("[REDACTED]", list.StandardOutput, StringComparison.Ordinal);
+        Assert.Equal(ExitCodes.Success, inspect.ExitCode);
+        Assert.Equal(ExitCodes.OperationFailed, missing.ExitCode);
+    }
+
+    [Fact]
     public async Task Cache_commands_reject_empty_urls()
     {
         CliHarness harness = CreateHarness();

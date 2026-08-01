@@ -27,7 +27,16 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
 
     public CompareResult Comparison { get; set; } = new("identical", 0, 0, 0, []);
 
+    /// <summary>Manifest file lists keyed by repository-relative directory.</summary>
+    public Dictionary<string, IReadOnlyList<ManifestFile>> ManifestFiles { get; } = new(StringComparer.Ordinal);
+
     public Exception? SyncForkFailure { get; set; }
+
+    /// <summary>Runs just before a comment mutation is recorded (for cancellation tests).</summary>
+    public Action? OnComment { get; set; }
+
+    /// <summary>Thrown by <see cref="CommentOnPullRequestAsync"/> after <see cref="OnComment"/> ran.</summary>
+    public Exception? CommentFailure { get; set; }
 
     /// <summary>The fork head SHA reported after a successful sync.</summary>
     public string? SyncedHeadSha { get; set; }
@@ -126,6 +135,12 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         MutationRequest mutation,
         CancellationToken cancellationToken = default)
     {
+        OnComment?.Invoke();
+        if (CommentFailure is not null)
+        {
+            throw CommentFailure;
+        }
+
         Mutations.Add($"comment:{number}:{body}");
         return Task.FromResult(new PullRequestComment(
             1,
@@ -168,7 +183,18 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         string directory,
         string reference,
         CancellationToken cancellationToken = default)
-        => throw new NotSupportedException();
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!ManifestFiles.TryGetValue(directory, out IReadOnlyList<ManifestFile>? files))
+        {
+            throw new GitHubApiException(
+                $"Directory '{directory}' not found.",
+                System.Net.HttpStatusCode.NotFound,
+                requestId: null);
+        }
+
+        return Task.FromResult(files);
+    }
 
     public Task<IReadOnlyList<GitHubRelease>> GetReleasesAsync(
         RepositoryCoordinates repository,

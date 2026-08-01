@@ -181,6 +181,23 @@ public sealed class ConfigCommandTests
     }
 
     [Fact]
+    public async Task Set_and_unset_dry_run_never_write()
+    {
+        (CliHarness harness, DictionaryConfigFileSystem fileSystem) = CreateHarness();
+        harness.Files[_defaultPath] = "repository: \"contoso/pkgs\"\n";
+
+        CliRunResult set = await harness.RunAsync(["config", "set", "interaction", "never", "--dry-run"]);
+        CliRunResult unset = await harness.RunAsync(["config", "unset", "repository", "--dry-run"]);
+
+        Assert.Equal(ExitCodes.Success, set.ExitCode);
+        Assert.Equal(ExitCodes.Success, unset.ExitCode);
+        Assert.Contains("dry run", set.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("dry run", unset.StandardOutput, StringComparison.Ordinal);
+        Assert.Empty(fileSystem.Writes);
+        Assert.Equal("repository: \"contoso/pkgs\"\n", harness.Files[_defaultPath]);
+    }
+
+    [Fact]
     public async Task Unset_removes_a_key_and_is_idempotent()
     {
         (CliHarness harness, _) = CreateHarness();

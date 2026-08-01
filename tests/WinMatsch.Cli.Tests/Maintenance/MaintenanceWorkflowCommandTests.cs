@@ -320,6 +320,40 @@ public sealed class MaintenanceWorkflowCommandTests
     }
 
     [Fact]
+    public async Task Complete_apply_safe_cancellation_maps_to_the_cancelled_exit_code()
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        client.PullRequests.Add(MaintenancePullRequests.ToolOwned(41));
+        var source = new ScriptedFeedbackSource(
+        [
+            .. MaintenancePullRequests.Observe(MaintenancePullRequests.ToolOwned(41))
+                .Select(observation => observation with
+                {
+                    Comments =
+                    [
+                        new PullRequestCommentObservation(
+                            "wingetbot",
+                            "Please rerun the failed checks after the transient internal error.",
+                            DateTimeOffset.UnixEpoch),
+                    ],
+                }),
+        ]);
+        CliHarness harness = CreateHarness(client, source);
+        using var cancellation = new CancellationTokenSource();
+        client.OnComment = cancellation.Cancel;
+        client.CommentFailure = new OperationCanceledException();
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--apply-safe", "--yes"],
+            cancellation.Token);
+
+        Assert.Equal(ExitCodes.Cancelled, result.ExitCode);
+        Assert.Contains("GH3207", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("cancelled during remote processing", result.StandardError, StringComparison.Ordinal);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
     public async Task Complete_apply_safe_escalates_unknown_feedback()
     {
         FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");

@@ -79,7 +79,7 @@ public sealed class CacheCommandModule : ICommandModule
                 string.Equals(candidate.Url, urlValue, StringComparison.Ordinal));
             if (entry is null)
             {
-                throw new CliOperationException($"No cache entry exists for '{urlValue}'.");
+                throw new CliOperationException($"No cache entry exists for '{RedactUrl(urlValue)}'.");
             }
 
             context.Output.WriteFormatted(
@@ -133,7 +133,7 @@ public sealed class CacheCommandModule : ICommandModule
                     context.ParseResult.GetValue(yes),
                     urlValue is null
                         ? $"Remove all {targets.Count} entr{(targets.Count == 1 ? "y" : "ies")} from the download cache?"
-                        : $"Remove the cache entry for '{urlValue}'?")
+                        : $"Remove the cache entry for '{RedactUrl(urlValue)}'?")
                     .ConfigureAwait(false);
                 if (!confirmed)
                 {
@@ -197,6 +197,17 @@ public sealed class CacheCommandModule : ICommandModule
                     return ExitCodes.Cancelled;
                 }
 
+                // Re-inspect after the confirmation gap and keep only entries that are still
+                // not fresh, so an entry refreshed by a concurrent download survives. The
+                // remaining window between this check and each per-URL delete is inherent to
+                // the bounded per-operation cache lock.
+                IReadOnlyList<DownloadCacheEntryInfo> recheck = await InspectCacheAsync(context, cache)
+                    .ConfigureAwait(false);
+                var stillRemovableUrls = recheck
+                    .Where(static entry => entry.State != DownloadCacheEntryState.Fresh && entry.Url.Length > 0)
+                    .Select(static entry => entry.Url)
+                    .ToHashSet(StringComparer.Ordinal);
+                removable = [.. removable.Where(entry => stillRemovableUrls.Contains(entry.Url))];
                 foreach (DownloadCacheEntryInfo entry in removable)
                 {
                     context.CancellationToken.ThrowIfCancellationRequested();
@@ -362,7 +373,8 @@ public sealed class CacheCommandModule : ICommandModule
     private static void WriteEntryJson(Utf8JsonWriter writer, DownloadCacheEntryInfo entry)
     {
         writer.WriteStartObject();
-        writer.WriteString("url", entry.Url);
+        writer.WriteString("url", RedactUrl(entry.Url));
+        writer.WriteString("cacheKey", entry.CacheKey);
         writer.WriteString("state", MaintenanceCommandHelpers.ToCamelCase(entry.State));
         if (entry.ContentIdentity is { } identity)
         {
@@ -401,6 +413,13 @@ public sealed class CacheCommandModule : ICommandModule
             ? identity.SizeInBytes.ToString(CultureInfo.InvariantCulture) + " bytes"
             : "unknown size";
 
+    /// <summary>
+    /// The display form of an entry's URL: credentials in userinfo and query values are
+    /// redacted, since signed installer URLs routinely embed secrets. Commands still address
+    /// entries by the exact original URL the caller already knows.
+    /// </summary>
+    private static string RedactUrl(string url) => MaintenanceCommandHelpers.Redact(url);
+
     private static string FormatUrl(DownloadCacheEntryInfo entry)
-        => entry.Url.Length > 0 ? entry.Url : $"(unreadable metadata; key {entry.CacheKey})";
+        => entry.Url.Length > 0 ? RedactUrl(entry.Url) : $"(unreadable metadata; key {entry.CacheKey})";
 }

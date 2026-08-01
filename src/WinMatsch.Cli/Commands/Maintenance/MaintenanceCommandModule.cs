@@ -283,6 +283,19 @@ public sealed class MaintenanceCommandModule : ICommandModule
                     context.CancellationToken))
                 .ConfigureAwait(false);
             WriteCompleteResult(context, upstream, forkRepository, result.Statuses, result.Diagnostics, applied: true);
+            if (result.RemoteStates.Any(static state => state.State.RemoteOutcomeUncertain))
+            {
+                context.Output.WriteError(
+                    "Warning: at least one remote outcome is uncertain; verify the listed "
+                    + "pull requests manually before retrying.");
+            }
+
+            if (context.CancellationToken.IsCancellationRequested)
+            {
+                context.Output.WriteError("The operation was cancelled during remote processing.");
+                return ExitCodes.Cancelled;
+            }
+
             return result.Diagnostics.IsEmpty ? ExitCodes.Success : ExitCodes.OperationFailed;
         });
     }
