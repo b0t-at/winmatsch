@@ -14,7 +14,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     private const int MaximumPullRequestFilePages = 10;
     private const int MaximumPullRequestFiles = 1_000;
     private const int MaximumPullRequestFileBatchSize = 50;
-    private const int MaximumRestPullRequestFileFallbacks = 64;
+    private const int MaximumRestPullRequestFileFallbackPullRequests = 64;
+    private const int MaximumRestPullRequestFileFallbackPages = 64;
     private const int MaximumTruncatedPullRequestFileFallbacks = 16;
 
     private const string ViewerQuery =
@@ -903,6 +904,17 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         RepositoryCoordinates repository,
         long number,
         CancellationToken cancellationToken = default)
+        => await GetPullRequestChangedFilesAsync(
+            repository,
+            number,
+            requestBudget: null,
+            cancellationToken).ConfigureAwait(false);
+
+    private async Task<IReadOnlyList<PullRequestChangedFile>> GetPullRequestChangedFilesAsync(
+        RepositoryCoordinates repository,
+        long number,
+        PaginationRequestBudget? requestBudget,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(number);
@@ -915,7 +927,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             GitHubJsonContext.Default.ListRestPullRequestChangedFileDto,
             cancellationToken,
             maximumResults: MaximumPullRequestFiles,
-            maximumPages: MaximumPullRequestFilePages).ConfigureAwait(false);
+            maximumPages: MaximumPullRequestFilePages,
+            requestBudget).ConfigureAwait(false);
         return files.Select(static file =>
             new PullRequestChangedFile(
                 file.Filename,
@@ -960,17 +973,19 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         }
         catch (GitHubApiException exception) when (IsGraphQlUnavailable(exception))
         {
-            if (pullRequests.Count > MaximumRestPullRequestFileFallbacks)
+            if (pullRequests.Count > MaximumRestPullRequestFileFallbackPullRequests)
             {
                 throw new GitHubApiException(
                     "GitHub GraphQL is unavailable and the pull-request changed-file fallback " +
-                    $"would exceed the safe REST request bound of {MaximumRestPullRequestFileFallbacks}.",
+                    "would exceed the safe REST pull-request bound of " +
+                    $"{MaximumRestPullRequestFileFallbackPullRequests}.",
                     exception);
             }
 
             return await GetPullRequestChangedFilesViaRestAsync(
                 repository,
                 pullRequests,
+                new PaginationRequestBudget(MaximumRestPullRequestFileFallbackPages),
                 cancellationToken).ConfigureAwait(false);
         }
     }
@@ -1057,6 +1072,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 $"completed within the safe REST fallback bound of {MaximumTruncatedPullRequestFileFallbacks}.");
         }
 
+        var requestBudget = new PaginationRequestBudget(MaximumRestPullRequestFileFallbackPages);
         foreach (PullRequestInfo pullRequest in restCompletions)
         {
             result.Add(
@@ -1064,6 +1080,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 await GetPullRequestChangedFilesAsync(
                     repository,
                     pullRequest.Number,
+                    requestBudget,
                     cancellationToken).ConfigureAwait(false));
         }
 
@@ -1074,6 +1091,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         GetPullRequestChangedFilesViaRestAsync(
             RepositoryCoordinates repository,
             IReadOnlyList<PullRequestInfo> pullRequests,
+            PaginationRequestBudget requestBudget,
             CancellationToken cancellationToken)
     {
         var result = new Dictionary<long, IReadOnlyList<PullRequestChangedFile>>();
@@ -1085,6 +1103,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 await GetPullRequestChangedFilesAsync(
                     repository,
                     pullRequest.Number,
+                    requestBudget,
                     cancellationToken).ConfigureAwait(false));
         }
 
@@ -1361,7 +1380,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         System.Text.Json.Serialization.Metadata.JsonTypeInfo<List<T>> responseType,
         CancellationToken cancellationToken,
         int? maximumResults = null,
-        int? maximumPages = null)
+        int? maximumPages = null,
+        PaginationRequestBudget? requestBudget = null)
     {
         var results = new List<T>();
         Uri? next = first;
@@ -1370,6 +1390,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         while (next is not null)
         {
             ValidatePaginationPage(next, visited, pageCount++, maximumPages);
+            requestBudget?.Consume();
             TransportResponse<List<T>> page = await _transport.GetPageAsync(
                 next,
                 responseType,
@@ -1388,6 +1409,27 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         }
 
         return results;
+    }
+
+    private sealed class PaginationRequestBudget
+    {
+        private readonly int _maximumRequests;
+        private int _remaining;
+
+        public PaginationRequestBudget(int maximumRequests)
+        {
+            _maximumRequests = maximumRequests;
+            _remaining = maximumRequests;
+        }
+
+        public void Consume()
+        {
+            if (_remaining-- <= 0)
+            {
+                throw new GitHubApiException(
+                    $"GitHub pagination exceeded the cumulative REST request limit of {_maximumRequests}.");
+            }
+        }
     }
 
     private Task<RestBranchDto> GetBranchAsync(

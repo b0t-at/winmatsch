@@ -316,8 +316,42 @@ public sealed class GitHubPullRequestTests
                     pullRequests,
                     TestContext.Current.CancellationToken));
 
-        Assert.Contains("safe REST request bound", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("safe REST pull-request bound", exception.Message, StringComparison.Ordinal);
         Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_rest_fallback_has_cumulative_page_budget()
+    {
+        PullRequestInfo[] pullRequests = CreatePullRequests(33);
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """{"message":"GraphQL unavailable"}""",
+            HttpStatusCode.NotFound));
+        for (int pullRequest = 1; pullRequest <= 32; pullRequest++)
+        {
+            int number = pullRequest;
+            handler.Add(_ => GitHubClientTestSupport.Json(
+                $$"""[{"filename":"{{number}}-first.yaml","status":"modified"}]""",
+                headers:
+                [
+                    ("Link",
+                        $"<https://github.invalid/api/pulls/{number}/files?page=2>; rel=\"next\""),
+                ]));
+            handler.Add(_ => GitHubClientTestSupport.Json(
+                $$"""[{"filename":"{{number}}-second.yaml","status":"modified"}]"""));
+        }
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    pullRequests,
+                    TestContext.Current.CancellationToken));
+
+        Assert.Contains("cumulative REST request limit", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(65, handler.Requests.Count);
+        Assert.Equal(0, handler.RemainingSteps);
     }
 
     [Fact]
