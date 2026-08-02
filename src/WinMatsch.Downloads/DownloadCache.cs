@@ -532,7 +532,18 @@ public sealed class DownloadCache
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            File.Move(tempPath, metadataPath, overwrite: true);
+            if (File.Exists(metadataPath))
+            {
+                File.Replace(
+                    tempPath,
+                    metadataPath,
+                    destinationBackupFileName: null,
+                    ignoreMetadataErrors: true);
+            }
+            else
+            {
+                File.Move(tempPath, metadataPath);
+            }
         }
         catch
         {
