@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Xunit;
 
 namespace WinMatsch.GitHub.Tests;
@@ -184,6 +185,170 @@ public sealed class GitHubPullRequestTests
             .GetPullRequestChangedFilesAsync(_repository, 7, TestContext.Current.CancellationToken));
 
         Assert.Equal(10, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_batch_uses_graphql_batches()
+    {
+        PullRequestInfo[] pullRequests = CreatePullRequests(400);
+        var byNode = pullRequests.ToDictionary(
+            static pullRequest => pullRequest.NodeId,
+            StringComparer.Ordinal);
+        var handler = new ScriptedHttpMessageHandler();
+        for (int batch = 0; batch < 8; batch++)
+        {
+            handler.Add(request =>
+            {
+                Assert.Equal(new Uri("https://github.invalid/graphql"), request.Uri);
+                string[] ids = ReadGraphQlIds(request);
+                Assert.Equal(50, ids.Length);
+                return GitHubClientTestSupport.Json(
+                    GraphQlFilesJson(ids.Select(id => byNode[id])),
+                    headers:
+                    [
+                        ("X-RateLimit-Limit", "5000"),
+                        ("X-RateLimit-Remaining", "4990"),
+                        ("X-RateLimit-Used", "10"),
+                        ("X-RateLimit-Reset", "1767229200"),
+                    ]);
+            });
+        }
+
+        var options = new GitHubClientOptions
+        {
+            ApiBaseUri = new Uri("https://github.invalid/api/"),
+            GraphQlUri = new Uri("https://github.invalid/graphql"),
+            UserAgent = "winmatsch-tests",
+            RetryBaseDelay = TimeSpan.Zero,
+            MaxTransientRetries = 0,
+        };
+        GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler, options);
+        IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> files =
+            await client.GetPullRequestChangedFilesBatchAsync(
+                _repository,
+                pullRequests,
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal(400, files.Count);
+        Assert.Equal(8, handler.Requests.Count);
+        Assert.Equal("graphql", Assert.IsType<RateLimitInfo>(client.LastRateLimit).Resource);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_batch_completes_truncated_graphql_files_via_rest()
+    {
+        PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlFilesJson([pullRequest], hasNextPage: true)));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """[{"filename":"first.yaml","status":"modified"}]""",
+            headers:
+            [
+                ("Link", "<https://github.invalid/api/files-page-2>; rel=\"next\""),
+            ]));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """[{"filename":"second.yaml","status":"added"}]"""));
+
+        IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> files =
+            await GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    [pullRequest],
+                    TestContext.Current.CancellationToken);
+
+        Assert.Equal(["first.yaml", "second.yaml"], files[pullRequest.Number].Select(static file => file.Path));
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_batch_fails_closed_before_unbounded_truncation_fallback()
+    {
+        PullRequestInfo[] pullRequests = CreatePullRequests(17);
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlFilesJson(pullRequests, hasNextPage: true)));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    pullRequests,
+                    TestContext.Current.CancellationToken));
+
+        Assert.Contains("safe REST fallback bound", exception.Message, StringComparison.Ordinal);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_batch_fails_closed_when_graphql_fallback_is_unbounded()
+    {
+        PullRequestInfo[] pullRequests = CreatePullRequests(65);
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """{"message":"GraphQL unavailable"}""",
+            HttpStatusCode.NotFound));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    pullRequests,
+                    TestContext.Current.CancellationToken));
+
+        Assert.Contains("safe REST request bound", exception.Message, StringComparison.Ordinal);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_batch_preserves_rate_limit_failure()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """{"message":"API rate limit exceeded"}""",
+            HttpStatusCode.Forbidden,
+            ("X-RateLimit-Limit", "5000"),
+            ("X-RateLimit-Remaining", "0"),
+            ("X-RateLimit-Used", "5000"),
+            ("X-RateLimit-Reset", "1767229200"),
+            ("X-RateLimit-Resource", "graphql")));
+        var options = new GitHubClientOptions
+        {
+            ApiBaseUri = new Uri("https://github.invalid/api/"),
+            GraphQlUri = new Uri("https://github.invalid/graphql"),
+            UserAgent = "winmatsch-tests",
+            RetryBaseDelay = TimeSpan.Zero,
+            MaxTransientRetries = 0,
+        };
+        GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler, options);
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => client.GetPullRequestChangedFilesBatchAsync(
+                _repository,
+                CreatePullRequests(1),
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(GitHubApiErrorKind.RateLimited, exception.ErrorKind);
+        Assert.Equal(0, Assert.IsType<RateLimitInfo>(exception.RateLimit).Remaining);
+        Assert.Equal(0, Assert.IsType<RateLimitInfo>(client.LastRateLimit).Remaining);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_batch_honors_pre_cancelled_token()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    CreatePullRequests(1),
+                    cancellation.Token));
+
+        Assert.Empty(handler.Requests);
     }
 
     [Fact]
@@ -456,5 +621,76 @@ public sealed class GitHubPullRequestTests
                 TestContext.Current.CancellationToken));
 
         Assert.Single(handler.Requests);
+    }
+
+    private static PullRequestInfo[] CreatePullRequests(int count)
+        =>
+        [
+            .. Enumerable.Range(1, count).Select(number =>
+                new PullRequestInfo(
+                    number,
+                    $"PR_{number}",
+                    $"Maintenance {number}",
+                    null,
+                    PullRequestState.Open,
+                    false,
+                    $"author-{number}",
+                    $"branch-{number}",
+                    number.ToString("D40", System.Globalization.CultureInfo.InvariantCulture),
+                    "main",
+                    new Uri($"https://github.invalid/upstream/repo/pull/{number}"),
+                    new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+                    new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero))
+                {
+                    HeadRepository = new RepositoryCoordinates($"author-{number}", "repo"),
+                    BaseSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                }),
+        ];
+
+    private static string[] ReadGraphQlIds(RecordedRequest request)
+    {
+        using JsonDocument document = JsonDocument.Parse(request.Body!);
+        Assert.Contains("nodes(ids: $ids)", document.RootElement.GetProperty("query").GetString());
+        return
+        [
+            .. document.RootElement
+                .GetProperty("variables")
+                .GetProperty("ids")
+                .EnumerateArray()
+                .Select(static id => id.GetString()!),
+        ];
+    }
+
+    private static string GraphQlFilesJson(
+        IEnumerable<PullRequestInfo> pullRequests,
+        bool hasNextPage = false)
+    {
+        string nodes = string.Join(
+            ',',
+            pullRequests.Select(pullRequest =>
+                $$"""
+                {
+                  "id":"{{pullRequest.NodeId}}",
+                  "number":{{pullRequest.Number}},
+                  "headRefOid":"{{pullRequest.HeadSha}}",
+                  "files":{
+                    "nodes":[{"path":"manifests/example.yaml","changeType":"MODIFIED"}],
+                    "pageInfo":{"hasNextPage":{{hasNextPage.ToString().ToLowerInvariant()}}}
+                  }
+                }
+                """));
+        return $$"""
+        {
+          "data": {
+            "nodes": [{{nodes}}],
+            "rateLimit": {
+              "limit": 5000,
+              "remaining": 4999,
+              "used": 1,
+              "resetAt": "2026-01-01T01:00:00Z"
+            }
+          }
+        }
+        """;
     }
 }

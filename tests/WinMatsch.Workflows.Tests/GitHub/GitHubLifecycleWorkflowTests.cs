@@ -182,19 +182,22 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
-    public async Task Canonical_title_without_manifest_evidence_does_not_block_submission()
+    public async Task Canonical_title_from_different_author_proves_duplicate_without_file_match()
     {
         var client = new FakeGitHubClient
         {
             AutoConfigureCanonicalPullRequestEvidence = false,
         };
-        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7));
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
+            7,
+            author: "different-author"));
 
         GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
             .ExecuteAsync(GitHubLifecycleTestSupport.Request());
 
-        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
-        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Equal(0, client.PullRequestHeadContentCalls);
+        Assert.Empty(client.Mutations);
     }
 
     [Fact]
@@ -202,11 +205,6 @@ public sealed class GitHubLifecycleWorkflowTests
     {
         var client = new FakeGitHubClient();
         WorkflowFileChange change = GitHubLifecycleTestSupport.Plan().FileChanges[0];
-        client.SetContent(
-            new RepositoryCoordinates("human-maintainer", GitHubLifecycleTestSupport.Upstream.Name),
-            change.RepositoryPath,
-            GitHubLifecycleTestSupport.CommitSha,
-            "independently generated manifest bytes"u8);
         client.SetPullRequestChangedFiles(7, change.RepositoryPath);
         client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
             7,
@@ -220,6 +218,7 @@ public sealed class GitHubLifecycleWorkflowTests
             .ExecuteAsync(GitHubLifecycleTestSupport.Request());
 
         Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Equal(0, client.PullRequestHeadContentCalls);
         Assert.Empty(client.Mutations);
     }
 
@@ -233,7 +232,7 @@ public sealed class GitHubLifecycleWorkflowTests
             change.RepositoryPath,
             GitHubLifecycleTestSupport.CommitSha,
             change.Content.AsSpan());
-        client.SetPullRequestChangedFiles(7, change.RepositoryPath);
+        client.SetPullRequestChangedFiles(7, "unrelated/readme.txt");
         client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
             7,
             author: GitHubLifecycleTestSupport.Fork.Owner) with
@@ -395,7 +394,57 @@ public sealed class GitHubLifecycleWorkflowTests
             change.Content.AsSpan());
         _ = await provider.GetEvidenceAsync(plan, moved, CancellationToken.None);
 
-        Assert.Equal(2, client.PullRequestFilesCalls);
+        Assert.Equal(2, client.PullRequestFileBatchCalls);
+        Assert.Equal([1, 1], client.PullRequestFileBatchSizes);
+    }
+
+    [Fact]
+    public async Task Production_scale_candidate_cache_refetches_only_changed_head_identity()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int number = 1; number <= 400; number++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        PullRequestInfo[] firstSnapshot = [.. client.PullRequests];
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            firstSnapshot,
+            CancellationToken.None));
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            firstSnapshot,
+            CancellationToken.None));
+        PullRequestInfo[] movedSnapshot =
+        [
+            .. firstSnapshot.Select(pullRequest =>
+                pullRequest.Number == 200
+                    ? pullRequest with
+                    {
+                        HeadSha = "dddddddddddddddddddddddddddddddddddddddd",
+                    }
+                    : pullRequest),
+        ];
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            movedSnapshot,
+            CancellationToken.None));
+
+        Assert.Equal(2, client.PullRequestFileBatchCalls);
+        Assert.Equal([400, 1], client.PullRequestFileBatchSizes);
+        Assert.Equal(0, client.PullRequestFilesCalls);
     }
 
     [Fact]
@@ -427,7 +476,7 @@ public sealed class GitHubLifecycleWorkflowTests
 
         await Assert.ThrowsAsync<PullRequestEvidenceLimitException>(
             () => provider.GetEvidenceAsync(plan, candidate, CancellationToken.None));
-        Assert.Equal(1, client.PullRequestFilesCalls);
+        Assert.Equal(1, client.PullRequestFileBatchCalls);
     }
 
     [Fact]
@@ -478,7 +527,7 @@ public sealed class GitHubLifecycleWorkflowTests
             CancellationToken.None);
 
         Assert.True(evidence.IsAssociated);
-        Assert.Equal(1, client.PullRequestFilesCalls);
+        Assert.Equal(1, client.PullRequestFileBatchCalls);
     }
 
     [Fact]
@@ -550,6 +599,7 @@ public sealed class GitHubLifecycleWorkflowTests
             Title = "Example.App maintenance",
             Body = null,
         });
+        client.SetPullRequestChangedFiles(7, priorPath);
         client.SetContent(
             GitHubLifecycleTestSupport.Upstream,
             priorPath,
@@ -760,7 +810,7 @@ public sealed class GitHubLifecycleWorkflowTests
         });
         client.SetPullRequestChangedFiles(
             7,
-            GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath);
+            "unrelated/readme.txt");
         client.SetContent(
             new RepositoryCoordinates("someone", GitHubLifecycleTestSupport.Upstream.Name),
             GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath,
@@ -796,7 +846,11 @@ public sealed class GitHubLifecycleWorkflowTests
 
         Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
         Assert.True(client.PullRequestHeadContentCalls <= 1);
-        Assert.True(client.PullRequestFilesCalls > PullRequestManifestEvidenceLimits.MaximumCandidates);
+        Assert.Equal(0, client.PullRequestFilesCalls);
+        Assert.Equal(1, client.PullRequestFileBatchCalls);
+        Assert.Equal(
+            [PullRequestManifestEvidenceLimits.MaximumCandidates + 1],
+            client.PullRequestFileBatchSizes);
     }
 
     [Fact]
@@ -820,6 +874,33 @@ public sealed class GitHubLifecycleWorkflowTests
 
         Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Open_pull_request_discovery_limit_fails_closed_before_evidence_or_mutation()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int number = 1;
+             number <= PullRequestManifestEvidenceLimits.MaximumOpenPullRequests + 1;
+             number++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.Equal(0, client.PullRequestFileBatchCalls);
         Assert.Empty(client.Mutations);
     }
 
@@ -852,7 +933,6 @@ public sealed class GitHubLifecycleWorkflowTests
     public async Task Post_creation_reconciliation_excludes_the_new_pr_at_candidate_limit()
     {
         var client = new FakeGitHubClient();
-        string path = GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath;
         for (int index = 0; index < PullRequestManifestEvidenceLimits.MaximumCandidates; index++)
         {
             int number = 100 + index;
@@ -861,7 +941,7 @@ public sealed class GitHubLifecycleWorkflowTests
                 Title = $"Unrelated maintenance {number}",
                 Body = null,
             });
-            client.SetPullRequestChangedFiles(number, path);
+            client.SetPullRequestChangedFiles(number, $"unrelated/{number}.txt");
         }
 
         GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)

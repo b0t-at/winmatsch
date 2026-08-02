@@ -457,6 +457,8 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
     private readonly IGitHubRepositoryClient _gitHub =
         gitHub ?? throw new ArgumentNullException(nameof(gitHub));
     private readonly ConcurrentDictionary<EvidenceCacheKey, PullRequestManifestEvidence> _cache = [];
+    private readonly ConcurrentDictionary<ChangedFilesCacheKey, ChangedFilesCacheEntry>
+        _changedFilesCache = [];
 
     public async Task<IReadOnlyList<PullRequestInfo>> GetCandidatesAsync(
         GitHubSubmissionPlan plan,
@@ -466,41 +468,28 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(openPullRequests);
         cancellationToken.ThrowIfCancellationRequested();
+        if (openPullRequests.Count > PullRequestManifestEvidenceLimits.MaximumOpenPullRequests)
+        {
+            throw new PullRequestEvidenceLimitException(
+                "Open pull-request discovery exceeds the safe evidence limit of " +
+                $"{PullRequestManifestEvidenceLimits.MaximumOpenPullRequests}.");
+        }
+
         var plannedPaths = new HashSet<string>(
             plan.Request.LocalPlan.FileChanges.Select(static change => change.RepositoryPath),
             StringComparer.Ordinal);
         var candidates = new List<PullRequestInfo>();
         bool canVerifyEveryOpenPullRequest =
             openPullRequests.Count <= PullRequestManifestEvidenceLimits.MaximumCandidates;
+        await EnsureChangedFilesAsync(
+            plan.Request.UpstreamRepository,
+            openPullRequests,
+            cancellationToken).ConfigureAwait(false);
         foreach (PullRequestInfo pullRequest in openPullRequests.OrderBy(static item => item.Number))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            IReadOnlyList<PullRequestChangedFile> changedFiles;
-            try
-            {
-                changedFiles = await _gitHub.GetPullRequestChangedFilesAsync(
-                    plan.Request.UpstreamRepository,
-                    pullRequest.Number,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (NotSupportedException exception)
-            {
-                throw new PullRequestEvidenceLimitException(
-                    $"Pull request #{pullRequest.Number} changed-file evidence is unavailable: {exception.Message}");
-            }
-            catch (GitHubApiException exception) when (exception.StatusCode is null)
-            {
-                throw new PullRequestEvidenceLimitException(
-                    $"Pull request #{pullRequest.Number} changed-file evidence failed a local transport safety bound: {exception.Message}");
-            }
-            if (changedFiles.Any(static file =>
-                    string.IsNullOrWhiteSpace(file.Path)
-                    || (file.PreviousPath is not null
-                        && string.IsNullOrWhiteSpace(file.PreviousPath))))
-            {
-                throw new PullRequestEvidenceLimitException(
-                    $"Pull request #{pullRequest.Number} returned an invalid changed-file path.");
-            }
+            IReadOnlyList<PullRequestChangedFile> changedFiles =
+                GetCachedChangedFiles(plan.Request.UpstreamRepository, pullRequest);
 
             bool hasTargetPath = changedFiles.Any(file =>
                 plannedPaths.Contains(file.Path)
@@ -567,6 +556,37 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        await EnsureChangedFilesAsync(
+            plan.Request.UpstreamRepository,
+            [pullRequest],
+            cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<PullRequestChangedFile> changedFiles =
+            GetCachedChangedFiles(plan.Request.UpstreamRepository, pullRequest);
+        string targetPrefix = plan.PackageVersionDirectory + "/";
+        WorkflowFileChange[] plannedChanges =
+        [
+            .. plan.Request.LocalPlan.FileChanges.Where(change =>
+                change.RepositoryPath.StartsWith(targetPrefix, StringComparison.Ordinal)),
+        ];
+        bool hasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleFor(
+            pullRequest.Title,
+            plan.Request.LocalPlan.PackageIdentifier,
+            plan.Request.LocalPlan.PackageVersion);
+        var plannedPaths = new HashSet<string>(
+            plannedChanges.Select(static change => change.RepositoryPath),
+            StringComparer.Ordinal);
+        bool hasManifestPath = changedFiles.Any(file =>
+            plannedPaths.Contains(file.Path)
+            || (file.PreviousPath is not null && plannedPaths.Contains(file.PreviousPath)));
+        if (hasCanonicalTitle || hasManifestPath)
+        {
+            await VerifyPullRequestIdentityAsync(
+                plan,
+                pullRequest,
+                cancellationToken).ConfigureAwait(false);
+            return new(hasManifestPath, false, hasCanonicalTitle);
+        }
+
         RepositoryInfo headRepository = await _gitHub.GetRepositoryAsync(
             pullRequest.HeadRepository!,
             cancellationToken).ConfigureAwait(false);
@@ -591,47 +611,12 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                 $"Pull request #{pullRequest.Number} merge-base evidence is unavailable: {exception.Message}");
         }
 
-        IReadOnlyList<PullRequestChangedFile> changedFiles;
-        try
-        {
-            changedFiles = await _gitHub.GetPullRequestChangedFilesAsync(
-                plan.Request.UpstreamRepository,
-                pullRequest.Number,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (NotSupportedException exception)
-        {
-            throw new PullRequestEvidenceLimitException(
-                $"Pull request #{pullRequest.Number} changed-file evidence is unavailable: {exception.Message}");
-        }
-        catch (GitHubApiException exception) when (exception.StatusCode is null)
-        {
-            throw new PullRequestEvidenceLimitException(
-                $"Pull request #{pullRequest.Number} changed-file evidence failed a local transport safety bound: {exception.Message}");
-        }
-
-        if (changedFiles.Any(static file =>
-                string.IsNullOrWhiteSpace(file.Path)
-                || (file.PreviousPath is not null
-                    && string.IsNullOrWhiteSpace(file.PreviousPath))))
-        {
-            throw new PullRequestEvidenceLimitException(
-                $"Pull request #{pullRequest.Number} returned an invalid changed-file path.");
-        }
-
-        string targetPrefix = plan.PackageVersionDirectory + "/";
-        WorkflowFileChange[] plannedChanges =
-        [
-            .. plan.Request.LocalPlan.FileChanges.Where(change =>
-                change.RepositoryPath.StartsWith(targetPrefix, StringComparison.Ordinal)),
-        ];
         if (plannedChanges.Length > PullRequestManifestEvidenceLimits.MaximumContentFiles)
         {
             throw new PullRequestEvidenceLimitException(
                 $"Pull request #{pullRequest.Number} requires more than {PullRequestManifestEvidenceLimits.MaximumContentFiles} manifest path comparisons.");
         }
 
-        bool hasManifestPath = false;
         bool hasMatchingContent = false;
         foreach (WorkflowFileChange change in plannedChanges)
         {
@@ -668,7 +653,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         }
 
         await VerifyPullRequestIdentityAsync(plan, pullRequest, cancellationToken).ConfigureAwait(false);
-        return new(hasManifestPath, hasMatchingContent);
+        return new(hasManifestPath, hasMatchingContent, hasCanonicalTitle);
     }
 
     private async Task<RepositoryContent?> TryGetContentAsync(
@@ -735,6 +720,140 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         CancellationToken cancellationToken)
         => _ = await ReadCurrentPullRequestAsync(plan, expected, cancellationToken).ConfigureAwait(false);
 
+    private async Task EnsureChangedFilesAsync(
+        RepositoryCoordinates repository,
+        IReadOnlyList<PullRequestInfo> pullRequests,
+        CancellationToken cancellationToken)
+    {
+        PullRequestInfo[] missing =
+        [
+            .. pullRequests
+                .DistinctBy(static pullRequest => pullRequest.Number)
+                .Where(pullRequest => !HasCurrentChangedFiles(repository, pullRequest)),
+        ];
+        if (missing.Length == 0)
+        {
+            return;
+        }
+
+        IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> fetched;
+        try
+        {
+            fetched = await _gitHub.GetPullRequestChangedFilesBatchAsync(
+                repository,
+                missing,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (NotSupportedException exception)
+        {
+            throw new PullRequestEvidenceLimitException(
+                $"Pull request changed-file evidence is unavailable: {exception.Message}");
+        }
+        catch (GitHubApiException exception) when (exception.StatusCode is null)
+        {
+            throw new PullRequestEvidenceLimitException(
+                "Pull request changed-file evidence failed a local transport safety bound: "
+                + exception.Message);
+        }
+
+        if (fetched.Count != missing.Length)
+        {
+            throw new PullRequestEvidenceLimitException(
+                "Pull request changed-file evidence returned an incomplete batch.");
+        }
+
+        foreach (PullRequestInfo pullRequest in missing)
+        {
+            if (!fetched.TryGetValue(
+                    pullRequest.Number,
+                    out IReadOnlyList<PullRequestChangedFile>? changedFiles))
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Pull request #{pullRequest.Number} changed-file evidence is missing.");
+            }
+
+            PullRequestChangedFile[] snapshot = [.. changedFiles];
+            ValidateChangedFiles(pullRequest.Number, snapshot);
+            var key = CreateChangedFilesCacheKey(repository, pullRequest);
+            _changedFilesCache[key] = new(
+                pullRequest.NodeId,
+                pullRequest.BaseSha,
+                snapshot);
+            foreach (ChangedFilesCacheKey stale in _changedFilesCache.Keys.Where(candidate =>
+                         string.Equals(
+                             candidate.Repository,
+                             key.Repository,
+                             StringComparison.Ordinal)
+                         && candidate.PullRequestNumber == key.PullRequestNumber
+                         && !string.Equals(
+                             candidate.HeadSha,
+                             key.HeadSha,
+                             StringComparison.Ordinal)))
+            {
+                _changedFilesCache.TryRemove(stale, out _);
+            }
+
+            foreach (EvidenceCacheKey stale in _cache.Keys.Where(candidate =>
+                         string.Equals(
+                             candidate.UpstreamRepository,
+                             key.Repository,
+                             StringComparison.Ordinal)
+                         && candidate.PullRequestNumber == key.PullRequestNumber
+                         && !string.Equals(
+                             candidate.HeadSha,
+                             key.HeadSha,
+                             StringComparison.Ordinal)))
+            {
+                _cache.TryRemove(stale, out _);
+            }
+        }
+    }
+
+    private bool HasCurrentChangedFiles(
+        RepositoryCoordinates repository,
+        PullRequestInfo pullRequest)
+    {
+        var key = CreateChangedFilesCacheKey(repository, pullRequest);
+        return _changedFilesCache.TryGetValue(key, out ChangedFilesCacheEntry? cached)
+            && string.Equals(cached.NodeId, pullRequest.NodeId, StringComparison.Ordinal)
+            && string.Equals(cached.BaseSha, pullRequest.BaseSha, StringComparison.Ordinal);
+    }
+
+    private IReadOnlyList<PullRequestChangedFile> GetCachedChangedFiles(
+        RepositoryCoordinates repository,
+        PullRequestInfo pullRequest)
+    {
+        var key = CreateChangedFilesCacheKey(repository, pullRequest);
+        if (_changedFilesCache.TryGetValue(key, out ChangedFilesCacheEntry? cached)
+            && string.Equals(cached.NodeId, pullRequest.NodeId, StringComparison.Ordinal)
+            && string.Equals(cached.BaseSha, pullRequest.BaseSha, StringComparison.Ordinal))
+        {
+            return cached.Files;
+        }
+
+        throw new PullRequestEvidenceLimitException(
+            $"Pull request #{pullRequest.Number} changed-file evidence was not cached at its pinned identity.");
+    }
+
+    private static void ValidateChangedFiles(
+        long pullRequestNumber,
+        IReadOnlyList<PullRequestChangedFile> changedFiles)
+    {
+        if (changedFiles.Any(static file =>
+                string.IsNullOrWhiteSpace(file.Path)
+                || (file.PreviousPath is not null
+                    && string.IsNullOrWhiteSpace(file.PreviousPath))))
+        {
+            throw new PullRequestEvidenceLimitException(
+                $"Pull request #{pullRequestNumber} returned an invalid changed-file path.");
+        }
+    }
+
+    private static ChangedFilesCacheKey CreateChangedFilesCacheKey(
+        RepositoryCoordinates repository,
+        PullRequestInfo pullRequest)
+        => new(repository.ToString(), pullRequest.Number, pullRequest.HeadSha);
+
     private static string CreatePlanFingerprint(GitHubSubmissionPlan plan)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -787,6 +906,16 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         string HeadSha,
         string BaseBranch,
         string BaseSha);
+
+    private readonly record struct ChangedFilesCacheKey(
+        string Repository,
+        long PullRequestNumber,
+        string HeadSha);
+
+    private sealed record ChangedFilesCacheEntry(
+        string NodeId,
+        string? BaseSha,
+        IReadOnlyList<PullRequestChangedFile> Files);
 }
 
 internal static class RepositorySubmissionEvidenceMerger

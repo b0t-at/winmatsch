@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using WinMatsch.GitHub;
 using WinMatsch.Testing.Infrastructure;
 using WinMatsch.Workflows.GitHub;
@@ -36,6 +37,11 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
             request =>
             {
                 Assert.Equal("https://ghe.invalid/api/graphql", request.RequestUri!.AbsoluteUri);
+                return Json(GraphQlFilesJson("unrelated/readme.txt"));
+            },
+            request =>
+            {
+                Assert.Equal("https://ghe.invalid/api/graphql", request.RequestUri!.AbsoluteUri);
                 return Json(RepositoryGraphQlJson(), ("X-OAuth-Scopes", "repo, read:org, repo"));
             },
             request =>
@@ -52,13 +58,6 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
                     request.RequestUri!.AbsolutePath,
                     StringComparison.Ordinal);
                 return Json(ComparisonJson());
-            },
-            request =>
-            {
-                Assert.EndsWith(
-                    "/repos/upstream/repo/pulls/7/files",
-                    request.RequestUri!.AbsolutePath);
-                return Json($"[{{\"filename\":\"{change.RepositoryPath}\"}}]");
             },
             request =>
             {
@@ -122,11 +121,9 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
         [
             _ => Json($"[{pullRequestJson}]"),
             _ => Json(pullRequestJson),
-            _ => Json(RepositoryGraphQlJson()),
-            _ => Json(BranchJson()),
-            _ => Json(ComparisonJson()),
+            _ => Json(GraphQlFilesJson(change.RepositoryPath, hasNextPage: true)),
             _ => Json(
-                $"[{{\"filename\":\"{change.RepositoryPath}\"}}]",
+                $"[{{\"filename\":\"{change.RepositoryPath}\",\"status\":\"modified\"}}]",
                 ("Link", $"<{filesUri}>; rel=\"next\"")),
         ]);
         (GitHubRepositoryClient client, List<ObservedRequest> requests) = CreateClient(steps);
@@ -143,10 +140,119 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
 
         Assert.Contains("loops", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(steps);
-        Assert.Equal(6, requests.Count);
+        Assert.Equal(4, requests.Count);
         Assert.DoesNotContain(
             requests,
             request => request.Uri.AbsolutePath.Contains("/contents/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Production_scale_discovery_batches_and_reuses_pinned_head_evidence()
+    {
+        PullRequestInfo[] firstSnapshot =
+        [
+            .. Enumerable.Range(1, 400).Select(number => PullRequest(number)),
+        ];
+        var byNode = firstSnapshot.ToDictionary(
+            static pullRequest => pullRequest.NodeId,
+            StringComparer.Ordinal);
+        var heads = firstSnapshot.ToDictionary(
+            static pullRequest => pullRequest.NodeId,
+            static pullRequest => pullRequest.HeadSha,
+            StringComparer.Ordinal);
+        var batchSizes = new List<int>();
+        int pullRequestPageRequests = 0;
+        int graphQlRequests = 0;
+        var handler = new StubHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            if (request.Method == HttpMethod.Get)
+            {
+                pullRequestPageRequests++;
+                Assert.Contains("base=main", request.RequestUri!.Query, StringComparison.Ordinal);
+                int page = ReadPage(request.RequestUri);
+                PullRequestInfo[] pageItems =
+                [
+                    .. firstSnapshot
+                        .Skip((page - 1) * 100)
+                        .Take(100)
+                        .Select(pullRequest => pullRequest with
+                        {
+                            HeadSha = heads[pullRequest.NodeId],
+                        }),
+                ];
+                return page < 4
+                    ? Json(
+                        RestPullRequestsJson(pageItems),
+                        ("Link",
+                            $"<https://ghe.invalid/api/v3/repos/upstream/repo/pulls" +
+                            $"?per_page=100&state=open&base=main&page={page + 1}>; rel=\"next\""))
+                    : Json(RestPullRequestsJson(pageItems));
+            }
+
+            graphQlRequests++;
+            Assert.Equal("https://ghe.invalid/api/graphql", request.RequestUri!.AbsoluteUri);
+            string body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            using JsonDocument document = JsonDocument.Parse(body);
+            string[] ids =
+            [
+                .. document.RootElement
+                    .GetProperty("variables")
+                    .GetProperty("ids")
+                    .EnumerateArray()
+                    .Select(static item => item.GetString()!),
+            ];
+            batchSizes.Add(ids.Length);
+            return Json(GraphQlBatchFilesJson(ids.Select(id =>
+                byNode[id] with { HeadSha = heads[id] })));
+        });
+        var options = new GitHubClientOptions
+        {
+            ApiBaseUri = new Uri("https://ghe.invalid/api/v3"),
+            GraphQlUri = new Uri("https://ghe.invalid/api/graphql"),
+            UserAgent = "winmatsch-evidence-budget-tests",
+            RetryBaseDelay = TimeSpan.Zero,
+            MaxTransientRetries = 0,
+        };
+        using var client = new GitHubRepositoryClient(
+            new HttpClient(handler),
+            "synthetic-token",
+            options);
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        IReadOnlyList<PullRequestInfo> discovered = await client.SearchPullRequestsAsync(
+            _upstream,
+            new PullRequestSearch(BaseBranch: "main"),
+            CancellationToken.None);
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            discovered,
+            CancellationToken.None));
+        discovered = await client.SearchPullRequestsAsync(
+            _upstream,
+            new PullRequestSearch(BaseBranch: "main"),
+            CancellationToken.None);
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            discovered,
+            CancellationToken.None));
+        const string movedHead = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        heads["PR_200"] = movedHead;
+        discovered = await client.SearchPullRequestsAsync(
+            _upstream,
+            new PullRequestSearch(BaseBranch: "main"),
+            CancellationToken.None);
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            discovered,
+            CancellationToken.None));
+
+        Assert.Equal(21, handler.Requests.Count);
+        Assert.Equal(12, pullRequestPageRequests);
+        Assert.Equal(9, graphQlRequests);
+        Assert.Equal([50, 50, 50, 50, 50, 50, 50, 50, 1], batchSizes);
+        Assert.Equal("graphql", Assert.IsType<RateLimitInfo>(client.LastRateLimit).Resource);
     }
 
     private static (GitHubRepositoryClient Client, List<ObservedRequest> Requests) CreateClient(
@@ -242,6 +348,26 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
         }
         """;
 
+    private static PullRequestInfo PullRequest(int number)
+        => new(
+            number,
+            $"PR_{number}",
+            $"Unrelated maintenance {number}",
+            null,
+            PullRequestState.Open,
+            false,
+            $"contributor-{number}",
+            $"branch-{number}",
+            number.ToString("D40", System.Globalization.CultureInfo.InvariantCulture),
+            "main",
+            new Uri($"https://ghe.invalid/upstream/repo/pull/{number}"),
+            new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero))
+        {
+            HeadRepository = new RepositoryCoordinates($"contributor-{number}", "repo"),
+            BaseSha = BaseSha,
+        };
+
     private static string RepositoryGraphQlJson()
         => $$"""
         {
@@ -258,6 +384,134 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
           }
         }
         """;
+
+    private static string GraphQlFilesJson(string path, bool hasNextPage = false)
+        => $$"""
+        {
+          "data": {
+            "nodes": [{
+              "id": "PR_7",
+              "number": 7,
+              "headRefOid": "{{HeadSha}}",
+              "files": {
+                "nodes": [{
+                  "path": "{{path}}",
+                  "changeType": "MODIFIED"
+                }],
+                "pageInfo": {
+                  "hasNextPage": {{hasNextPage.ToString().ToLowerInvariant()}}
+                }
+              }
+            }],
+            "rateLimit": {
+              "limit": 5000,
+              "remaining": 4998,
+              "used": 2,
+              "resetAt": "2026-01-01T01:00:00Z"
+            }
+          }
+        }
+        """;
+
+    private static string GraphQlBatchFilesJson(IEnumerable<PullRequestInfo> pullRequests)
+    {
+        string nodes = string.Join(
+            ',',
+            pullRequests.Select(pullRequest =>
+                $$"""
+                {
+                  "id": "{{pullRequest.NodeId}}",
+                  "number": {{pullRequest.Number}},
+                  "headRefOid": "{{pullRequest.HeadSha}}",
+                  "files": {
+                    "nodes": [{
+                      "path": "unrelated/{{pullRequest.Number}}.txt",
+                      "changeType": "MODIFIED"
+                    }],
+                    "pageInfo": { "hasNextPage": false }
+                  }
+                }
+                """));
+        return $$"""
+        {
+          "data": {
+            "nodes": [{{nodes}}],
+            "rateLimit": {
+              "limit": 5000,
+              "remaining": 4999,
+              "used": 1,
+              "resetAt": "2026-01-01T01:00:00Z"
+            }
+          }
+        }
+        """;
+    }
+
+    private static string RestPullRequestsJson(IEnumerable<PullRequestInfo> pullRequests)
+    {
+        string items = string.Join(
+            ',',
+            pullRequests.Select(pullRequest =>
+                $$"""
+                {
+                  "number": {{pullRequest.Number}},
+                  "node_id": "{{pullRequest.NodeId}}",
+                  "title": "{{pullRequest.Title}}",
+                  "body": null,
+                  "state": "open",
+                  "draft": false,
+                  "head": {
+                    "ref": "{{pullRequest.HeadBranch}}",
+                    "sha": "{{pullRequest.HeadSha}}",
+                    "repo": {
+                      "node_id": "R_head_{{pullRequest.Number}}",
+                      "full_name": "{{pullRequest.HeadRepository}}",
+                      "html_url": "https://ghe.invalid/{{pullRequest.HeadRepository}}",
+                      "fork": true,
+                      "private": false,
+                      "default_branch": "main",
+                      "owner": { "login": "{{pullRequest.HeadOwner}}" }
+                    },
+                    "user": { "login": "{{pullRequest.HeadOwner}}" }
+                  },
+                  "base": {
+                    "ref": "{{pullRequest.BaseBranch}}",
+                    "sha": "{{pullRequest.BaseSha}}",
+                    "repo": {
+                      "node_id": "R_base",
+                      "full_name": "{{_upstream}}",
+                      "html_url": "https://ghe.invalid/{{_upstream}}",
+                      "fork": false,
+                      "private": false,
+                      "default_branch": "main",
+                      "owner": { "login": "{{_upstream.Owner}}" }
+                    },
+                    "user": { "login": "{{_upstream.Owner}}" }
+                  },
+                  "html_url": "{{pullRequest.WebUri}}",
+                  "created_at": "2026-01-01T00:00:00Z",
+                  "updated_at": "2026-01-02T00:00:00Z"
+                }
+                """));
+        return $"[{items}]";
+    }
+
+    private static int ReadPage(Uri uri)
+    {
+        const string marker = "&page=";
+        int markerIndex = uri.Query.IndexOf(marker, StringComparison.Ordinal);
+        if (markerIndex < 0)
+        {
+            return 1;
+        }
+
+        int valueStart = markerIndex + marker.Length;
+        int valueEnd = uri.Query.IndexOf('&', valueStart);
+        string value = valueEnd < 0
+            ? uri.Query[valueStart..]
+            : uri.Query[valueStart..valueEnd];
+        return int.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+    }
 
     private static string BranchJson()
         => $$"""

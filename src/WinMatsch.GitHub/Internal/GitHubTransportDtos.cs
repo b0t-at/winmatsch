@@ -526,6 +526,62 @@ internal sealed class GraphQlRateLimitDto
     public DateTimeOffset ResetAt { get; set; }
 }
 
+internal sealed class GraphQlPullRequestFilesRequestDto
+{
+    public string Query { get; set; } = "";
+
+    public GraphQlPullRequestFilesVariablesDto Variables { get; set; } = new();
+}
+
+internal sealed class GraphQlPullRequestFilesVariablesDto
+{
+    public List<string> Ids { get; set; } = [];
+}
+
+internal sealed class GraphQlPullRequestFilesResponseDto
+{
+    public GraphQlPullRequestFilesDataDto? Data { get; set; }
+
+    public List<GraphQlErrorDto>? Errors { get; set; }
+}
+
+internal sealed class GraphQlPullRequestFilesDataDto
+{
+    public List<GraphQlPullRequestFileNodeDto?>? Nodes { get; set; }
+
+    public GraphQlRateLimitDto? RateLimit { get; set; }
+}
+
+internal sealed class GraphQlPullRequestFileNodeDto
+{
+    public string Id { get; set; } = "";
+
+    public long Number { get; set; }
+
+    public string HeadRefOid { get; set; } = "";
+
+    public GraphQlPullRequestFileConnectionDto? Files { get; set; }
+}
+
+internal sealed class GraphQlPullRequestFileConnectionDto
+{
+    public List<GraphQlPullRequestChangedFileDto?>? Nodes { get; set; }
+
+    public GraphQlPageInfoDto? PageInfo { get; set; }
+}
+
+internal sealed class GraphQlPullRequestChangedFileDto
+{
+    public string Path { get; set; } = "";
+
+    public string ChangeType { get; set; } = "";
+}
+
+internal sealed class GraphQlPageInfoDto
+{
+    public bool HasNextPage { get; set; }
+}
+
 internal sealed class GraphQlErrorDto
 {
     public string Message { get; set; } = "";

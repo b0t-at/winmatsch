@@ -38,6 +38,8 @@ namespace WinMatsch.GitHub.Internal;
 [JsonSerializable(typeof(GraphQlViewerResponseDto))]
 [JsonSerializable(typeof(GraphQlRepositoryRequestDto))]
 [JsonSerializable(typeof(GraphQlRepositoryResponseDto))]
+[JsonSerializable(typeof(GraphQlPullRequestFilesRequestDto))]
+[JsonSerializable(typeof(GraphQlPullRequestFilesResponseDto))]
 [JsonSerializable(typeof(GraphQlCommitRequestDto))]
 [JsonSerializable(typeof(GraphQlCommitResponseDto))]
 internal sealed partial class GitHubJsonContext : JsonSerializerContext;

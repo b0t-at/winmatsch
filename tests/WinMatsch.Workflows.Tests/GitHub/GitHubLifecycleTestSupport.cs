@@ -191,6 +191,10 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public int PullRequestFilesCalls { get; private set; }
 
+    public int PullRequestFileBatchCalls { get; private set; }
+
+    public List<int> PullRequestFileBatchSizes { get; } = [];
+
     public List<(RepositoryCoordinates Repository, string Treeish, bool Recursive)> TreeCalls { get; } = [];
 
     public bool PullRequestChangedFilesUnsupported { get; set; }
@@ -720,6 +724,30 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
             _pullRequestFiles.TryGetValue(number, out IReadOnlyList<PullRequestChangedFile>? files)
                 ? files
                 : (IReadOnlyList<PullRequestChangedFile>)[]);
+    }
+
+    public Task<IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>>>
+        GetPullRequestChangedFilesBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        PullRequestFileBatchCalls++;
+        PullRequestFileBatchSizes.Add(pullRequests.Count);
+        if (PullRequestChangedFilesUnsupported)
+        {
+            throw new NotSupportedException("Synthetic changed-file evidence is unavailable.");
+        }
+
+        return Task.FromResult<IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>>>(
+            pullRequests.ToDictionary(
+                static pullRequest => pullRequest.Number,
+                pullRequest => _pullRequestFiles.TryGetValue(
+                    pullRequest.Number,
+                    out IReadOnlyList<PullRequestChangedFile>? files)
+                        ? files
+                        : (IReadOnlyList<PullRequestChangedFile>)[]));
     }
 
     public Task<PullRequestComment> CommentOnPullRequestAsync(

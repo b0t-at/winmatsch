@@ -151,6 +151,29 @@ public interface IGitHubRepositoryClient : IDisposable
                 "This GitHub client does not support authoritative pull-request changed-file evidence."));
     }
 
+    public async Task<IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>>>
+        GetPullRequestChangedFilesBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(pullRequests);
+        var result = new Dictionary<long, IReadOnlyList<PullRequestChangedFile>>();
+        foreach (PullRequestInfo pullRequest in pullRequests)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            result.Add(
+                pullRequest.Number,
+                await GetPullRequestChangedFilesAsync(
+                    repository,
+                    pullRequest.Number,
+                    cancellationToken).ConfigureAwait(false));
+        }
+
+        return result;
+    }
+
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,
         long number,

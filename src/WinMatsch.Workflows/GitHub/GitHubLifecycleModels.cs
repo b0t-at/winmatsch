@@ -253,9 +253,10 @@ public sealed record RepositorySubmissionEvidence
 
 public sealed record PullRequestManifestEvidence(
     bool HasManifestPath,
-    bool HasMatchingContent)
+    bool HasMatchingContent,
+    bool HasCanonicalTitle = false)
 {
-    public bool IsAssociated => HasManifestPath || HasMatchingContent;
+    public bool IsAssociated => HasManifestPath || HasMatchingContent || HasCanonicalTitle;
 
     public static PullRequestManifestEvidence None { get; } = new(false, false);
 }
