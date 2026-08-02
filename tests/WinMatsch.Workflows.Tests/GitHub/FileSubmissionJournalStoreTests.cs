@@ -42,6 +42,34 @@ public sealed class FileSubmissionJournalStoreTests
     }
 
     [Fact]
+    public async Task Stale_handle_after_uncommitted_recovery_is_a_domain_conflict()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        SubmissionJournalHandle handle = await store.PrepareAsync(
+            Request(repository.Path),
+            default);
+
+        SubmissionJournalRecoveryResult recovery = await store.RecoverAsync(
+            repository.Path,
+            default);
+        SubmissionJournalConflictException exception =
+            await Assert.ThrowsAsync<SubmissionJournalConflictException>(() =>
+                store.ActivateAsync(handle, default));
+
+        Assert.Empty(recovery.Activated);
+        Assert.Contains(
+            recovery.Diagnostics,
+            diagnostic => diagnostic.Contains(
+                "Discarded uncommitted submission intent",
+                StringComparison.Ordinal));
+        Assert.Contains("no longer exists", exception.Message, StringComparison.Ordinal);
+        Assert.IsType<FileNotFoundException>(exception.InnerException);
+    }
+
+    [Fact]
     public async Task Journal_enforces_cas_cancel_and_tamper_detection()
     {
         using var repository = new TemporaryDirectory();

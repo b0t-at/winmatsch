@@ -13,6 +13,7 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
     private const int MaximumResponseBytes = 16 * 1024 * 1024;
 
     private readonly HttpClient _httpClient;
+    private readonly bool _ownsHttpClient;
     private readonly GitHubClientOptions _options;
     private string? _token;
 
@@ -23,6 +24,7 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _token = token;
+        _ownsHttpClient = httpClient is null;
         _httpClient = httpClient ?? new HttpClient();
     }
 
@@ -36,7 +38,11 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
 
     public void Dispose()
     {
-        _httpClient.Dispose();
+        if (_ownsHttpClient)
+        {
+            _httpClient.Dispose();
+        }
+
         GC.SuppressFinalize(this);
     }
 

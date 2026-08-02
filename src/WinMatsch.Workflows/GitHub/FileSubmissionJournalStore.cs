@@ -866,6 +866,13 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         {
             return ReadIntentCore(path);
         }
+        catch (FileNotFoundException exception)
+        {
+            throw new SubmissionJournalConflictException(
+                $"Prepared submission intent '{Path.GetFileName(path)}' no longer exists. "
+                + "It may have been recovered or discarded by another process; re-plan and retry.",
+                exception);
+        }
         catch (SubmissionJournalTamperedException exception)
         {
             SubmissionJournalCorruption corruption = Quarantine(path, exception);

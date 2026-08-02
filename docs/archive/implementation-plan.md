@@ -1,4 +1,8 @@
-# Plan: winmatsch — cross-platform WinGet manifest automation tool (.NET)
+# Archived implementation plan: winmatsch
+
+> Historical planning record retained for implementation provenance. It is not
+> normative product documentation; current behavior is documented in `README.md`
+> and the maintained guides under `docs/`.
 
 ## Context & decisions (confirmed with user)
 - Name: **winmatsch** (repo d:\winmatsch, currently only README.md)

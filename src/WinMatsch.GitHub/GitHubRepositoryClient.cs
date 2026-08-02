@@ -1048,7 +1048,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                             Status: ParseGraphQlPullRequestFileStatus(file.ChangeType))),
                 ];
                 bool requiresRestCompletion = node.Files.PageInfo.HasNextPage
-                    || files.Any(static file => file.Status == PullRequestFileStatus.Renamed);
+                    || files.Any(static file => file.Status is
+                        PullRequestFileStatus.Renamed or PullRequestFileStatus.Copied);
                 if (requiresRestCompletion)
                 {
                     restCompletions.Add(expected);

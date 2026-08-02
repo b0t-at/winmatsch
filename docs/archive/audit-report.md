@@ -1,4 +1,8 @@
-# Audit report — original audit, remediation closeout, and independent re-audit
+# Archived audit report — original audit, remediation closeout, and independent re-audit
+
+> Historical audit and remediation record retained for engineering provenance.
+> It is not normative product documentation; findings describe the reviewed
+> commits and their disposition at the time recorded.
 
 **Audited worktree:** `D:\copilot-worktrees\winmatsch\utesgui-psychic-umbrella` @ `29e6f7b` (116 commits ahead of `main`; 389 files, +71,746 / −433)
 **Audit date:** 2026-08-01 · **Method:** Phase 0 inventory + central build/test by the coordinating auditor; 7 parallel per-unit deep-review subagents (all Claude Fable 5, long context — **no unit hit model guardrails, the GPT‑5.6 Sol fallback was never needed**); Phase 2 independent re-verification of every blocker and load-bearing major (code re-read and/or live repro against the built binary).
@@ -94,17 +98,14 @@ changes, which are real. **Merge recommendation: merge.** Only nits remain
 
 ### R2.4 New findings this round (all nits, none blocking)
 
-- `[nit]` `FileSubmissionJournalStore.cs:1269-1271` — a stale-handle
-  `ActivateAsync` after a concurrent process discarded the uncommitted intent
-  surfaces a raw `FileNotFoundException` instead of a domain conflict
-  (cross-process race, fail-closed either way).
-- `[nit]` `PublicReadOnlyGitHubClient.cs:26,37-41` — unconditionally disposes
-  an injected `HttpClient` (same ownership class as the fixed items);
-  pre-existing, production always passes null — latent for library consumers.
-- `[nit]` `GitHubRepositoryClient.cs:1043-1051` — the GraphQL batch drops
-  `previousPath` for COPIED files (only RENAMED forces REST completion);
-  direction is conservative (worst case: extra verification, never
-  mis-association).
+- `[nit]` **Resolved after round 3:** stale-handle `ActivateAsync` now maps a
+  concurrently discarded prepared intent to `SubmissionJournalConflictException`;
+  `Stale_handle_after_uncommitted_recovery_is_a_domain_conflict` pins the race.
+- `[nit]` **Resolved after round 3:** `PublicReadOnlyGitHubClient` now disposes
+  only internally created `HttpClient` instances and preserves injected caller
+  ownership, matching the other GitHub adapters.
+- `[nit]` **Resolved after round 3:** GraphQL `COPIED` files now use the bounded
+  REST completion path, preserving `previousPath` consistently with REST evidence.
 - `[nit]` `docs/analyzers.md` dirty in the working tree (see R2.3-3).
 
 ### R2.5 Build & test matrix (round-3 run, HEAD `86e4bb1`)

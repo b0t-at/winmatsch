@@ -262,6 +262,36 @@ public sealed class GitHubPullRequestTests
     }
 
     [Fact]
+    public async Task Pull_request_changed_files_batch_completes_copied_graphql_files_via_rest()
+    {
+        PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlFilesJson([pullRequest], changeType: "COPIED")));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            [{
+              "filename":"manifests/copied.yaml",
+              "status":"copied",
+              "previous_filename":"manifests/source.yaml"
+            }]
+            """));
+
+        IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> files =
+            await GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    [pullRequest],
+                    TestContext.Current.CancellationToken);
+
+        PullRequestChangedFile file = Assert.Single(files[pullRequest.Number]);
+        Assert.Equal("manifests/copied.yaml", file.Path);
+        Assert.Equal("manifests/source.yaml", file.PreviousPath);
+        Assert.Equal(PullRequestFileStatus.Copied, file.Status);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
     public async Task Pull_request_changed_files_batch_maps_graphql_changed_status()
     {
         PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));

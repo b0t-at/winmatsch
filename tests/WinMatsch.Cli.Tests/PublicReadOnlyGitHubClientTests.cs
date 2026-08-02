@@ -13,10 +13,11 @@ public sealed class PublicReadOnlyGitHubClientTests
     {
         var handler = new RecordingHandler(
             """{"sha":"tree","truncated":false,"tree":[]}""");
+        using var httpClient = new HttpClient(handler);
         using var client = new PublicReadOnlyGitHubClient(
             new GitHubClientOptions(),
             token: null,
-            new HttpClient(handler));
+            httpClient);
 
         IReadOnlyList<RepositoryTreeEntry> entries = await client.GetTreeAsync(
             new RepositoryCoordinates("owner", "repo"),
@@ -33,10 +34,11 @@ public sealed class PublicReadOnlyGitHubClientTests
     {
         var handler = new RecordingHandler(
             """{"sha":"tree","truncated":true,"tree":[]}""");
+        using var httpClient = new HttpClient(handler);
         using var client = new PublicReadOnlyGitHubClient(
             new GitHubClientOptions(),
             token: null,
-            new HttpClient(handler));
+            httpClient);
 
         InvalidDataException exception = await Assert.ThrowsAsync<InvalidDataException>(
             () => client.GetTreeAsync(
@@ -52,10 +54,11 @@ public sealed class PublicReadOnlyGitHubClientTests
     public async Task Stale_optional_token_retries_public_read_anonymously()
     {
         var handler = new StaleTokenHandler();
+        using var httpClient = new HttpClient(handler);
         using var client = new PublicReadOnlyGitHubClient(
             new GitHubClientOptions(),
             "stale-token",
-            new HttpClient(handler));
+            httpClient);
 
         IReadOnlyList<RepositoryTreeEntry> entries = await client.GetTreeAsync(
             new RepositoryCoordinates("owner", "repo"),
@@ -73,11 +76,29 @@ public sealed class PublicReadOnlyGitHubClientTests
         Assert.True(handler.ThirdWasAnonymous);
     }
 
+    [Fact]
+    public void Dispose_preserves_a_caller_owned_http_client()
+    {
+        var handler = new RecordingHandler(
+            """{"sha":"tree","truncated":false,"tree":[]}""");
+        using var httpClient = new HttpClient(handler);
+        var client = new PublicReadOnlyGitHubClient(
+            new GitHubClientOptions(),
+            token: null,
+            httpClient);
+
+        client.Dispose();
+
+        Assert.False(handler.IsDisposed);
+    }
+
     private sealed class RecordingHandler(string json) : HttpMessageHandler
     {
         public Uri? RequestUri { get; private set; }
 
         public System.Net.Http.Headers.AuthenticationHeaderValue? Authorization { get; private set; }
+
+        public bool IsDisposed { get; private set; }
 
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -89,6 +110,12 @@ public sealed class PublicReadOnlyGitHubClientTests
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json"),
             });
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            IsDisposed = true;
+            base.Dispose(disposing);
         }
     }
 
