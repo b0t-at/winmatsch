@@ -342,6 +342,34 @@ public sealed class FileSubmissionJournalStoreTests
     }
 
     [Fact]
+    public async Task Interrupted_scope_quarantine_remains_a_durable_blocking_state()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        GitHubSubmissionRequest request = Request(repository.Path);
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        SubmissionJournalEntry entry = await store.ActivateAsync(handle, default);
+        string scope = System.IO.Path.Combine(state.Path, $"{entry.Id}.scope");
+        string conflict = $"{scope}.{Guid.NewGuid():N}.conflict";
+        DurableFileSystem.MoveFile(scope, conflict);
+
+        await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+            store.GetAsync(entry.Id, default));
+
+        Assert.True(File.Exists(conflict));
+        Assert.False(File.Exists(scope));
+        Assert.False(File.Exists(System.IO.Path.Combine(state.Path, $"{entry.Id}.journal")));
+        Assert.Single(Directory.EnumerateFiles(state.Path, "*.corrupt"));
+        SubmissionJournalTamperedException retry =
+            await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+                store.PrepareAsync(request, default));
+        Assert.Contains("cannot be proven unrelated", retry.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Completion_keeps_journal_retryable_when_scope_cleanup_fails()
     {
         using var repository = new TemporaryDirectory();

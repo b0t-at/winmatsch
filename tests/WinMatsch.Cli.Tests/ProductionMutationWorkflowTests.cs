@@ -121,21 +121,8 @@ public sealed class ProductionMutationWorkflowTests
                 new(evidencePath, "other-repository", "Other.App"),
             ],
         });
-        var workflow = new ProductionSubmissionWorkflow(
-            new WinMatschConfiguration
-            {
-                Repository = new RepositoryCoordinates("microsoft", "winget-pkgs"),
-                ConcurrentDownloads = 2,
-                EnabledRules = [],
-                DisabledRules = [],
-                CacheEnabled = false,
-                FreshnessDelay = TimeSpan.FromHours(4),
-                OutputFormat = OutputFormat.Text,
-                OutputDirectory = temporary.Path,
-                Interaction = InteractionMode.Always,
-            },
-            new GitHubToken("test-token"),
-            new GitHubClientOptions(),
+        ProductionSubmissionWorkflow workflow = CreateSubmissionWorkflow(
+            temporary.Path,
             journals);
 
         SubmissionJournalTamperedException exception =
@@ -147,6 +134,28 @@ public sealed class ProductionMutationWorkflowTests
                     new RepositoryCoordinates("microsoft", "winget-pkgs")));
 
         Assert.Contains(evidencePath, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Resume_classifies_benign_recovery_diagnostics_as_conflict()
+    {
+        using var temporary = new TemporaryDirectory();
+        var journals = new DiagnosticOnlyJournalStore(new(
+            [],
+            ["Discarded uncommitted submission intent 'abc'."]));
+        ProductionSubmissionWorkflow workflow = CreateSubmissionWorkflow(
+            temporary.Path,
+            journals);
+
+        SubmissionJournalConflictException exception =
+            await Assert.ThrowsAsync<SubmissionJournalConflictException>(() =>
+                workflow.ResumePendingAsync(
+                    temporary.Path,
+                    new PackageIdentifier("Example.App"),
+                    new PackageVersion("2.0.0"),
+                    new RepositoryCoordinates("microsoft", "winget-pkgs")));
+
+        Assert.Contains("Discarded uncommitted", exception.Message, StringComparison.Ordinal);
     }
 
     private static ProductionMutationWorkflow CreateWorkflow(
@@ -171,6 +180,26 @@ public sealed class ProductionMutationWorkflowTests
             new GitHubClientOptions(),
             cleanupWarning,
             deleteDirectory);
+
+    private static ProductionSubmissionWorkflow CreateSubmissionWorkflow(
+        string root,
+        ISubmissionJournalStore journals)
+        => new(
+            new WinMatschConfiguration
+            {
+                Repository = new RepositoryCoordinates("microsoft", "winget-pkgs"),
+                ConcurrentDownloads = 2,
+                EnabledRules = [],
+                DisabledRules = [],
+                CacheEnabled = false,
+                FreshnessDelay = TimeSpan.FromHours(4),
+                OutputFormat = OutputFormat.Text,
+                OutputDirectory = root,
+                Interaction = InteractionMode.Always,
+            },
+            new GitHubToken("test-token"),
+            new GitHubClientOptions(),
+            journals);
 
     private static void WritePackage(string root)
     {

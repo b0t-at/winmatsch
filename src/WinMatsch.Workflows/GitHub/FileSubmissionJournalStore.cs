@@ -1025,6 +1025,12 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
     private void EnsureScope(SubmissionJournalEntry entry)
     {
         string path = ScopePath(entry.Id);
+        if (HasScopeConflict(entry.Id))
+        {
+            throw new SubmissionJournalScopeTamperedException(
+                $"Submission journal '{entry.Id}' has preserved conflicting scope evidence.");
+        }
+
         if (!File.Exists(path))
         {
             WriteScope(entry.Id, entry);
@@ -1113,7 +1119,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
 
     private SubmissionJournalScope? TryReadScope(string? id)
     {
-        if (id is null)
+        if (id is null || HasScopeConflict(id))
         {
             return null;
         }
@@ -1212,6 +1218,9 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
 
     private bool HasQuarantined(string id)
         => Directory.GetFiles(_rootDirectory, $"{id}.*.corrupt").Length > 0;
+
+    private bool HasScopeConflict(string id)
+        => Directory.GetFiles(_rootDirectory, $"{id}.scope.*.conflict").Length > 0;
 
     private static SubmissionJournalTamperedException QuarantinedException(
         string path,

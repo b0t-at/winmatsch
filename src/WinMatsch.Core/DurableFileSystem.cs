@@ -13,17 +13,6 @@ public static partial class DurableFileSystem
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
         string sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(source))!;
         string destinationDirectory = Path.GetDirectoryName(Path.GetFullPath(destination))!;
-        if (!string.Equals(
-                sourceDirectory,
-                destinationDirectory,
-                OperatingSystem.IsWindows()
-                    ? StringComparison.OrdinalIgnoreCase
-                    : StringComparison.Ordinal))
-        {
-            throw new IOException(
-                "Durable atomic file moves must remain within the same directory.");
-        }
-
         if (OperatingSystem.IsWindows())
         {
             if (!MoveFileEx(
@@ -38,8 +27,17 @@ public static partial class DurableFileSystem
             return;
         }
 
-        File.Move(source, destination, overwrite: true);
-        FlushDirectory(Path.GetDirectoryName(Path.GetFullPath(destination))!);
+        if (Rename(source, destination) != 0)
+        {
+            throw new IOException(
+                $"Durable file replacement failed with operating-system error {Marshal.GetLastPInvokeError()}.");
+        }
+
+        FlushDirectory(destinationDirectory);
+        if (!string.Equals(sourceDirectory, destinationDirectory, StringComparison.Ordinal))
+        {
+            FlushDirectory(sourceDirectory);
+        }
     }
 
     public static void MoveFile(string source, string destination)
@@ -132,6 +130,13 @@ public static partial class DurableFileSystem
         SetLastError = true,
         StringMarshalling = StringMarshalling.Utf8)]
     private static partial int Open(string path, int flags);
+
+    [LibraryImport(
+        "libc",
+        EntryPoint = "rename",
+        SetLastError = true,
+        StringMarshalling = StringMarshalling.Utf8)]
+    private static partial int Rename(string oldPath, string newPath);
 
     [LibraryImport("libc", EntryPoint = "fsync", SetLastError = true)]
     private static partial int Fsync(int fileDescriptor);
