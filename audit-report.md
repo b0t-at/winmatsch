@@ -1,8 +1,132 @@
-# Audit report — original audit plus final remediation closeout
+# Audit report — original audit, remediation closeout, and independent re-audit
 
 **Audited worktree:** `D:\copilot-worktrees\winmatsch\utesgui-psychic-umbrella` @ `29e6f7b` (116 commits ahead of `main`; 389 files, +71,746 / −433)
 **Audit date:** 2026-08-01 · **Method:** Phase 0 inventory + central build/test by the coordinating auditor; 7 parallel per-unit deep-review subagents (all Claude Fable 5, long context — **no unit hit model guardrails, the GPT‑5.6 Sol fallback was never needed**); Phase 2 independent re-verification of every blocker and load-bearing major (code re-read and/or live repro against the built binary).
 **Methodology deviation (disclosed):** builds/tests were run **once, centrally** by the coordinator instead of per-subagent — 7 concurrent `dotnet build/test` runs in one worktree would deadlock on `obj/` file locks. Per-project results are recorded in §4 from that central run. Subagents were read-only.
+
+---
+
+## R. Independent re-audit — 2026-08-02 (verification of the §0 remediation closeout)
+
+> Performed by the original (independent) auditor against branch HEAD `43ec8c0`
+> (54 remediation commits after the audit report landed; +42,622 / −3,644 over
+> 342 files). Method: central build + full test run, live CLI repros of the
+> originally-reproduced defects, and 3 parallel verification subagents
+> (Claude Fable 5, long context) re-reading the current code for every
+> blocker/major/appendix claim — the §0 closeout below is the remediation
+> agent's self-report; **this section is the independent check of it.**
+> This section supersedes §0's self-assessment where they differ.
+
+### R.1 Verdict
+
+**The remediation is genuine and essentially complete: every blocker and major
+from the original audit is verified fixed in current code, and the original
+merge gate (§5 items 1–6) is cleared.** Both former blockers were re-reproduced
+as fixed live (`analyze` on a 70 MiB PE and a ZIP-wrapped PE now exit 0 with
+bounded evidence; the typo'd `--token` parse error no longer echoes the secret).
+Build: 0 warnings / 0 errors. Tests: **2,274 passed, 0 failed, 3 skipped**
+(intended opt-in gates), matching the closeout's claim exactly. The closeout's
+per-item table is substantively accurate — my verification confirmed
+**Fixed** for B1, B2, M1–M18 and every appendix item except A1k
+(partially fixed: the no-op `catch (InvalidDataException) { throw; }` at
+`InnoFormatReader.cs:145-154` survives despite the "no-op catches were removed"
+claim) and A9 (deferred, as disclosed). The re-audit found **two new majors in
+the remediation code itself** (R-N1, R-N2 below) plus a handful of minors —
+none data-corrupting or safety-breaking. **Recommendation: mergeable now**,
+with R-N1/R-N2 and the plan.md contradictions as prioritized fast-follows
+(R-N2 is a small fix; R-N1 needs a design decision before production-scale
+use against `microsoft/winget-pkgs`).
+
+### R.2 Spot-confirmations of the closeout table (independent evidence)
+
+| Item | Independent evidence |
+|---|---|
+| B1 | Live: `analyze` 70 MiB PE → exit 0, full output; 70 MiB-class ZIP+PE → exit 0. Code: header-only PE read; ZIP budgets degrade to `DependencyEvidenceStatus.Unavailable` + DEP001/002/003; DEP-1 rule treats Unavailable as info-only, `Absent` only for complete direct-PE evidence (`Dep1PayloadDependencyRule.cs:67-81`). One residual axis → R-N2. |
+| B2 | `HumanCorrectionDetector.cs:169-296` — occurrence-queue index with consumed-flags replaces `ToDictionary`; 1→2 same-URL twin pinned by review-asserting tests (`RuleRuntimeTests.cs:1039,1076,1318`). |
+| M1 | Shared pairwise `InstallerDuplicateRelation` (`src/WinMatsch.Core/InstallerDuplicateRelation.cs:11-48`) with null-scope/locale wildcard + NestedInstallerType; the formerly-passing `{x64,exe,no-scope}`+`{x64,exe,user}` case pinned red (`AuditValidationRegressionTests.cs:70-85`); multi-locale legal again. |
+| M2 | WM0202 (`ApplyOverridePackFieldsRule`, `ProductionRuleComposer.cs:49`) consumes all four former-dead fields; learned packs persist via fingerprint-bound approval → `StageAsync` → prepared/manifest-committed/activated journal with hash CAS (`OverridePackStore.cs:287-295,492-631`) and are consumed on the next run (`LocalWorkflowEngine.cs:502-551`); value+bot-value hash matching makes re-application conservatively strict (degrades to re-review, never blind rewrite). No ABBA lock order found. |
+| M3/M4 | Discovery is author-independent: all open PRs on the base branch, association proven from changed-file paths or pinned head content (`GitHubSubmissionEvidence.cs:461-527`); evidence limits fail closed → GH2034. Titles canonical `New version:`/`Update version:`/`Add version:`/`Remove version:` (`GitHubSubmissionFormatter.cs:12-23,118-126`). Cost regression → R-N1. |
+| M5 | Fresh reservation adopted (GH2032), journaled exact-commit recovery (GH2041), bounded `-2…-8` suffixes; the 422-forever brick is gone (`GitHubLifecycleWorkflow.cs:454-585,1366-1432`). Branch deletion still manual (disclosed). |
+| M6 | Evidence fetched pre-plan (`GitHubLifecycleWorkflow.cs:221-227`) from a real bounded repo-tree scan (sibling hashes — the load-bearing half, live against any repo) plus a tool-defined policy file `.github/winmatsch/submission-evidence.json` for retired-ids/vanity — **only live in repos adopting that convention; microsoft/winget-pkgs does not carry it** (closeout overstates this half). |
+| M7 | `[JsonIgnore(Condition = Never)]` on `CreateTreeEntryDto.Sha` (`GitHubTransportDtos.cs:400`); raw serialized `"sha":null` asserted in recorded tests (`GitHubMutationOperationsTests.cs:290,343`). |
+| M8 | Envelope written **before** the exit-4 throw (`MutationCommandModule.cs:361-401`); `--approve-reviews` is fingerprint-bound at CLI and engine layers (`ReviewApproval.cs:8-94`). Residual (inherent, docs-disclosed): across two invocations the boolean flag approves the second run's recomputed review set. |
+| M9 | Live: `--tokn ghp_…` → `Unrecognized option '--tokn'` (value never printed); unmatched-token values render `[REDACTED]`. `questions[].path` now redacted via `CliRedactor.RedactUrl`; all CliHost exception paths redact; JSON string values redacted on the wire (`CommandOutput.cs:37-149`). Note: engines were *aligned by decorating every production client* with `RedactingGitHubRepositoryClient`, not unified — `GitHubSubmissionFormatter`'s own engine still lacks `ghp_` rules (latent for library consumers only). |
+| M10 | All decline sites now exit 5; 130 only under a genuinely cancelled token (`MaintenanceCommandHelpers.cs:54-64`; `MaintenanceCommandModule.cs:599-602`); docs updated. |
+| M11–M15 | Inno ANSI → replacement-fallback decoding + INNO004/005 diagnostics, overflow guard replaced `checked()` (`InnoFormatReader.cs:345-374,1240-1291`); schema-invalid docs skip materialization and `OverflowException` → VLD2003 (`ManifestPackageParser.cs:73-133`); all YAML file reads route through budgeted `ManifestYamlDocument`/`SafeManifestFile` (byte/event/depth/node/alias bans + reparse-point-safe opens) incl. `PackageManifestIO`, `PreflightRequest.FromDirectory`, `OriginalSubmissionStore`. |
+| M12/M13 | `x86compatible` without payload proof is now **inconclusive** + INNO001 manual-analysis; size-weighted dominance (≥2× + largest image) + INNO002; `ArchitecturesInstallIn64BitMode` hint (INNO011); header/payload divergence INNO012 (`InnoProbe.cs:220-383`). Dependencies: Inno + Squirrel payloads decompressed (bounded) for imports; NSIS/Burn/AdvancedInstaller wrappers → `Ambiguous` outer-stub evidence with `outer-stub-only` signal, never `Absent`. |
+| M16 | `InstallerVersionTrustPolicy` admits direct-PE (non-SFX) and single-candidate-ZIP versions; wrappers/placeholder shapes rejected; production-wired (`ProductionAdapters.cs:285-334`). |
+| M17 | All 13 descriptors drive the **real** production engine (`WorkflowProductionComposition.CreateLocalEngine` → `NewAsync`/`UpdateAsync`) with SHA-pinned synthetic binaries served to the real downloader/analyzer, byte-compared to complete merged-manifest YAML goldens (`RegressionDescriptorE2ETests.cs:31-188`). Previous installers now come from independent descriptor scenarios, not the expected output. |
+| M18 | Production composes durable `FileFeedbackStateStore` + `AllowlistedApprovedRepairPlanner` (DuplicateEntry/HashMismatch only, full preflight re-entry); `NullApprovedRepairPlanner` has zero references. |
+| A15b | Default `freshnessDelay` = 4 h (`ConfigurationDefaults.cs:12`). Nuance: submissions **without** release provenance still run with no delay (the gate can't evaluate without a release identity) — "4 h" holds for release-provenance submissions. |
+| A17 | `File.Replace` metadata publication race fix present (`DownloadCache.cs:535-546`); lock poll has deadline + cancellation. |
+| A20f | Live: `list-versions Git.Git` with no token → exit 0 (anonymous public read works). |
+| A21/A22 | All 6 action pins live-resolved tag→SHA: **6/6 match** the committed SHAs; workflow-level `permissions: contents: read`, write only on the release job, `persist-credentials: false` everywhere; no injectable `${{ }}` in run blocks. |
+| A29 | The compiled-installer corpus CI job **exists and is real**: unconditional `windows-compiled-corpus` job, SHA-pinned Inno 6.4.0 / NSIS 3.10 / WiX 5.0.2 / MakeAppx toolchain, compiles six formats, asserts real `FileAnalyzer` results (`ci.yml:54-101`, `Build-WindowsInstallerCorpus.ps1`, `WindowsCompiledCorpusTests.cs`). But see R.4: plan.md still claims the job doesn't exist. |
+
+### R.3 New findings in the remediation code
+
+- **R-N1 `[major]` Duplicate-PR discovery does a changed-files API call for every open PR on the base branch — throughput/rate-limit regression.**
+  `GitHubSubmissionEvidence.cs:475-517` fetches `GetPullRequestChangedFilesAsync` for **each** open PR *before* any filtering (the title-hint/`canVerifyEveryOpenPullRequest` check at :512-517 only gates candidacy, not the fetch), and discovery runs at least twice per submission (pre-create + post-create reconciliation, `GitHubLifecycleWorkflow.cs:241,787`). The old server-side `ExactTitleToken` narrowing is gone. Against `microsoft/winget-pkgs` (routinely 200–400 open PRs on master) that is 400–800+ sequential REST calls (each up to 10 pages) per submission — minutes of latency and a large slice of the 5,000/hr limit, capping realistic throughput at a handful of submissions per hour. Correctness is unaffected (failures escalate, never silently mis-associate); this is the price of the M3 fix as designed. Fix directions: server-side title/head prefilter before file fetches, batching via GraphQL, or caching per (PR, headSha). **Confirmed (code); live impact depends on open-PR count.**
+- **R-N2 `[major]` ZIPs with 4,097–10,000 entries still crash dependency analysis — the B1 degrade contract is violated on the entry-count axis.**
+  `PayloadDependencyAnalyzer.cs:206-217` throws `InvalidDataException` above its own 4,096-entry cap while `FileAnalyzer` accepts up to 10,000; `InvalidDataException` is absent from every catch list on the path (`LocalWorkflowEngine.cs:1593-1628`, `DiagnosticsCommandModule.cs:372-382`) → `analyze`/`update` on a large portable ZIP (SDK-style, ~5k files) exits 1 "unexpected error" instead of degrading to `Unavailable` evidence like every other budget in the same file. Small fix: convert to the existing Unavailable+DEP003 path or align the caps. **Confirmed (static trace end-to-end).**
+- `[minor]` **plan.md contradicts the shipped code twice** (closeout doesn't disclose either): (a) plan.md:64 says the `DRY_RUN` env var "was dropped: an exported variable must never be able to flip submission into a no-op or back" — but the variable **is implemented** (`GlobalOptions.cs:30,183-210`, documented in docs/commands.md:70,80-82), and an exported `DRY_RUN=true` does silently turn `--submit` into a plan-mode no-op with exit 0 — exactly the failure mode the plan text forbids; (b) plan.md:73 still says the P8 compiled-corpus CI job "does not exist" / reconciliation PENDING while `ci.yml:54-101` has carried it since `b2e291a`. Either the plan or the behavior needs to change; today the ledger is wrong on both.
+- `[minor]` One corrupt submission-journal file blocks **all** submissions: `FileSubmissionJournalStore.cs:61-62,659-724` throws `SubmissionJournalTamperedException` on any unreadable `*.journal`/`*.intent` during `PrepareAsync`/recovery, with no quarantine path (the override store quarantines to `.corrupt`; the journal store doesn't). Global blast radius for a single bit-rotted file.
+- `[minor]` E2E `RegressionFixturePipeline.cs:38-42` builds the production engine with the **real user-profile override store** (`%LOCALAPPDATA%\winmatsch\overrides`); a developer machine holding genuine learned packs for one of the 13 real package ids breaks the byte-exact goldens, and `WINMATSCH_UPDATE_REGRESSION_GOLDENS=1` there would bake user state into regenerated goldens. CI-safe; developer-hostile.
+- `[minor]` `TokenCommandModule.cs:64-68` (and `MaintenanceGitHubAdapters.cs:27` fallback) create an inline `HttpClient` for `token add` validation without ownership (`disposeHttpClient: true` not set) — leaks in-process; contradicts the A17d ownership contract this same remediation introduced.
+- `[minor]` `MutationContracts.cs:569-583`: Windows `explorer.exe <url>` conventionally exits 1 even on success — `--open-pr` on Windows will typically print a false "browser could not be opened … exited with code 1" diagnostic (PR creation and exit code unaffected).
+- `[nit]` Journal global lock is fail-fast (`FileSubmissionJournalStore.cs:847-867`) — concurrent CLI invocations get immediate `SubmissionJournalConflictException` instead of the bounded wait the override store uses. `[nit]` `FileFeedbackStateStore.cs:57-73` skips the directory-fsync pattern its sibling stores use. `[nit]` Journaled prepare/execute/resume paths interpolate raw `exception.Message` (`MutationCommandModule.cs:974,1000,1030`) — still redacted at the host boundary, but with shallower depth than sibling paths. `[nit]` `tests/WinMatsch.Downloads.LockHost` copy-pastes the cache's platform lock strategy (test-only drift risk). `[nit]` Feedback downloader enables the cache only when explicitly configured while mutation workflows default it on (`MaintenanceCommandModule.cs:432-438` vs `ProductionMutationWorkflows.cs:304-309`). `[nit]` `InnoFormatReader.cs:145-154` no-op catch remains (A1k). `[nit]` NSIS corpus tool pinned to a single SourceForge mirror host + runner-image MakeAppx byte-pin — availability treadmill (`Build-WindowsInstallerCorpus.ps1:20,147-180`). `[nit]` CHANGELOG still documents the pre-A20f "token requirement for show/list-versions".
+
+### R.4 Closeout accuracy assessment
+
+The §0 closeout is **substantively honest** — no claimed fix was found to be
+fake, and its three self-found extra defects are real. Corrections for the
+record: (1) its fix-commit hashes (`c78d0c7`, `f7cbe52`, `1703c4c`) are from
+the pre-rebase closeout branch and are **not in this branch's history** — the
+same changes landed here as `16a05e5`, `7541397`, `21505bc`; (2) "the two
+redaction engines unified" → actually *aligned via a decorator*, with the
+weaker formatter engine remaining for library consumers; (3) "no-op catches
+were removed" (A1k) → one remains; (4) B1's "returns bounded unavailable
+evidence instead of aborting" → true except the ZIP entry-count axis (R-N2);
+(5) M6's evidence sources → the retired-id/vanity half depends on a
+tool-defined repo policy file that the real winget-pkgs doesn't carry;
+(6) "zero is an explicit opt-out" for the freshness delay → zero is also the
+implicit behavior for provenance-less submissions; (7) the plan.md
+contradictions in R.3 are undisclosed by the closeout.
+
+### R.5 Build & test matrix (re-audit run, HEAD `43ec8c0`)
+
+Build: **0 warnings, 0 errors** (56.6 s). Tests (`dotnet test --no-build`):
+
+| Project | Passed | Skipped | | Project | Passed | Skipped |
+|---|---:|---:|---|---|---:|---:|
+| Core.Tests | 188 | 0 | | GitHub.Tests | 120 | 0 |
+| Analysis.Tests | 489 | 0 | | Workflows.Tests | 389 | 0 |
+| Downloads.Tests | 84 | 0 | | Cli.Tests | 420 | 0 |
+| Rules.Tests | 469 | 0 | | Testing.Tests | 12 | 0 |
+| Validation.Tests | 76 | 0 | | E2E.Tests | 27 | 3 |
+
+**Total: 2,274 passed, 0 failed, 3 skipped** (opt-in live/compile gates). Live
+CLI re-repros: B1 PE/ZIP exit 0 ✓, M9 secret not echoed ✓, M10 130-only-on-
+cancel confirmed in code ✓, A20f anonymous read exit 0 ✓, `DRY_RUN=bogus` →
+exit 3 ✓, new flags (`--approve-reviews`, `--override-store`,
+`--github-api-url`, `--github-graphql-url`) present ✓.
+
+### R.6 Updated merge recommendation
+
+**Merge.** The original fix-first gate is fully cleared and verified. Ship the
+following as immediate fast-follows (none needs to block the merge, but R-N1
+should land before pointing the tool at `microsoft/winget-pkgs` at scale):
+
+1. **R-N2** — degrade the dependency-analyzer entry-count budget to
+   `Unavailable` evidence (or align the 4,096 cap with FileAnalyzer's 10,000);
+   one-file fix plus a regression test.
+2. **R-N1** — bound the duplicate-PR evidence cost (server-side prefilter,
+   GraphQL batching, or per-(PR, headSha) caching) and add a rate-budget test.
+3. **plan.md reconciliation** — fix the DRY_RUN paragraph (the env var exists;
+   decide whether that's acceptable and document it, or remove the variable)
+   and the stale P8-corpus PENDING note.
+4. Journal-store quarantine for corrupt files; E2E override-store isolation;
+   the HttpClient ownership nit; the explorer.exe false diagnostic.
 
 ---
 
