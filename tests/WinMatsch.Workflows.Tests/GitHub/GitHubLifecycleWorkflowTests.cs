@@ -309,6 +309,50 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
+    public async Task Graphql_rate_limit_evidence_failure_preserves_classification_without_mutation()
+    {
+        var rateLimit = new RateLimitInfo(
+            "graphql",
+            5000,
+            0,
+            5000,
+            new DateTimeOffset(2026, 12, 1, 1, 0, 0, TimeSpan.Zero));
+        var client = new FakeGitHubClient
+        {
+            PullRequestChangedFilesFailure = new GitHubApiException(
+                "API rate limit exceeded",
+                statusCode: null,
+                requestId: null,
+                errorKind: GitHubApiErrorKind.RateLimited,
+                rateLimit: rateLimit,
+                retryAfter: TimeSpan.FromMinutes(1)),
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        });
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => provider.GetCandidatesAsync(
+                plan,
+                client.PullRequests,
+                CancellationToken.None));
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubApiErrorKind.RateLimited, exception.ErrorKind);
+        Assert.Same(rateLimit, exception.RateLimit);
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2013");
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
     public async Task Renamed_fork_evidence_fails_closed_when_head_coordinates_change()
     {
         var client = new FakeGitHubClient();

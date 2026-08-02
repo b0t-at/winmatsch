@@ -201,6 +201,8 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public bool PullRequestChangedFilesUnsupported { get; set; }
 
+    public GitHubApiException? PullRequestChangedFilesFailure { get; set; }
+
     public int FailNextPullRequestContentCalls { get; set; }
 
     public Action<FakeGitHubClient, int>? OnSearch { get; set; }
@@ -738,6 +740,11 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         cancellationToken.ThrowIfCancellationRequested();
         PullRequestFileBatchCalls++;
         PullRequestFileBatchSizes.Add(pullRequests.Count);
+        if (PullRequestChangedFilesFailure is not null)
+        {
+            throw PullRequestChangedFilesFailure;
+        }
+
         if (PullRequestChangedFilesUnsupported)
         {
             throw new NotSupportedException("Synthetic changed-file evidence is unavailable.");

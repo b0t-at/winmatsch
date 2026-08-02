@@ -755,7 +755,9 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
             throw new PullRequestEvidenceLimitException(
                 $"Pull request changed-file evidence is unavailable: {exception.Message}");
         }
-        catch (GitHubApiException exception) when (exception.StatusCode is null)
+        catch (GitHubApiException exception) when (
+            exception.StatusCode is null
+            && exception.ErrorKind != GitHubApiErrorKind.RateLimited)
         {
             throw new PullRequestEvidenceLimitException(
                 "Pull request changed-file evidence failed a local transport safety bound: "
