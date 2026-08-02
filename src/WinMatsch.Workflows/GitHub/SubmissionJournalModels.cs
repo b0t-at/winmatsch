@@ -199,13 +199,18 @@ public sealed class SubmissionJournalConflictException : IOException
     }
 }
 
-public sealed class SubmissionJournalTamperedException : IOException
+public class SubmissionJournalTamperedException : IOException
 {
     public SubmissionJournalTamperedException(string message, Exception? innerException = null)
         : base(message, innerException)
     {
     }
 }
+
+internal sealed class SubmissionJournalScopeTamperedException(
+    string message,
+    Exception? innerException = null)
+    : SubmissionJournalTamperedException(message, innerException);
 
 public interface ISubmissionJournalStore
 {

@@ -733,6 +733,13 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
         ];
         if (candidates.IsEmpty)
         {
+            if (!recovery.Diagnostics.IsDefaultOrEmpty)
+            {
+                throw new SubmissionJournalTamperedException(
+                    "No matching pending submission was found. Journal recovery reported: "
+                    + string.Join(" ", recovery.Diagnostics));
+            }
+
             return null;
         }
 

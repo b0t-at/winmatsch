@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using WinMatsch.Cli.Hosting;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
@@ -5,6 +6,7 @@ using WinMatsch.GitHub.Auth;
 using WinMatsch.Validation;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.Configuration;
+using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
 using Xunit;
 
@@ -105,6 +107,48 @@ public sealed class ProductionMutationWorkflowTests
         }
     }
 
+    [Fact]
+    public async Task Resume_surfaces_recovery_diagnostics_when_no_candidate_exists()
+    {
+        using var temporary = new TemporaryDirectory();
+        const string evidencePath = "unrelated.journal.abc.corrupt";
+        var journals = new DiagnosticOnlyJournalStore(new(
+            [],
+            [$"Quarantined journal evidence at '{evidencePath}'."])
+        {
+            Corruptions =
+            [
+                new(evidencePath, "other-repository", "Other.App"),
+            ],
+        });
+        var workflow = new ProductionSubmissionWorkflow(
+            new WinMatschConfiguration
+            {
+                Repository = new RepositoryCoordinates("microsoft", "winget-pkgs"),
+                ConcurrentDownloads = 2,
+                EnabledRules = [],
+                DisabledRules = [],
+                CacheEnabled = false,
+                FreshnessDelay = TimeSpan.FromHours(4),
+                OutputFormat = OutputFormat.Text,
+                OutputDirectory = temporary.Path,
+                Interaction = InteractionMode.Always,
+            },
+            new GitHubToken("test-token"),
+            new GitHubClientOptions(),
+            journals);
+
+        SubmissionJournalTamperedException exception =
+            await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+                workflow.ResumePendingAsync(
+                    temporary.Path,
+                    new PackageIdentifier("Example.App"),
+                    new PackageVersion("2.0.0"),
+                    new RepositoryCoordinates("microsoft", "winget-pkgs")));
+
+        Assert.Contains(evidencePath, exception.Message, StringComparison.Ordinal);
+    }
+
     private static ProductionMutationWorkflow CreateWorkflow(
         string root,
         Action<string>? cleanupWarning = null,
@@ -186,6 +230,55 @@ public sealed class ProductionMutationWorkflowTests
 
         public Task<ResolvedToken> RequireAsync(CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("This local workflow must not request a token.");
+    }
+
+    private sealed class DiagnosticOnlyJournalStore(
+        SubmissionJournalRecoveryResult recovery) : ISubmissionJournalStore
+    {
+        public Task<SubmissionJournalHandle> PrepareAsync(
+            GitHubSubmissionRequest request,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<SubmissionJournalEntry> ActivateAsync(
+            SubmissionJournalHandle handle,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<SubmissionJournalRecoveryResult> RecoverAsync(
+            string outputDirectory,
+            CancellationToken cancellationToken)
+            => Task.FromResult(recovery);
+
+        public Task<ImmutableArray<SubmissionJournalEntry>> ListPendingAsync(
+            CancellationToken cancellationToken)
+            => Task.FromResult(ImmutableArray<SubmissionJournalEntry>.Empty);
+
+        public Task<SubmissionJournalEntry?> GetAsync(
+            string id,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<SubmissionJournalEntry> RecordRemoteStateAsync(
+            string id,
+            long expectedRevision,
+            RemoteMutationState remoteState,
+            SubmissionJournalState state,
+            string? errorMessage,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task CancelAsync(
+            string id,
+            long expectedRevision,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task CompleteAsync(
+            string id,
+            long expectedRevision,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     private sealed class TemporaryDirectory : IDisposable

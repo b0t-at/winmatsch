@@ -11,6 +11,19 @@ public static partial class DurableFileSystem
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(source);
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+        string sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(source))!;
+        string destinationDirectory = Path.GetDirectoryName(Path.GetFullPath(destination))!;
+        if (!string.Equals(
+                sourceDirectory,
+                destinationDirectory,
+                OperatingSystem.IsWindows()
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal))
+        {
+            throw new IOException(
+                "Durable atomic file moves must remain within the same directory.");
+        }
+
         if (OperatingSystem.IsWindows())
         {
             if (!MoveFileEx(
@@ -33,6 +46,19 @@ public static partial class DurableFileSystem
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(source);
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+        string sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(source))!;
+        string destinationDirectory = Path.GetDirectoryName(Path.GetFullPath(destination))!;
+        if (!string.Equals(
+                sourceDirectory,
+                destinationDirectory,
+                OperatingSystem.IsWindows()
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal))
+        {
+            throw new IOException(
+                "Durable atomic file moves must remain within the same directory.");
+        }
+
         if (OperatingSystem.IsWindows())
         {
             if (!MoveFileEx(source, destination, MoveFileWriteThrough))
@@ -45,13 +71,7 @@ public static partial class DurableFileSystem
         }
 
         File.Move(source, destination);
-        string sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(source))!;
-        string destinationDirectory = Path.GetDirectoryName(Path.GetFullPath(destination))!;
         FlushDirectory(destinationDirectory);
-        if (!string.Equals(sourceDirectory, destinationDirectory, StringComparison.Ordinal))
-        {
-            FlushDirectory(sourceDirectory);
-        }
     }
 
     public static void FlushDirectory(string directory)

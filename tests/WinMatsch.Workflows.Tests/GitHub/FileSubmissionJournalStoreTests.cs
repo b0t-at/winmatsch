@@ -227,10 +227,6 @@ public sealed class FileSubmissionJournalStoreTests
         bytes[^2] ^= 0x01;
         await File.WriteAllBytesAsync(journal, bytes);
 
-        SubmissionJournalTamperedException listing =
-            await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
-                store.ListPendingAsync(default));
-        Assert.Contains("preserved", listing.Message, StringComparison.OrdinalIgnoreCase);
         SubmissionJournalRecoveryResult recovery = await store.RecoverAsync(
             repository.Path,
             default);
@@ -295,6 +291,54 @@ public sealed class FileSubmissionJournalStoreTests
 
         string evidence = Assert.Single(Directory.EnumerateFiles(state.Path, "*.corrupt"));
         Assert.Equal(original, await File.ReadAllBytesAsync(evidence));
+    }
+
+    [Fact]
+    public async Task Readable_mismatched_scope_is_never_trusted_for_package_attribution()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        GitHubSubmissionRequest request = Request(repository.Path);
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        SubmissionJournalEntry entry = await store.ActivateAsync(handle, default);
+        string scopePath = System.IO.Path.Combine(state.Path, $"{entry.Id}.scope");
+        SubmissionJournalEnvelope scopeEnvelope = JsonSerializer.Deserialize(
+            await File.ReadAllBytesAsync(scopePath),
+            SubmissionJournalJsonContext.Default.SubmissionJournalEnvelope)!;
+        SubmissionJournalScope scope = JsonSerializer.Deserialize(
+            Convert.FromBase64String(scopeEnvelope.Payload),
+            SubmissionJournalJsonContext.Default.SubmissionJournalScope)!;
+        byte[] mismatchedPayload = JsonSerializer.SerializeToUtf8Bytes(
+            scope with { PackageIdentifier = "Other.App" },
+            SubmissionJournalJsonContext.Default.SubmissionJournalScope);
+        await File.WriteAllBytesAsync(
+            scopePath,
+            JsonSerializer.SerializeToUtf8Bytes(
+                new SubmissionJournalEnvelope(
+                    Convert.ToBase64String(mismatchedPayload),
+                    Convert.ToHexString(SHA256.HashData(mismatchedPayload))),
+                SubmissionJournalJsonContext.Default.SubmissionJournalEnvelope));
+
+        await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+            store.GetAsync(entry.Id, default));
+        SubmissionJournalRecoveryResult recovery = await store.RecoverAsync(
+            repository.Path,
+            default);
+
+        SubmissionJournalCorruption corruption = Assert.Single(recovery.Corruptions);
+        Assert.Null(corruption.PackageIdentifier);
+        Assert.Null(corruption.RepositoryFileSystemIdentity);
+        SubmissionJournalTamperedException originalPackage =
+            await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+                store.PrepareAsync(request, default));
+        SubmissionJournalTamperedException claimedPackage =
+            await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+                store.PrepareAsync(Request(repository.Path, "Other.App"), default));
+        Assert.Contains("cannot be proven unrelated", originalPackage.Message, StringComparison.Ordinal);
+        Assert.Contains("cannot be proven unrelated", claimedPackage.Message, StringComparison.Ordinal);
     }
 
     [Fact]

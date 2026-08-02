@@ -1040,7 +1040,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         }
         catch (SubmissionJournalTamperedException exception)
         {
-            throw new SubmissionJournalTamperedException(
+            throw new SubmissionJournalScopeTamperedException(
                 $"Submission journal '{entry.Id}' has unreadable scope metadata.",
                 exception);
         }
@@ -1054,7 +1054,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
                 entry.LocalPlan.PackageIdentifier.Value,
                 StringComparison.OrdinalIgnoreCase))
         {
-            throw new SubmissionJournalTamperedException(
+            throw new SubmissionJournalScopeTamperedException(
                 $"Submission journal '{entry.Id}' does not match its durable scope metadata.");
         }
     }
@@ -1064,7 +1064,35 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         SubmissionJournalTamperedException cause)
     {
         string evidencePath = $"{path}.{Guid.NewGuid():N}.corrupt";
-        SubmissionJournalScope? scope = TryReadScope(ArtifactId(path));
+        string? id = ArtifactId(path);
+        SubmissionJournalScope? scope;
+        if (cause is SubmissionJournalScopeTamperedException)
+        {
+            scope = null;
+            if (id is not null && File.Exists(ScopePath(id)))
+            {
+                string scopeEvidencePath =
+                    $"{ScopePath(id)}.{Guid.NewGuid():N}.conflict";
+                try
+                {
+                    DurableFileSystem.MoveFile(ScopePath(id), scopeEvidencePath);
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException)
+                {
+                    throw new SubmissionJournalTamperedException(
+                        $"Conflicting scope metadata for submission journal "
+                        + $"'{Path.GetFileName(path)}' could not be quarantined. No journal "
+                        + "operation was performed; resolve the file access problem and retry.",
+                        new AggregateException(cause, exception));
+                }
+            }
+        }
+        else
+        {
+            scope = TryReadScope(id);
+        }
+
         try
         {
             DurableFileSystem.MoveFile(path, evidencePath);
