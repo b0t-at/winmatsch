@@ -1,4 +1,4 @@
-# Audit report — branch `utesgui-project-implementation-plan`
+# Audit report — original audit plus final remediation closeout
 
 **Audited worktree:** `D:\copilot-worktrees\winmatsch\utesgui-psychic-umbrella` @ `29e6f7b` (116 commits ahead of `main`; 389 files, +71,746 / −433)
 **Audit date:** 2026-08-01 · **Method:** Phase 0 inventory + central build/test by the coordinating auditor; 7 parallel per-unit deep-review subagents (all Claude Fable 5, long context — **no unit hit model guardrails, the GPT‑5.6 Sol fallback was never needed**); Phase 2 independent re-verification of every blocker and load-bearing major (code re-read and/or live repro against the built binary).
@@ -6,7 +6,230 @@
 
 ---
 
-## 1. Executive summary
+## 0. Final remediation closeout — 2026-08-02
+
+> **Current status supersedes §§1–6 below.** The original 2026-08-01 audit is
+> retained verbatim as historical provenance. This closeout independently
+> inspected the integrated production composition and reran the mechanical
+> verification on branch `utesgui-audit-remediation-closeout`, code head
+> `c78d0c7` (the report itself is committed immediately after that code head).
+> No live GitHub mutation was performed.
+
+### 0.1 Current conclusion and merge recommendation
+
+**Mergeable from the code, test, and local release-engineering perspective.**
+Both blockers, all 18 major findings, and every merge-affecting appendix item
+are fixed. The final audit found and fixed three additional integration defects
+that the remediation ledger missed:
+
+1. `f7cbe52` keeps generic preflight re-download artifacts alive until their
+   caller consumes them and adds a regression test for the former deleted-path
+   contract (A19).
+2. `1703c4c` replaces NuGet-deprecated, unlisted SharpCompress 1.0.0 with the
+   matured listed 0.50.1 API, updates the test SDK/runner, and reconciles
+   release-facing CLI/GHES/anonymous-read/review/line-ending documentation.
+3. `c78d0c7` fixes a Windows cache metadata publication race reproduced on
+   iteration 8 of the closeout race loop; 20 clean six-test iterations passed
+   after the fix.
+
+Accepted residuals are limited to A9's audit-attribution precision, the absence
+of committed NuGet lockfiles, deferred artifact attestations and repository
+settings that require administrator enforcement, manual branch deletion, and
+opt-in live GitHub tests that were deliberately not run because this audit
+prohibited remote mutation. None is a blocker or major product-behavior gap.
+
+### 0.2 Blockers and major findings
+
+| ID | Status | Current production/test evidence | Fix commit(s) / residual |
+|---|---|---|---|
+| B1 | **Fixed** | Oversized PE/archive dependency analysis returns bounded unavailable evidence instead of aborting (`PayloadDependencyAnalyzer`); live 70 MiB PE and 70 MiB ZIP-with-PE both exit 0. | `f75e87a`, `413bbf5`, `d827bb8`; conservative evidence can require review. |
+| B2 | **Fixed** | `HumanCorrectionDetector` uses duplicate-safe occurrence queues; flagship 1→2 same-URL twin tests pass. | `0324226`. |
+| M1 | **Fixed** | Validation and WM0102 share `InstallerDuplicateRelation`; wildcard scope/locale and nested-type cases are pinned. | `954af82`. |
+| M2 | **Fixed** | Production composes `ApplyOverridePackFieldsRule` and `FileOverridePackStore`; approved corrections stage, commit, activate, recover, and are consumed on the next run. | `e2f9465`…`de56935`. |
+| M3 | **Fixed** | Duplicate PR discovery is author-independent and proves association from changed files or pinned head content. | `f7b81d2`, `807e90c`; bounded evidence fails closed. |
+| M4 | **Fixed** | New/Update/Add/Remove titles use canonical WinGet prefixes; custom titles remain explicit. | `f7b81d2`. |
+| M5 | **Fixed** | Fresh branch reservations are adopted, exact planned commits recover, and conflicts use bounded suffixes. | `f7b81d2`; deletion remains manual by design. |
+| M6 | **Fixed** | Production fetches pinned policy, retired identifiers, sibling hashes, duplicate hashes, and vanity annotations before planning. | `807e90c`, `de56935`. |
+| M7 | **Fixed** | REST tree deletion serializes explicit `sha: null`; recorded body assertion passes. | `793aeea`. |
+| M8 | **Fixed** | JSON/noninteractive questions and reviews emit the auditable envelope before exit 4; `--approve-reviews` is explicit and fingerprint-bound. | `a64c13f`…`72fde4d`. |
+| M9 | **Fixed** | Shared `CliRedactor` covers host/parser/output/question/maintenance paths; live secret-shaped parse input is absent from stdout/stderr. | `a64c13f`. |
+| M10 | **Fixed** | Declines consistently return 5; only cancellation returns 130. | `a64c13f`. |
+| M11 | **Fixed** | Inno ANSI decoding uses bounded replacement/code-page fallback with diagnostics. | `f75e87a`, `d827bb8`. |
+| M12 | **Fixed** | Inno architecture uses payload dominance and 64-bit-mode hints; mixed/absent proof is inconclusive and diagnosed. | `f75e87a`, `413bbf5`. |
+| M13 | **Fixed** | Wrapper-aware dependency inspection analyzes bounded Inno/Squirrel payloads and never claims unsupported outer-stub absence. | `f75e87a`, `2156f60`. |
+| M14 | **Fixed** | Schema-invalid documents do not materialize; oversized success codes become structured validation findings. | `954af82`. |
+| M15 | **Fixed** | `SafeManifestFile`/`ManifestYamlDocument` enforce byte, depth, node, alias, and reparse-point boundaries before materialization. | `954af82`. |
+| M16 | **Fixed** | `InstallerVersionTrustPolicy` admits conservative direct-PE/single-ZIP version evidence and rejects wrappers/placeholders. | `e2f9465`…`de56935`. |
+| M17 | **Fixed** | All 13 descriptors run the production plan/rules/emit path to exact YAML goldens. | `6e267a6`…`aacf0f0`. |
+| M18 | **Fixed** | Production maintenance uses durable feedback state and an allowlisted native repair planner that re-enters full lifecycle/preflight. | `a64c13f`…`7e1f7a7`. |
+
+### 0.3 Appendix finding disposition
+
+Status vocabulary for this closeout is exactly: **Fixed**, **Deliberately
+Deferred**, **Not Reproducible**, and **Still Open**.
+
+| ID | Status | Current evidence / residual |
+|---|---|---|
+| A1 | **Fixed** | Inno emits manual-analysis diagnostics for ambiguous/mixed payload architecture. |
+| A1b | **Fixed** | Empty architecture expressions consult embedded payload and 64-bit-mode hints. |
+| A1c | **Fixed** | Legacy flags distinguish strict x86/x64; IA64 is preserved as manual-only evidence. |
+| A1d | **Fixed** | Future Inno setup-data versions become manual analysis, not process failure. |
+| A1e | **Fixed** | Unsupported bzip2 evidence is explicit (`INNO003`). |
+| A1f | **Fixed** | Privilege overrides preserve scope/elevation uncertainty. |
+| A1g | **Fixed** | ARM64-only Burn chains no longer silently inherit an x64 stub. |
+| A1h | **Fixed** | Squirrel architecture inspects nested nupkg PE payloads. |
+| A1i | **Fixed** | Advanced Installer MSI stream length is checked before allocation. |
+| A1j | **Fixed** | ZIP budgets count actual reads, compressed bytes, operations, entries, and central-directory bounds. |
+| A1k | **Fixed** | Dead/unreachable advanced-analysis branches and no-op catches were removed; bounded error taxonomy remains. |
+| A2 | **Fixed** | JWT recognition no longer redacts dotted package identifiers; secret-shaped cases remain covered. |
+| A3 | **Fixed** | Apply and log-only snapshot failures both fail closed. |
+| A4 | **Fixed** | Compatibility factories delegate to the single `ProductionRuleComposer` catalogue. |
+| A5 | **Fixed** | `META-4-bullets` is independently configurable and production-composed. |
+| A6 | **Fixed** | Dead Chrome `ARP-1` annotation removed (`894bc91`). |
+| A7 | **Fixed** | URL identity preserves bare architecture tokens. |
+| A8 | **Fixed** | Duplicate/multi-locale matching is bounded and occurrence-aware. |
+| A9 | **Deliberately Deferred** | Reverse-order ARP removals can fall back to generic source attribution after index shifts; output, safety, and approval decisions are unaffected. |
+| A10 | **Fixed** | Policy evidence dictionaries are case-insensitively unique and deterministically ordered; dead helper removed. |
+| A11 | **Fixed** | Dead stale-PID recovery removed; held remote locks are cleanup-safe. |
+| A12 | **Fixed** | Lock roots use application state and canonical/symlink-safe identity; held files cannot be moved by cleanup. |
+| A13 | **Fixed** | Apply, rollback, and cleanup failures remain visible together. |
+| A14 | **Fixed** | Successful safety revalidation is not failed by scratch cleanup; recovery diagnostics are retained. |
+| A15 | **Fixed** | Snapshot contention maps to structured conflict; cancellation remains cancellation. |
+| A15b | **Fixed** | Default freshness delay is four hours; zero is an explicit opt-out. |
+| A15c | **Fixed** | Provenance is captured only for tool-created manifests and finalizes atomically with learned state. |
+| A16 | **Fixed** | Cache maintenance removes only old, owned, inactive temporary files. |
+| A17 | **Fixed** | Cache process locking has deadline/cancellation/recovery; closeout also replaced existing metadata with `File.Replace` after reproducing an intermittent Windows publication race (`c78d0c7`). |
+| A17b | **Fixed** | Retry delays are capped; pagination enforces origin, loop, page, and item limits. |
+| A17c | **Fixed** | GitHub fallback/retry decisions use structured error kinds, not message text. |
+| A17d | **Fixed** | Injected `HttpClient` ownership is explicit and tested. |
+| A17e | **Fixed** | Downloader disposal cancels and drains in-flight work; 20 post-fix race iterations pass. |
+| A17f | **Fixed** | Head filtering uses full owner/ref identity and authoritative PR evidence. |
+| A17g | **Fixed** | GHES GraphQL is safely derived from REST; explicit endpoints must remain same-authority and are exposed by the CLI. |
+| A18 | **Fixed** | Validated `--created-with-url` reaches local manifests and the submission request. |
+| A19 | **Fixed** | Workflow and generic validation re-download paths now retain usable artifacts through consumption; `Downloader_adapter_keeps_fresh_revalidation_artifact_alive_for_its_owner` pins the generic contract (`f7cbe52`). |
+| A19b | **Fixed** | Unparseable display versions never create ordinal ranges; exact overlap still blocks. |
+| A19c | **Fixed** | `$schema` must be the exact first line. |
+| A19d | **Fixed** | Schema-valid empty collections/mappings survive round-trip. |
+| A19e | **Fixed** | Existing LF/CRLF convention is preserved; new files use LF. The integration ledger's deferred classification was stale. |
+| A19f | **Fixed** | `ManifestVersion.Default` is the sole `1.12.0` literal used by validation. |
+| A20 | **Fixed** | Structural/stable-URL options are registered only on `update`. |
+| A20b | **Fixed** | `--edit` + `--replace` rejects before workflow creation. |
+| A20c | **Fixed** | Hidden dead-version flow rejects multi-version input before remote inspection and fully inspects one version. |
+| A20d | **Fixed** | Fish completion descriptions are generated and shell-safe. |
+| A20e | **Fixed** | Config mutation rejects unknown keys and refuses comment-losing rewrites. |
+| A20f | **Fixed** | Public reads are anonymous-capable and retry anonymously after stale optional tokens. |
+| A20g | **Fixed** | Platform URL launch uses one literal argument and propagates nonzero/cancellation. |
+| A20h | **Fixed** | Shared CLI JSON contracts pin enum naming and compact newline-terminated output. |
+| A21 | **Fixed** | Every action is pinned to a current full release SHA with a version comment; live tag/SHA resolution matches all six pins. |
+| A22 | **Fixed** | Workflows default to `contents: read`; only draft release creation has `contents: write`; checkout never persists credentials. |
+| A23 | **Fixed** | Dead HTTP recording infrastructure and obsolete smoke tests are gone; E2E drives production paths. |
+| A24 | **Fixed** | Real-process parser tests inject and reject four realistic secret shapes. |
+| A25 | **Fixed** | Tautological assembly-load smoke removed and replaced by process/pipeline/lifecycle tests. |
+| A26 | **Fixed** | Shared fixture semantics and exact YAML goldens eliminate divergent parsers. |
+| A27 | **Not Reproducible** | Remaining `C:\...` values are manifest/test data, not host filesystem operations; no production hard-coded Windows path was found. |
+| A28 | **Fixed** | Architecture documentation states eight production projects plus shared test infrastructure. |
+| A29 | **Fixed** | CI has a pinned Windows compiled-corpus job; this closeout compiled and analyzed Inno, NSIS, WiX MSI, duplicate MSI, Burn, and MSIX successfully. |
+
+No original blocker, major, appendix item, or appendix subitem is **Still
+Open** after the closeout commits.
+
+### 0.4 Production composition re-verification
+
+The final read traced the sole production factories, not convenience/test
+constructors:
+
+- `ProductionCliComposition` binds `DRY_RUN`, GHES REST/GraphQL endpoints,
+  output/interaction, redaction, diagnostics, mutation, submission,
+  maintenance, cache, token, and completion surfaces.
+- `WorkflowProductionComposition` injects populated repository and PR evidence
+  providers, the complete rule catalogue, durable override/provenance stores,
+  and the durable preflight network.
+- Local completion stages learned state, commits manifest/provenance
+  atomically, then activates the learned pack under a consistent lock order.
+- Submission recovery prepares before local mutation, activates after the exact
+  local commit, records every remote boundary, and removes the journal only
+  after verified PR creation.
+- Feedback replay uses durable state, authoritative changed-file evidence, the
+  allowlisted native repair planner, and the full GitHub lifecycle. No null
+  planner or empty evidence provider is used by production.
+
+No stale production factory, duplicate persistence owner, lost merge wiring,
+or lock-order inversion was found.
+
+### 0.5 Build, test, race, corpus, publish, and lint evidence
+
+All results below are from code head `c78d0c7` after the final fixes:
+
+| Verification | Result |
+|---|---|
+| Restore/build | 19 projects restored; Release build succeeded with 0 warnings and 0 errors. |
+| Full serialized tests | **2,274 passed, 0 failed, 3 skipped** (the opt-in compiled/live E2E gates). |
+| Full default-parallel tests | **2,274 passed, 0 failed, 3 skipped**. |
+| Historical repro matrix | Rules 2 + validation 8 + CLI 7 + GitHub 8 + workflows 14 = **39 passed**. |
+| Download race closeout | Initial loop reproduced 1 metadata-publication failure on iteration 8; after `c78d0c7`, 6 tests × 20 iterations = **120 passed**. |
+| Learned/provenance races | 8 tests × 10 iterations = **80 passed**. |
+| Journal/PR-evidence races | 12 selected cases × 10 iterations = **120 passed**. |
+| Live local CLI | Version/help/analyze-help/completion/config-path, 70 MiB PE, 70 MiB ZIP containing a valid PE, and secret-shaped parse error = **8 expected exits/contracts passed**. |
+| Windows compiled corpus | Pinned/hash-checked Inno 6.4.0, NSIS 3.10, WiX 5.0.2/Bal, and Windows SDK MakeAppx produced six formats; **1 test passed, 0 skipped**. |
+| Regression corpus | 13 descriptor-to-production-pipeline exact-YAML cases passed in E2E. |
+| Trimmed RID publish | `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64`: **6/6** self-contained single-file outputs contained LICENSE/notices; native `win-x64` five-command smoke passed. |
+| Workflow lint | actionlint **1.7.12**, 2 workflows, no findings. |
+| Workflow security | zizmor **1.29.0**, offline auditor persona, minimum low: no findings (one tool-reported ignore). |
+| Live action SHA map | checkout v7.0.1, setup-dotnet v6.0.0, upload-artifact v7.0.1, download-artifact v8.0.1, zizmor-action v0.6.2, and action-gh-release v3.0.2 all resolve to the committed workflow SHAs. |
+
+### 0.6 Dependency, license, notice, and supply-chain closeout
+
+Direct shipped pins are JsonSchema.Net 8.0.5 (documented MIT/license-term
+hold-back), YamlDotNet 18.1.0, OpenMcdf 3.2.0, SharpCompress 0.50.1,
+Spectre.Console 0.57.2, and System.CommandLine 2.0.10. Test pins are
+Microsoft.NET.Test.Sdk 18.8.1, xunit 2.9.3, and
+xunit.runner.visualstudio 3.1.5. SharpCompress 1.0.0 was removed because NuGet
+marks it unlisted/deprecated as an accidental build; 0.50.1 was the newest
+listed patch outside the repository's three-day cooldown on the verification
+date. The restored runtime closure/license/notice drift guard passed all four
+checks.
+
+The 2026-07-30 hardening baseline was refreshed against GitHub's current
+Actions secure-use reference. No newer guidance changed this repository's
+required controls: immutable action SHAs, least-privilege token permissions,
+no privileged untrusted checkout, no event-data shell interpolation,
+`persist-credentials: false`, hosted runners, CODEOWNERS, and Dependabot
+cooldown remain current. The workflows contain no `pull_request_target`,
+`workflow_run`, self-hosted runner, `secrets.*`, or untrusted
+`github.event.*` shell interpolation.
+
+Residual supply-chain controls:
+
+- **Deliberately Deferred:** NuGet `packages.lock.json` files and central
+  transitive pinning are absent. Restore plus the runtime-closure drift guard
+  verifies the resolved graph, but the repository does not cryptographically
+  freeze every transitive package.
+- **Deliberately Deferred:** artifact attestations until the private repository
+  has a supported verification/enforcement path
+  (`.github/SECURITY-SETTINGS.md`).
+- **Administrator action:** enforce the documented Actions allow-list,
+  SHA-only policy, branch/tag rulesets, dependency graph/alerts/security
+  updates, secret scanning, and push protection in repository settings.
+
+### 0.7 Originally skipped audit areas
+
+| Original skipped area | Closeout status | Disposition |
+|---|---|---|
+| Unchanged MSI/NSIS/Cabinet analyzer internals | **Deliberately Deferred** | Not re-reviewed line-by-line outside remediation paths; full analysis tests and compiled corpus pass. |
+| Legacy WM0001–WM0101/0103 rule bodies | **Deliberately Deferred** | Not re-reviewed body-by-body; complete rule suite and production-catalogue boundary tests pass. |
+| `InstallerFieldAccessors.cs` | **Not Reproducible** | Independently inspected; explicit full-field clone/accessor coverage exists and no defect was found. |
+| ~50 remaining `RuleRuntimeTests` bodies | **Deliberately Deferred** | Not individually re-derived; the full 469-case rules project passes. |
+| Tail halves of largest Analysis/GitHub tests | **Deliberately Deferred** | Not assertion-audited line-by-line; full projects pass and targeted safety cases were rerun. |
+| Untracked `DESIGN.md` / `PRODUCT.md` | **Not Reproducible** | Absent from this tracked worktree and never touched. |
+| Live-network E2E | **Deliberately Deferred** | Token-gated by design; prohibited here to avoid live GitHub mutation. Read-only live action metadata was verified. |
+| NuGet latest/license review beyond six runtime packages | **Fixed** | All direct runtime/test pins and the restored runtime closure were checked in this closeout. |
+
+---
+
+## 1. Original executive summary (2026-08-01; superseded)
+
+**Historical snapshot:** retained to preserve the original audit provenance.
+The current conclusion and recommendation are in §0.
 
 The branch is far more real than a typical overnight agent run: the solution builds with 0 warnings, all 1,781 tests pass (+3 opt-in live tests skipped, exactly matching plan.md's claim), there are **zero** TODO/FIXME/NotImplementedException markers in `src/`, docs are unusually accurate, and hard sub-systems (journaled file transactions, cache process-locking, GitHub race handling, adversarial YAML/ZIP validation) are genuinely engineered rather than stubbed. However, it is **not mergeable as-is**. Two blockers exist: (B1) the payload-dependency analyzer hard-fails on any `.exe`/`.zip` over 64 MiB and is called unguarded by both `analyze` and the update/new acquisition path — reproduced live: `winmatsch analyze` on a 70 MB PE exits 1 with "exceeds the analysis limit" — which makes the tool unusable for a large share of real winget packages (Electron apps, VS Code-class installers); and (B2) the human-correction detector crashes with an unhandled `ToDictionary` duplicate-key `ArgumentException` on the same-URL twin-entry pattern (SurrealDB/DUP-2) that the spec itself designates a flagship scenario. Beyond that, the spec's self-declared "single highest-leverage feature" — per-package *memory* (§0.2) — is only half-delivered (detection and halt work; nothing ever persists a learned override, and three override-pack fields are parsed but consumed by nothing), the DUP-1 duplicate-entry gate implements a key that diverges from winget's actual comparator in both directions, and the WORK-1 duplicate-PR gate cannot see other tools' PRs. A cluster of "built-but-unwired" seams (retired-identifier/duplicate-hash evidence, feedback auto-repair, PE-version trust) shows the parallel workstreams were assembled but not fully composed. The biggest merge risk is therefore **not** hidden breakage of what exists — it is that several spec-critical behaviors quietly do less than plan.md and the test-green status imply. Recommendation: **fix-first, then merge** (list in §5); the codebase quality justifies completion rather than rework.
 
@@ -84,7 +307,7 @@ Status legend: **confirmed-live** = reproduced against the built binary by the c
 
 ---
 
-## 3. Spec coverage
+## 3. Original spec coverage (2026-08-01; superseded)
 
 ### 3.1 plan.md (branch scope: P4-remainder → P8 + command surface; P0–P5 were already on `main`)
 
@@ -168,7 +391,7 @@ Status legend: **confirmed-live** = reproduced against the built binary by the c
 
 ---
 
-## 4. Build & test matrix
+## 4. Original build & test matrix (2026-08-01; superseded)
 
 Central run in the audited worktree (SDK 10.0.302, user-local; logs: session artifacts `build.log` / `tests.log`).
 
@@ -198,7 +421,10 @@ The 3 skips are the intended env-gated live tests (`Opt_in_acquisition…`, `Liv
 
 ---
 
-## 5. Merge recommendation
+## 5. Original merge recommendation (2026-08-01; superseded)
+
+**Historical snapshot:** the fix-first recommendation below described commit
+`29e6f7b`. The final closeout recommendation is in §0.1.
 
 **Do not merge yet.** The branch is a strong foundation with no evidence of fabricated work, but B1 makes the tool unusable for a large class of real packages and B2 crashes the flagship safety flow; both are cheap to fix relative to the branch size. Recommended fix-first order:
 
@@ -218,7 +444,7 @@ Items 1–6 are the merge gate; 7–11 can be fast-follow issues if the team pre
 
 ---
 
-## 6. Appendix — minor findings and nits (compact)
+## 6. Original appendix — minor findings and nits (2026-08-01; superseded)
 
 **Analysis** · A1 Inno emits no diagnostic for ambiguous/mixed payload arch (unlike NSIS001/BURN001) so `RequiresManualAnalysis` never fires for Inno (`InnoProbe.cs:75-83`) · A1b empty/absent `ArchitecturesAllowed` never consults payload evidence; `ArchitecturesInstallIn64BitMode` unused as arch signal (`InnoProbe.cs:178-183`) · A1c pre-6.3 flag 0x04 rendered `x64compatible` (overstates OS set), 0x08 → untokenizable `ia64` (`InnoFormatReader.cs:572-596`) · A1d Inno version window hard-throws on future releases (`:210-214`) · A1e bzip2 payloads silently yield zero evidence via message-less swallowed throw (`:668,678-686`) · A1f `PrivilegesRequired=lowest`→`ElevationProhibited` is stronger than the data warrants (`InnoProbe.cs:119-124`) · A1g Burn x64-stub + arm64-only chain stays x64 silently (`BurnProbe.cs:110-152`) · A1h Squirrel ignores in-hand nupkg payload PEs for arch (`SquirrelProbe.cs:212-213`) · A1i unbounded alloc drift in `AdvancedMsiProperties.cs:69-75` · A1j aggregate ZIP budget counts declared not actual bytes → CPU amplification (`PayloadDependencyAnalyzer.cs:69-83`) · A1k dead `PeOverlay.FindSignature`, no-op `catch{throw;}` blocks, unreachable zlib arm, NRE-catch masking own bugs (`AdvancedInstallerProbe.cs:277-287`).
 
