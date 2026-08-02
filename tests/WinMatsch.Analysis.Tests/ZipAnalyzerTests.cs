@@ -320,7 +320,8 @@ public class ZipAnalyzerTests
             .ToArray();
         using MemoryStream zip = BuildZip(entries);
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(zip, "many.zip"));
+        AnalysisResourceLimitException exception = Assert.Throws<AnalysisResourceLimitException>(
+            () => _analyzer.Analyze(zip, "many.zip"));
 
         Assert.Contains("entries", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(AnalysisLimits.MaxArchiveEntries.ToString(), exception.Message, StringComparison.Ordinal);

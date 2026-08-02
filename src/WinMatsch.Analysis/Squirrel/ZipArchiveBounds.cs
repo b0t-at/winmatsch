@@ -9,8 +9,8 @@ internal static class ZipArchiveBounds
     private const uint Zip64EndOfCentralDirectorySignature = 0x06064B50;
     private const uint Zip64LocatorSignature = 0x07064B50;
     private const int MaxCommentLength = ushort.MaxValue;
-    private const int DefaultMaxEntryCount = 4096;
-    private const long DefaultMaxCentralDirectoryBytes = 16L * 1024 * 1024;
+    private const int DefaultMaxEntryCount = AnalysisLimits.MaxDependencyArchiveEntries;
+    private const long DefaultMaxCentralDirectoryBytes = AnalysisLimits.MaxDependencyCentralDirectoryBytes;
 
     public static void Validate(Stream stream, string description)
         => Validate(
@@ -87,12 +87,13 @@ internal static class ZipArchiveBounds
 
             if (entryCount > (ulong)maximumEntryCount)
             {
-                throw new InvalidDataException($"{description} contains more than {maximumEntryCount} ZIP entries.");
+                throw new AnalysisResourceLimitException(
+                    $"{description} contains more than {maximumEntryCount} ZIP entries.");
             }
 
             if (directorySize > (ulong)maximumCentralDirectoryBytes)
             {
-                throw new InvalidDataException(
+                throw new AnalysisResourceLimitException(
                     $"{description} has a ZIP central directory larger than {maximumCentralDirectoryBytes} bytes.");
             }
 
@@ -203,11 +204,15 @@ internal static class ZipArchiveBounds
                 + BinaryPrimitives.ReadUInt16LittleEndian(header[30..])
                 + BinaryPrimitives.ReadUInt16LittleEndian(header[32..]);
             ulong recordSize = FixedHeaderSize + variableSize;
-            if (recordSize > directoryEnd - position
-                || position - directoryOffset + recordSize > (ulong)maximumBytes)
+            if (recordSize > directoryEnd - position)
             {
-                throw new InvalidDataException(
-                    $"{description} has an actual ZIP central directory larger than {maximumBytes} bytes or extending outside its validated bounds.");
+                throw Corrupt(description);
+            }
+
+            if (position - directoryOffset + recordSize > (ulong)maximumBytes)
+            {
+                throw new AnalysisResourceLimitException(
+                    $"{description} has an actual ZIP central directory larger than {maximumBytes} bytes.");
             }
 
             position += recordSize;
@@ -230,10 +235,14 @@ internal static class ZipArchiveBounds
 
             stream.ReadExactly(optionalRecordHeader.Slice(4, 2));
             ulong recordSize = 6UL + BinaryPrimitives.ReadUInt16LittleEndian(optionalRecordHeader[4..]);
-            if (recordSize > directoryEnd - position
-                || position - directoryOffset + recordSize > (ulong)maximumBytes)
+            if (recordSize > directoryEnd - position)
             {
-                throw new InvalidDataException(
+                throw Corrupt(description);
+            }
+
+            if (position - directoryOffset + recordSize > (ulong)maximumBytes)
+            {
+                throw new AnalysisResourceLimitException(
                     $"{description} has an optional ZIP central-directory record outside the configured bounds.");
             }
 

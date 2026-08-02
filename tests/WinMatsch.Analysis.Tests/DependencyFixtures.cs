@@ -23,10 +23,39 @@ internal static class DependencyFixtures
         {
             foreach ((string path, byte[] content) in entries)
             {
-                ZipArchiveEntry entry = archive.CreateEntry(path);
-                entry.LastWriteTime = new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
-                using Stream destination = entry.Open();
-                destination.Write(content);
+                WriteEntry(archive, path, content);
+            }
+        }
+
+        stream.Position = 0;
+        return stream;
+    }
+
+    public static MemoryStream BuildZipWithEntryCount(
+        int entryCount,
+        (string Path, byte[] Content)? firstEntry = null)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(entryCount);
+        if (firstEntry is not null && entryCount == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(entryCount),
+                "An archive with a first entry must contain at least one entry.");
+        }
+
+        var stream = new MemoryStream();
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            int index = 0;
+            if (firstEntry is { } entry)
+            {
+                WriteEntry(archive, entry.Path, entry.Content);
+                index = 1;
+            }
+
+            for (; index < entryCount; index++)
+            {
+                WriteEntry(archive, $"docs/{index:D5}.txt", []);
             }
         }
 
@@ -41,6 +70,14 @@ internal static class DependencyFixtures
         => new(BuildPe(machine, imports), length);
 
     public static Stream AsNonSeekable(MemoryStream stream) => new NonSeekableReadStream(stream);
+
+    private static void WriteEntry(ZipArchive archive, string path, byte[] content)
+    {
+        ZipArchiveEntry entry = archive.CreateEntry(path);
+        entry.LastWriteTime = new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        using Stream destination = entry.Open();
+        destination.Write(content);
+    }
 
     public static byte[] AddCentralDirectoryDigitalSignature(
         byte[] archive,

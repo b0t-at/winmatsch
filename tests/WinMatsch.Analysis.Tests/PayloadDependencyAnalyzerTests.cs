@@ -509,20 +509,78 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
-    public void Archive_entry_count_is_bounded_including_irrelevant_entries()
+    public void Archive_at_dependency_entry_limit_is_complete()
     {
-        var analyzer = new PayloadDependencyAnalyzer(new PayloadDependencyAnalyzerOptions
+        using MemoryStream archive = DependencyFixtures.BuildZipWithEntryCount(
+            PayloadDependencyAnalyzerOptions.DefaultMaximumArchiveEntries);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "boundary.zip");
+
+        Assert.True(analysis.IsComplete);
+        Assert.Empty(analysis.Evidence);
+        Assert.DoesNotContain(analysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
+    }
+
+    [Theory]
+    [InlineData(PayloadDependencyAnalyzerOptions.DefaultMaximumArchiveEntries + 1)]
+    [InlineData(AnalysisLimits.MaxArchiveEntries)]
+    [InlineData(AnalysisLimits.MaxArchiveEntries + 1)]
+    public void Archive_over_dependency_entry_limit_returns_unavailable_evidence(int entryCount)
+    {
+        using MemoryStream archive = DependencyFixtures.BuildZipWithEntryCount(entryCount);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, $"{entryCount}.zip");
+
+        Assert.False(analysis.IsComplete);
+        Assert.All(analysis.Evidence, evidence =>
         {
-            MaximumArchiveEntries = 1,
+            Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status);
+            Assert.Contains("analysis-unavailable:resource-limit", evidence.Signals);
         });
-        using MemoryStream archive = DependencyFixtures.BuildZip(
-            ("one.txt", [1]),
-            ("two.txt", [2]));
+        AnalysisDiagnostic diagnostic = Assert.Single(
+            analysis.Diagnostics,
+            item => item.Code == "DEP003");
+        Assert.Contains(
+            PayloadDependencyAnalyzerOptions.DefaultMaximumArchiveEntries.ToString(),
+            diagnostic.Message,
+            StringComparison.Ordinal);
+    }
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(
-            () => analyzer.Analyze(archive, "many.zip"));
+    [Fact]
+    public void FileAnalyzer_accepts_its_maximum_while_dependency_evidence_degrades()
+    {
+        using MemoryStream archive = DependencyFixtures.BuildZipWithEntryCount(
+            AnalysisLimits.MaxArchiveEntries,
+            ("bin/app.exe", DependencyFixtures.BuildPe(Machine.Amd64)));
 
-        Assert.Contains("more than 1", exception.Message, StringComparison.Ordinal);
+        InstallerAnalysis installer = FileAnalyzer.Analyze(archive, "maximum.zip");
+        archive.Position = 0;
+        PayloadDependencyAnalysis dependencies = _analyzer.Analyze(archive, "maximum.zip");
+
+        Assert.Equal(DetectedInstallerFormat.Zip, installer.Format);
+        Assert.False(dependencies.IsComplete);
+        Assert.All(
+            dependencies.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
+    }
+
+    [Fact]
+    public void FileAnalyzer_rejects_over_maximum_but_dependency_analysis_still_degrades()
+    {
+        using MemoryStream archive = DependencyFixtures.BuildZipWithEntryCount(
+            AnalysisLimits.MaxArchiveEntries + 1,
+            ("bin/app.exe", DependencyFixtures.BuildPe(Machine.Amd64)));
+
+        Assert.Throws<AnalysisResourceLimitException>(
+            () => FileAnalyzer.Analyze(archive, "over-maximum.zip"));
+        archive.Position = 0;
+
+        PayloadDependencyAnalysis dependencies = _analyzer.Analyze(archive, "over-maximum.zip");
+
+        Assert.False(dependencies.IsComplete);
+        Assert.All(
+            dependencies.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
     }
 
     [Fact]
@@ -535,10 +593,16 @@ public class PayloadDependencyAnalyzerTests
         using var archive = new MemoryStream(
             SquirrelFixtures.BuildDirectoryBomb(entryCount: 1, centralDirectorySize: 2048));
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(
-            () => analyzer.Analyze(archive, "directory-bomb.zip"));
+        PayloadDependencyAnalysis analysis = analyzer.Analyze(archive, "directory-bomb.zip");
 
-        Assert.Contains("central directory larger", exception.Message, StringComparison.Ordinal);
+        Assert.False(analysis.IsComplete);
+        Assert.All(
+            analysis.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
+        Assert.Contains(
+            analysis.Diagnostics,
+            diagnostic => diagnostic.Code == "DEP003"
+                && diagnostic.Message.Contains("central directory larger", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -554,6 +618,17 @@ public class PayloadDependencyAnalyzerTests
             () => _analyzer.Analyze(archive, "underreported.zip"));
 
         Assert.Contains("declared and actual", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Truncated_archive_is_not_converted_to_unavailable_evidence()
+    {
+        using MemoryStream valid = DependencyFixtures.BuildZip(
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64)));
+        byte[] archiveBytes = valid.ToArray();
+        using var truncated = new MemoryStream(archiveBytes[..^1]);
+
+        Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(truncated, "truncated.zip"));
     }
 
     [Fact]

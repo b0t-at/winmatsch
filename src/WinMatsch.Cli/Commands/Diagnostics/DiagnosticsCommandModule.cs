@@ -416,7 +416,7 @@ public sealed class DiagnosticsCommandModule : ICommandModule
                 }
 
                 writer.WriteLine("Diagnostics:");
-                foreach (AnalysisDiagnostic diagnostic in result.Analysis.Diagnostics)
+                foreach (AnalysisDiagnostic diagnostic in EnumerateDiagnostics(result))
                 {
                     writer.WriteLine(
                         $"  {diagnostic.Code}: {diagnostic.Message}"
@@ -484,7 +484,7 @@ public sealed class DiagnosticsCommandModule : ICommandModule
 
         writer.WriteEndArray();
         writer.WriteStartArray("diagnostics");
-        foreach (AnalysisDiagnostic diagnostic in result.Analysis.Diagnostics)
+        foreach (AnalysisDiagnostic diagnostic in EnumerateDiagnostics(result))
         {
             writer.WriteStartObject();
             writer.WriteString("code", diagnostic.Code);
@@ -496,6 +496,10 @@ public sealed class DiagnosticsCommandModule : ICommandModule
         writer.WriteEndArray();
         writer.WriteEndObject();
     }
+
+    private static IEnumerable<AnalysisDiagnostic> EnumerateDiagnostics(
+        InstallerDiagnosticResult result)
+        => result.Analysis.Diagnostics.Concat(result.Dependencies.Diagnostics);
 
     private static void WriteValidationResult(
         CommandContext context,

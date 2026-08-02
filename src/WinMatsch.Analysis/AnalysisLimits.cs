@@ -7,10 +7,12 @@ namespace WinMatsch.Analysis;
 internal static class AnalysisLimits
 {
     public const int MaxArchiveEntries = 10_000;
+    public const int MaxDependencyArchiveEntries = 4_096;
     public const int MaxArchivePathDepth = 64;
     public const int MaxArchivePathLength = 2_048;
     public const long MaxEntryBytes = 256L * 1024 * 1024;
     public const long MaxExpandedArchiveBytes = 1024L * 1024 * 1024;
+    public const long MaxDependencyCentralDirectoryBytes = 16L * 1024 * 1024;
     public const int MaxNestedArchives = 4;
     public const int MaxPeSections = 96;
     public const int MaxResourceBytes = 16 * 1024 * 1024;
@@ -24,7 +26,7 @@ internal static class AnalysisLimits
         int depth = _archiveDepth.Value + 1;
         if (depth > MaxNestedArchives)
         {
-            throw new InvalidDataException(
+            throw new AnalysisResourceLimitException(
                 $"{description} exceeds the supported nesting limit of {MaxNestedArchives} archives. Manual analysis is required.");
         }
 
@@ -36,7 +38,7 @@ internal static class AnalysisLimits
     {
         if (archive.Entries.Count > MaxArchiveEntries)
         {
-            throw new InvalidDataException(
+            throw new AnalysisResourceLimitException(
                 $"{description} contains {archive.Entries.Count} entries; the analysis limit is {MaxArchiveEntries}.");
         }
 
@@ -50,7 +52,9 @@ internal static class AnalysisLimits
             }
             catch (OverflowException exception)
             {
-                throw new InvalidDataException($"{description} declares an overflowing expanded size.", exception);
+                throw new AnalysisResourceLimitException(
+                    $"{description} declares an overflowing expanded size.",
+                    exception);
             }
         }
 
@@ -81,18 +85,28 @@ internal static class AnalysisLimits
 
     public static void ValidateAllocation(long size, string description, long maximum)
     {
-        if (size < 0 || size > maximum || size > int.MaxValue)
+        if (size < 0)
         {
-            throw new InvalidDataException(
+            throw new InvalidDataException($"{description} declares a negative size of {size} bytes.");
+        }
+
+        if (size > maximum || size > int.MaxValue)
+        {
+            throw new AnalysisResourceLimitException(
                 $"{description} declares {size} bytes; the analysis allocation limit is {Math.Min(maximum, int.MaxValue)} bytes.");
         }
     }
 
     public static void ValidateExpandedSize(long size, string description)
     {
-        if (size < 0 || size > MaxExpandedArchiveBytes)
+        if (size < 0)
         {
-            throw new InvalidDataException(
+            throw new InvalidDataException($"{description} declares a negative expanded size of {size} bytes.");
+        }
+
+        if (size > MaxExpandedArchiveBytes)
+        {
+            throw new AnalysisResourceLimitException(
                 $"{description} expands to {size} bytes; the analysis limit is {MaxExpandedArchiveBytes} bytes.");
         }
     }

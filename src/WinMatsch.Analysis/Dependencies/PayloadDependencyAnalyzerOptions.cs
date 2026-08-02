@@ -3,12 +3,12 @@ namespace WinMatsch.Analysis.Dependencies;
 /// <summary>Resource limits for untrusted installer and archive inspection.</summary>
 public sealed class PayloadDependencyAnalyzerOptions
 {
-    public const int DefaultMaximumArchiveEntries = 4096;
+    public const int DefaultMaximumArchiveEntries = AnalysisLimits.MaxDependencyArchiveEntries;
     public const long DefaultMaximumPayloadBytes = 64L * 1024 * 1024;
     public const long DefaultMaximumTotalPayloadBytes = 256L * 1024 * 1024;
     public const long DefaultMaximumCompressedPayloadBytes = 64L * 1024 * 1024;
     public const long DefaultMaximumTotalCompressedBytes = 256L * 1024 * 1024;
-    public const long DefaultMaximumCentralDirectoryBytes = 16L * 1024 * 1024;
+    public const long DefaultMaximumCentralDirectoryBytes = AnalysisLimits.MaxDependencyCentralDirectoryBytes;
     public const int DefaultMaximumArchiveReadOperations = 16_384;
     public const int DefaultMaximumRuntimeConfigBytes = 4 * 1024 * 1024;
     public const int DefaultMaximumImportDescriptors = 1024;

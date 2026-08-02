@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Reflection.PortableExecutable;
 using System.Text;
+using WinMatsch.Analysis.Dependencies;
 using WinMatsch.Analysis.Tests;
 using WinMatsch.Cli;
 using WinMatsch.Core;
@@ -41,6 +42,26 @@ public sealed class InstallerCorpusProcessTests
             $"Exit {result.ExitCode}{Environment.NewLine}stdout:{Environment.NewLine}{result.StandardOutput}"
             + $"{Environment.NewLine}stderr:{Environment.NewLine}{result.StandardError}");
         Assert.Contains($"\"format\":\"{expectedFormat}\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, result.StandardError);
+        CliProcess.AssertSafe(result);
+    }
+
+    [Fact]
+    public async Task Real_process_degrades_dependency_evidence_for_4097_entry_zip()
+    {
+        using var temporary = new TemporaryDirectory();
+        string path = Path.Combine(temporary.Path, "large-portable.zip");
+        using MemoryStream archive = DependencyFixtures.BuildZipWithEntryCount(
+            PayloadDependencyAnalyzerOptions.DefaultMaximumArchiveEntries + 1,
+            ("bin/app.exe", DependencyFixtures.BuildPe(Machine.Amd64)));
+        await File.WriteAllBytesAsync(path, archive.ToArray());
+
+        ProcessResult result = await CliProcess.RunAsync(
+            ["analyze", path, "--format", "json", "--interaction", "never", "--no-color"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("\"statusCode\":\"unavailable\"", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"code\":\"DEP003\"", result.StandardOutput, StringComparison.Ordinal);
         Assert.Equal(string.Empty, result.StandardError);
         CliProcess.AssertSafe(result);
     }

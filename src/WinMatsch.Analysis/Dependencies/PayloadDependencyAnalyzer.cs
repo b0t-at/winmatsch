@@ -47,12 +47,28 @@ public sealed partial class PayloadDependencyAnalyzer
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (string.Equals(Path.GetExtension(fileName), ".zip", StringComparison.OrdinalIgnoreCase))
+        try
         {
-            return AnalyzeArchive(stream, fileName, cancellationToken);
-        }
+            if (string.Equals(Path.GetExtension(fileName), ".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                return AnalyzeArchive(stream, fileName, cancellationToken);
+            }
 
-        return AnalyzeExecutable(stream, fileName, cancellationToken);
+            return AnalyzeExecutable(stream, fileName, cancellationToken);
+        }
+        catch (AnalysisResourceLimitException exception)
+        {
+            string payloadPath = Path.GetFileName(fileName);
+            const string signal = "analysis-unavailable:resource-limit";
+            return new PayloadDependencyAnalysis(
+                CreateUnavailableEvidence(payloadPath, signal),
+                [
+                    new AnalysisDiagnostic(
+                        "DEP003",
+                        $"Dependency evidence for '{payloadPath}' is unavailable because a resource limit was reached: {exception.Message}"),
+                ],
+                isComplete: false);
+        }
     }
 
     private PayloadDependencyAnalysis AnalyzeExecutable(
@@ -212,7 +228,7 @@ public sealed partial class PayloadDependencyAnalyzer
         using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
         if (archive.Entries.Count > _options.MaximumArchiveEntries)
         {
-            throw new InvalidDataException(
+            throw new AnalysisResourceLimitException(
                 $"Archive contains {archive.Entries.Count} entries, exceeding the analysis limit of {_options.MaximumArchiveEntries}.");
         }
 
@@ -787,10 +803,11 @@ public sealed partial class PayloadDependencyAnalyzer
             return new ExeAnalyzer().Analyze(stream, fileName);
         }
         catch (Exception exception) when (
-            exception is InvalidDataException
+            exception is not AnalysisResourceLimitException
+            && exception is (InvalidDataException
                 or BadImageFormatException
                 or NotSupportedException
-                or IOException)
+                or IOException))
         {
             return null;
         }

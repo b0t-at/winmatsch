@@ -257,7 +257,8 @@ public class SquirrelProbeTests
             "DATA",
             131);
 
-        InvalidDataException error = Assert.Throws<InvalidDataException>(() => Probe(setup));
+        AnalysisResourceLimitException error = Assert.Throws<AnalysisResourceLimitException>(
+            () => Probe(setup));
         Assert.Contains("more than 4096", error.Message, StringComparison.Ordinal);
     }
 
@@ -268,7 +269,7 @@ public class SquirrelProbeTests
             entryCount: 1,
             centralDirectorySize: 32u * 1024 * 1024);
 
-        InvalidDataException error = Assert.Throws<InvalidDataException>(
+        AnalysisResourceLimitException error = Assert.Throws<AnalysisResourceLimitException>(
             () => Probe(SquirrelFixtures.BuildClassicSetup(nupkg)));
         Assert.Contains("central directory larger", error.Message, StringComparison.Ordinal);
     }

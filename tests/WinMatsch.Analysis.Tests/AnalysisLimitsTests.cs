@@ -7,7 +7,7 @@ public class AnalysisLimitsTests
     [Fact]
     public void Allocation_over_the_limit_is_rejected_before_buffer_creation()
     {
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+        AnalysisResourceLimitException exception = Assert.Throws<AnalysisResourceLimitException>(
             () => AnalysisLimits.ValidateAllocation(
                 AnalysisLimits.MaxEntryBytes + 1,
                 "Hostile entry",
@@ -19,7 +19,7 @@ public class AnalysisLimitsTests
     [Fact]
     public void Expanded_archive_size_over_the_limit_is_rejected()
     {
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+        AnalysisResourceLimitException exception = Assert.Throws<AnalysisResourceLimitException>(
             () => AnalysisLimits.ValidateExpandedSize(AnalysisLimits.MaxExpandedArchiveBytes + 1, "Hostile archive"));
 
         Assert.Contains("expands to", exception.Message, StringComparison.Ordinal);
@@ -36,7 +36,7 @@ public class AnalysisLimitsTests
                 scopes.Add(AnalysisLimits.EnterArchive("Nested archive"));
             }
 
-            InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            AnalysisResourceLimitException exception = Assert.Throws<AnalysisResourceLimitException>(
                 () => AnalysisLimits.EnterArchive("Nested archive"));
 
             Assert.Contains("nesting limit", exception.Message, StringComparison.Ordinal);
