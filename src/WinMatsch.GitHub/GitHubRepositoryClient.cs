@@ -138,10 +138,10 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 GitHubJsonContext.Default.GraphQlViewerRequestDto,
                 GitHubJsonContext.Default.GraphQlViewerResponseDto,
                 cancellationToken).ConfigureAwait(false);
-            ThrowIfGraphQlErrors(response.Errors);
+            ObserveGraphQlRateLimit(response.Data?.RateLimit);
+            ThrowIfGraphQlErrors(response.Errors, response.Data?.RateLimit);
             GraphQlViewerDataDto data = response.Data ??
                 throw InvalidGraphQlResponse("viewer data");
-            ObserveGraphQlRateLimit(data.RateLimit);
             GraphQlUserDto viewer = data.Viewer ??
                 throw InvalidGraphQlResponse("authenticated viewer");
             return new GitHubUser(
@@ -185,10 +185,10 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 GitHubJsonContext.Default.GraphQlRepositoryRequestDto,
                 GitHubJsonContext.Default.GraphQlRepositoryResponseDto,
                 cancellationToken).ConfigureAwait(false);
-            ThrowIfGraphQlErrors(response.Errors);
+            ObserveGraphQlRateLimit(response.Data?.RateLimit);
+            ThrowIfGraphQlErrors(response.Errors, response.Data?.RateLimit);
             GraphQlRepositoryDataDto data = response.Data ??
                 throw InvalidGraphQlResponse("repository data");
-            ObserveGraphQlRateLimit(data.RateLimit);
             GraphQlRepositoryDto dto = data.Repository ??
                 throw new GitHubApiException(
                     $"GitHub repository '{repository}' was not found.",
@@ -1014,10 +1014,10 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 GitHubJsonContext.Default.GraphQlPullRequestFilesRequestDto,
                 GitHubJsonContext.Default.GraphQlPullRequestFilesResponseDto,
                 cancellationToken).ConfigureAwait(false);
-            ThrowIfGraphQlErrors(response.Errors);
+            ObserveGraphQlRateLimit(response.Data?.RateLimit);
+            ThrowIfGraphQlErrors(response.Errors, response.Data?.RateLimit);
             GraphQlPullRequestFilesDataDto data = response.Data ??
                 throw InvalidGraphQlResponse("pull-request changed-file data");
-            ObserveGraphQlRateLimit(data.RateLimit);
             if (data.Nodes is null || data.Nodes.Count != batch.Length)
             {
                 throw InvalidGraphQlResponse("every requested pull-request changed-file node");
@@ -1277,10 +1277,10 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 GitHubJsonContext.Default.GraphQlCommitRequestDto,
                 GitHubJsonContext.Default.GraphQlCommitResponseDto,
                 cancellationToken).ConfigureAwait(false);
-            ThrowIfGraphQlErrors(response.Errors);
+            ObserveGraphQlRateLimit(response.Data?.RateLimit);
+            ThrowIfGraphQlErrors(response.Errors, response.Data?.RateLimit);
             GraphQlCommitDataDto data = response.Data ??
                 throw InvalidGraphQlResponse("commit mutation data");
-            ObserveGraphQlRateLimit(data.RateLimit);
             GraphQlCreatedCommitDto commit = data.CreateCommitOnBranch?.Commit ??
                 throw InvalidGraphQlResponse("created commit");
             return new ServerCommitResult(
@@ -1514,14 +1514,9 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
 
     private void ObserveGraphQlRateLimit(GraphQlRateLimitDto? rateLimit)
     {
-        if (rateLimit is not null)
+        if (MapGraphQlRateLimit(rateLimit) is { } mapped)
         {
-            PublishRateLimit(new RateLimitInfo(
-                "graphql",
-                rateLimit.Limit,
-                rateLimit.Remaining,
-                rateLimit.Used,
-                rateLimit.ResetAt));
+            PublishRateLimit(mapped);
         }
     }
 
@@ -1531,15 +1526,24 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         RateLimitObserved?.Invoke(this, rateLimit);
     }
 
-    private static void ThrowIfGraphQlErrors(List<GraphQlErrorDto>? errors)
+    private static void ThrowIfGraphQlErrors(
+        List<GraphQlErrorDto>? errors,
+        GraphQlRateLimitDto? rateLimit = null)
     {
         if (errors is null || errors.Count == 0)
         {
             return;
         }
 
+        bool isRateLimited = rateLimit?.Remaining == 0
+            || errors.Any(static error =>
+                string.Equals(error.Type, "RATE_LIMITED", StringComparison.OrdinalIgnoreCase));
         HttpStatusCode? status;
-        if (errors.Any(static error =>
+        if (isRateLimited)
+        {
+            status = null;
+        }
+        else if (errors.Any(static error =>
                 string.Equals(error.Type, "NOT_FOUND", StringComparison.OrdinalIgnoreCase)))
         {
             status = HttpStatusCode.NotFound;
@@ -1566,12 +1570,31 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             status,
             requestId: null,
             errors.Select(static error => error.Message).ToArray(),
-            errorKind: status == HttpStatusCode.NotFound
+            errorKind: isRateLimited
+                ? GitHubApiErrorKind.RateLimited
+                : status == HttpStatusCode.NotFound
                 ? GitHubApiErrorKind.ResourceNotFound
                 : status is HttpStatusCode.Conflict or HttpStatusCode.UnprocessableEntity
                     ? GitHubApiErrorKind.Conflict
-                    : GitHubApiErrorKind.Unknown);
+                    : GitHubApiErrorKind.Unknown,
+            rateLimit: MapGraphQlRateLimit(rateLimit),
+            retryAfter: isRateLimited && rateLimit is not null
+                ? Max(rateLimit.ResetAt - DateTimeOffset.UtcNow, TimeSpan.Zero)
+                : null);
     }
+
+    private static RateLimitInfo? MapGraphQlRateLimit(GraphQlRateLimitDto? rateLimit)
+        => rateLimit is null
+            ? null
+            : new(
+                "graphql",
+                rateLimit.Limit,
+                rateLimit.Remaining,
+                rateLimit.Used,
+                rateLimit.ResetAt);
+
+    private static TimeSpan Max(TimeSpan left, TimeSpan right)
+        => left >= right ? left : right;
 
     private static GitHubApiException InvalidGraphQlResponse(string expected)
         => new($"GitHub GraphQL response did not contain {expected}.");

@@ -389,6 +389,43 @@ public sealed class GitHubPullRequestTests
     }
 
     [Fact]
+    public async Task Pull_request_changed_files_batch_preserves_graphql_rate_limit_error()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "data": {
+                "nodes": null,
+                "rateLimit": {
+                  "limit": 5000,
+                  "remaining": 0,
+                  "used": 5000,
+                  "resetAt": "2026-12-01T01:00:00Z"
+                }
+              },
+              "errors": [{
+                "message": "API rate limit exceeded",
+                "type": "RATE_LIMITED"
+              }]
+            }
+            """));
+        GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => client.GetPullRequestChangedFilesBatchAsync(
+                _repository,
+                CreatePullRequests(1),
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(GitHubApiErrorKind.RateLimited, exception.ErrorKind);
+        Assert.Null(exception.StatusCode);
+        Assert.Equal(0, Assert.IsType<RateLimitInfo>(exception.RateLimit).Remaining);
+        Assert.Equal("graphql", Assert.IsType<RateLimitInfo>(client.LastRateLimit).Resource);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
     public async Task Pull_request_changed_files_batch_honors_pre_cancelled_token()
     {
         var handler = new ScriptedHttpMessageHandler();
