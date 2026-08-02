@@ -199,15 +199,21 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
             {
                 if (++scanned > MaxFileEntries)
                 {
-                    throw new InvalidDataException("The Advanced Installer nested 7z contains too many entries.");
+                    throw new AnalysisResourceLimitException(
+                        "The Advanced Installer nested 7z contains too many entries.");
                 }
 
                 if (entry.IsDirectory
                     || entry.Key is not { } name
-                    || !name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase)
-                    || entry.Size > MaxPayloadBytes)
+                    || !name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
+                }
+
+                if (entry.Size > MaxPayloadBytes)
+                {
+                    throw new AnalysisResourceLimitException(
+                        $"The Advanced Installer nested MSI '{name}' exceeds the supported size.");
                 }
 
                 using Stream source = entry.OpenEntryStream();
@@ -266,16 +272,18 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
     }
 
     private static bool IsPayloadReadFailure(Exception ex)
-        => ex is InvalidDataException
+        => ex is not AnalysisResourceLimitException
+            && ex is (InvalidDataException
             or EndOfStreamException
             or ArgumentException
             or IndexOutOfRangeException
             or NotSupportedException
             or OverflowException
-            or IOException;
+            or IOException);
 
     private static bool IsArchiveReadFailure(Exception ex)
-        => ex is SharpCompressException
+        => ex is not AnalysisResourceLimitException
+            && ex is (SharpCompressException
             or InvalidDataException
             or EndOfStreamException
             or ArgumentException
@@ -283,7 +291,7 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
             or NotSupportedException
             or OverflowException
             or IOException
-            or InvalidOperationException;
+            or InvalidOperationException);
 
     private static void CopyBounded(Stream source, Stream destination, long maxBytes)
     {
@@ -295,7 +303,8 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
             total += read;
             if (total > maxBytes)
             {
-                throw new InvalidDataException("The embedded payload expands beyond the supported bound.");
+                throw new AnalysisResourceLimitException(
+                    "The embedded payload expands beyond the supported bound.");
             }
 
             destination.Write(buffer, 0, read);

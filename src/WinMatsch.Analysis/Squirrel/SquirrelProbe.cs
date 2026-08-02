@@ -102,7 +102,8 @@ public sealed class SquirrelProbe : IExeFormatProbe
     {
         if (entry.Length > MaxNupkgBytes)
         {
-            throw new InvalidDataException("The Squirrel release package exceeds the supported size.");
+            throw new AnalysisResourceLimitException(
+                "The Squirrel release package exceeds the supported size.");
         }
 
         using var package = new MemoryStream();
@@ -225,7 +226,8 @@ public sealed class SquirrelProbe : IExeFormatProbe
     {
         if (nuspecEntry.Length > MaxNuspecBytes)
         {
-            throw new InvalidDataException("The package's nuspec manifest exceeds the supported size.");
+            throw new AnalysisResourceLimitException(
+                "The package's nuspec manifest exceeds the supported size.");
         }
 
         using var buffer = new MemoryStream();
@@ -437,7 +439,8 @@ public sealed class SquirrelProbe : IExeFormatProbe
             total += read;
             if (total > maxBytes)
             {
-                throw new InvalidDataException("The embedded payload expands beyond the supported bound.");
+                throw new AnalysisResourceLimitException(
+                    "The embedded payload expands beyond the supported bound.");
             }
 
             destination.Write(buffer, 0, read);

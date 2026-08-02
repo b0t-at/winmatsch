@@ -253,7 +253,7 @@ public class SquirrelProbeTests
     public void Outer_zip_entry_count_is_bounded_before_entries_materialize()
     {
         byte[] setup = SquirrelFixtures.BuildResourceSetup(
-            SquirrelFixtures.BuildDirectoryBomb(5000),
+            DependencyFixtures.BuildZipWithEntryCount(5000).ToArray(),
             "DATA",
             131);
 
@@ -265,9 +265,9 @@ public class SquirrelProbeTests
     [Fact]
     public void Nested_zip_central_directory_size_is_bounded_before_entries_materialize()
     {
-        byte[] nupkg = SquirrelFixtures.BuildDirectoryBomb(
-            entryCount: 1,
-            centralDirectorySize: 32u * 1024 * 1024);
+        byte[] nupkg = DependencyFixtures.BuildZipWithEntryCount(
+            entryCount: 300,
+            entryNameLength: 60_000).ToArray();
 
         AnalysisResourceLimitException error = Assert.Throws<AnalysisResourceLimitException>(
             () => Probe(SquirrelFixtures.BuildClassicSetup(nupkg)));

@@ -33,9 +33,11 @@ internal static class DependencyFixtures
 
     public static MemoryStream BuildZipWithEntryCount(
         int entryCount,
-        (string Path, byte[] Content)? firstEntry = null)
+        (string Path, byte[] Content)? firstEntry = null,
+        int entryNameLength = 0)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(entryCount);
+        ArgumentOutOfRangeException.ThrowIfNegative(entryNameLength);
         if (firstEntry is not null && entryCount == 0)
         {
             throw new ArgumentOutOfRangeException(
@@ -55,7 +57,13 @@ internal static class DependencyFixtures
 
             for (; index < entryCount; index++)
             {
-                WriteEntry(archive, $"docs/{index:D5}.txt", []);
+                string path = $"docs/{index:D5}.txt";
+                if (entryNameLength > path.Length)
+                {
+                    path = path.PadRight(entryNameLength, 'x');
+                }
+
+                WriteEntry(archive, path, []);
             }
         }
 

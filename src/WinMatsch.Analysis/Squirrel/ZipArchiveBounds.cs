@@ -8,6 +8,7 @@ internal static class ZipArchiveBounds
     private const uint EndOfCentralDirectorySignature = 0x06054B50;
     private const uint Zip64EndOfCentralDirectorySignature = 0x06064B50;
     private const uint Zip64LocatorSignature = 0x07064B50;
+    private const int CentralDirectoryHeaderSize = 46;
     private const int MaxCommentLength = ushort.MaxValue;
     private const int DefaultMaxEntryCount = AnalysisLimits.MaxDependencyArchiveEntries;
     private const long DefaultMaxCentralDirectoryBytes = AnalysisLimits.MaxDependencyCentralDirectoryBytes;
@@ -85,6 +86,13 @@ internal static class ZipArchiveBounds
                     out directoryEnd);
             }
 
+            if (directoryOffset > directoryEnd
+                || directorySize > directoryEnd - directoryOffset
+                || entryCount > directorySize / CentralDirectoryHeaderSize)
+            {
+                throw Corrupt(description);
+            }
+
             if (entryCount > (ulong)maximumEntryCount)
             {
                 throw new AnalysisResourceLimitException(
@@ -95,12 +103,6 @@ internal static class ZipArchiveBounds
             {
                 throw new AnalysisResourceLimitException(
                     $"{description} has a ZIP central directory larger than {maximumCentralDirectoryBytes} bytes.");
-            }
-
-            if (directoryOffset > (ulong)eocdOffset
-                || directorySize > (ulong)eocdOffset - directoryOffset)
-            {
-                throw Corrupt(description);
             }
 
             ValidateCentralDirectory(
@@ -175,7 +177,6 @@ internal static class ZipArchiveBounds
         long maximumBytes)
     {
         const uint CentralDirectoryHeaderSignature = 0x02014B50;
-        const int FixedHeaderSize = 46;
         if (directoryOffset > directoryEnd
             || directoryEnd > (ulong)stream.Length
             || directoryOffset > long.MaxValue)
@@ -184,11 +185,11 @@ internal static class ZipArchiveBounds
         }
 
         ulong position = directoryOffset;
-        Span<byte> header = stackalloc byte[FixedHeaderSize];
+        Span<byte> header = stackalloc byte[CentralDirectoryHeaderSize];
         Span<byte> optionalRecordHeader = stackalloc byte[8];
         for (ulong i = 0; i < entryCount; i++)
         {
-            if (position > directoryEnd || directoryEnd - position < FixedHeaderSize)
+            if (position > directoryEnd || directoryEnd - position < CentralDirectoryHeaderSize)
             {
                 throw Corrupt(description);
             }
@@ -203,7 +204,7 @@ internal static class ZipArchiveBounds
             ulong variableSize = (ulong)BinaryPrimitives.ReadUInt16LittleEndian(header[28..])
                 + BinaryPrimitives.ReadUInt16LittleEndian(header[30..])
                 + BinaryPrimitives.ReadUInt16LittleEndian(header[32..]);
-            ulong recordSize = FixedHeaderSize + variableSize;
+            ulong recordSize = CentralDirectoryHeaderSize + variableSize;
             if (recordSize > directoryEnd - position)
             {
                 throw Corrupt(description);

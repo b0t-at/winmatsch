@@ -590,8 +590,7 @@ public class PayloadDependencyAnalyzerTests
         {
             MaximumCentralDirectoryBytes = 1024,
         });
-        using var archive = new MemoryStream(
-            SquirrelFixtures.BuildDirectoryBomb(entryCount: 1, centralDirectorySize: 2048));
+        using MemoryStream archive = DependencyFixtures.BuildZipWithEntryCount(20);
 
         PayloadDependencyAnalysis analysis = analyzer.Analyze(archive, "directory-bomb.zip");
 
@@ -606,6 +605,16 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Impossible_central_directory_declaration_remains_corrupt()
+    {
+        using var archive = new MemoryStream(
+            SquirrelFixtures.BuildDirectoryBomb(entryCount: 1, centralDirectorySize: 2048));
+
+        Assert.Throws<InvalidDataException>(
+            () => _analyzer.Analyze(archive, "invalid-directory.zip"));
+    }
+
+    [Fact]
     public void Underreported_central_directory_size_is_rejected_before_materialization()
     {
         using MemoryStream valid = DependencyFixtures.BuildZip(
@@ -617,7 +626,7 @@ public class PayloadDependencyAnalyzerTests
         InvalidDataException exception = Assert.Throws<InvalidDataException>(
             () => _analyzer.Analyze(archive, "underreported.zip"));
 
-        Assert.Contains("declared and actual", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("truncated or has an invalid ZIP directory", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -827,6 +836,53 @@ public class PayloadDependencyAnalyzerTests
         Assert.Equal(DependencyEvidenceStatus.Detected, evidence.Status);
         Assert.Equal(Architecture.X64, evidence.Architecture);
         Assert.Contains("vcruntime140.dll", evidence.Signals);
+    }
+
+    [Fact]
+    public void Advanced_installer_nested_resource_limit_returns_unavailable_evidence()
+    {
+        byte[] msi = MsiFixtures.BuildMsi([]);
+        string encodedName = MsiFixtures.EncodeStreamName("Property", isTable: true);
+        int directoryEntry = msi.AsSpan().IndexOf(Encoding.Unicode.GetBytes(encodedName + "\0"));
+        Assert.True(directoryEntry >= 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            msi.AsSpan(directoryEntry + 120),
+            (ulong)AnalysisLimits.MaxMsiStreamBytes + 1);
+        byte[] setup = AdvancedInstallerFixtures.BuildContainer(
+        [
+            new AdvancedInstallerFixtures.FixtureEntry(1, 0, 0, "payload.bin", msi),
+        ]);
+        using var stream = new MemoryStream(setup);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "setup.exe");
+
+        Assert.False(analysis.IsComplete);
+        Assert.All(
+            analysis.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
+    }
+
+    [Fact]
+    public void Squirrel_nested_resource_limit_returns_unavailable_evidence()
+    {
+        byte[] nupkg = SquirrelFixtures.BuildNupkg(SquirrelFixtures.NuspecXml());
+        byte[] releaseZip = SquirrelFixtures.BuildStoredZip(
+        [
+            ("RELEASES", "stub"u8.ToArray()),
+            ("Contoso.Chat-1.2.3-full.nupkg", nupkg),
+        ],
+        declaredSizeOverrideForLastEntry: 300L * 1024 * 1024);
+        byte[] setup = SquirrelFixtures.BuildResourceSetup(releaseZip, "DATA", 131);
+        using var stream = new MemoryStream(setup);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "Setup.exe");
+
+        Assert.False(analysis.IsComplete);
+        Assert.All(
+            analysis.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
     }
 
     [Fact]
