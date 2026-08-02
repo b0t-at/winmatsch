@@ -1375,7 +1375,9 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 cancellationToken).ConfigureAwait(false);
             ValidatePaginationItemCount(results.Count, page.Value.Count);
             results.AddRange(page.Value);
-            if (maximumResults is { } maximum && results.Count > maximum)
+            if (maximumResults is { } maximum
+                && (results.Count > maximum
+                    || (results.Count == maximum && page.NextUri is not null)))
             {
                 throw new GitHubApiException(
                     $"GitHub pagination exceeded the safe result limit of {maximum}.");

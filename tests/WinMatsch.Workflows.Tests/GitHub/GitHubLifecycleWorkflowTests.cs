@@ -900,6 +900,9 @@ public sealed class GitHubLifecycleWorkflowTests
 
         Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.Equal(
+            PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+            Assert.Single(client.PullRequestSearches).MaximumResults);
         Assert.Equal(0, client.PullRequestFileBatchCalls);
         Assert.Empty(client.Mutations);
     }

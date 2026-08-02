@@ -1256,7 +1256,10 @@ public sealed class GitHubLifecycleWorkflow
                 request.UpstreamRepository,
                 new PullRequestSearch(
                     PullRequestState.Open,
-                    BaseBranch: expectedBaseBranch),
+                    BaseBranch: expectedBaseBranch)
+                {
+                    MaximumResults = PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                },
                 cancellationToken).ConfigureAwait(false);
         }
         catch (GitHubApiException exception) when (exception.StatusCode is null)

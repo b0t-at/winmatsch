@@ -370,6 +370,37 @@ public sealed class GitHubPullRequestTests
     }
 
     [Fact]
+    public async Task Pull_request_search_does_not_fetch_beyond_an_exact_full_page_bound()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        for (int page = 0; page < 10; page++)
+        {
+            int firstNumber = (page * 100) + 1;
+            int nextPage = page + 2;
+            string pullRequests = string.Join(
+                ',',
+                Enumerable.Range(firstNumber, 100).Select(number =>
+                    GitHubClientTestSupport.PullRequestJson(number, $"Update {number}")));
+            handler.Add(_ => GitHubClientTestSupport.Json(
+                $"[{pullRequests}]",
+                headers:
+                [
+                    ("Link",
+                        $"<https://github.invalid/api/pulls?page={nextPage}>; rel=\"next\""),
+                ]));
+        }
+
+        await Assert.ThrowsAsync<GitHubApiException>(() => GitHubClientTestSupport
+            .CreateClient(handler)
+            .SearchPullRequestsAsync(
+                _repository,
+                new PullRequestSearch { MaximumResults = 1_000 },
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(10, handler.Requests.Count);
+    }
+
+    [Fact]
     public async Task Pull_request_search_uses_the_requested_base_branch()
     {
         var handler = new ScriptedHttpMessageHandler();

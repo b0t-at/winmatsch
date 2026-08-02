@@ -183,6 +183,8 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public int SearchCalls { get; private set; }
 
+    public List<PullRequestSearch> PullRequestSearches { get; } = [];
+
     public int ContentCalls { get; private set; }
 
     public List<(RepositoryCoordinates Repository, string Path, string Reference)> ContentRequests { get; } = [];
@@ -614,6 +616,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     {
         cancellationToken.ThrowIfCancellationRequested();
         SearchCalls++;
+        PullRequestSearches.Add(search);
         OnSearch?.Invoke(this, SearchCalls);
         IEnumerable<PullRequestInfo> result = _pullRequests;
         if (search.State != PullRequestState.All)
