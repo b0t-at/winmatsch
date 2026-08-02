@@ -253,6 +253,7 @@ public sealed class GitHubPullRequestMetadataSource : IPullRequestMetadataSource
     private const int MaximumResponseBytes = 4 * 1024 * 1024;
 
     private readonly HttpClient _httpClient;
+    private readonly bool _ownsHttpClient;
     private readonly GitHubClientOptions _options;
     private readonly string _token;
 
@@ -264,6 +265,7 @@ public sealed class GitHubPullRequestMetadataSource : IPullRequestMetadataSource
         _options = options ?? throw new ArgumentNullException(nameof(options));
         ArgumentException.ThrowIfNullOrWhiteSpace(token);
         _token = token;
+        _ownsHttpClient = httpClient is null;
         _httpClient = httpClient ?? new HttpClient();
     }
 
@@ -320,7 +322,11 @@ public sealed class GitHubPullRequestMetadataSource : IPullRequestMetadataSource
 
     public void Dispose()
     {
-        _httpClient.Dispose();
+        if (_ownsHttpClient)
+        {
+            _httpClient.Dispose();
+        }
+
         GC.SuppressFinalize(this);
     }
 

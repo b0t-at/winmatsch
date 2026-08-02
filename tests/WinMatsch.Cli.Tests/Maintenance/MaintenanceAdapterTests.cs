@@ -73,18 +73,21 @@ public sealed class MaintenanceAdapterTests
     public async Task Pull_request_metadata_follows_pages_and_skips_deleted_users()
     {
         var handler = new FeedbackMetadataHandler();
-        using var source = new GitHubPullRequestMetadataSource(
+        using var httpClient = new HttpClient(handler);
+        var source = new GitHubPullRequestMetadataSource(
             new GitHubClientOptions(),
             "token",
-            new HttpClient(handler));
+            httpClient);
 
         PullRequestMetadata metadata = await source.GetAsync(
             new RepositoryCoordinates("owner", "repo"),
             41,
             CancellationToken.None);
+        source.Dispose();
 
         Assert.Equal(["first", "second"], metadata.Comments.Select(static comment => comment.Body));
         Assert.Equal(3, handler.RequestCount);
+        Assert.False(handler.IsDisposed);
     }
 
     [Fact]
@@ -408,6 +411,8 @@ public sealed class MaintenanceAdapterTests
     {
         public int RequestCount { get; private set; }
 
+        public bool IsDisposed { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
@@ -437,6 +442,12 @@ public sealed class MaintenanceAdapterTests
                 {
                     Content = new StringContent(content, Encoding.UTF8, "application/json"),
                 };
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            IsDisposed = true;
+            base.Dispose(disposing);
         }
     }
 

@@ -711,7 +711,6 @@ public sealed class MaintenanceCommandModule : ICommandModule
         return _clientFactory is not null
             ? _clientFactory(token.Token.RevealValue())
             : new RedactingGitHubRepositoryClient(new GitHubRepositoryClient(
-                new HttpClient(),
                 token.Token.RevealValue(),
                 context.GitHubOptions));
     }

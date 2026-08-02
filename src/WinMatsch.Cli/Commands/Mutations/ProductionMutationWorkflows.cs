@@ -688,6 +688,15 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
         SubmissionJournalRecoveryResult recovery = await _journals
             .RecoverAsync(outputDirectory, cancellationToken)
             .ConfigureAwait(false);
+        if (!recovery.Corruptions.IsDefaultOrEmpty
+            && string.IsNullOrWhiteSpace(recovery.RepositoryFileSystemIdentity))
+        {
+            throw new SubmissionJournalTamperedException(
+                "Journal recovery returned quarantined evidence without the verified repository "
+                + "identity needed to prove package scope.");
+        }
+
+        string? repositoryFileSystemIdentity = recovery.RepositoryFileSystemIdentity;
         SubmissionJournalCorruption? unknown = recovery.Corruptions.FirstOrDefault(corruption =>
             string.IsNullOrWhiteSpace(corruption.RepositoryFileSystemIdentity)
             || string.IsNullOrWhiteSpace(corruption.PackageIdentifier));
@@ -702,12 +711,20 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
         if (!recovery.Corruptions.IsDefaultOrEmpty
             && recovery.Corruptions.Any(corruption =>
                 string.Equals(
+                    corruption.RepositoryFileSystemIdentity,
+                    repositoryFileSystemIdentity,
+                    StringComparison.Ordinal)
+                && string.Equals(
                     corruption.PackageIdentifier,
                     packageIdentifier.Value,
                     StringComparison.OrdinalIgnoreCase)))
         {
             SubmissionJournalCorruption matching = recovery.Corruptions.First(corruption =>
                 string.Equals(
+                    corruption.RepositoryFileSystemIdentity,
+                    repositoryFileSystemIdentity,
+                    StringComparison.Ordinal)
+                && string.Equals(
                     corruption.PackageIdentifier,
                     packageIdentifier.Value,
                     StringComparison.OrdinalIgnoreCase));
@@ -719,7 +736,7 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
 
         ImmutableArray<SubmissionJournalEntry> candidates =
         [
-            .. (await _journals.ListPendingAsync(cancellationToken).ConfigureAwait(false))
+            .. recovery.Pending
                 .Where(entry =>
                     string.Equals(
                         Path.GetFullPath(entry.Repository.CanonicalPath),
@@ -735,14 +752,22 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
         {
             if (!recovery.Diagnostics.IsDefaultOrEmpty)
             {
-                string diagnostic =
-                    "No matching pending submission was found. Journal recovery reported: "
-                    + string.Join(" ", recovery.Diagnostics);
-                if (!recovery.Corruptions.IsDefaultOrEmpty)
+                string[] operationalDiagnostics =
+                [
+                    .. recovery.Diagnostics.Where(diagnostic =>
+                        !recovery.Corruptions.Any(corruption =>
+                            diagnostic.Contains(
+                                corruption.EvidencePath,
+                                StringComparison.Ordinal))),
+                ];
+                if (operationalDiagnostics.Length == 0)
                 {
-                    throw new SubmissionJournalTamperedException(diagnostic);
+                    return null;
                 }
 
+                string diagnostic =
+                    "No matching pending submission was found. Journal recovery reported: "
+                    + string.Join(" ", operationalDiagnostics);
                 throw new SubmissionJournalConflictException(diagnostic);
             }
 

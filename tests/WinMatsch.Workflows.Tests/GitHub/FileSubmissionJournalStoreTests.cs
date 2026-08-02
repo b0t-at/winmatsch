@@ -37,6 +37,7 @@ public sealed class FileSubmissionJournalStoreTests
         SubmissionJournalEntry entry = Assert.Single(recovered.Activated);
         Assert.Equal(handle.Id, entry.Id);
         Assert.Equal(SubmissionJournalState.Pending, entry.State);
+        Assert.Equal(entry, Assert.Single(recovered.Pending));
         Assert.Single(await store.ListPendingAsync(default));
     }
 
@@ -642,6 +643,40 @@ public sealed class FileSubmissionJournalStoreTests
 
         await Assert.ThrowsAsync<ArgumentException>(() =>
             store.PrepareAsync(request, default));
+    }
+
+    [Fact]
+    public async Task Journal_redacts_remote_error_diagnostics_before_persisting()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        GitHubSubmissionRequest request = Request(repository.Path);
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        SubmissionJournalEntry entry = await store.ActivateAsync(handle, default);
+        string token = "ghp_" + new string('A', 30);
+
+        SubmissionJournalEntry updated = await store.RecordRemoteStateAsync(
+            entry.Id,
+            entry.Revision,
+            new()
+            {
+                Fork = GitHubLifecycleTestSupport.Fork,
+                BranchName = "winmatsch/test",
+                BranchCreated = true,
+            },
+            SubmissionJournalState.BranchCreated,
+            $"request failed for https://example.test/path?token={token}: bearer {token}",
+            default);
+
+        Assert.DoesNotContain(token, updated.LastError, StringComparison.Ordinal);
+        Assert.Contains("?token=[REDACTED]", updated.LastError, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", updated.LastError, StringComparison.Ordinal);
+        SubmissionJournalEntry persisted = Assert.IsType<SubmissionJournalEntry>(
+            await store.GetAsync(entry.Id, default));
+        Assert.Equal(updated.LastError, persisted.LastError);
     }
 
     [Fact]

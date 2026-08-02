@@ -108,7 +108,7 @@ public sealed class ProductionMutationWorkflowTests
     }
 
     [Fact]
-    public async Task Resume_surfaces_recovery_diagnostics_when_no_candidate_exists()
+    public async Task Resume_ignores_proven_unrelated_corruption_when_no_candidate_exists()
     {
         using var temporary = new TemporaryDirectory();
         const string evidencePath = "unrelated.journal.abc.corrupt";
@@ -120,6 +120,35 @@ public sealed class ProductionMutationWorkflowTests
             [
                 new(evidencePath, "other-repository", "Other.App"),
             ],
+            RepositoryFileSystemIdentity = "current-repository",
+        });
+        ProductionSubmissionWorkflow workflow = CreateSubmissionWorkflow(
+            temporary.Path,
+            journals);
+
+        GitHubLifecycleResult? result = await workflow.ResumePendingAsync(
+            temporary.Path,
+            new PackageIdentifier("Example.App"),
+            new PackageVersion("2.0.0"),
+            new RepositoryCoordinates("microsoft", "winget-pkgs"));
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task Resume_blocks_corruption_for_the_same_repository_and_package()
+    {
+        using var temporary = new TemporaryDirectory();
+        const string evidencePath = "matching.journal.abc.corrupt";
+        var journals = new DiagnosticOnlyJournalStore(new(
+            [],
+            [$"Quarantined journal evidence at '{evidencePath}'."])
+        {
+            Corruptions =
+            [
+                new(evidencePath, "current-repository", "Example.App"),
+            ],
+            RepositoryFileSystemIdentity = "current-repository",
         });
         ProductionSubmissionWorkflow workflow = CreateSubmissionWorkflow(
             temporary.Path,

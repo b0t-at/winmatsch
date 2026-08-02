@@ -221,7 +221,8 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         var activated = ImmutableArray.CreateBuilder<SubmissionJournalEntry>();
         var diagnostics = ImmutableArray.CreateBuilder<string>();
         var corruptions = ImmutableArray.CreateBuilder<SubmissionJournalCorruption>();
-        _ = ReadAllEntries("*.journal", diagnostics, corruptions);
+        SubmissionJournalEntry[] existingEntries =
+            ReadAllEntries("*.journal", diagnostics, corruptions);
         foreach (string path in Directory.GetFiles(_rootDirectory, "*.intent")
                      .Order(StringComparer.Ordinal))
         {
@@ -296,6 +297,15 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             diagnostics.ToImmutable())
         {
             Corruptions = corruptions.ToImmutable(),
+            RepositoryFileSystemIdentity = DirectoryPin.GetIdentity(canonical),
+            Pending =
+            [
+                .. existingEntries
+                    .Concat(activated)
+                    .Where(static entry => entry.State is not SubmissionJournalState.Cancelled)
+                    .OrderBy(static entry => entry.CreatedAt)
+                    .ThenBy(static entry => entry.Id, StringComparer.Ordinal),
+            ],
         };
     }
 
@@ -429,7 +439,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             State = state,
             RemoteState = remoteState,
             UpdatedAt = _clock.UtcNow,
-            LastError = errorMessage,
+            LastError = RedactStoredDiagnostic(errorMessage),
         };
         WriteEntry(path, updated);
         return updated;
@@ -1600,6 +1610,13 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             }
         }
     }
+
+    private static string? RedactStoredDiagnostic(string? value)
+        => value is null
+            ? null
+            : SecretValueRegex().Replace(
+                GitHubSubmissionFormatter.Redact(value),
+                "[REDACTED]");
 
     private static void RejectReparsePoint(string path)
     {

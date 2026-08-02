@@ -165,6 +165,10 @@ public sealed record SubmissionJournalRecoveryResult(
     ImmutableArray<string> Diagnostics)
 {
     public ImmutableArray<SubmissionJournalCorruption> Corruptions { get; init; } = [];
+
+    public ImmutableArray<SubmissionJournalEntry> Pending { get; init; } = [];
+
+    public string? RepositoryFileSystemIdentity { get; init; }
 }
 
 public sealed class VerifiedSubmissionRecoveryRequest
