@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using WinMatsch.Analysis.Pe;
 using WinMatsch.Core;
 
@@ -21,7 +22,7 @@ namespace WinMatsch.Analysis.Nsis;
 /// conventional marker, so ARM64-targeting installers are reported as their stub's machine.
 /// The installer locale is the first language table's LCID — the script's default language.
 /// </summary>
-public sealed class NsisProbe : IExeFormatProbe
+public sealed partial class NsisProbe : IExeFormatProbe
 {
     private const int EwSetFlag = 13;
     private const int EwWriteReg = 51;
@@ -33,23 +34,28 @@ public sealed class NsisProbe : IExeFormatProbe
 
     /// <summary>
     /// Returns the installer's analysis, or null when the executable's overlay has no NSIS
-    /// first header.
+    /// first header. An installer that is positively NSIS but truncated, corrupt, or using
+    /// an unsupported compressor (NSIS-modified bzip2, BCJ-filtered LZMA) yields a degraded
+    /// analysis carrying diagnostic NSIS003 instead of header-derived metadata.
     /// </summary>
-    /// <exception cref="InvalidDataException">
-    /// The file is positively an NSIS installer but is truncated, corrupt, or uses an
-    /// unsupported compressor (NSIS-modified bzip2, BCJ-filtered LZMA).
-    /// </exception>
     public InstallerAnalysis? Probe(PeFile peFile, Stream stream)
     {
         ArgumentNullException.ThrowIfNull(peFile);
         ArgumentNullException.ThrowIfNull(stream);
 
-        NsisFirstHeader? firstHeader = NsisFirstHeader.Find(stream);
-        if (firstHeader is null)
+        try
         {
-            return null;
+            NsisFirstHeader? firstHeader = NsisFirstHeader.Find(stream);
+            return firstHeader is null ? null : Analyze(peFile, stream, firstHeader);
         }
+        catch (InvalidDataException exception)
+        {
+            return CreateDegradedAnalysis(peFile, exception);
+        }
+    }
 
+    private static InstallerAnalysis Analyze(PeFile peFile, Stream stream, NsisFirstHeader firstHeader)
+    {
         NsisHeader header = NsisHeader.Parse(NsisCompression.ReadHeaderData(stream, firstHeader));
         var strings = new NsisStringReader(header);
 
@@ -62,9 +68,9 @@ public sealed class NsisProbe : IExeFormatProbe
             DetectPayloadArchitectures(header),
             out AnalysisDiagnostic? architectureDiagnostic);
 
-        string? displayName = arpValues.GetValueOrDefault("DisplayName");
-        string? displayVersion = arpValues.GetValueOrDefault("DisplayVersion");
-        string? publisher = arpValues.GetValueOrDefault("Publisher");
+        string? displayName = StripUnresolvedVariables(arpValues.GetValueOrDefault("DisplayName"));
+        string? displayVersion = StripUnresolvedVariables(arpValues.GetValueOrDefault("DisplayVersion"));
+        string? publisher = StripUnresolvedVariables(arpValues.GetValueOrDefault("Publisher"));
         VersionInfo version = peFile.VersionInfo;
 
         var installer = new Installer
@@ -102,6 +108,58 @@ public sealed class NsisProbe : IExeFormatProbe
             Diagnostics = architectureDiagnostic is null ? [] : [architectureDiagnostic],
         };
     }
+
+    private static InstallerAnalysis CreateDegradedAnalysis(PeFile peFile, InvalidDataException exception)
+    {
+        VersionInfo version = peFile.VersionInfo;
+        return new InstallerAnalysis
+        {
+            Format = DetectedInstallerFormat.Nullsoft,
+            Installers =
+            [
+                new Installer
+                {
+                    // The always-x86 stub says nothing about the payload; only a non-x86 stub is evidence.
+                    Architecture = peFile.Architecture == Architecture.X86 ? null : peFile.Architecture,
+                    InstallerType = InstallerType.Nullsoft,
+                    ElevationRequirement = peFile.RequestedElevation,
+                },
+            ],
+            ProductName = version.ProductName,
+            Publisher = version.CompanyName,
+            ProductVersion = version.ProductVersion,
+            Copyright = version.LegalCopyright,
+            Diagnostics =
+            [
+                new AnalysisDiagnostic(
+                    "NSIS003",
+                    $"{exception.Message} Header metadata was not interpreted; verify the installer manually.",
+                    RequiresManualAnalysis: true),
+            ],
+        };
+    }
+
+    /// <summary>
+    /// Removes unresolved user-variable tokens ($0–$9, $R0–$R9, $__VARn__) that scripts
+    /// interpolate into ARP values at run time (Tauri writes "DisplayName" as "...$1").
+    /// </summary>
+    private static string? StripUnresolvedVariables(string? value)
+    {
+        if (value is null || !value.Contains('$'))
+        {
+            return value;
+        }
+
+        string stripped = UnresolvedVariablePattern().Replace(value, string.Empty);
+        stripped = WhitespaceRunPattern().Replace(stripped, " ").Trim();
+        return stripped.Length == 0 ? null : stripped;
+    }
+
+    [GeneratedRegex(@"\$(?:R[0-9](?![0-9])|[0-9](?![0-9])|__VAR[0-9]+__)")]
+    private static partial Regex UnresolvedVariablePattern();
+
+    [GeneratedRegex(@"\s{2,}")]
+    private static partial Regex WhitespaceRunPattern();
 
     /// <summary>
     /// Scans the instructions for REG_SZ writes to an uninstall key, collecting the values

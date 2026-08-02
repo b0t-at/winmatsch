@@ -324,6 +324,89 @@ public sealed class InstallerDownloaderTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadAsync_RetriesAStalledBody_ThenSucceeds()
+    {
+        byte[] payload = CreatePayload(64);
+        using StubHttpMessageHandler stub = new((request, requestNumber) => requestNumber == 1
+            ? new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new StallingStream(CreatePayload(16))),
+                RequestMessage = request,
+            }
+            : Ok(request, payload));
+        using InstallerDownloader downloader = new(stub, new DownloaderOptions
+        {
+            StallTimeout = TimeSpan.FromMilliseconds(200),
+            RetryBaseDelay = TimeSpan.FromMilliseconds(1),
+        });
+
+        DownloadResult result = await downloader.DownloadAsync("https://example.com/a.exe", _tempDir);
+
+        Assert.Equal(2, stub.RequestCount);
+        Assert.Equal(payload.LongLength, result.SizeInBytes);
+    }
+
+    [Fact]
+    public async Task DownloadAsync_FailsFast_WhenTheBodyKeepsStalling()
+    {
+        using StubHttpMessageHandler stub = new((request, _) => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new StallingStream(CreatePayload(16))),
+            RequestMessage = request,
+        });
+        using InstallerDownloader downloader = new(stub, new DownloaderOptions
+        {
+            StallTimeout = TimeSpan.FromMilliseconds(100),
+            RetryBaseDelay = TimeSpan.FromMilliseconds(1),
+            MaxRetryAttempts = 1,
+        });
+
+        DownloadNetworkException exception = await Assert.ThrowsAsync<DownloadNetworkException>(
+            () => downloader.DownloadAsync("https://example.com/a.exe", _tempDir));
+
+        HttpRequestException transportException = Assert.IsType<HttpRequestException>(exception.InnerException);
+        Assert.Contains("stalled", transportException.Message, StringComparison.Ordinal);
+        Assert.Equal(2, stub.RequestCount);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_tempDir));
+    }
+
+    [Fact]
+    public async Task DownloadAsync_FailsFast_WhenHeadersNeverArrive()
+    {
+        using StubHttpMessageHandler stub = new((request, _) => Ok(request, CreatePayload(16)))
+        {
+            PerRequestDelay = TimeSpan.FromMinutes(10),
+        };
+        using InstallerDownloader downloader = new(stub, new DownloaderOptions
+        {
+            StallTimeout = TimeSpan.FromMilliseconds(100),
+            RetryBaseDelay = TimeSpan.FromMilliseconds(1),
+            MaxRetryAttempts = 0,
+        });
+
+        DownloadNetworkException exception = await Assert.ThrowsAsync<DownloadNetworkException>(
+            () => downloader.DownloadAsync("https://example.com/a.exe", _tempDir));
+
+        HttpRequestException transportException = Assert.IsType<HttpRequestException>(exception.InnerException);
+        Assert.Contains("response headers", transportException.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-2)]
+    public void InvalidStallAndConnectTimeouts_AreRejected(int seconds)
+    {
+        using StubHttpMessageHandler stub = new((request, _) => Ok(request, CreatePayload(16)));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new InstallerDownloader(
+            stub,
+            new DownloaderOptions { StallTimeout = TimeSpan.FromSeconds(seconds) }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new InstallerDownloader(
+            stub,
+            new DownloaderOptions { ConnectTimeout = TimeSpan.FromSeconds(seconds) }));
+    }
+
+    [Fact]
     public async Task DownloadAsync_CleansUpPartFile_WhenStreamFailsMidDownload()
     {
         using StubHttpMessageHandler stub = new((request, _) =>

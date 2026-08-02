@@ -79,14 +79,18 @@ internal sealed class NsisHeader
             blocks[i] = (offset, count);
         }
 
-        // The strings and langtables blocks carry byte lengths in their count fields relative
-        // to the next block in NSIS's writer; only the region up to the header end is safe to
-        // claim. The strings block extends to the langtables block per makensis's layout.
+        // The strings block carries no byte length in its count field; it runs to the next
+        // block in file order. makensis places langtables right after strings, but other
+        // writers (e.g. Tauri's NSIS builds) order the blocks differently, so the nearest
+        // following block offset — or the header end — bounds the region.
         (int stringsOffset, _) = blocks[StringsBlock];
-        int stringsEnd = blocks[LangtablesBlock].Offset;
-        if (stringsEnd < stringsOffset || stringsEnd > data.Length)
+        int stringsEnd = data.Length;
+        for (int i = 0; i < BlockCount; i++)
         {
-            throw new InvalidDataException("The NSIS strings block does not precede the language tables block.");
+            if (i != StringsBlock && blocks[i].Offset > stringsOffset && blocks[i].Offset < stringsEnd)
+            {
+                stringsEnd = blocks[i].Offset;
+            }
         }
 
         blocks[StringsBlock] = (stringsOffset, stringsEnd - stringsOffset);

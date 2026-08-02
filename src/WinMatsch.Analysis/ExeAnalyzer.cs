@@ -11,7 +11,7 @@ namespace WinMatsch.Analysis;
 /// <summary>
 /// Analyzes .exe files. Format-specific probes run first; when no probe claims the file, a
 /// generic fallback classifies it as an installer or a portable executable based on keywords
-/// in its version strings.
+/// in its version strings and its file name.
 /// </summary>
 public sealed class ExeAnalyzer : IInstallerAnalyzer
 {
@@ -25,7 +25,10 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
     ];
 
     // An EXE whose OriginalFilename or FileDescription contains one of these is treated as an
-    // installer; everything else is portable. The 7-Zip SFX module names are self-extractor stubs.
+    // installer; everything else is portable. For installers shipped without any version
+    // resource (e.g. Google's uncompressed Chrome installer) the actual file name is the only
+    // signal, so it is consulted as a fallback. The 7-Zip SFX module names are self-extractor
+    // stubs.
     private static readonly string[] _sevenZipSfxModuleNames =
         ["7z.sfx", "7zCon.sfx", "7zS.sfx", "7zSD.sfx", "7zS2.sfx", "7zS2con.sfx"];
 
@@ -69,7 +72,8 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
         }
 
         bool isInstaller = ContainsInstallerKeyword(version.OriginalFilename)
-            || ContainsInstallerKeyword(version.FileDescription);
+            || ContainsInstallerKeyword(version.FileDescription)
+            || (!HasVersionEvidence(version) && ContainsInstallerKeyword(Path.GetFileName(fileName)));
         bool isSelfExtractorStub = IsSelfExtractorStub(version);
 
         return new InstallerAnalysis
@@ -116,6 +120,15 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
         Architecture = peFile.Architecture,
         InstallerType = InstallerType.Portable,
     };
+
+    private static bool HasVersionEvidence(VersionInfo version)
+        => version.ProductName is not null
+            || version.CompanyName is not null
+            || version.LegalCopyright is not null
+            || version.ProductVersion is not null
+            || version.FileVersion is not null
+            || version.OriginalFilename is not null
+            || version.FileDescription is not null;
 
     private static bool ContainsInstallerKeyword(string? value)
     {

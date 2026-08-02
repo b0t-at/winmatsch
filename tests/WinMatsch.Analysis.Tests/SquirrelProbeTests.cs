@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.IO.Compression;
 using System.Reflection.PortableExecutable;
 using System.Text;
 using WinMatsch.Analysis.Pe;
@@ -182,6 +183,40 @@ public class SquirrelProbeTests
     }
 
     [Fact]
+    public void Oversized_payload_architecture_is_sniffed_from_the_copied_prefix()
+    {
+        byte[] nupkg = BuildDeflatedNupkg(("lib/app/big.exe", OversizedPe(Machine.Amd64)));
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(
+            Probe(SquirrelFixtures.BuildClowdSetup(nupkg)));
+
+        Assert.Equal(Architecture.X64, Assert.Single(analysis.Installers).Architecture);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("SQUIRREL002", diagnostic.Code);
+        Assert.False(diagnostic.RequiresManualAnalysis);
+        Assert.Contains("dependency evidence is incomplete", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Small_stubs_do_not_outvote_an_oversized_payload()
+    {
+        // The TableCloth shape: tiny x86 helper stubs plus an over-budget x64 app payload.
+        byte[] nupkg = BuildDeflatedNupkg(
+            ("lib/app/Squirrel.exe", DependencyFixtures.BuildPe(Machine.I386)),
+            ("lib/app/App_ExecutionStub.exe", DependencyFixtures.BuildPe(Machine.I386)),
+            ("lib/app/App.exe", OversizedPe(Machine.Amd64)));
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(
+            Probe(SquirrelFixtures.BuildClowdSetup(nupkg)));
+
+        Assert.Equal(Architecture.X64, Assert.Single(analysis.Installers).Architecture);
+        Assert.Contains(
+            analysis.Diagnostics,
+            static diagnostic => diagnostic.Code == "SQUIRREL002" && !diagnostic.RequiresManualAnalysis);
+        Assert.Contains(analysis.Diagnostics, static diagnostic => diagnostic.Code == "SQUIRREL001");
+    }
+
+    [Fact]
     public void Package_name_architecture_wins_over_stub()
     {
         byte[] setup = SquirrelFixtures.BuildClassicSetup(
@@ -295,6 +330,37 @@ public class SquirrelProbeTests
         byte[] data = new byte[128];
         new byte[] { 0x50, 0x4B, 0x03, 0x04 }.CopyTo(data, 0);
         return data;
+    }
+
+    /// <summary>A valid PE padded with an overlay to just past the per-payload copy budget.</summary>
+    private static byte[] OversizedPe(Machine machine)
+    {
+        byte[] pe = DependencyFixtures.BuildPe(machine);
+        byte[] oversized = new byte[SquirrelProbe.MaxPayloadPeBytes + 4096];
+        pe.CopyTo(oversized, 0);
+        return oversized;
+    }
+
+    /// <summary>A nupkg with deflated entries, so oversized payloads stay small on disk.</summary>
+    private static byte[] BuildDeflatedNupkg(params (string Name, byte[] Data)[] entries)
+    {
+        using var buffer = new MemoryStream();
+        using (var zip = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            WriteEntry(zip, "Contoso.Chat.nuspec", Encoding.UTF8.GetBytes(SquirrelFixtures.NuspecXml()));
+            foreach ((string name, byte[] data) in entries)
+            {
+                WriteEntry(zip, name, data);
+            }
+        }
+
+        return buffer.ToArray();
+
+        static void WriteEntry(ZipArchive zip, string name, byte[] data)
+        {
+            using Stream entry = zip.CreateEntry(name, CompressionLevel.SmallestSize).Open();
+            entry.Write(data);
+        }
     }
 
     private static InstallerAnalysis? Probe(byte[] setup)

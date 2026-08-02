@@ -51,9 +51,10 @@ public class PayloadDependencyAnalyzerTests
     {
         using var payload = new MemoryStream(DependencyFixtures.BuildPe(machine, "KERNEL32.dll", "VCRUNTIME140.dll"));
 
-        PayloadDependencyAnalysis analysis = _analyzer.Analyze(payload, "setup.exe");
+        // A neutral name: "setup"/"installer" names now classify as a generic installer stub.
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(payload, "tool.exe");
 
-        DependencyEvidence evidence = Find(analysis, "setup.exe", DependencyEvidenceKind.VisualCppRuntime);
+        DependencyEvidence evidence = Find(analysis, "tool.exe", DependencyEvidenceKind.VisualCppRuntime);
         Assert.Equal(DependencyEvidenceStatus.Detected, evidence.Status);
         Assert.Equal(architecture, evidence.Architecture);
         Assert.Equal(["vcruntime140.dll"], evidence.Signals);

@@ -81,6 +81,9 @@ internal static class NsisFixtures
         /// <summary>Overrides the first header's length_of_header for corruption tests.</summary>
         public int? DeclaredHeaderSizeOverride { get; set; }
 
+        /// <summary>Places the langtables block before the strings block, as Tauri's NSIS builds do.</summary>
+        public bool LangtablesBeforeStrings { get; set; }
+
         /// <summary>Extra zero bytes before the first header, to exercise the 512-byte scan.</summary>
         public int FirstHeaderPadding { get; set; }
 
@@ -155,9 +158,20 @@ internal static class NsisFixtures
         }
 
         int entriesOffset = FixedPartSize;
-        int stringsOffset = entriesOffset + (entries.Count * EntrySize);
-        int langTablesOffset = stringsOffset + stringsBytes.Length;
-        int end = langTablesOffset + langTable.Length;
+        int stringsOffset;
+        int langTablesOffset;
+        if (options.LangtablesBeforeStrings)
+        {
+            langTablesOffset = entriesOffset + (entries.Count * EntrySize);
+            stringsOffset = langTablesOffset + langTable.Length;
+        }
+        else
+        {
+            stringsOffset = entriesOffset + (entries.Count * EntrySize);
+            langTablesOffset = stringsOffset + stringsBytes.Length;
+        }
+
+        int end = Math.Max(stringsOffset + stringsBytes.Length, langTablesOffset + langTable.Length);
 
         byte[] header = new byte[end];
         WriteBlockHeader(header, 0, entriesOffset, 0);                 // Pages.
@@ -193,18 +207,20 @@ internal static class NsisFixtures
     /// <summary>
     /// The first header plus the archive data in the requested storage mode. Non-solid data
     /// blocks carry a uint32 size prefix whose high bit marks compression; solid data is one
-    /// continuous compressed stream starting with the installer header.
+    /// continuous compressed stream whose decompressed form starts with a uint32 header-size
+    /// echo followed by the installer header.
     /// </summary>
     private static byte[] WrapArchive(byte[] header, NsisCompressor compressor, int? declaredSizeOverride)
     {
         int declaredSize = declaredSizeOverride ?? header.Length;
+        byte[] solidPayload = [.. SizePrefix((uint)declaredSize), .. header];
         byte[] data = compressor switch
         {
             NsisCompressor.StoredNonSolid => [.. SizePrefix((uint)declaredSize), .. header],
             NsisCompressor.DeflateNonSolid => CompressedBlock(Deflate(header)),
-            NsisCompressor.DeflateSolid => Deflate(header),
+            NsisCompressor.DeflateSolid => Deflate(solidPayload),
             NsisCompressor.LzmaNonSolid => CompressedBlock(Lzma(header)),
-            NsisCompressor.LzmaSolid => Lzma(header),
+            NsisCompressor.LzmaSolid => Lzma(solidPayload),
             NsisCompressor.Bzip2Solid => [0x31, 0x05, 0x41, 0x59, 0x26, 0x53, 0x59, 0x00],
             NsisCompressor.Bzip2NonSolid => CompressedBlock([0x31, 0x05, 0x41, 0x59, 0x26, 0x53, 0x59, 0x00]),
             NsisCompressor.LzmaBcjSolid => [0x01, .. Lzma(header)],

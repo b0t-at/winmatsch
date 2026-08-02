@@ -36,6 +36,21 @@ public sealed class DownloaderOptions
     public TimeSpan Timeout { get; set; } = TimeSpan.FromMinutes(30);
 
     /// <summary>
+    /// The maximum time to wait for a connection (including TLS) to be established. Applies only
+    /// to the default handler; a custom handler configures its own connect behavior.
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> disables the limit.
+    /// </summary>
+    public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The maximum time to wait for response headers, or for the next payload bytes while
+    /// streaming, before the attempt counts as stalled and is retried as a transient failure.
+    /// Catches dead connections long before <see cref="Timeout"/> would.
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> disables stall detection.
+    /// </summary>
+    public TimeSpan StallTimeout { get; set; } = TimeSpan.FromSeconds(90);
+
+    /// <summary>
     /// Optional persistent cache directory. A null or empty value disables caching so callers retain
     /// full control over persistence.
     /// </summary>

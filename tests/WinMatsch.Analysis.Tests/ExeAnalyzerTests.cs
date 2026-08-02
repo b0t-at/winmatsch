@@ -188,6 +188,42 @@ public class ExeAnalyzerTests
         Assert.Equal(DetectedInstallerFormat.PortableExe, analysis.Format);
     }
 
+    [Theory]
+    [InlineData("153.0.7986.0_chrome_installer_uncompressed.exe")]
+    [InlineData("FooSetup.exe")]
+    [InlineData(@"C:\downloads\chrome_installer.exe")]
+    public void Installer_keyword_in_the_file_name_yields_a_generic_installer(string fileName)
+    {
+        // Google's uncompressed Chrome installer carries no version resource at all.
+        using MemoryStream stream = PeFixtures.BuildExeStream();
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, fileName);
+
+        Assert.Equal(DetectedInstallerFormat.GenericInstallerExe, analysis.Format);
+        Assert.Equal(InstallerType.Exe, Assert.Single(analysis.Installers).InstallerType);
+    }
+
+    [Fact]
+    public void Installer_keyword_in_the_directory_only_does_not_claim_an_installer()
+    {
+        using MemoryStream stream = PeFixtures.BuildExeStream();
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, @"C:\setup-files\tool.exe");
+
+        Assert.Equal(DetectedInstallerFormat.PortableExe, analysis.Format);
+    }
+
+    [Fact]
+    public void File_name_is_ignored_when_the_version_resource_has_evidence()
+    {
+        using MemoryStream stream = PeFixtures.BuildExeStream(version: new VersionStrings(
+            ProductName: "Foo Tool"));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "setup.exe");
+
+        Assert.Equal(DetectedInstallerFormat.PortableExe, analysis.Format);
+    }
+
     [Fact]
     public void Elevation_requirement_flows_from_the_manifest_into_the_installer()
     {

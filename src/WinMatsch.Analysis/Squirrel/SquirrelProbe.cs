@@ -34,7 +34,7 @@ public sealed class SquirrelProbe : IExeFormatProbe
     private const int ClassicResourceId = 131;
     private const long MaxNupkgBytes = 256L * 1024 * 1024;
     private const long MaxNuspecBytes = 4L * 1024 * 1024;
-    private const long MaxPayloadPeBytes = 64L * 1024 * 1024;
+    internal const long MaxPayloadPeBytes = 64L * 1024 * 1024;
     private const long MaxTotalPayloadPeBytes = 256L * 1024 * 1024;
     private const int MaxPayloadPeEntries = 256;
 
@@ -176,25 +176,45 @@ public sealed class SquirrelProbe : IExeFormatProbe
 
             using Stream source = entry.Open();
             using var content = new MemoryStream();
-            if (!CopyPayloadBounded(
-                    source,
-                    content,
-                    MaxPayloadPeBytes,
-                    MaxTotalPayloadPeBytes,
-                    ref totalBytes))
-            {
-                findings.Add(new AnalysisDiagnostic(
-                    "SQUIRREL002",
-                    $"Squirrel payload '{entry.FullName}' exceeded the bounded PE inspection budget; its architecture is unavailable.",
-                    RequiresManualAnalysis: true));
-                continue;
-            }
+            bool copyComplete = CopyPayloadBounded(
+                source,
+                content,
+                MaxPayloadPeBytes,
+                MaxTotalPayloadPeBytes,
+                ref totalBytes);
 
             content.Position = 0;
             PeImportInspection inspection = PeImportReader.Inspect(
                 content,
                 PayloadDependencyAnalyzerOptions.DefaultMaximumImportDescriptors,
                 PayloadDependencyAnalyzerOptions.DefaultMaximumImportNameBytes);
+            if (!copyComplete)
+            {
+                // The PE headers sit inside the copied prefix, so the architecture usually
+                // survives a budget cut; only the dependency evidence is at risk.
+                if (inspection.Architecture is { } prefixArchitecture)
+                {
+                    payloads.Add(new SquirrelPayloadPe(
+                        NormalizePackagePath(entry.FullName),
+                        entry.Length,
+                        prefixArchitecture,
+                        inspection with { IsComplete = false }));
+                    findings.Add(new AnalysisDiagnostic(
+                        "SQUIRREL002",
+                        $"Squirrel payload '{entry.FullName}' exceeded the bounded PE inspection budget; its architecture was read from the copied prefix, but its dependency evidence is incomplete.",
+                        RequiresManualAnalysis: false));
+                }
+                else
+                {
+                    findings.Add(new AnalysisDiagnostic(
+                        "SQUIRREL002",
+                        $"Squirrel payload '{entry.FullName}' exceeded the bounded PE inspection budget; its architecture is unavailable.",
+                        RequiresManualAnalysis: true));
+                }
+
+                continue;
+            }
+
             if (inspection.Architecture is { } architecture)
             {
                 payloads.Add(new SquirrelPayloadPe(

@@ -223,7 +223,44 @@ public class NsisProbeTests
         InstallerAnalysis? analysis = Probe(NsisFixtures.BuildInstaller(options));
 
         Assert.NotNull(analysis);
-        Assert.Equal("$R0$ edition", analysis.ProductName);
+        // The unresolved $R0 is stripped from the ARP value; the escaped literal $ survives.
+        Assert.Equal("$ edition", analysis.ProductName);
+    }
+
+    [Fact]
+    public void Unresolved_user_variables_are_stripped_from_arp_values()
+    {
+        var options = new NsisFixtures.Options();
+        options.RegistryWrites[0] = options.RegistryWrites[0] with
+        {
+            // Tauri writes DisplayName as "$(^Name) <version>$1"; $1 holds a runtime suffix.
+            Value = [NsisFixtures.Token.Lit("Alma 0.0.927"), NsisFixtures.Token.Var(1)],
+        };
+
+        InstallerAnalysis? analysis = Probe(NsisFixtures.BuildInstaller(options));
+
+        Assert.NotNull(analysis);
+        Assert.Equal("Alma 0.0.927", analysis.ProductName);
+        AppsAndFeaturesEntry arp = Assert.Single(Assert.Single(analysis.Installers).AppsAndFeaturesEntries!);
+        Assert.Equal("Alma 0.0.927", arp.DisplayName);
+    }
+
+    [Fact]
+    public void An_arp_value_that_is_only_variables_falls_back_to_the_version_strings()
+    {
+        var options = new NsisFixtures.Options
+        {
+            Version = new VersionStrings(ProductName: "Stub Product"),
+        };
+        options.RegistryWrites[0] = options.RegistryWrites[0] with
+        {
+            Value = [NsisFixtures.Token.Var(1), NsisFixtures.Token.Var(12)],
+        };
+
+        InstallerAnalysis? analysis = Probe(NsisFixtures.BuildInstaller(options));
+
+        Assert.NotNull(analysis);
+        Assert.Equal("Stub Product", analysis.ProductName);
     }
 
     [Fact]
@@ -333,29 +370,47 @@ public class NsisProbeTests
         Assert.Equal(NsisFixtures.DefaultDisplayName, analysis.ProductName);
     }
 
+    [Fact]
+    public void Langtables_before_strings_layout_parses()
+    {
+        // Tauri's NSIS builds emit the langtables block before the strings block.
+        var options = new NsisFixtures.Options { LangtablesBeforeStrings = true };
+
+        InstallerAnalysis? analysis = Probe(NsisFixtures.BuildInstaller(options));
+
+        Assert.NotNull(analysis);
+        Assert.Empty(analysis.Diagnostics);
+        Assert.Equal(NsisFixtures.DefaultDisplayName, analysis.ProductName);
+        Assert.Equal(NsisFixtures.DefaultPublisher, analysis.Publisher);
+        Assert.Equal(NsisFixtures.DefaultDisplayVersion, analysis.ProductVersion);
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(Architecture.X64, installer.Architecture);
+        Assert.Equal(new LanguageTag("en-US"), installer.InstallerLocale);
+    }
+
     [Theory]
     [InlineData(NsisCompressor.Bzip2Solid)]
     [InlineData(NsisCompressor.Bzip2NonSolid)]
-    public void Nsis_bzip2_throws_naming_the_compressor(NsisCompressor compressor)
+    public void Nsis_bzip2_degrades_naming_the_compressor(NsisCompressor compressor)
     {
         byte[] installer = NsisFixtures.BuildInstaller(new NsisFixtures.Options { Compressor = compressor });
 
-        var exception = Assert.Throws<InvalidDataException>(() => Probe(installer));
+        AnalysisDiagnostic diagnostic = AssertDegraded(Probe(installer));
 
-        Assert.Contains("bzip2", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("Manual analysis is required", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("bzip2", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("Manual analysis is required", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Bcj_filtered_lzma_throws_naming_the_filter()
+    public void Bcj_filtered_lzma_degrades_naming_the_filter()
     {
         byte[] installer = NsisFixtures.BuildInstaller(
             new NsisFixtures.Options { Compressor = NsisCompressor.LzmaBcjSolid });
 
-        var exception = Assert.Throws<InvalidDataException>(() => Probe(installer));
+        AnalysisDiagnostic diagnostic = AssertDegraded(Probe(installer));
 
-        Assert.Contains("BCJ", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("Manual analysis is required", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("BCJ", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("Manual analysis is required", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -364,48 +419,48 @@ public class NsisProbeTests
         byte[] installer = NsisFixtures.BuildInstaller(
             new NsisFixtures.Options { Compressor = NsisCompressor.OversizedLzmaDictionary });
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Probe(installer));
+        AnalysisDiagnostic diagnostic = AssertDegraded(Probe(installer));
 
-        Assert.Contains("dictionary", exception.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains(AnalysisLimits.MaxNsisHeaderBytes.ToString(), exception.Message, StringComparison.Ordinal);
+        Assert.Contains("dictionary", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(AnalysisLimits.MaxNsisHeaderBytes.ToString(), diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Theory]
     [InlineData(NsisCompressor.NoDataAtAll)]
     [InlineData(NsisCompressor.CorruptDeflateNonSolid)]
     [InlineData(NsisCompressor.CorruptLzmaSolid)]
-    public void Corrupt_archives_throw(NsisCompressor compressor)
+    public void Corrupt_archives_degrade_with_a_diagnostic(NsisCompressor compressor)
     {
         byte[] installer = NsisFixtures.BuildInstaller(new NsisFixtures.Options { Compressor = compressor });
 
-        Assert.Throws<InvalidDataException>(() => Probe(installer));
+        AssertDegraded(Probe(installer));
     }
 
     [Fact]
-    public void A_header_shorter_than_declared_throws()
+    public void A_header_shorter_than_declared_degrades()
     {
         byte[] installer = NsisFixtures.BuildInstaller(
             new NsisFixtures.Options { DeclaredHeaderSizeOverride = 1 << 20 });
 
-        Assert.Throws<InvalidDataException>(() => Probe(installer));
+        AssertDegraded(Probe(installer));
     }
 
     [Fact]
-    public void An_implausible_declared_header_size_throws()
+    public void An_implausible_declared_header_size_degrades()
     {
         byte[] installer = NsisFixtures.BuildInstaller(
             new NsisFixtures.Options { DeclaredHeaderSizeOverride = -1 });
 
-        Assert.Throws<InvalidDataException>(() => Probe(installer));
+        AssertDegraded(Probe(installer));
     }
 
     [Fact]
-    public void A_truncated_stored_header_throws()
+    public void A_truncated_stored_header_degrades()
     {
         byte[] installer = NsisFixtures.BuildInstaller(
             new NsisFixtures.Options { Compressor = NsisCompressor.StoredNonSolid });
 
-        Assert.Throws<InvalidDataException>(() => Probe(installer[..^64]));
+        AssertDegraded(Probe(installer[..^64]));
     }
 
     [Fact]
@@ -441,5 +496,18 @@ public class NsisProbeTests
         using var peFile = new PeFile(stream);
         stream.Position = 0;
         return new NsisProbe().Probe(peFile, stream);
+    }
+
+    private static AnalysisDiagnostic AssertDegraded(InstallerAnalysis? analysis)
+    {
+        Assert.NotNull(analysis);
+        Assert.Equal(DetectedInstallerFormat.Nullsoft, analysis.Format);
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(InstallerType.Nullsoft, installer.InstallerType);
+        Assert.Null(installer.Architecture); // The x86 stub says nothing about the payload.
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("NSIS003", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+        return diagnostic;
     }
 }

@@ -34,7 +34,7 @@ public sealed class InstallerDownloader : IDisposable, IAsyncDisposable
 
     /// <summary>Creates a downloader with validated redirects and automatic decompression enabled.</summary>
     public InstallerDownloader(DownloaderOptions? options = null)
-        : this(new SocketsHttpHandler { AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.All }, options)
+        : this(CreateDefaultHandler(options), options)
     {
     }
 
@@ -68,6 +68,13 @@ public sealed class InstallerDownloader : IDisposable, IAsyncDisposable
 
     /// <summary>The configured persistent cache, or null when caching is disabled.</summary>
     public DownloadCache? Cache => _cache;
+
+    private static SocketsHttpHandler CreateDefaultHandler(DownloaderOptions? options) => new()
+    {
+        AllowAutoRedirect = false,
+        AutomaticDecompression = DecompressionMethods.All,
+        ConnectTimeout = options?.ConnectTimeout ?? new DownloaderOptions().ConnectTimeout,
+    };
 
     /// <summary>
     /// Downloads an installer atomically. When caching is enabled, a fresh integrity-checked entry
@@ -515,16 +522,25 @@ public sealed class InstallerDownloader : IDisposable, IAsyncDisposable
                 await using (fileStream.ConfigureAwait(false))
                 {
                     var buffer = new byte[CopyBufferSize];
+                    using CancellationTokenSource? stallCts = CreateStallSource(cancellationToken);
+                    CancellationToken readToken = stallCts?.Token ?? cancellationToken;
                     while (true)
                     {
                         int read;
+                        stallCts?.CancelAfter(_options.StallTimeout);
                         try
                         {
-                            read = await contentStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                            read = await contentStream.ReadAsync(buffer, readToken).ConfigureAwait(false);
                         }
                         catch (IOException exception)
                         {
                             throw new HttpRequestException("The response stream ended unexpectedly.", exception);
+                        }
+                        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            throw new HttpRequestException(
+                                $"The response stream stalled: no data arrived within {_options.StallTimeout.TotalSeconds:F0} seconds.",
+                                exception);
                         }
 
                         if (read == 0)
@@ -658,9 +674,23 @@ public sealed class InstallerDownloader : IDisposable, IAsyncDisposable
             for (int redirectCount = 0; ; redirectCount++)
             {
                 DateTimeOffset requestTime = _timeProvider.GetUtcNow();
-                HttpResponseMessage response = await _httpClient
-                    .SendAsync(currentRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-                    .ConfigureAwait(false);
+                HttpResponseMessage response;
+                using (CancellationTokenSource? stallCts = CreateStallSource(cancellationToken))
+                {
+                    try
+                    {
+                        response = await _httpClient
+                            .SendAsync(currentRequest, HttpCompletionOption.ResponseHeadersRead, stallCts?.Token ?? cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        throw new HttpRequestException(
+                            $"The server did not return response headers within {_options.StallTimeout.TotalSeconds:F0} seconds.",
+                            exception);
+                    }
+                }
+
                 DateTimeOffset responseTime = _timeProvider.GetUtcNow();
                 if ((int)response.StatusCode is not (>= 300 and < 400) || response.Headers.Location is not { } location)
                 {
@@ -873,6 +903,19 @@ public sealed class InstallerDownloader : IDisposable, IAsyncDisposable
             _ => false,
         };
 
+    /// <summary>A linked source that cancels after <see cref="DownloaderOptions.StallTimeout"/>, or null when stall detection is disabled.</summary>
+    private CancellationTokenSource? CreateStallSource(CancellationToken cancellationToken)
+    {
+        if (_options.StallTimeout == System.Threading.Timeout.InfiniteTimeSpan)
+        {
+            return null;
+        }
+
+        var stallCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        stallCts.CancelAfter(_options.StallTimeout);
+        return stallCts;
+    }
+
     private static bool IsTransientStatus(HttpStatusCode status)
         => (int)status >= 500 || status is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests;
 
@@ -1047,6 +1090,16 @@ public sealed class InstallerDownloader : IDisposable, IAsyncDisposable
         if (options.Timeout <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Timeout must be positive.");
+        }
+
+        if (options.ConnectTimeout <= TimeSpan.Zero && options.ConnectTimeout != System.Threading.Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Connect timeout must be positive or infinite.");
+        }
+
+        if (options.StallTimeout <= TimeSpan.Zero && options.StallTimeout != System.Threading.Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Stall timeout must be positive or infinite.");
         }
 
         if (options.CacheProcessLockTimeout <= TimeSpan.Zero)

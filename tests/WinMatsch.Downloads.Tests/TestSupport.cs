@@ -50,6 +50,56 @@ internal sealed class FaultyStream(byte[] prefix) : Stream
 }
 
 /// <summary>
+/// A read-only stream that serves a fixed prefix of bytes and then blocks until the read's
+/// cancellation token fires, simulating a connection that stalls without erroring.
+/// </summary>
+internal sealed class StallingStream(byte[] prefix) : Stream
+{
+    private readonly byte[] _prefix = prefix;
+    private int _position;
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+        => throw new NotSupportedException("Only async reads are expected.");
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (_position >= _prefix.Length)
+        {
+            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+
+        int read = Math.Min(buffer.Length, _prefix.Length - _position);
+        _prefix.AsMemory(_position, read).CopyTo(buffer);
+        _position += read;
+        return read;
+    }
+
+    public override void Flush()
+    {
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+}
+
+/// <summary>
 /// An <see cref="IProgress{T}"/> that records reports synchronously on the reporting thread,
 /// unlike <see cref="Progress{T}"/> which posts to a synchronization context.
 /// </summary>
