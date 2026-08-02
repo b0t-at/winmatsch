@@ -1447,7 +1447,27 @@ public sealed class AtomicWorkflowFileTransaction :
             stream.Flush(flushToDisk: true);
         }
 
-        File.Move(temporaryPath, journalPath, overwrite: true);
+        ReplaceJournalFile(temporaryPath, journalPath);
+    }
+
+    private static void ReplaceJournalFile(string temporaryPath, string journalPath)
+    {
+        if (File.Exists(journalPath))
+        {
+            File.Replace(
+                temporaryPath,
+                journalPath,
+                destinationBackupFileName: null,
+                ignoreMetadataErrors: true);
+        }
+        else
+        {
+            DurableFileSystem.ReplaceFile(temporaryPath, journalPath);
+        }
+
+        string directory = Path.GetDirectoryName(Path.GetFullPath(journalPath))
+            ?? throw new InvalidOperationException("The transaction journal has no parent directory.");
+        DurableFileSystem.FlushDirectory(directory);
     }
 
     private static async Task RecoverAbandonedTransactionsAsync(
@@ -1604,7 +1624,7 @@ public sealed class AtomicWorkflowFileTransaction :
             stream.Flush(flushToDisk: true);
         }
 
-        File.Move(temporary, journalPath, overwrite: true);
+        ReplaceJournalFile(temporary, journalPath);
     }
 
     private static void DeleteRecoveredTransaction(string transaction)
