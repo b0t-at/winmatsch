@@ -6,6 +6,127 @@
 
 ---
 
+## R2. Independent re-audit round 3 — 2026-08-02 (verification of §R.0)
+
+> Performed by the original independent auditor against branch HEAD `86e4bb1`
+> (25 commits after the round-2 re-audit `c213af5`; +5,151 / −569 over 69
+> files). Method: central build + full test run, live CLI repros, direct code
+> reads of the R-N1/R-N2 fixes, and one breadth-verification subagent
+> (Claude Fable 5, long context) covering the journal/CLI/E2E/mechanical
+> clusters. §R.0 below is the remediation agent's self-report; this section is
+> the independent check of it and is the **current authoritative status**.
+
+### R2.1 Verdict — section R is confirmed closed; the branch is mergeable
+
+**Every round-2 finding (R-N1, R-N2, all minors and nits) is verified fixed in
+current code.** Build: 0 warnings / 0 errors (20 projects — count confirmed
+against WinMatsch.slnx). Tests: **2,344 passed, 0 failed, 3 skipped** — my
+central run matches §R.0's claim exactly. Unlike the §0 closeout, §R.0's
+provenance is clean this round: all 24 cited fix commits resolve on this
+branch, and the off-branch "reviewed-as" hashes (`7b6b207`/`45a6d46`) are
+exact patch-id matches of on-branch `d58eef0`/`5f07e52`, as disclosed. The
+nested GPT‑5.6 Sol review itself is a session artifact I cannot inspect, but
+its two claimed findings correspond exactly to `5f07e52`'s two production
+changes, which are real. **Merge recommendation: merge.** Only nits remain
+(R2.4); none needs to block anything.
+
+### R2.2 Load-bearing verifications (independent evidence)
+
+- **R-N1 (duplicate-PR API amplification) — Fixed.** Changed-file evidence now
+  flows through `GetPullRequestChangedFilesBatchAsync` (GraphQL, 50 PR nodes
+  per request — `GitHubRepositoryClient.cs:16,1001`) with a per-(repo, PR#,
+  headSha) cache incl. NodeId/BaseSha validation and stale-head eviction
+  (`GitHubSubmissionEvidence.cs:484-516,786-816`); discovery hard-capped at
+  1,000 open PRs fail-closed (`GitHubLifecycleContracts.cs:59`, overflow →
+  GH2034), REST fallback bounded by a shared 64-request budget + 64-PR gate,
+  GraphQL/REST rate-limit errors classified `RateLimited` and never re-wrapped
+  or used to enter the fallback (`GitHubRepositoryClient.cs:1538-1603`;
+  `GitHubSubmissionEvidence.cs:758-765`). 400 open PRs now cost ~8 GraphQL
+  requests instead of 400+ sequential REST calls; a clean repeat costs zero.
+  All guards throw (fail closed), none degrade open.
+- **R-N2 (ZIP entry-count crash) — Fixed, reproduced live.** `analyze` on a
+  4,101-entry ZIP containing a real PE → **exit 0**,
+  `visualCppRuntime=unavailable`, and `DEP003: … more than 4096 ZIP entries` —
+  exactly the degrade contract. Code: entry-count now throws the new
+  `AnalysisResourceLimitException`, converted to Unavailable+DEP003
+  (`PayloadDependencyAnalyzer.cs:74-83,246-250`); corruption/I-O/cancellation
+  taxonomies remain distinct; ZIP64 per-disk vs total entry counts
+  cross-checked (`ZipArchiveBounds.cs:69-74,171-174`).
+- **Journal durability cluster — Fixed.** Corrupt journals are atomically
+  quarantined to `{file}.{guid}.corrupt` and block only same-repo-identity
+  (volume-serial/file-index) + same-package submissions — unrelated packages
+  proceed (`FileSubmissionJournalStore.cs:1078-1214`); scope sidecars carry
+  repository filesystem identity; lock wait is bounded (10 s / 25 ms retry,
+  cancellation honored, `:1388-1437`); feedback store fsyncs directories;
+  `CreateDirectoryDurably` fsyncs each created path component for journals,
+  feedback state, and learned overrides (`DurableFileSystem.cs:10-38`);
+  persisted `LastError` diagnostics are redacted before write (`:442,1614-1619`).
+- **CLI/E2E/mechanical clusters — Fixed** (verified individually):
+  token-validation client ownership + inline-HttpClient leak +
+  `GitHubPullRequestMetadataSource` caller-owned disposal; explorer.exe exit-1
+  accepted only on Windows and only exit 1 (other codes still surface);
+  feedback cache defaults aligned with mutation workflows; regression pipeline
+  now uses a temporary override store (no `%LOCALAPPDATA%` bleed); LockHost
+  calls the production `DownloadCacheProcessLock` (copy-paste divergence
+  gone); NSIS fetch has 3 SHA-pinned HTTPS mirrors fail-closed; MakeAppx
+  requires valid Microsoft Authenticode + pinned SDK version floor with no
+  latest-SDK fallback; plan.md's DRY_RUN paragraph now matches the shipped
+  behavior and the P8 corpus note reads "Implemented (2026-08-02)"; the
+  CHANGELOG anonymous-read sentence is corrected; the surviving no-op Inno
+  catch is gone.
+
+### R2.3 Corrections to §R.0 (small; nothing material)
+
+1. §R.0's "lets proven-unrelated packages continue" is accurate for
+   submissions, but the maintenance **listing** surface (`ListPendingAsync`,
+   `FileSubmissionJournalStore.cs:390-394`) still hard-fails once on the
+   quarantine-transition call even for unrelated-repo corruption, then
+   self-heals on the next call — a one-time hiccup §R.0 doesn't mention.
+2. The §R.0 gate table's focused/stress/publish/lint/action-pin numbers
+   (480-iteration journal stress, focused 3 / 10+1, 6/6 publishes,
+   actionlint/zizmor, live pin resolution) are the remediation agent's own
+   runs from session artifacts I could not independently execute this round;
+   I verified the full-suite, build, project-count, and live-CLI claims myself
+   and all held, so I extend qualified trust to the rest.
+3. One **uncommitted working-tree change** existed at review time
+   (`docs/analyzers.md`, trivial markdown table-delimiter reformat) — commit
+   or discard it before merging so the merged tree matches the reviewed tree.
+
+### R2.4 New findings this round (all nits, none blocking)
+
+- `[nit]` `FileSubmissionJournalStore.cs:1269-1271` — a stale-handle
+  `ActivateAsync` after a concurrent process discarded the uncommitted intent
+  surfaces a raw `FileNotFoundException` instead of a domain conflict
+  (cross-process race, fail-closed either way).
+- `[nit]` `PublicReadOnlyGitHubClient.cs:26,37-41` — unconditionally disposes
+  an injected `HttpClient` (same ownership class as the fixed items);
+  pre-existing, production always passes null — latent for library consumers.
+- `[nit]` `GitHubRepositoryClient.cs:1043-1051` — the GraphQL batch drops
+  `previousPath` for COPIED files (only RENAMED forces REST completion);
+  direction is conservative (worst case: extra verification, never
+  mis-association).
+- `[nit]` `docs/analyzers.md` dirty in the working tree (see R2.3-3).
+
+### R2.5 Build & test matrix (round-3 run, HEAD `86e4bb1`)
+
+Build: **0 warnings, 0 errors**. Tests (`dotnet test --no-build`):
+Core 191, Analysis 506, Downloads 84, Rules 469, Validation 76, GitHub 130,
+Workflows 409, Cli 437, Testing.Tests 12, E2E 30 (+3 skipped opt-in) —
+**total 2,344 passed, 0 failed, 3 skipped**, matching §R.0 exactly. Live
+repros this round: R-N2 4,101-entry ZIP → exit 0 + DEP003 ✓; binary
+`--version` = `0.1.0+86e4bb1…` (tree under test = HEAD) ✓.
+
+### R2.6 Final recommendation
+
+**Merge.** All three audit rounds are now closed: original blockers/majors
+(round 1) → fixed and verified (round 2) → round-2 regressions R-N1/R-N2 and
+all residue → fixed and verified (this round). Before merging: commit or
+discard the dirty `docs/analyzers.md`. The four R2.4 nits and the §0-disclosed
+deferred residuals (NuGet lockfiles, artifact attestations, admin repo
+settings, opt-in live E2E) can ride as ordinary backlog items.
+
+---
+
 ## R. Independent re-audit — 2026-08-02 (verification of the §0 remediation closeout)
 
 > Performed by the original (independent) auditor against branch HEAD `43ec8c0`
