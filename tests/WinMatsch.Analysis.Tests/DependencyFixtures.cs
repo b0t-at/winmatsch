@@ -79,6 +79,9 @@ internal static class DependencyFixtures
 
     public static Stream AsNonSeekable(MemoryStream stream) => new NonSeekableReadStream(stream);
 
+    public static Stream ThrowOnReadAtOrAfter(MemoryStream stream, long offset)
+        => new FaultingReadStream(stream, offset);
+
     private static void WriteEntry(ZipArchive archive, string path, byte[] content)
     {
         ZipArchiveEntry entry = archive.CreateEntry(path);
@@ -439,6 +442,56 @@ internal static class DependencyFixtures
             {
                 inner.Dispose();
             }
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class FaultingReadStream(MemoryStream inner, long faultOffset) : Stream
+    {
+        public override bool CanRead => true;
+
+        public override bool CanSeek => true;
+
+        public override bool CanWrite => false;
+
+        public override long Length => inner.Length;
+
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+            => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (Position >= faultOffset)
+            {
+                throw new IOException("Simulated dependency-analysis read failure.");
+            }
+
+            return inner.Read(buffer);
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void Flush()
+        {
+        }
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+            }
+
             base.Dispose(disposing);
         }
     }

@@ -87,14 +87,17 @@ internal static class SquirrelFixtures
     /// <summary>Builds a Clowd.Squirrel setup with an in-image locator bounding the appended nupkg.</summary>
     public static byte[] BuildClowdSetup(
         byte[] nupkg,
-        Machine machine = Machine.I386)
+        Machine machine = Machine.I386,
+        long? declaredPackageLength = null)
     {
         byte[] marker = new byte[16 + _clowdBundleSignature.Length];
         _clowdBundleSignature.CopyTo(marker, 16);
         byte[] stub = BuildPeWithNamedResource("BUNDLE", 1, marker, machine);
         int signatureOffset = stub.AsSpan().IndexOf(_clowdBundleSignature);
         BinaryPrimitives.WriteInt64LittleEndian(stub.AsSpan(signatureOffset - 16), stub.Length);
-        BinaryPrimitives.WriteInt64LittleEndian(stub.AsSpan(signatureOffset - 8), nupkg.Length);
+        BinaryPrimitives.WriteInt64LittleEndian(
+            stub.AsSpan(signatureOffset - 8),
+            declaredPackageLength ?? nupkg.Length);
         return AdvancedInstallerFixtures.Concat(stub, nupkg);
     }
 

@@ -199,6 +199,20 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Unsupported_outer_packaging_returns_unavailable_evidence()
+    {
+        using var payload = new MemoryStream([1, 2, 3, 4]);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(payload, "package.msi");
+
+        Assert.False(analysis.IsComplete);
+        Assert.All(
+            analysis.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "DEP001");
+    }
+
+    [Fact]
     public void Truncated_bsjb_metadata_root_cannot_create_neutral_evidence()
     {
         byte[] pe = DependencyFixtures.BuildPe(Machine.I386);
@@ -906,21 +920,44 @@ public class PayloadDependencyAnalyzerTests
 
         using var advancedStream = new MemoryStream(advanced);
         using var squirrelStream = new MemoryStream(squirrel);
-        PayloadDependencyAnalysis advancedAnalysis = _analyzer.Analyze(
-            advancedStream,
-            "advanced.exe");
-        PayloadDependencyAnalysis squirrelAnalysis = _analyzer.Analyze(
-            squirrelStream,
-            "squirrel.exe");
 
-        Assert.DoesNotContain(advancedAnalysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
-        Assert.DoesNotContain(squirrelAnalysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
+        Assert.Throws<InvalidDataException>(
+            () => _analyzer.Analyze(advancedStream, "advanced.exe"));
+        Assert.Throws<InvalidDataException>(
+            () => _analyzer.Analyze(squirrelStream, "squirrel.exe"));
+    }
+
+    [Fact]
+    public void Wrapper_io_failure_is_not_converted_to_dependency_evidence()
+    {
+        byte[] advanced = AdvancedInstallerFixtures.BuildInstaller([]);
+        using var content = new MemoryStream(advanced);
+        using Stream faulting = DependencyFixtures.ThrowOnReadAtOrAfter(
+            content,
+            advanced.Length - 74);
+
+        Assert.Throws<IOException>(
+            () => _analyzer.Analyze(faulting, "advanced.exe"));
+    }
+
+    [Fact]
+    public void Clowd_squirrel_package_size_limit_returns_unavailable_evidence()
+    {
+        const long DeclaredPackageLength = 300L * 1024 * 1024;
+        byte[] prefix = SquirrelFixtures.BuildClowdSetup(
+            SquirrelFixtures.BuildNupkg(SquirrelFixtures.NuspecXml()),
+            declaredPackageLength: DeclaredPackageLength);
+        using var stream = new DependencyFixtures.SparsePrefixStream(
+            prefix,
+            prefix.Length + DeclaredPackageLength);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "Setup.exe");
+
+        Assert.False(analysis.IsComplete);
         Assert.All(
-            advancedAnalysis.Evidence,
-            evidence => Assert.NotEqual(DependencyEvidenceStatus.Unavailable, evidence.Status));
-        Assert.All(
-            squirrelAnalysis.Evidence,
-            evidence => Assert.NotEqual(DependencyEvidenceStatus.Unavailable, evidence.Status));
+            analysis.Evidence,
+            evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
     }
 
     [Fact]

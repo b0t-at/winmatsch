@@ -49,12 +49,27 @@ public sealed partial class PayloadDependencyAnalyzer
 
         try
         {
-            if (string.Equals(Path.GetExtension(fileName), ".zip", StringComparison.OrdinalIgnoreCase))
+            string extension = Path.GetExtension(fileName);
+            if (string.Equals(extension, ".zip", StringComparison.OrdinalIgnoreCase))
             {
                 return AnalyzeArchive(stream, fileName, cancellationToken);
             }
 
-            return AnalyzeExecutable(stream, fileName, cancellationToken);
+            if (string.Equals(extension, ".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return AnalyzeExecutable(stream, fileName, cancellationToken);
+            }
+
+            string payloadPath = Path.GetFileName(fileName);
+            const string signal = "analysis-unavailable:unsupported-packaging";
+            return new PayloadDependencyAnalysis(
+                CreateUnavailableEvidence(payloadPath, signal),
+                [
+                    new AnalysisDiagnostic(
+                        "DEP001",
+                        $"Dependency evidence for '{payloadPath}' is unavailable because its outer packaging is not a PE executable or ZIP archive."),
+                ],
+                isComplete: false);
         }
         catch (AnalysisResourceLimitException exception)
         {
@@ -87,12 +102,15 @@ public sealed partial class PayloadDependencyAnalyzer
         }
 
         PePayload payload = InspectPe(payloadPath, stream);
-        InstallerAnalysis? installerAnalysis = TryAnalyzeExecutable(stream, fileName, cancellationToken);
-        DetectedInstallerFormat? format = installerAnalysis?.Format;
+        InstallerAnalysis installerAnalysis = AnalyzeExecutableFormat(
+            stream,
+            fileName,
+            cancellationToken);
+        DetectedInstallerFormat format = installerAnalysis.Format;
         bool payloadIsDirect = format == DetectedInstallerFormat.PortableExe;
         string? outerSignal = payloadIsDirect
             ? null
-            : $"outer-stub-only:{format?.ToString() ?? "unclassified"}";
+            : $"outer-stub-only:{format}";
         var evidence = new List<DependencyEvidence>(CreatePeEvidence(
             payload,
             runtimeConfig: null,
@@ -105,8 +123,7 @@ public sealed partial class PayloadDependencyAnalyzer
             [
                 new AnalysisDiagnostic(
                     "DEP002",
-                    $"The outer PE of '{payloadPath}' is a wrapper stub"
-                        + (format is null ? "." : $" ({format}).")
+                    $"The outer PE of '{payloadPath}' is a wrapper stub ({format})."
                         + " Missing runtime imports in that stub are ambiguous; any bounded format-specific payload evidence is reported separately."),
             ]);
         bool isComplete = payloadIsDirect;
@@ -790,7 +807,7 @@ public sealed partial class PayloadDependencyAnalyzer
     private static string CombinePath(string directory, string fileName)
         => directory.Length == 0 ? fileName : $"{directory}/{fileName}";
 
-    private static InstallerAnalysis? TryAnalyzeExecutable(
+    private static InstallerAnalysis AnalyzeExecutableFormat(
         Stream stream,
         string fileName,
         CancellationToken cancellationToken)
@@ -801,15 +818,6 @@ public sealed partial class PayloadDependencyAnalyzer
             cancellationToken.ThrowIfCancellationRequested();
             stream.Position = 0;
             return new ExeAnalyzer().Analyze(stream, fileName);
-        }
-        catch (Exception exception) when (
-            exception is not AnalysisResourceLimitException
-            && exception is (InvalidDataException
-                or BadImageFormatException
-                or NotSupportedException
-                or IOException))
-        {
-            return null;
         }
         finally
         {

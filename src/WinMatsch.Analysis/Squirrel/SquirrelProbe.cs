@@ -112,6 +112,12 @@ public sealed class SquirrelProbe : IExeFormatProbe
                 "The Squirrel release package is truncated or corrupt.", exception);
         }
 
+        if (package.Length != entry.Length)
+        {
+            throw new InvalidDataException(
+                "The Squirrel release package ends before its declared size.");
+        }
+
         package.Position = 0;
         return ReadPackage(
             package,
@@ -224,6 +230,12 @@ public sealed class SquirrelProbe : IExeFormatProbe
             CopyBounded(entryStream, buffer, MaxNuspecBytes);
         }
 
+        if (buffer.Length != nuspecEntry.Length)
+        {
+            throw new InvalidDataException(
+                "The package's nuspec manifest ends before its declared size.");
+        }
+
         buffer.Position = 0;
         return NuspecReader.Parse(buffer);
     }
@@ -269,11 +281,16 @@ public sealed class SquirrelProbe : IExeFormatProbe
                     || length <= 0
                     || offset < imageEnd
                     || offset > stream.Length
-                    || length > stream.Length - offset
-                    || length > MaxNupkgBytes)
+                    || length > stream.Length - offset)
                 {
                     throw new InvalidDataException(
                         "The Clowd.Squirrel bundle locator contains an invalid package offset or length.");
+                }
+
+                if (length > MaxNupkgBytes)
+                {
+                    throw new AnalysisResourceLimitException(
+                        "The Clowd.Squirrel release package exceeds the supported size.");
                 }
 
                 return new BundleLocation(offset, length);
