@@ -27,7 +27,7 @@ function Get-WindowsInstallerCorpusToolManifest {
         )
         BalPackageSha256 = '22422B50A925477E33C2B5F78D2965A9A09C6622D17BA5AA5365B20EC662B7C8'
         WindowsSdkVersion = '10.0.26100.0'
-        MakeAppxMinimumFileVersion = '10.0.26100.0'
+        MakeAppxMinimumFileVersion = '10.0.26100.8249'
         MakeAppxSignerOrganization = 'Microsoft Corporation'
     }
 }
@@ -218,40 +218,50 @@ function Resolve-ApprovedMakeAppx {
     )
 
     $sdk = [Version]$SdkVersion
+    $rejections = [Collections.Generic.List[string]]::new()
     foreach ($candidate in $CandidatePaths | Select-Object -Unique) {
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             continue
         }
 
-        $signer = Assert-AuthenticodeSignature `
-            -Path $candidate `
-            -SignatureInspector $SignatureInspector
-        $organizationPattern = '(^|,\s*)O=' +
-            [Regex]::Escape($ApprovedSignerOrganization) +
-            '(,|$)'
-        if ($signer -notmatch $organizationPattern) {
-            throw "MakeAppx '$candidate' is signed by '$signer', not approved organization '$ApprovedSignerOrganization'."
-        }
+        try {
+            $signer = Assert-AuthenticodeSignature `
+                -Path $candidate `
+                -SignatureInspector $SignatureInspector
+            $organizationPattern = '(^|,\s*)O=' +
+                [Regex]::Escape($ApprovedSignerOrganization) +
+                '(,|$)'
+            if ($signer -notmatch $organizationPattern) {
+                throw "MakeAppx '$candidate' is signed by '$signer', not approved organization '$ApprovedSignerOrganization'."
+            }
 
-        $actualVersion = [Version](& $FileVersionReader $candidate)
-        if ($actualVersion.Major -ne $sdk.Major -or
-            $actualVersion.Minor -ne $sdk.Minor -or
-            $actualVersion.Build -ne $sdk.Build -or
-            $actualVersion -lt $MinimumFileVersion) {
-            throw "MakeAppx '$candidate' has file version '$actualVersion'; expected signed Windows SDK $SdkVersion tooling with version at least '$MinimumFileVersion' and build '$($sdk.Build)'."
-        }
+            $actualVersion = [Version](& $FileVersionReader $candidate)
+            if ($actualVersion.Major -ne $sdk.Major -or
+                $actualVersion.Minor -ne $sdk.Minor -or
+                $actualVersion.Build -ne $sdk.Build -or
+                $actualVersion -lt $MinimumFileVersion) {
+                throw "MakeAppx '$candidate' has file version '$actualVersion'; expected signed Windows SDK $SdkVersion tooling with version at least '$MinimumFileVersion' and build '$($sdk.Build)'."
+            }
 
-        return [pscustomobject]@{
-            Path = (Resolve-Path -LiteralPath $candidate).Path
-            SdkVersion = $SdkVersion
-            FileVersion = $actualVersion.ToString()
-            Sha256 = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
-            Signer = $signer
-            Source = (Resolve-Path -LiteralPath $candidate).Path
+            return [pscustomobject]@{
+                Path = (Resolve-Path -LiteralPath $candidate).Path
+                SdkVersion = $SdkVersion
+                FileVersion = $actualVersion.ToString()
+                Sha256 = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
+                Signer = $signer
+                Source = (Resolve-Path -LiteralPath $candidate).Path
+            }
+        } catch {
+            $rejections.Add("$candidate -> $($_.Exception.Message)")
         }
     }
 
-    throw "Approved MakeAppx for Windows SDK '$SdkVersion' was not found. Install that exact SDK, or set WindowsSdkVerBinPath/WindowsSdkBinPath to its bin directory. No latest-SDK fallback is permitted."
+    $rejectionDetails = if ($rejections.Count -eq 0) {
+        'No candidate file existed.'
+    } else {
+        $rejections -join '; '
+    }
+    throw "Approved MakeAppx for Windows SDK '$SdkVersion' was not found. Candidate results: $rejectionDetails Install that exact SDK, or set WindowsSdkVerBinPath/WindowsSdkBinPath to its bin directory. No latest-SDK fallback is permitted."
 }
 
 Export-ModuleMember -Function @(

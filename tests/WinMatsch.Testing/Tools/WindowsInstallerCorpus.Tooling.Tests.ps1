@@ -112,8 +112,11 @@ try {
     }
 
     $missingCandidate = Join-Path $root 'missing\makeappx.exe'
+    $rejectedCandidate = Join-Path $root 'stale-sdk\10.0.26100.0\x64\makeappx.exe'
     $candidate = Join-Path $root 'sdk\10.0.26100.0\x64\makeappx.exe'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $rejectedCandidate) | Out-Null
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $candidate) | Out-Null
+    Copy-Item -LiteralPath $payload -Destination $rejectedCandidate
     Copy-Item -LiteralPath $payload -Destination $candidate
     $validSignature = {
         param($Path)
@@ -125,11 +128,18 @@ try {
         }
     }
     $resolved = Resolve-ApprovedMakeAppx `
-        -CandidatePaths @($missingCandidate, $candidate) `
+        -CandidatePaths @($missingCandidate, $rejectedCandidate, $candidate) `
         -SdkVersion $manifest.WindowsSdkVersion `
         -MinimumFileVersion ([Version]$manifest.MakeAppxMinimumFileVersion) `
         -ApprovedSignerOrganization $manifest.MakeAppxSignerOrganization `
-        -SignatureInspector $validSignature `
+        -SignatureInspector {
+            param($Path)
+            if ($Path -eq $rejectedCandidate) {
+                return [pscustomobject]@{ Status = 'NotSigned'; SignerCertificate = $null }
+            }
+
+            & $validSignature $Path
+        } `
         -FileVersionReader { param($Path) '10.0.26100.8249' }
     Assert-True ($resolved.Path -eq (Resolve-Path -LiteralPath $candidate).Path) 'MakeAppx discovery order failed.'
     Assert-True (-not [string]::IsNullOrWhiteSpace($resolved.Sha256)) 'MakeAppx provenance omitted its hash.'
@@ -172,7 +182,7 @@ try {
             -MinimumFileVersion ([Version]$manifest.MakeAppxMinimumFileVersion) `
             -ApprovedSignerOrganization $manifest.MakeAppxSignerOrganization `
             -SignatureInspector $validSignature `
-            -FileVersionReader { param($Path) '10.0.22621.1' }
+            -FileVersionReader { param($Path) '10.0.26100.8248' }
     } 'expected signed Windows SDK'
 
     'Windows installer corpus tooling tests passed.'
