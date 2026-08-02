@@ -47,6 +47,21 @@ public sealed class RegressionDescriptorE2ETests
                 out FixtureHttpMessageHandler handler,
                 out FixtureReleaseSource releaseSource);
             WorkflowOperationRequest request = RegressionFixturePipeline.CreateRequest(fixture, temporary.Path);
+            string[] explicitAssetUrls = fixture.Descriptor.Assets
+                .Where(static asset => asset.Synthetic.ExplicitArchitecture is not null)
+                .Select(static asset => asset.Url.AbsoluteUri)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            string[] overrideUrls = (request switch
+                {
+                    NewOperationRequest create => create.UrlOverrides,
+                    UpdateOperationRequest update => update.UrlOverrides,
+                    _ => [],
+                })
+                .Select(static item => item.Url.AbsoluteUri)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            Assert.Equal(explicitAssetUrls, overrideUrls);
 
             WorkflowOperationResult result = request switch
             {
@@ -59,6 +74,7 @@ public sealed class RegressionDescriptorE2ETests
                 result.Code == WorkflowResultCode.Succeeded,
                 $"{fixture.Descriptor.Id}:{Environment.NewLine}{RegressionFixturePipeline.Describe(result)}");
             Assert.False(result.Applied);
+            Assert.Empty(result.Plan.Questions);
             Assert.Equal(fixture.Descriptor.Assets.Count, releaseSource.DiscoveredCount);
             Assert.All(
                 fixture.Descriptor.Assets,
@@ -67,6 +83,7 @@ public sealed class RegressionDescriptorE2ETests
                     requestRecord => requestRecord.Method == HttpMethod.Get
                         && requestRecord.Uri == asset.Url));
             Assert.NotEmpty(fixture.Descriptor.Regression.RuleIds);
+            Assert.False(string.IsNullOrWhiteSpace(fixture.Descriptor.Regression.ExpectedBehavior));
             Assert.Contains(
                 result.Plan.Rules.Executions,
                 static execution => execution.RuleId == "PIPE-1");
@@ -74,6 +91,35 @@ public sealed class RegressionDescriptorE2ETests
             Assert.DoesNotContain(
                 result.Plan.Validation.Findings,
                 static finding => finding.Severity == ValidationSeverity.Error);
+            Assert.Equal(NetworkValidationMode.Online, result.Plan.Preflight.Options.NetworkMode);
+            Assert.Equal(
+                result.Plan.BeforeDocuments.Select(DocumentSignature),
+                result.Plan.Preflight.BeforeDocuments.Select(DocumentSignature));
+            Assert.Equal(
+                result.Plan.AfterDocuments.Select(DocumentSignature),
+                result.Plan.Preflight.AfterDocuments.Select(DocumentSignature));
+            Assert.Equal(
+                result.Plan.FileChanges.Select(ChangeSignature),
+                result.Plan.Preflight.Changes.Select(ChangeSignature));
+            Assert.All(
+                result.Plan.FileChanges,
+                static change => Assert.Equal(WorkflowChangeProvenance.ToolGenerated, change.Provenance));
+            Assert.All(
+                new[]
+                {
+                    result.Plan.PlanningInputsFingerprint,
+                    result.Plan.RuleEvaluationFingerprint,
+                    result.Plan.ValidationFingerprint,
+                    result.Plan.AuditFingerprint,
+                    result.Plan.PreflightEvidenceFingerprint,
+                },
+                static fingerprint => Assert.Matches("^[0-9A-F]{64}$", fingerprint));
+            if (fixture.Descriptor.Id == "surrealdb")
+            {
+                Assert.Contains(
+                    result.Plan.Rules.Executions,
+                    static execution => execution.RuleId == "DEP-1");
+            }
 
             if (Environment.GetEnvironmentVariable("WINMATSCH_UPDATE_REGRESSION_GOLDENS") == "1")
             {
@@ -132,6 +178,12 @@ public sealed class RegressionDescriptorE2ETests
                 + $"{Environment.NewLine}Actual:{Environment.NewLine}{Encoding.UTF8.GetString(byFileName[fileName])}");
         }
     }
+
+    private static string DocumentSignature(RawManifestDocument document)
+        => $"{document.RepositoryPath}|{Convert.ToHexString(SHA256.HashData(document.Content.AsSpan()))}";
+
+    private static string ChangeSignature(WorkflowFileChange change)
+        => $"{change.Kind}|{change.RepositoryPath}|{Convert.ToHexString(SHA256.HashData(change.Content.AsSpan()))}";
 
     private static void WriteGoldens(
         RegressionFixture fixture,

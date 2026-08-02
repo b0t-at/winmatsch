@@ -13,6 +13,8 @@ namespace WinMatsch.Cli.Hosting;
 /// prompt), by <c>--interaction never</c>, and in <c>auto</c> mode by CI environments
 /// (<c>CI</c>, <c>GITHUB_ACTIONS</c>, or <c>TF_BUILD</c> set to a truthy value) or redirected
 /// standard input/error. <c>--interaction always</c> forces prompting.</item>
+/// <item><b>Progress</b> is enabled only for plain interactive text terminals. JSON, CI,
+/// no-color, no-interaction, or any redirected standard stream runs the operation silently.</item>
 /// </list>
 /// </summary>
 public sealed record ConsoleCapabilities
@@ -22,6 +24,9 @@ public sealed record ConsoleCapabilities
 
     /// <summary>Whether prompting is allowed. See the type docs for the rules.</summary>
     public required bool PromptsEnabled { get; init; }
+
+    /// <summary>Whether transient Spectre progress may render on standard error.</summary>
+    public required bool ProgressEnabled { get; init; }
 
     /// <summary>Why prompting is disabled; null when <see cref="PromptsEnabled"/> is true.</summary>
     public string? PromptsDisabledReason { get; init; }
@@ -36,6 +41,7 @@ public sealed record ConsoleCapabilities
         bool noColorRequested,
         Func<string, string?> environment,
         bool isInputRedirected,
+        bool isOutputRedirected,
         bool isErrorRedirected)
     {
         ArgumentNullException.ThrowIfNull(environment);
@@ -44,8 +50,15 @@ public sealed record ConsoleCapabilities
             || IsTruthy(environment("GITHUB_ACTIONS"))
             || IsTruthy(environment("TF_BUILD"));
 
-        bool colorEnabled = !noColorRequested
-            && string.IsNullOrEmpty(environment("NO_COLOR"))
+        bool noColor = noColorRequested || !string.IsNullOrEmpty(environment("NO_COLOR"));
+        bool colorEnabled = !noColor
+            && !isErrorRedirected;
+        bool progressEnabled = interaction != InteractionMode.Never
+            && format != OutputFormat.Json
+            && !noColor
+            && !isCi
+            && !isInputRedirected
+            && !isOutputRedirected
             && !isErrorRedirected;
 
         (bool promptsEnabled, string? reason) = DecidePrompting(
@@ -55,6 +68,7 @@ public sealed record ConsoleCapabilities
         {
             ColorEnabled = colorEnabled,
             PromptsEnabled = promptsEnabled,
+            ProgressEnabled = progressEnabled,
             PromptsDisabledReason = reason,
             IsContinuousIntegration = isCi,
         };

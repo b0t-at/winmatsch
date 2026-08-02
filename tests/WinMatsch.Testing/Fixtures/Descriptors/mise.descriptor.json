@@ -30,9 +30,9 @@
       "url": "https://github.com/jdx/mise/releases/download/v2025.12.2/mise-v2025.12.2-windows-x64.zip",
       "sha256": "281929A9910ACD3B1229E03BBD8F29FA399CE05750701947227636811FA05AA0",
       "syntheticSha256": "A58EBD4BDC72A3023D0241F4062D78B21237EAF3DE2F9E36DB49620FB15948BA",
-      "expectedArchitecture": "x64",
-      "expectedInstallerType": "zip",
       "synthetic": {
+        "kind": "zip",
+        "architecture": "x64",
         "nestedPayloadPaths": [
           "mise/bin/mise.exe"
         ]
@@ -43,9 +43,9 @@
       "url": "https://github.com/jdx/mise/releases/download/v2025.12.2/mise-v2025.12.2-windows-arm64.zip",
       "sha256": "BDDE94A05B2D014A89E509142552510CE8105494F38D6F1B45172507435F1EC7",
       "syntheticSha256": "1785939572CC0EB806F641D58D554415F740664ECD234B73A91F656FD2799BAF",
-      "expectedArchitecture": "arm64",
-      "expectedInstallerType": "zip",
       "synthetic": {
+        "kind": "zip",
+        "architecture": "arm64",
         "nestedPayloadPaths": [
           "mise/bin/mise.exe"
         ]

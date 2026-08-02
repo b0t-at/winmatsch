@@ -296,6 +296,7 @@ public sealed class CliHost
             parseResult.GetValue(_globalOptions.NoColor),
             _options.EnvironmentVariables,
             _options.IsInputRedirected,
+            _options.IsOutputRedirected,
             _options.IsErrorRedirected);
 
         var tokenResolver = new TokenResolver(
@@ -329,7 +330,8 @@ public sealed class CliHost
         if (capabilities.PromptsEnabled)
         {
             return new RedactingUserInteraction(new SpectreUserInteraction(
-                SpectreUserInteraction.CreateErrorConsole(_options.Error, capabilities.ColorEnabled)));
+                SpectreUserInteraction.CreateErrorConsole(_options.Error, capabilities.ColorEnabled),
+                capabilities.ProgressEnabled));
         }
 
         return new RedactingUserInteraction(new NonInteractiveUserInteraction(

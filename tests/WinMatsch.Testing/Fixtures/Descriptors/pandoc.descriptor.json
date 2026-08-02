@@ -30,8 +30,10 @@
       "url": "https://github.com/jgm/pandoc/releases/download/3.6.2/pandoc-3.6.2-windows-x86_64.msi",
       "sha256": "E9A8036CC298AE3D92105D5909C805A0A069CC988E7938703C4041B3E24A13AA",
       "syntheticSha256": "643E4C0ECFDAE4409C78721D013D8D1F220EF8596E82DD7C3BB9EDC3221BB017",
-      "expectedArchitecture": "x64",
-      "expectedInstallerType": "wix"
+      "synthetic": {
+        "kind": "wix",
+        "architecture": "x64"
+      }
     }
   ],
   "scenario": {

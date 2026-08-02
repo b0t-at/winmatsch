@@ -56,7 +56,9 @@ public static class FixtureCatalog
             [
                 .. descriptor.Assets.Select(static asset =>
                 {
-                    FixtureSyntheticAsset synthetic = asset.Synthetic ?? new();
+                    FixtureSyntheticAsset synthetic = asset.Synthetic
+                        ?? throw new InvalidDataException(
+                            $"Fixture asset '{asset.FileName}' has no independent synthetic encoding.");
                     return asset with
                     {
                         Synthetic = synthetic with
@@ -137,6 +139,8 @@ public static class FixtureCatalog
         {
             ValidateSha256(descriptor.Id, asset.UpstreamSha256);
             ValidateSha256(descriptor.Id, asset.SyntheticSha256);
+            _ = FixtureSemantics.ParseArchitecture(asset.Synthetic.Architecture);
+            _ = FixtureSemantics.ParseInstallerType(asset.Synthetic.Kind);
         }
 
         string[] duplicateUrls = descriptor.Assets

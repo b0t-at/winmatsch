@@ -45,6 +45,33 @@ public sealed class InstallerCorpusProcessTests
         CliProcess.AssertSafe(result);
     }
 
+    [Theory]
+    [InlineData("json", null, null)]
+    [InlineData("text", "CI", "true")]
+    [InlineData("text", "NO_COLOR", "1")]
+    [InlineData("text", null, null)]
+    public async Task Real_process_analyze_keeps_noninteractive_stderr_clean(
+        string format,
+        string? environmentName,
+        string? environmentValue)
+    {
+        using var temporary = new TemporaryDirectory();
+        string path = Path.Combine(temporary.Path, "fixture.msi");
+        await File.WriteAllBytesAsync(path, Build("fixture.msi"));
+        IReadOnlyDictionary<string, string?>? environment = environmentName is null
+            ? null
+            : new Dictionary<string, string?> { [environmentName] = environmentValue };
+
+        ProcessResult result = await CliProcess.RunAsync(
+            ["analyze", path, "--format", format],
+            environment);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.NotEmpty(result.StandardOutput);
+        Assert.Equal(string.Empty, result.StandardError);
+        CliProcess.AssertSafe(result);
+    }
+
     [Fact]
     public async Task Real_process_help_version_and_every_command_help_are_hermetic()
     {

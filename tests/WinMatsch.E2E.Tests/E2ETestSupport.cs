@@ -53,7 +53,10 @@ internal static class CliProcess
             startInfo.ArgumentList.Add(argument);
         }
 
-        startInfo.Environment["NO_COLOR"] = "1";
+        startInfo.Environment["NO_COLOR"] = null;
+        startInfo.Environment["CI"] = null;
+        startInfo.Environment["GITHUB_ACTIONS"] = null;
+        startInfo.Environment["TF_BUILD"] = null;
         startInfo.Environment["GITHUB_TOKEN"] = null;
         if (environment is not null)
         {

@@ -64,7 +64,7 @@ public sealed class FixtureCatalogTests
 
         FixtureAsset tokenless = FixtureCatalog.Get("super-productivity").Descriptor.Assets
             .Single(static asset => asset.FileName == "Super-Productivity-Setup.exe");
-        Assert.Equal("x86", tokenless.ExpectedArchitecture);
+        Assert.Equal("x86", tokenless.Synthetic.Architecture);
         Assert.Null(tokenless.Synthetic.ExplicitArchitecture);
 
         FixtureAsset ambiguous = FixtureCatalog.Get("uhk-agent").Descriptor.Assets

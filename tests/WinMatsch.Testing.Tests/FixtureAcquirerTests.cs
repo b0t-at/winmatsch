@@ -158,7 +158,10 @@ public sealed class FixtureAcquirerTests
         Url = new Uri("https://fixtures.invalid/fixture.bin"),
         UpstreamSha256 = Convert.ToHexString(SHA256.HashData(contents)),
         SyntheticSha256 = Convert.ToHexString(SHA256.HashData(contents)),
-        ExpectedArchitecture = "x64",
-        ExpectedInstallerType = "portable",
+        Synthetic = new()
+        {
+            Architecture = "x64",
+            Kind = "portable",
+        },
     };
 }

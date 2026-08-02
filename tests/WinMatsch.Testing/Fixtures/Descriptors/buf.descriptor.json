@@ -30,9 +30,9 @@
       "url": "https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-x86_64.zip",
       "sha256": "097B0BA51F424FC6811EA30BA3A0A70A75C457126CA09FA45CC5DA4CFEFCB26E",
       "syntheticSha256": "A08FC86D9BA755B003EE0033C7D4340687F8B6EB963527273A12597D996D5EC5",
-      "expectedArchitecture": "x64",
-      "expectedInstallerType": "zip",
       "synthetic": {
+        "kind": "zip",
+        "architecture": "x64",
         "nestedPayloadPaths": [
           "buf/bin/buf.exe",
           "buf/bin/protoc-gen-buf-breaking.exe",
@@ -45,9 +45,9 @@
       "url": "https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-arm64.zip",
       "sha256": "DA90612C292920CFD1625588A319FBFACDDCFC5E40BB78FC49B147D19000CED7",
       "syntheticSha256": "1A2F907588643E88FD1E87371A166E93CFA3C71F4BA3AF1BEB23753A443C1757",
-      "expectedArchitecture": "arm64",
-      "expectedInstallerType": "zip",
       "synthetic": {
+        "kind": "zip",
+        "architecture": "arm64",
         "nestedPayloadPaths": [
           "buf/bin/buf.exe",
           "buf/bin/protoc-gen-buf-breaking.exe",

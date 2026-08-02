@@ -30,9 +30,9 @@
       "url": "https://curl.se/windows/dl-8.12.1_4/curl-8.12.1_4-win32-mingw.zip",
       "sha256": "A5DC6E706A018AEFEC7C889F23B94CFF5A12F071AED93354D02A1EABB7D33D2A",
       "syntheticSha256": "FCE4B7F136AB4EBB62E94471F4577FB138C901A88C14A93D8958D7F83DEC6C63",
-      "expectedArchitecture": "x86",
-      "expectedInstallerType": "zip",
       "synthetic": {
+        "kind": "zip",
+        "architecture": "x86",
         "nestedPayloadPaths": [
           "curl-8.12.1_4-win32-mingw/bin/curl.exe"
         ]
@@ -43,9 +43,9 @@
       "url": "https://curl.se/windows/dl-8.12.1_4/curl-8.12.1_4-win64-mingw.zip",
       "sha256": "74372A481395FD5A89C441D1B01D80D3AF20C6DE723B96DEF4D7FE08CC8B3C56",
       "syntheticSha256": "8904868ADAF4D944E911AC52C05A433DFEC2E84298FED3E3A27DBF31E700E1CB",
-      "expectedArchitecture": "x64",
-      "expectedInstallerType": "zip",
       "synthetic": {
+        "kind": "zip",
+        "architecture": "x64",
         "nestedPayloadPaths": [
           "curl-8.12.1_4-win64-mingw/bin/curl.exe"
         ]
@@ -56,9 +56,9 @@
       "url": "https://curl.se/windows/dl-8.12.1_4/curl-8.12.1_4-win64a-mingw.zip",
       "sha256": "65939BF5885523F9EEA3A5CE50CB57BA5556374A733711A8D69972742A9AC9EE",
       "syntheticSha256": "371CCBADC07B4BD05312EBA3388756FA39B5E570136148350657836FB65506A0",
-      "expectedArchitecture": "arm64",
-      "expectedInstallerType": "zip",
       "synthetic": {
+        "kind": "zip",
+        "architecture": "arm64",
         "nestedPayloadPaths": [
           "curl-8.12.1_4-win64a-mingw/bin/curl.exe"
         ]

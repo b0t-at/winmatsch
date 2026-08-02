@@ -7,16 +7,14 @@ namespace WinMatsch.Cli.Interaction;
 /// </summary>
 public sealed class NonInteractiveUserInteraction : IUserInteraction
 {
-    private readonly TextWriter _error;
     private readonly string _reason;
 
-    /// <param name="error">The standard error writer used for status messages.</param>
+    /// <param name="error">The standard error writer, validated for host contract consistency.</param>
     /// <param name="reason">Why prompting is unavailable; included in failure messages.</param>
     public NonInteractiveUserInteraction(TextWriter error, string reason)
     {
         ArgumentNullException.ThrowIfNull(error);
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
-        _error = error;
         _reason = reason;
     }
 
@@ -37,19 +35,16 @@ public sealed class NonInteractiveUserInteraction : IUserInteraction
         IReadOnlyList<string> choices,
         CancellationToken cancellationToken = default) => throw Missing(question);
 
-    public void ReportStatus(string message) => _error.WriteLine(message);
+    public void ReportStatus(string message) => ArgumentNullException.ThrowIfNull(message);
 
-    public async Task<T> RunProgressAsync<T>(
+    public Task<T> RunProgressAsync<T>(
         string description,
         Func<CancellationToken, Task<T>> operation,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(description);
         ArgumentNullException.ThrowIfNull(operation);
-        _error.WriteLine($"{description}...");
-        T result = await operation(cancellationToken).ConfigureAwait(false);
-        _error.WriteLine($"{description}: complete.");
-        return result;
+        return operation(cancellationToken);
     }
 
     private MissingInputException Missing(string question) =>

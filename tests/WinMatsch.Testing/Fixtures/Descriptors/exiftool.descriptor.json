@@ -31,16 +31,20 @@
       "url": "https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_32.exe",
       "sha256": "E1059C78D961A46960E6B2161AE661AE7553626D8FE48B0675157333DA515E97",
       "syntheticSha256": "1D0C49746AF4279B36349A262DFB15B96A42B36A7EDFAC1EB2410C40DA121758",
-      "expectedArchitecture": "x86",
-      "expectedInstallerType": "inno"
+      "synthetic": {
+        "kind": "inno",
+        "architecture": "x86"
+      }
     },
     {
       "fileName": "ExifTool_install_12.87_64.exe",
       "url": "https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_64.exe",
       "sha256": "E56B953D9A70EB3439A4DE01401489B7AB757CD8081A41128531C1A59AF15D7B",
       "syntheticSha256": "F3ADEA776A48E5770A4C7B6D8C20762A7F9143DE28400D2A5E057DC0BB13E6CB",
-      "expectedArchitecture": "x64",
-      "expectedInstallerType": "inno"
+      "synthetic": {
+        "kind": "inno",
+        "architecture": "x64"
+      }
     }
   ],
   "scenario": {

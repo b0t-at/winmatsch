@@ -29,16 +29,20 @@
       "url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-X64-0.9.8.exe",
       "sha256": "762C0CDE3C285C8317503452A2EC1FDCA9276056DD1443412C8418DC217F0D6B",
       "syntheticSha256": "422C09BC27137689E7AE803F5CF8998368F6332ECFF0E07C3072DAF2A7898C47",
-      "expectedArchitecture": "x64",
-      "expectedInstallerType": "inno"
+      "synthetic": {
+        "kind": "inno",
+        "architecture": "x64"
+      }
     },
     {
       "fileName": "CloudDrive2Setup-Arm64-0.9.8.exe",
       "url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-Arm64-0.9.8.exe",
       "sha256": "4C5E6803A5615D023F084CD4B95D445DD9B335EAF2CAC2315459B08C9E44FEC4",
       "syntheticSha256": "36B6D3113A51702E294D308ED806391BA882C876AF5089BC3C0816877A400223",
-      "expectedArchitecture": "arm64",
-      "expectedInstallerType": "inno"
+      "synthetic": {
+        "kind": "inno",
+        "architecture": "arm64"
+      }
     }
   ],
   "scenario": {

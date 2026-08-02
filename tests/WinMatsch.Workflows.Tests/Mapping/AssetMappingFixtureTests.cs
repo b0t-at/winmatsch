@@ -11,8 +11,8 @@ public sealed class AssetMappingFixtureTests
     {
         foreach (FixtureAsset asset in FixtureCatalog.All.SelectMany(static fixture => fixture.Descriptor.Assets))
         {
-            Architecture architecture = FixtureSemantics.ParseArchitecture(asset.ExpectedArchitecture);
-            InstallerType installerType = FixtureSemantics.ParseInstallerType(asset.ExpectedInstallerType);
+            Architecture architecture = FixtureSemantics.ParseArchitecture(asset.Synthetic.Architecture);
+            InstallerType installerType = FixtureSemantics.ParseInstallerType(asset.Synthetic.Kind);
 
             Assert.True(Enum.IsDefined(architecture));
             Assert.True(Enum.IsDefined(installerType));

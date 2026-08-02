@@ -322,6 +322,7 @@ public sealed class InstallerWorkflowArtifactProcessor(
             analysis,
             content,
             dependencies,
+            boundedArchiveEntries: analysis.Zip?.NestedInstallerCandidates,
             isProductVersionTrustworthy: versionTrust.IsTrustworthy
                 && versionTrust.UsesProductVersion,
             productVersionEvidenceKind: versionTrust.Kind,

@@ -31,32 +31,40 @@
       "url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64.exe",
       "sha256": "C12A1F9A11D912636528918DC900BAA0213A942C4621031BE9CF1C04A447D5EE",
       "syntheticSha256": "61E4290B4CF2F08B9CD5DF6E9BD473CA00C3F99963AE1DEBF672B6F099E7D7AE",
-      "expectedArchitecture": "x64",
-      "expectedInstallerType": "nullsoft"
+      "synthetic": {
+        "kind": "nullsoft",
+        "architecture": "x64"
+      }
     },
     {
       "fileName": "notesnook_win_x64_portable.exe",
       "url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64_portable.exe",
       "sha256": "0BBE8D413AEB04D8C7257CB83FA4BE63DE64BAE5702242B621F959A79D676D60",
       "syntheticSha256": "74911C9560100A8D9E824C26CD53C0205B6580202FC847D898E4A96A5F8B478C",
-      "expectedArchitecture": "x64",
-      "expectedInstallerType": "portable"
+      "synthetic": {
+        "kind": "portable",
+        "architecture": "x64"
+      }
     },
     {
       "fileName": "notesnook_win_arm64.exe",
       "url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64.exe",
       "sha256": "05F5D7DDA56507DB2D2F95660EBC57B092D24F4A41D9504777DA2B24A9A93659",
       "syntheticSha256": "6F3C593798A4CF2C80B943048CE46427EEF995FC14BA2EB11AE55536E920316B",
-      "expectedArchitecture": "arm64",
-      "expectedInstallerType": "nullsoft"
+      "synthetic": {
+        "kind": "nullsoft",
+        "architecture": "arm64"
+      }
     },
     {
       "fileName": "notesnook_win_arm64_portable.exe",
       "url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64_portable.exe",
       "sha256": "AC8713CA2FAC92E262497DDD31D5A3FB92CA8202742C6B497C1C6CA44AC6107E",
       "syntheticSha256": "6955AA31045FCD75687FF3851BC3EDCEE15E6CA62480F2F9ED0B919047C9B024",
-      "expectedArchitecture": "arm64",
-      "expectedInstallerType": "portable"
+      "synthetic": {
+        "kind": "portable",
+        "architecture": "arm64"
+      }
     }
   ],
   "scenario": {

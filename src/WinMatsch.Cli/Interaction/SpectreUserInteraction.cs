@@ -11,13 +11,15 @@ namespace WinMatsch.Cli.Interaction;
 public sealed class SpectreUserInteraction : IUserInteraction
 {
     private readonly IAnsiConsole _console;
+    private readonly bool _progressEnabled;
 
     /// <param name="console">A console writing to standard error, from
     /// <see cref="CreateErrorConsole"/> or a test double.</param>
-    public SpectreUserInteraction(IAnsiConsole console)
+    public SpectreUserInteraction(IAnsiConsole console, bool progressEnabled = true)
     {
         ArgumentNullException.ThrowIfNull(console);
         _console = console;
+        _progressEnabled = progressEnabled;
     }
 
     public bool CanPrompt => true;
@@ -28,7 +30,7 @@ public sealed class SpectreUserInteraction : IUserInteraction
         ArgumentNullException.ThrowIfNull(error);
         return AnsiConsole.Create(new AnsiConsoleSettings
         {
-            Ansi = colorEnabled ? AnsiSupport.Detect : AnsiSupport.No,
+            Ansi = colorEnabled ? AnsiSupport.Yes : AnsiSupport.No,
             ColorSystem = colorEnabled ? ColorSystemSupport.Detect : ColorSystemSupport.NoColors,
             Interactive = InteractionSupport.Yes,
             Out = new AnsiConsoleOutput(error),
@@ -81,7 +83,10 @@ public sealed class SpectreUserInteraction : IUserInteraction
     public void ReportStatus(string message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        _console.WriteLine(message);
+        if (_progressEnabled)
+        {
+            _console.WriteLine(message);
+        }
     }
 
     public async Task<T> RunProgressAsync<T>(
@@ -91,6 +96,11 @@ public sealed class SpectreUserInteraction : IUserInteraction
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(description);
         ArgumentNullException.ThrowIfNull(operation);
+        if (!_progressEnabled)
+        {
+            return await operation(cancellationToken).ConfigureAwait(false);
+        }
+
         T? result = default;
         await _console.Progress()
             .AutoClear(true)

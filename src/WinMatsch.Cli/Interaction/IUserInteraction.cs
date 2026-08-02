@@ -39,14 +39,15 @@ public interface IUserInteraction
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Writes a transient status/progress message to standard error. Safe to call in any
-    /// interaction mode; never throws for being non-interactive.
+    /// Writes a transient status message to standard error when terminal progress is enabled.
+    /// Safe to call in any interaction mode; never throws for being non-interactive.
     /// </summary>
     public void ReportStatus(string message);
 
     /// <summary>
-    /// Runs a long operation with bounded progress UI. Interactive terminals get one Spectre
-    /// progress task; redirected, no-prompt, and CI sessions get only start/completion lines.
+    /// Runs a long operation with bounded progress UI. Plain interactive terminals get one
+    /// Spectre progress task; redirected, JSON, CI, no-color, and no-interaction sessions run
+    /// the operation without status noise.
     /// </summary>
     public Task<T> RunProgressAsync<T>(
         string description,

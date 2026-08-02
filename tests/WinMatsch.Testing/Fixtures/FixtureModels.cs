@@ -73,16 +73,14 @@ public sealed record FixtureAsset
 
     public required string SyntheticSha256 { get; init; }
 
-    public required string ExpectedArchitecture { get; init; }
-
-    public required string ExpectedInstallerType { get; init; }
-
-    public FixtureSyntheticAsset Synthetic { get; init; } = new();
+    public required FixtureSyntheticAsset Synthetic { get; init; }
 }
 
 public sealed record FixtureSyntheticAsset
 {
-    public string? Kind { get; init; }
+    public required string Kind { get; init; }
+
+    public required string Architecture { get; init; }
 
     public IReadOnlyList<string> NestedPayloadPaths { get; init; } = [];
 

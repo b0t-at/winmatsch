@@ -157,8 +157,8 @@ internal static class RegressionFixturePipeline
 
     private static byte[] BuildAsset(RegressionFixture fixture, FixtureAsset asset)
     {
-        Architecture architecture = FixtureSemantics.ParseArchitecture(asset.ExpectedArchitecture);
-        string kind = asset.Synthetic.Kind ?? asset.ExpectedInstallerType;
+        Architecture architecture = FixtureSemantics.ParseArchitecture(asset.Synthetic.Architecture);
+        string kind = asset.Synthetic.Kind;
         byte[] bytes = kind.ToLowerInvariant() switch
         {
             "portable" => DependencyFixtures.BuildPe(
@@ -197,7 +197,7 @@ internal static class RegressionFixturePipeline
             asset.Synthetic.PayloadArchitectures ?? [];
         List<string> payloadArchitectures = configuredPayloadArchitectures.Count > 0
             ? [.. configuredPayloadArchitectures]
-            : [asset.ExpectedArchitecture];
+            : [asset.Synthetic.Architecture];
         var options = new NsisFixtures.Options
         {
             LangName = descriptor.Package.Identifier,

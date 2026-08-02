@@ -60,6 +60,7 @@ public sealed class InteractionContractTests
         InteractionCreation creation = Assert.Single(harness.InteractionCreations);
         Assert.True(creation.Capabilities.IsContinuousIntegration);
         Assert.False(creation.Capabilities.PromptsEnabled);
+        Assert.False(creation.Capabilities.ProgressEnabled);
     }
 
     [Fact]
@@ -113,6 +114,7 @@ public sealed class InteractionContractTests
 
         InteractionCreation creation = Assert.Single(harness.InteractionCreations);
         Assert.False(creation.Capabilities.ColorEnabled);
+        Assert.False(creation.Capabilities.ProgressEnabled);
     }
 
     [Fact]
@@ -126,6 +128,7 @@ public sealed class InteractionContractTests
 
         InteractionCreation creation = Assert.Single(harness.InteractionCreations);
         Assert.False(creation.Capabilities.ColorEnabled);
+        Assert.False(creation.Capabilities.ProgressEnabled);
     }
 
     [Fact]
@@ -138,6 +141,7 @@ public sealed class InteractionContractTests
 
         InteractionCreation creation = Assert.Single(harness.InteractionCreations);
         Assert.False(creation.Capabilities.ColorEnabled);
+        Assert.False(creation.Capabilities.ProgressEnabled);
     }
 
     [Fact]
@@ -151,6 +155,7 @@ public sealed class InteractionContractTests
         InteractionCreation creation = Assert.Single(harness.InteractionCreations);
         Assert.True(creation.Capabilities.ColorEnabled);
         Assert.True(creation.Capabilities.PromptsEnabled);
+        Assert.True(creation.Capabilities.ProgressEnabled);
     }
 
     [Fact]
@@ -175,7 +180,7 @@ public sealed class InteractionContractTests
     }
 
     [Fact]
-    public async Task Redirected_progress_fallback_emits_only_start_and_completion_lines()
+    public async Task Redirected_progress_runs_silently()
     {
         var harness = new CliHarness
         {
@@ -183,6 +188,30 @@ public sealed class InteractionContractTests
             IsErrorRedirected = true,
             UseFakeInteraction = false,
         };
+        harness.Modules.Add(new ProbeModule(async context =>
+        {
+            int value = await context.Interaction.RunProgressAsync(
+                "Analyzing",
+                async cancellationToken =>
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
+                    return 42;
+                },
+                context.CancellationToken);
+            Assert.Equal(42, value);
+            return ExitCodes.Success;
+        }));
+
+        CliRunResult result = await harness.RunAsync(["probe"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(string.Empty, result.StandardError);
+    }
+
+    [Fact]
+    public async Task Plain_interactive_terminal_uses_spectre_progress()
+    {
+        var harness = new CliHarness { UseFakeInteraction = false };
         harness.Modules.Add(new ProbeModule(async context =>
         {
             int value = await context.Interaction.RunProgressAsync(
@@ -196,6 +225,6 @@ public sealed class InteractionContractTests
         CliRunResult result = await harness.RunAsync(["probe"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Equal("Analyzing...\nAnalyzing: complete.\n", result.StandardError);
+        Assert.Contains("Analyzing", result.StandardError, StringComparison.Ordinal);
     }
 }

@@ -1,5 +1,5 @@
-# Created with winmatsch synthetic regression fixture
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+# Created with winmatsch synthetic regression fixture
 
 PackageIdentifier: OliverBetz.ExifTool
 PackageVersion: "12.87"
