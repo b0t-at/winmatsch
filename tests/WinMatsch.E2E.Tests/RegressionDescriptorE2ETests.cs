@@ -53,11 +53,11 @@ public sealed class RegressionDescriptorE2ETests
                 .Order(StringComparer.Ordinal)
                 .ToArray();
             string[] overrideUrls = (request switch
-                {
-                    NewOperationRequest create => create.UrlOverrides,
-                    UpdateOperationRequest update => update.UrlOverrides,
-                    _ => [],
-                })
+            {
+                NewOperationRequest create => create.UrlOverrides,
+                UpdateOperationRequest update => update.UrlOverrides,
+                _ => [],
+            })
                 .Select(static item => item.Url.AbsoluteUri)
                 .Order(StringComparer.Ordinal)
                 .ToArray();
