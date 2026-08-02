@@ -841,17 +841,18 @@ public class PayloadDependencyAnalyzerTests
     [Fact]
     public void Advanced_installer_nested_resource_limit_returns_unavailable_evidence()
     {
-        byte[] msi = MsiFixtures.BuildMsi([]);
-        string encodedName = MsiFixtures.EncodeStreamName("Property", isTable: true);
-        int directoryEntry = msi.AsSpan().IndexOf(Encoding.Unicode.GetBytes(encodedName + "\0"));
-        Assert.True(directoryEntry >= 0);
-        BinaryPrimitives.WriteUInt64LittleEndian(
-            msi.AsSpan(directoryEntry + 120),
-            (ulong)AnalysisLimits.MaxMsiStreamBytes + 1);
-        byte[] setup = AdvancedInstallerFixtures.BuildContainer(
+        AdvancedInstallerFixtures.FixtureEntry[] entries =
         [
-            new AdvancedInstallerFixtures.FixtureEntry(1, 0, 0, "payload.bin", msi),
-        ]);
+            .. Enumerable.Range(0, AnalysisLimits.MaxArchiveEntries + 1)
+                .Select(static index => new AdvancedInstallerFixtures.FixtureEntry(
+                    0,
+                    0,
+                    0,
+                    $"payload-{index}.bin",
+                    [])),
+        ];
+        byte[] setup = AdvancedInstallerFixtures.BuildContainer(
+            entries);
         using var stream = new MemoryStream(setup);
 
         PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "setup.exe");
@@ -866,14 +867,9 @@ public class PayloadDependencyAnalyzerTests
     [Fact]
     public void Squirrel_nested_resource_limit_returns_unavailable_evidence()
     {
-        byte[] nupkg = SquirrelFixtures.BuildNupkg(SquirrelFixtures.NuspecXml());
-        byte[] releaseZip = SquirrelFixtures.BuildStoredZip(
-        [
-            ("RELEASES", "stub"u8.ToArray()),
-            ("Contoso.Chat-1.2.3-full.nupkg", nupkg),
-        ],
-        declaredSizeOverrideForLastEntry: 300L * 1024 * 1024);
-        byte[] setup = SquirrelFixtures.BuildResourceSetup(releaseZip, "DATA", 131);
+        string oversizedNuspec = new('x', 5 * 1024 * 1024);
+        byte[] setup = SquirrelFixtures.BuildClassicSetup(
+            SquirrelFixtures.BuildNupkg(oversizedNuspec));
         using var stream = new MemoryStream(setup);
 
         PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "Setup.exe");
@@ -883,6 +879,48 @@ public class PayloadDependencyAnalyzerTests
             analysis.Evidence,
             evidence => Assert.Equal(DependencyEvidenceStatus.Unavailable, evidence.Status));
         Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
+    }
+
+    [Fact]
+    public void Corrupt_wrapper_declarations_are_not_reported_as_resource_limits()
+    {
+        byte[] msi = MsiFixtures.BuildMsi([]);
+        string encodedName = MsiFixtures.EncodeStreamName("Property", isTable: true);
+        int directoryEntry = msi.AsSpan().IndexOf(Encoding.Unicode.GetBytes(encodedName + "\0"));
+        Assert.True(directoryEntry >= 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            msi.AsSpan(directoryEntry + 120),
+            (ulong)AnalysisLimits.MaxMsiStreamBytes + 1);
+        byte[] advanced = AdvancedInstallerFixtures.BuildContainer(
+        [
+            new AdvancedInstallerFixtures.FixtureEntry(1, 0, 0, "payload.bin", msi),
+        ]);
+        byte[] nupkg = SquirrelFixtures.BuildNupkg(SquirrelFixtures.NuspecXml());
+        byte[] releaseZip = SquirrelFixtures.BuildStoredZip(
+        [
+            ("RELEASES", "stub"u8.ToArray()),
+            ("Contoso.Chat-1.2.3-full.nupkg", nupkg),
+        ],
+        declaredSizeOverrideForLastEntry: 300L * 1024 * 1024);
+        byte[] squirrel = SquirrelFixtures.BuildResourceSetup(releaseZip, "DATA", 131);
+
+        using var advancedStream = new MemoryStream(advanced);
+        using var squirrelStream = new MemoryStream(squirrel);
+        PayloadDependencyAnalysis advancedAnalysis = _analyzer.Analyze(
+            advancedStream,
+            "advanced.exe");
+        PayloadDependencyAnalysis squirrelAnalysis = _analyzer.Analyze(
+            squirrelStream,
+            "squirrel.exe");
+
+        Assert.DoesNotContain(advancedAnalysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
+        Assert.DoesNotContain(squirrelAnalysis.Diagnostics, diagnostic => diagnostic.Code == "DEP003");
+        Assert.All(
+            advancedAnalysis.Evidence,
+            evidence => Assert.NotEqual(DependencyEvidenceStatus.Unavailable, evidence.Status));
+        Assert.All(
+            squirrelAnalysis.Evidence,
+            evidence => Assert.NotEqual(DependencyEvidenceStatus.Unavailable, evidence.Status));
     }
 
     [Fact]

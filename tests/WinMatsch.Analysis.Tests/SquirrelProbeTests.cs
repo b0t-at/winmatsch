@@ -253,13 +253,16 @@ public class SquirrelProbeTests
     public void Outer_zip_entry_count_is_bounded_before_entries_materialize()
     {
         byte[] setup = SquirrelFixtures.BuildResourceSetup(
-            DependencyFixtures.BuildZipWithEntryCount(5000).ToArray(),
+            DependencyFixtures.BuildZipWithEntryCount(AnalysisLimits.MaxArchiveEntries + 1).ToArray(),
             "DATA",
             131);
 
         AnalysisResourceLimitException error = Assert.Throws<AnalysisResourceLimitException>(
             () => Probe(setup));
-        Assert.Contains("more than 4096", error.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            $"more than {AnalysisLimits.MaxArchiveEntries}",
+            error.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]

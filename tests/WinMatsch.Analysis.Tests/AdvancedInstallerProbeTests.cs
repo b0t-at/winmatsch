@@ -195,10 +195,10 @@ public class AdvancedInstallerProbeTests
             (ulong)AnalysisLimits.MaxMsiStreamBytes + 1);
         using var stream = new MemoryStream(msi);
 
-        AnalysisResourceLimitException exception = Assert.Throws<AnalysisResourceLimitException>(
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
             () => AdvancedMsiProperties.IsArpSystemComponent(stream));
 
-        Assert.Contains("allocation limit", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("ends before its declared size", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

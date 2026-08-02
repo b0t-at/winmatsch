@@ -21,7 +21,7 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
     private const int SignatureOffset = 64;
     private const int FooterSearchBytes = 16 * 1024;
     private const int FileEntrySize = 24;
-    private const int MaxFileEntries = 4096;
+    private const int MaxFileEntries = AnalysisLimits.MaxArchiveEntries;
     private const int MaxEntryNameCharacters = 4096;
     private const long MaxPayloadBytes = 256L * 1024 * 1024;
     private const int XorPrefixBytes = 0x200;
@@ -43,19 +43,13 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
         {
             if (entry.IsMsi)
             {
-                byte[]? data = ReadFile(stream, entry);
-                if (data is not null)
-                {
-                    payloads.Add(AnalyzeMsi(data, entry.Name));
-                }
+                byte[] data = ReadFile(stream, entry);
+                payloads.Add(AnalyzeMsi(data, entry.Name));
             }
             else if (entry.IsSevenZip)
             {
-                byte[]? data = ReadFile(stream, entry);
-                if (data is not null)
-                {
-                    payloads.AddRange(ReadSevenZipMsis(data));
-                }
+                byte[] data = ReadFile(stream, entry);
+                payloads.AddRange(ReadSevenZipMsis(data));
             }
         }
 
@@ -95,13 +89,19 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
         uint infoOffset = BinaryPrimitives.ReadUInt32LittleEndian(bytes[16..]);
         uint tablePointer = BinaryPrimitives.ReadUInt32LittleEndian(bytes[20..]);
         uint fileDataStart = BinaryPrimitives.ReadUInt32LittleEndian(bytes[24..]);
-        if (fileCount > MaxFileEntries
-            || tablePointer >= footerOffset
+        if (tablePointer >= footerOffset
             || fileDataStart > tablePointer
-            || infoOffset > stream.Length)
+            || infoOffset > stream.Length
+            || fileCount > (footerOffset - tablePointer) / FileEntrySize)
         {
             throw new InvalidDataException(
                 "The Advanced Installer ADVINSTSFX footer contains invalid table offsets or counts.");
+        }
+
+        if (fileCount > MaxFileEntries)
+        {
+            throw new AnalysisResourceLimitException(
+                $"The Advanced Installer container contains more than {MaxFileEntries} file entries.");
         }
 
         return new Footer(footerOffset, fileCount, tablePointer);
@@ -147,11 +147,12 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
         return entries;
     }
 
-    private static byte[]? ReadFile(Stream stream, FileEntry entry)
+    private static byte[] ReadFile(Stream stream, FileEntry entry)
     {
         if (entry.Size > MaxPayloadBytes)
         {
-            return null;
+            throw new AnalysisResourceLimitException(
+                $"The Advanced Installer embedded payload '{entry.Name}' exceeds the supported size.");
         }
 
         byte[] data = new byte[entry.Size];

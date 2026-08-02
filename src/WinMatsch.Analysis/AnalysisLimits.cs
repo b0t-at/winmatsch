@@ -83,6 +83,57 @@ internal static class AnalysisLimits
         return bytes;
     }
 
+    public static byte[] ReadBounded(
+        Stream source,
+        long declaredSize,
+        string description,
+        long maximum)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximum);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(maximum, int.MaxValue);
+        if (declaredSize < 0)
+        {
+            throw new InvalidDataException($"{description} declares a negative size of {declaredSize} bytes.");
+        }
+
+        using var output = new MemoryStream(
+            (int)Math.Min(Math.Min(declaredSize, maximum), 64 * 1024));
+        byte[] buffer = new byte[81920];
+        while (output.Length < declaredSize)
+        {
+            int allowed = (int)Math.Min(
+                buffer.Length,
+                Math.Min(declaredSize - output.Length, maximum + 1 - output.Length));
+            if (allowed <= 0)
+            {
+                throw new AnalysisResourceLimitException(
+                    $"{description} exceeds the analysis allocation limit of {Math.Min(maximum, int.MaxValue)} bytes.");
+            }
+
+            int read = source.Read(buffer, 0, allowed);
+            if (read == 0)
+            {
+                throw new InvalidDataException($"{description} ends before its declared size.");
+            }
+
+            if (output.Length + read > maximum)
+            {
+                throw new AnalysisResourceLimitException(
+                    $"{description} exceeds the analysis allocation limit of {Math.Min(maximum, int.MaxValue)} bytes.");
+            }
+
+            output.Write(buffer, 0, read);
+        }
+
+        if (source.ReadByte() != -1)
+        {
+            throw new InvalidDataException($"{description} expands beyond its declared size.");
+        }
+
+        return output.ToArray();
+    }
+
     public static void ValidateAllocation(long size, string description, long maximum)
     {
         if (size < 0)

@@ -10,7 +10,7 @@ internal static class ZipArchiveBounds
     private const uint Zip64LocatorSignature = 0x07064B50;
     private const int CentralDirectoryHeaderSize = 46;
     private const int MaxCommentLength = ushort.MaxValue;
-    private const int DefaultMaxEntryCount = AnalysisLimits.MaxDependencyArchiveEntries;
+    private const int DefaultMaxEntryCount = AnalysisLimits.MaxArchiveEntries;
     private const long DefaultMaxCentralDirectoryBytes = AnalysisLimits.MaxDependencyCentralDirectoryBytes;
 
     public static void Validate(Stream stream, string description)

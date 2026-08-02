@@ -50,4 +50,19 @@ public class AnalysisLimitsTests
             }
         }
     }
+
+    [Fact]
+    public void Bounded_read_distinguishes_truncation_from_resource_exhaustion()
+    {
+        using var truncated = new MemoryStream([1, 2]);
+        using var oversized = new MemoryStream([1, 2, 3, 4]);
+
+        InvalidDataException corrupt = Assert.Throws<InvalidDataException>(
+            () => AnalysisLimits.ReadBounded(truncated, 4, "Truncated payload", 3));
+        AnalysisResourceLimitException exhausted = Assert.Throws<AnalysisResourceLimitException>(
+            () => AnalysisLimits.ReadBounded(oversized, 4, "Oversized payload", 3));
+
+        Assert.Contains("ends before its declared size", corrupt.Message, StringComparison.Ordinal);
+        Assert.Contains("allocation limit", exhausted.Message, StringComparison.Ordinal);
+    }
 }

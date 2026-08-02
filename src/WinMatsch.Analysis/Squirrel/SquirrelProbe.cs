@@ -100,12 +100,6 @@ public sealed class SquirrelProbe : IExeFormatProbe
 
     private static SquirrelPackageInspection ReadNestedPackage(ZipArchiveEntry entry)
     {
-        if (entry.Length > MaxNupkgBytes)
-        {
-            throw new AnalysisResourceLimitException(
-                "The Squirrel release package exceeds the supported size.");
-        }
-
         using var package = new MemoryStream();
         try
         {
@@ -224,12 +218,6 @@ public sealed class SquirrelProbe : IExeFormatProbe
 
     private static NuspecMetadata ReadNuspec(ZipArchiveEntry nuspecEntry)
     {
-        if (nuspecEntry.Length > MaxNuspecBytes)
-        {
-            throw new AnalysisResourceLimitException(
-                "The package's nuspec manifest exceeds the supported size.");
-        }
-
         using var buffer = new MemoryStream();
         using (Stream entryStream = nuspecEntry.Open())
         {
