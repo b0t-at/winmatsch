@@ -5,6 +5,7 @@ using WinMatsch.Cli.Commands.Maintenance;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
+using WinMatsch.GitHub.Auth;
 using WinMatsch.Testing.Infrastructure;
 using WinMatsch.Workflows.GitHub;
 using Xunit;
@@ -17,6 +18,8 @@ namespace WinMatsch.Cli.Tests.Maintenance;
 /// </summary>
 public sealed class MaintenanceAdapterTests
 {
+    private const string Token = "synthetic-token";
+
     [Fact]
     public void Lifecycle_cancellation_maps_to_130_only_for_a_cancelled_invocation()
     {
@@ -82,6 +85,61 @@ public sealed class MaintenanceAdapterTests
 
         Assert.Equal(["first", "second"], metadata.Comments.Select(static comment => comment.Body));
         Assert.Equal(3, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task Token_validator_disposes_an_owned_client_after_success()
+    {
+        var handler = new DisposeTrackingHandler((_, _) =>
+            Task.FromResult(AuthenticatedUserResponse()));
+        var validator = OwnedValidator(handler);
+
+        TokenValidationResult result = await validator.ValidateAsync(new GitHubToken(Token));
+
+        Assert.True(result.IsValid);
+        Assert.True(handler.IsDisposed);
+    }
+
+    [Fact]
+    public async Task Token_validator_disposes_an_owned_client_after_error()
+    {
+        var handler = new DisposeTrackingHandler((_, _) => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.Unauthorized)));
+        var validator = OwnedValidator(handler);
+
+        TokenValidationResult result = await validator.ValidateAsync(new GitHubToken(Token));
+
+        Assert.False(result.IsValid);
+        Assert.True(handler.IsDisposed);
+    }
+
+    [Fact]
+    public async Task Token_validator_disposes_an_owned_client_after_cancellation()
+    {
+        var handler = new DisposeTrackingHandler((_, cancellationToken) =>
+            Task.FromCanceled<HttpResponseMessage>(cancellationToken));
+        var validator = OwnedValidator(handler);
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => validator.ValidateAsync(new GitHubToken(Token), cancellation.Token));
+
+        Assert.True(handler.IsDisposed);
+    }
+
+    [Fact]
+    public async Task Token_validator_never_disposes_a_caller_owned_http_client()
+    {
+        var handler = new DisposeTrackingHandler((_, _) =>
+            Task.FromResult(AuthenticatedUserResponse()));
+        using var httpClient = new HttpClient(handler);
+        var validator = new GitHubTokenValidator(httpClient, GitHubOptions());
+
+        TokenValidationResult result = await validator.ValidateAsync(new GitHubToken(Token));
+
+        Assert.True(result.IsValid);
+        Assert.False(handler.IsDisposed);
     }
 
     private static readonly RepositoryCoordinates _upstream = new("microsoft", "winget-pkgs");
@@ -283,6 +341,49 @@ public sealed class MaintenanceAdapterTests
         return client;
     }
 
+    private static GitHubTokenValidator OwnedValidator(DisposeTrackingHandler handler)
+        => new(token => new GitHubRepositoryClient(
+            new HttpClient(handler),
+            token,
+            GitHubOptions(),
+            disposeHttpClient: true));
+
+    private static GitHubClientOptions GitHubOptions()
+        => new()
+        {
+            ApiBaseUri = new Uri("https://github.invalid/api/v3/"),
+            GraphQlUri = new Uri("https://github.invalid/api/graphql"),
+            UserAgent = "winmatsch-tests",
+            MaxTransientRetries = 0,
+        };
+
+    private static HttpResponseMessage Json(string content)
+        => new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(content, Encoding.UTF8, "application/json"),
+        };
+
+    private static HttpResponseMessage AuthenticatedUserResponse()
+        => Json(
+            """
+            {
+              "data": {
+                "viewer": {
+                  "login": "octocat",
+                  "name": null,
+                  "email": null,
+                  "avatarUrl": "https://example.invalid/avatar"
+                },
+                "rateLimit": {
+                  "limit": 5000,
+                  "remaining": 4999,
+                  "used": 1,
+                  "resetAt": "2026-08-02T14:00:00Z"
+                }
+              }
+            }
+            """);
+
     private sealed class FakePullRequestMetadataSource : IPullRequestMetadataSource
     {
         public List<long> RequestedPullRequests { get; } = [];
@@ -336,6 +437,24 @@ public sealed class MaintenanceAdapterTests
                 {
                     Content = new StringContent(content, Encoding.UTF8, "application/json"),
                 };
+        }
+    }
+
+    private sealed class DisposeTrackingHandler(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> responder)
+        : HttpMessageHandler
+    {
+        public bool IsDisposed { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+            => responder(request, cancellationToken);
+
+        protected override void Dispose(bool disposing)
+        {
+            IsDisposed = true;
+            base.Dispose(disposing);
         }
     }
 

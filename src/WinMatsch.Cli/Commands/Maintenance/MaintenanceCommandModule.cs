@@ -32,6 +32,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
     private readonly IFeedbackStateStore _feedbackStateStore;
     private readonly IWorkflowClock _clock;
     private readonly ISubmissionJournalStore? _submissionJournals;
+    private readonly Func<DownloaderOptions, InstallerDownloader> _feedbackDownloaderFactory;
 
     public MaintenanceCommandModule(
         Func<string, IGitHubRepositoryClient>? clientFactory = null,
@@ -41,7 +42,8 @@ public sealed class MaintenanceCommandModule : ICommandModule
         IApprovedRepairPlannerFactory? repairPlannerFactory = null,
         IFeedbackStateStore? feedbackStateStore = null,
         IWorkflowClock? clock = null,
-        ISubmissionJournalStore? submissionJournals = null)
+        ISubmissionJournalStore? submissionJournals = null,
+        Func<DownloaderOptions, InstallerDownloader>? feedbackDownloaderFactory = null)
     {
         _clientFactory = clientFactory;
         _inspectorFactory = inspectorFactory
@@ -53,6 +55,8 @@ public sealed class MaintenanceCommandModule : ICommandModule
             ?? new CliApprovedRepairPlannerFactory(new ProductionMutationWorkflowFactory());
         _feedbackStateStore = feedbackStateStore ?? new NoOpFeedbackStateStore();
         _submissionJournals = submissionJournals;
+        _feedbackDownloaderFactory = feedbackDownloaderFactory
+            ?? (static options => new InstallerDownloader(options));
     }
 
     public string Name => "maintenance";
@@ -430,10 +434,10 @@ public sealed class MaintenanceCommandModule : ICommandModule
                         context.CancellationToken))
                 .ConfigureAwait(false);
             using InstallerDownloader? feedbackDownloader = _feedbackFactory is null
-                ? new InstallerDownloader(new DownloaderOptions
+                ? _feedbackDownloaderFactory(new DownloaderOptions
                 {
                     CacheDirectory = context.Configuration.CacheEnabled
-                        ? context.Configuration.CacheDirectory
+                        ? context.Configuration.CacheDirectory ?? DefaultCacheDirectory()
                         : null,
                 })
                 : null;
@@ -743,6 +747,12 @@ public sealed class MaintenanceCommandModule : ICommandModule
         Description = "Confirm mutating actions without prompting. Required in non-interactive "
             + "and JSON sessions; confirmation never defaults to yes.",
     };
+
+    private static string DefaultCacheDirectory()
+        => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "winmatsch",
+            "downloads");
 
     private GitHubFeedbackWorkflow CreateDefaultFeedbackWorkflow(
         IGitHubRepositoryClient client,

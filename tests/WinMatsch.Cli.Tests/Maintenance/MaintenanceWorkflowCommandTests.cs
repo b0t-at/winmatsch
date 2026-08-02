@@ -3,8 +3,10 @@ using WinMatsch.Cli.Commands.Maintenance;
 using WinMatsch.Cli.Commands.Mutations;
 using WinMatsch.Cli.Tests.Harness;
 using WinMatsch.Core;
+using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows;
+using WinMatsch.Workflows.Configuration;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
 using Xunit;
@@ -893,6 +895,69 @@ public sealed class MaintenanceWorkflowCommandTests
         }
     }
 
+    [Fact]
+    public async Task Feedback_downloader_uses_the_default_cache_when_unconfigured()
+    {
+        string? cacheDirectory = await CaptureFeedbackCacheDirectoryAsync();
+
+        Assert.Equal(DefaultCacheDirectory(), cacheDirectory);
+    }
+
+    [Fact]
+    public async Task Feedback_downloader_uses_the_configured_cache_directory()
+    {
+        string? cacheDirectory = await CaptureFeedbackCacheDirectoryAsync(
+            configure: harness =>
+            {
+                harness.Files[DefaultConfigPath(harness)] =
+                    "cache:\n  directory: file-cache\n";
+            });
+
+        Assert.Equal("file-cache", cacheDirectory);
+    }
+
+    [Fact]
+    public async Task Feedback_downloader_environment_cache_directory_overrides_config()
+    {
+        string? cacheDirectory = await CaptureFeedbackCacheDirectoryAsync(
+            configure: harness =>
+            {
+                harness.Files[DefaultConfigPath(harness)] =
+                    "cache:\n  directory: file-cache\n";
+                harness.EnvironmentVariables["WINMATSCH_CACHE_DIRECTORY"] = "env-cache";
+            });
+
+        Assert.Equal("env-cache", cacheDirectory);
+    }
+
+    [Fact]
+    public async Task Feedback_downloader_cli_cache_directory_overrides_environment()
+    {
+        string? cacheDirectory = await CaptureFeedbackCacheDirectoryAsync(
+            configure: harness =>
+            {
+                harness.EnvironmentVariables["WINMATSCH_CACHE_DIRECTORY"] = "env-cache";
+            },
+            arguments: ["complete", "--cache-directory", "cli-cache"]);
+
+        Assert.Equal("cli-cache", cacheDirectory);
+    }
+
+    [Fact]
+    public async Task Feedback_downloader_no_cache_option_disables_cache()
+    {
+        string? cacheDirectory = await CaptureFeedbackCacheDirectoryAsync(
+            configure: harness =>
+            {
+                harness.Files[DefaultConfigPath(harness)] =
+                    "cache:\n  directory: file-cache\n";
+                harness.EnvironmentVariables["WINMATSCH_CACHE_DIRECTORY"] = "env-cache";
+            },
+            arguments: ["complete", "--cache-directory", "cli-cache", "--no-cache"]);
+
+        Assert.Null(cacheDirectory);
+    }
+
     private static FakeMaintenanceGitHubClient CreateClient(string forkSha)
     {
         var client = new FakeMaintenanceGitHubClient();
@@ -916,7 +981,8 @@ public sealed class MaintenanceWorkflowCommandTests
         IPullRequestFeedbackSource? source = null,
         IFeedbackStateStore? feedbackStateStore = null,
         IApprovedRepairPlannerFactory? repairPlannerFactory = null,
-        ISubmissionJournalStore? submissionJournals = null)
+        ISubmissionJournalStore? submissionJournals = null,
+        Func<DownloaderOptions, InstallerDownloader>? feedbackDownloaderFactory = null)
     {
         var harness = new CliHarness();
         harness.EnvironmentVariables["GITHUB_TOKEN"] = Token;
@@ -927,9 +993,40 @@ public sealed class MaintenanceWorkflowCommandTests
                 : (_, _) => source,
             repairPlannerFactory: repairPlannerFactory,
             feedbackStateStore: feedbackStateStore,
-            submissionJournals: submissionJournals));
+            submissionJournals: submissionJournals,
+            feedbackDownloaderFactory: feedbackDownloaderFactory));
         return harness;
     }
+
+    private static async Task<string?> CaptureFeedbackCacheDirectoryAsync(
+        Action<CliHarness>? configure = null,
+        string[]? arguments = null)
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        string? cacheDirectory = null;
+        CliHarness harness = CreateHarness(
+            client,
+            feedbackDownloaderFactory: options =>
+            {
+                cacheDirectory = options.CacheDirectory;
+                return new InstallerDownloader(options);
+            });
+        configure?.Invoke(harness);
+
+        CliRunResult result = await harness.RunAsync(arguments ?? ["complete"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        return cacheDirectory;
+    }
+
+    private static string DefaultConfigPath(CliHarness harness)
+        => Path.Combine(harness.HomeDirectory!, ".config", "winmatsch", "config.yaml");
+
+    private static string DefaultCacheDirectory()
+        => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "winmatsch",
+            "downloads");
 
     private static ScriptedFeedbackSource TransientFeedbackSource(params long[] numbers)
         => new(

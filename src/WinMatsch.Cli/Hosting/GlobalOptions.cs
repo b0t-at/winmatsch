@@ -18,6 +18,8 @@ namespace WinMatsch.Cli.Hosting;
 /// <item><term><c>--format</c></term><description>Result format on standard output: <c>text</c> or <c>json</c>.</description></item>
 /// <item><term><c>--output</c></term><description>Directory where generated manifests and reports are written.</description></item>
 /// <item><term><c>--concurrent-downloads</c></term><description>Maximum parallel installer downloads.</description></item>
+/// <item><term><c>--cache-directory</c></term><description>Persistent installer download cache directory.</description></item>
+/// <item><term><c>--no-cache</c></term><description>Disable the persistent installer download cache.</description></item>
 /// <item><term><c>--dry-run</c></term><description>Plan mode: validate and show what would change; never mutates.</description></item>
 /// <item><term><c>--interaction</c></term><description>Prompting policy: <c>auto</c>, <c>always</c>, or <c>never</c>.</description></item>
 /// <item><term><c>--no-color</c></term><description>Disable ANSI color (also honored via <c>NO_COLOR</c>).</description></item>
@@ -59,6 +61,19 @@ public sealed class GlobalOptions
         {
             Description = "Maximum number of installers downloaded in parallel.",
             HelpName = "count",
+            Recursive = true,
+        };
+
+        CacheDirectory = new Option<string?>("--cache-directory")
+        {
+            Description = "Persistent installer download cache directory.",
+            HelpName = "directory",
+            Recursive = true,
+        };
+
+        NoCache = new Option<bool>("--no-cache")
+        {
+            Description = "Disable the persistent installer download cache.",
             Recursive = true,
         };
 
@@ -129,6 +144,10 @@ public sealed class GlobalOptions
 
     public Option<int?> ConcurrentDownloads { get; }
 
+    public Option<string?> CacheDirectory { get; }
+
+    public Option<bool> NoCache { get; }
+
     public Option<string?> OverrideStoreDirectory { get; }
 
     public Option<bool> DryRun { get; }
@@ -152,6 +171,8 @@ public sealed class GlobalOptions
         Format,
         OutputDirectory,
         ConcurrentDownloads,
+        CacheDirectory,
+        NoCache,
         OverrideStoreDirectory,
         DryRun,
         Interaction,
@@ -170,6 +191,10 @@ public sealed class GlobalOptions
         {
             Repository = parseResult.GetValue(Repository),
             ConcurrentDownloads = parseResult.GetValue(ConcurrentDownloads),
+            CacheEnabled = parseResult.GetResult(NoCache) is OptionResult { Implicit: false }
+                ? !parseResult.GetValue(NoCache)
+                : null,
+            CacheDirectory = parseResult.GetValue(CacheDirectory),
             OverrideStoreDirectory = parseResult.GetValue(OverrideStoreDirectory),
             OutputFormat = parseResult.GetValue(Format),
             OutputDirectory = parseResult.GetValue(OutputDirectory),

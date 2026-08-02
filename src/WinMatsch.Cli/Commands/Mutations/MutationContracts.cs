@@ -564,7 +564,8 @@ public sealed class ProcessUrlLauncher : IUrlLauncher
     {
         ArgumentNullException.ThrowIfNull(uri);
         cancellationToken.ThrowIfCancellationRequested();
-        string executable = _platform() switch
+        UrlLauncherPlatform platform = _platform();
+        string executable = platform switch
         {
             UrlLauncherPlatform.Windows => "explorer.exe",
             UrlLauncherPlatform.MacOS => "open",
@@ -576,7 +577,8 @@ public sealed class ProcessUrlLauncher : IUrlLauncher
             executable,
             [uri.AbsoluteUri],
             cancellationToken).ConfigureAwait(false);
-        if (exitCode != 0)
+        if (exitCode != 0
+            && !(platform == UrlLauncherPlatform.Windows && exitCode == 1))
         {
             throw new InvalidOperationException(
                 $"The pull request URL launcher exited with code {exitCode}.");

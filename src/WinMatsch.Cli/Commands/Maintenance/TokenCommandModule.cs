@@ -61,11 +61,7 @@ public sealed class TokenCommandModule : ICommandModule
                 context.ParseResult.GetValue(stdin),
                 registry).ConfigureAwait(false);
             EnsureStoreAvailable("stored");
-            ITokenValidator validator = _validator ?? new GitHubTokenValidator(value =>
-                new RedactingGitHubRepositoryClient(new WinMatsch.GitHub.GitHubRepositoryClient(
-                    new HttpClient(),
-                    value,
-                    context.GitHubOptions)));
+            ITokenValidator validator = _validator ?? new GitHubTokenValidator(context.GitHubOptions);
             TokenValidationResult validation = await MaintenanceCommandHelpers.RunRemoteAsync(
                 context,
                 "Token validation failed",

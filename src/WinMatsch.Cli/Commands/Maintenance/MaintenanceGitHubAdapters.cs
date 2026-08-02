@@ -21,10 +21,22 @@ public sealed class GitHubTokenValidator : ITokenValidator
 {
     private readonly Func<string, IGitHubRepositoryClient> _clientFactory;
 
-    public GitHubTokenValidator(Func<string, IGitHubRepositoryClient>? clientFactory = null)
+    public GitHubTokenValidator(GitHubClientOptions? options = null)
     {
-        _clientFactory = clientFactory
-            ?? (token => new GitHubRepositoryClient(new HttpClient(), token));
+        _clientFactory = token => new GitHubRepositoryClient(token, options);
+    }
+
+    public GitHubTokenValidator(
+        HttpClient httpClient,
+        GitHubClientOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(httpClient);
+        _clientFactory = token => new GitHubRepositoryClient(httpClient, token, options);
+    }
+
+    public GitHubTokenValidator(Func<string, IGitHubRepositoryClient> clientFactory)
+    {
+        _clientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
     }
 
     public async Task<TokenValidationResult> ValidateAsync(

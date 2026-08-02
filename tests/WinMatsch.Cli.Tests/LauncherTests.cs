@@ -37,6 +37,30 @@ public sealed class LauncherTests
     }
 
     [Fact]
+    public async Task Windows_launcher_accepts_explorer_shell_handoff_exit_code()
+    {
+        var launcher = new ProcessUrlLauncher(
+            () => UrlLauncherPlatform.Windows,
+            new RecordingUrlProcessRunner { ExitCode = 1 });
+
+        await launcher.OpenAsync(new Uri("https://example.test/pull/42"));
+    }
+
+    [Fact]
+    public async Task Launcher_preserves_process_start_failures()
+    {
+        var expected = new InvalidOperationException("start failed");
+        var launcher = new ProcessUrlLauncher(
+            () => UrlLauncherPlatform.Windows,
+            new RecordingUrlProcessRunner { Failure = expected });
+
+        InvalidOperationException actual = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => launcher.OpenAsync(new Uri("https://example.test/pull/42")));
+
+        Assert.Same(expected, actual);
+    }
+
+    [Fact]
     public async Task Launcher_preserves_cancellation()
     {
         using var cancellation = new CancellationTokenSource();
@@ -55,6 +79,8 @@ public sealed class LauncherTests
     {
         public int ExitCode { get; init; }
 
+        public Exception? Failure { get; init; }
+
         public string? Executable { get; private set; }
 
         public IReadOnlyList<string> Arguments { get; private set; } = [];
@@ -65,6 +91,11 @@ public sealed class LauncherTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (Failure is not null)
+            {
+                return Task.FromException<int>(Failure);
+            }
+
             Executable = executable;
             Arguments = arguments;
             return Task.FromResult(ExitCode);
