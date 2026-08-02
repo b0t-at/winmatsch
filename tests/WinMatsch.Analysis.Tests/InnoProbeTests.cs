@@ -102,6 +102,24 @@ public class InnoProbeTests
     }
 
     [Fact]
+    public void Space_separated_architecture_list_produces_one_installer_per_target()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(6, 7, 0),
+            LoaderRevision = 2,
+            ArchitecturesAllowed = "x64os arm64",
+            ArchitecturesInstallIn64BitMode = "x64os arm64",
+        };
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal(
+            [Architecture.X64, Architecture.Arm64],
+            analysis.Installers.Select(static installer => installer.Architecture));
+    }
+
+    [Fact]
     public void X86compatible_without_payload_proof_is_inconclusive()
     {
         var options = new InnoFixtures.Options
@@ -124,7 +142,7 @@ public class InnoProbeTests
     {
         byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
         {
-            Version = new Version(6, 5, 0),
+            Version = new Version(7, 1, 0),
         });
         using var stream = new MemoryStream(installer);
         using var peFile = new PeFile(stream);
@@ -407,6 +425,22 @@ public class InnoProbeTests
     }
 
     [Fact]
+    public void Empty_architectures_allowed_defaults_to_provisional_x86_without_payload_evidence()
+    {
+        var options = new InnoFixtures.Options
+        {
+            ArchitecturesAllowed = "",
+            ArchitecturesInstallIn64BitMode = "",
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal(Architecture.X86, metadata.EffectiveArchitecture);
+        Assert.False(metadata.ArchitectureIsConclusive);
+        Assert.Contains(metadata.Diagnostics, static diagnostic => diagnostic.Code == "INNO001");
+    }
+
+    [Fact]
     public void Empty_architectures_allowed_consults_64_bit_mode_as_a_hint()
     {
         var options = new InnoFixtures.Options
@@ -467,7 +501,7 @@ public class InnoProbeTests
     {
         byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options
         {
-            Version = new Version(6, 5, 0),
+            Version = new Version(7, 1, 0),
         });
 
         using var stream = new MemoryStream(installer);
@@ -578,18 +612,103 @@ public class InnoProbeTests
     }
 
     [Fact]
-    public void Unsupported_resource_style_loader_revision_is_not_silently_treated_as_generic()
+    public void Revision_two_resource_style_loader_table_is_supported_for_known_header_layouts()
     {
         var options = new InnoFixtures.Options
         {
             WriteLegacyLoaderPointer = false,
             LoaderRevision = 2,
+            Version = new Version(6, 4, 0, 1),
         };
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(
-            () => Inspect(InnoFixtures.BuildInstaller(options)));
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(
+            Inspect(InnoFixtures.BuildInstaller(options)));
 
-        Assert.Contains("revision 2", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(new Version(6, 4, 0, 1), metadata.SetupDataVersion);
+        Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
+    }
+
+    [Fact]
+    public void Revision_two_loader_with_current_setup_data_extracts_metadata()
+    {
+        var options = new InnoFixtures.Options
+        {
+            WriteLegacyLoaderPointer = false,
+            LoaderRevision = 2,
+            Version = new Version(6, 7, 0),
+        };
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal(DetectedInstallerFormat.InnoSetup, analysis.Format);
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(InstallerType.Inno, installer.InstallerType);
+        Assert.Equal(Architecture.X64, installer.Architecture);
+        Assert.Equal("Contoso Commander 2.5", analysis.ProductName);
+        Assert.DoesNotContain(analysis.Diagnostics, static diagnostic => diagnostic.Code == "INNO010");
+    }
+
+    [Fact]
+    public void Setup_data_6_4_3_extracts_metadata()
+    {
+        var options = new InnoFixtures.Options { Version = new Version(6, 4, 3) };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal(new Version(6, 4, 3), metadata.SetupDataVersion);
+        Assert.Equal("Contoso Commander", metadata.AppName);
+        Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
+    }
+
+    [Fact]
+    public void Fully_encrypted_current_header_degrades_with_a_specific_diagnostic()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(6, 7, 0),
+            LoaderRevision = 2,
+            EncryptionUse = 2,
+        };
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal(DetectedInstallerFormat.InnoSetup, analysis.Format);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("INNO013", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+    }
+
+    [Fact]
+    public void File_only_encryption_preserves_header_metadata_and_marks_payload_evidence_unavailable()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(7, 0, 0, 3),
+            LoaderRevision = 2,
+            EncryptionUse = 1,
+            PayloadMachines = [Machine.Amd64],
+        };
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal("Contoso Commander 2.5", analysis.ProductName);
+        Assert.Contains(analysis.Diagnostics, static diagnostic => diagnostic.Code == "INNO014");
+    }
+
+    [Fact]
+    public void Latest_stable_setup_data_7_0_0_3_extracts_metadata()
+    {
+        var options = new InnoFixtures.Options
+        {
+            Version = new Version(7, 0, 0, 3),
+            LoaderRevision = 2,
+        };
+
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(InnoFixtures.BuildInstaller(options)));
+
+        Assert.Equal(new Version(7, 0, 0, 3), metadata.SetupDataVersion);
+        Assert.Equal("Contoso Commander", metadata.AppName);
+        Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
     }
 
     [Fact]

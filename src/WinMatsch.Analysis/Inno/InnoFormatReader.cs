@@ -10,7 +10,7 @@ using WinMatsch.Core;
 
 namespace WinMatsch.Analysis.Inno;
 
-internal sealed record InnoLoaderOffsets(long HeaderOffset, long DataOffset);
+internal sealed record InnoLoaderOffsets(long HeaderOffset, long DataOffset, bool PayloadEncrypted = false);
 
 internal enum InnoCompression
 {
@@ -57,7 +57,7 @@ internal sealed class UnsupportedInnoVersionException : Exception
     public UnsupportedInnoVersionException(Version version, bool isFuture)
         : base(
             isFuture
-                ? $"Inno Setup setup-data version {version} is newer than the supported 6.4.0.1 family."
+                ? $"Inno Setup setup-data version {version} is newer than the supported 7.0.0.3 family."
                 : $"Inno Setup setup-data version {version} predates the supported 5.5.7 family.")
     {
         Version = version;
@@ -67,6 +67,14 @@ internal sealed class UnsupportedInnoVersionException : Exception
     public Version Version { get; }
 
     public bool IsFuture { get; }
+}
+
+internal sealed class UnsupportedInnoEncryptionException : Exception
+{
+    public UnsupportedInnoEncryptionException()
+        : base("The Inno Setup primary header is fully encrypted and cannot be interpreted without its password.")
+    {
+    }
 }
 
 internal static partial class InnoFormatReader
@@ -96,6 +104,12 @@ internal static partial class InnoFormatReader
         byte[] versionBytes = new byte[64];
         stream.ReadExactly(versionBytes);
         (Version version, bool unicode) = ParseVersion(versionBytes);
+        if (version >= new Version(6, 7, 0))
+        {
+            byte encryptionUse = ReadEncryptionHeader(stream);
+            offsets = offsets with { PayloadEncrypted = encryptionUse != 0 };
+        }
+
         byte[] header = ReadBlock(stream, version, options);
         return (ParseHeader(header, version, unicode, options), offsets);
     }
@@ -165,13 +179,19 @@ internal static partial class InnoFormatReader
             return true;
         }
 
-        return candidate.Length >= 44
-            && Crc32(candidate[..40]) == BinaryPrimitives.ReadUInt32LittleEndian(candidate[40..]);
+        return revision switch
+        {
+            2 when candidate.Length >= 64
+                => Crc32(candidate[..60]) == BinaryPrimitives.ReadUInt32LittleEndian(candidate[60..]),
+            _ when candidate.Length >= 44
+                => Crc32(candidate[..40]) == BinaryPrimitives.ReadUInt32LittleEndian(candidate[40..]),
+            _ => false,
+        };
     }
 
     private static InnoLoaderOffsets ReadOffsetTable(Stream stream, long offset)
     {
-        Span<byte> prefix = stackalloc byte[44];
+        Span<byte> prefix = stackalloc byte[16];
         if (!TryReadAt(stream, offset, prefix))
         {
             throw new InvalidDataException("The Inno Setup loader offset table is truncated.");
@@ -185,23 +205,59 @@ internal static partial class InnoFormatReader
         }
 
         uint revision = BinaryPrimitives.ReadUInt32LittleEndian(prefix[12..]);
-        if (revision != 1)
+        return revision switch
         {
-            throw new InvalidDataException($"The Inno Setup loader revision {revision} is not supported.");
+            1 => ReadRevision1OffsetTable(stream, offset),
+            2 => ReadRevision2OffsetTable(stream, offset),
+            _ => throw new InvalidDataException($"The Inno Setup loader revision {revision} is not supported."),
+        };
+    }
+
+    private static InnoLoaderOffsets ReadRevision1OffsetTable(Stream stream, long offset)
+    {
+        Span<byte> table = stackalloc byte[44];
+        if (!TryReadAt(stream, offset, table))
+        {
+            throw new InvalidDataException("The Inno Setup loader offset table is truncated.");
         }
 
-        uint expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(prefix[40..]);
-        if (Crc32(prefix[..40]) != expectedCrc)
+        uint expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(table[40..]);
+        if (Crc32(table[..40]) != expectedCrc)
         {
             throw new InvalidDataException("The Inno Setup loader offset-table checksum is invalid.");
         }
 
-        uint headerOffset = BinaryPrimitives.ReadUInt32LittleEndian(prefix[32..]);
-        uint dataOffset = BinaryPrimitives.ReadUInt32LittleEndian(prefix[36..]);
+        uint headerOffset = BinaryPrimitives.ReadUInt32LittleEndian(table[32..]);
+        uint dataOffset = BinaryPrimitives.ReadUInt32LittleEndian(table[36..]);
         if (headerOffset == 0 || headerOffset >= stream.Length || dataOffset > stream.Length)
         {
             throw new InvalidDataException(
                 "The Inno Setup loader contains an out-of-range data offset; the installer is truncated or malformed.");
+        }
+
+        return new InnoLoaderOffsets(headerOffset, dataOffset);
+    }
+
+    private static InnoLoaderOffsets ReadRevision2OffsetTable(Stream stream, long offset)
+    {
+        Span<byte> table = stackalloc byte[64];
+        if (!TryReadAt(stream, offset, table))
+        {
+            throw new InvalidDataException("The Inno Setup loader revision-2 offset table is truncated.");
+        }
+
+        uint expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(table[60..]);
+        if (Crc32(table[..60]) != expectedCrc)
+        {
+            throw new InvalidDataException("The Inno Setup revision-2 loader offset-table checksum is invalid.");
+        }
+
+        long headerOffset = BinaryPrimitives.ReadInt64LittleEndian(table[40..]);
+        long dataOffset = BinaryPrimitives.ReadInt64LittleEndian(table[48..]);
+        if (headerOffset <= 0 || headerOffset >= stream.Length || dataOffset < 0 || dataOffset > stream.Length)
+        {
+            throw new InvalidDataException(
+                "The Inno Setup revision-2 loader contains an out-of-range data offset; the installer is truncated or malformed.");
         }
 
         return new InnoLoaderOffsets(headerOffset, dataOffset);
@@ -235,7 +291,7 @@ internal static partial class InnoFormatReader
             throw new UnsupportedInnoVersionException(version, isFuture: false);
         }
 
-        if (version > new Version(6, 4, 0, 1))
+        if (version > new Version(7, 0, 0, 3))
         {
             throw new UnsupportedInnoVersionException(version, isFuture: true);
         }
@@ -245,9 +301,44 @@ internal static partial class InnoFormatReader
         return (version, unicode);
     }
 
+    private static byte ReadEncryptionHeader(Stream stream)
+    {
+        Span<byte> bytes = stackalloc byte[53];
+        try
+        {
+            stream.ReadExactly(bytes);
+        }
+        catch (EndOfStreamException exception)
+        {
+            throw new InvalidDataException("The Inno Setup encryption header is truncated.", exception);
+        }
+
+        uint expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        ReadOnlySpan<byte> header = bytes[4..];
+        if (Crc32(header) != expectedCrc)
+        {
+            throw new InvalidDataException("The Inno Setup encryption-header checksum is invalid.");
+        }
+
+        byte encryptionUse = header[0];
+        if (encryptionUse > 2)
+        {
+            throw new InvalidDataException($"The Inno Setup encryption mode {encryptionUse} is invalid.");
+        }
+
+        if (encryptionUse == 2)
+        {
+            throw new UnsupportedInnoEncryptionException();
+        }
+
+        return encryptionUse;
+    }
+
     private static byte[] ReadBlock(Stream stream, Version version, InnoProbeOptions options)
     {
-        Span<byte> blockHeader = stackalloc byte[9];
+        int blockHeaderSize = version >= new Version(6, 7, 0) ? 13 : 9;
+        Span<byte> blockHeader = stackalloc byte[13];
+        blockHeader = blockHeader[..blockHeaderSize];
         try
         {
             stream.ReadExactly(blockHeader);
@@ -258,14 +349,16 @@ internal static partial class InnoFormatReader
         }
 
         uint expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(blockHeader);
-        uint storedSize = BinaryPrimitives.ReadUInt32LittleEndian(blockHeader[4..]);
-        byte compressed = blockHeader[8];
+        long storedSize = version >= new Version(6, 7, 0)
+            ? BinaryPrimitives.ReadInt64LittleEndian(blockHeader[4..])
+            : BinaryPrimitives.ReadUInt32LittleEndian(blockHeader[4..]);
+        byte compressed = blockHeader[^1];
         if (Crc32(blockHeader[4..]) != expectedCrc)
         {
             throw new InvalidDataException("The Inno Setup primary header block checksum is invalid.");
         }
 
-        if (storedSize == 0 || storedSize > options.MaximumStoredHeaderBytes)
+        if (storedSize <= 0 || storedSize > options.MaximumStoredHeaderBytes)
         {
             throw new InvalidDataException(
                 $"The Inno Setup stored header size {storedSize} is outside the configured limit.");
@@ -276,7 +369,7 @@ internal static partial class InnoFormatReader
             throw new InvalidDataException("The Inno Setup primary header block is malformed or truncated.");
         }
 
-        byte[] framed = new byte[storedSize];
+        byte[] framed = new byte[checked((int)storedSize)];
         stream.ReadExactly(framed);
         byte[] packed = RemoveChunkChecksums(framed);
         if (compressed == 0)
@@ -417,6 +510,21 @@ internal static partial class InnoFormatReader
             architectures64 = reader.ReadString();
         }
 
+        if (version >= new Version(6, 4, 3))
+        {
+            _ = reader.ReadString(); // CloseApplicationsFilterExcludes
+        }
+
+        if (version >= new Version(6, 7, 0))
+        {
+            reader.SkipString(); // SevenZipLibraryName
+            reader.SkipString(); // UsePreviousAppDir
+            reader.SkipString(); // UsePreviousGroup
+            reader.SkipString(); // UsePreviousSetupType
+            reader.SkipString(); // UsePreviousTasks
+            reader.SkipString(); // UsePreviousUserInfo
+        }
+
         reader.SkipString(ansi: true); // LicenseText
         reader.SkipString(ansi: true); // InfoBefore
         reader.SkipString(ansi: true); // InfoAfter
@@ -435,7 +543,12 @@ internal static partial class InnoFormatReader
         }
 
         reader.Skip(4 * 5); // message, permission, type, component and task counts.
-        reader.Skip(4 * 10); // directory through uninstall-run counts.
+        reader.Skip(version >= new Version(6, 7, 0) ? 4 * 11 : 4 * 10); // directory through uninstall-run counts.
+        if (version >= new Version(7, 0, 0, 3))
+        {
+            reader.Skip(4); // CompiledCodeVersion.
+        }
+
         reader.Skip(20); // Minimum and maximum Windows versions.
 
         if (version < new Version(6, 4, 0, 1))
@@ -443,13 +556,26 @@ internal static partial class InnoFormatReader
             reader.Skip(8); // BackColor and BackColor2.
         }
 
-        if (version >= new Version(6, 0, 0))
+        if (version >= new Version(6, 7, 0))
         {
-            reader.Skip(9); // WizardStyle and resize percentages.
+            reader.Skip(8); // Wizard resize percentages.
+            reader.Skip(1); // WizardDarkStyle.
+            reader.Skip(1); // WizardImageAlphaFormat.
+            reader.Skip(24); // Light and dynamic-dark wizard colors.
+            reader.Skip(2); // Wizard image and background opacity.
+            reader.Skip(1); // WizardLightControlStyling.
+        }
+        else
+        {
+            if (version >= new Version(6, 0, 0))
+            {
+                reader.Skip(9); // WizardStyle and resize percentages.
+            }
+
+            reader.Skip(1); // WizardImageAlphaFormat.
+            reader.Skip(version >= new Version(6, 4, 0) ? 4 + 44 : 20 + 8);
         }
 
-        reader.Skip(1); // WizardImageAlphaFormat.
-        reader.Skip(version >= new Version(6, 4, 0) ? 4 + 44 : 20 + 8);
         reader.Skip(12); // ExtraDiskSpaceRequired and SlicesPerDisk.
         reader.Skip(1); // UninstallLogMode.
         reader.Skip(1); // DirExistsWarning.
@@ -537,21 +663,29 @@ internal static partial class InnoFormatReader
         string? name = reader.ReadString();
         _ = reader.ReadString(); // LanguageName
         reader.SkipString(); // DialogFont
-        reader.SkipString(); // TitleFont
+        if (version < new Version(6, 7, 0))
+        {
+            reader.SkipString(); // TitleFont
+        }
+
         reader.SkipString(); // WelcomeFont
-        reader.SkipString(); // CopyrightFont
+        if (version < new Version(6, 7, 0))
+        {
+            reader.SkipString(); // CopyrightFont
+        }
+
         reader.SkipString(); // Data
         reader.SkipString(); // LicenseText
         reader.SkipString(); // InfoBefore
         reader.SkipString(); // InfoAfter
-        uint languageId = reader.ReadUInt32();
+        uint languageId = version >= new Version(6, 7, 0) ? reader.ReadUInt16() : reader.ReadUInt32();
         uint codePage = unicode ? 1200u : reader.ReadUInt32();
         if (codePage == 0)
         {
             codePage = 1252;
         }
 
-        reader.Skip(16); // Four font sizes.
+        reader.Skip(16); // Font sizes and, in 6.7+, dialog base-scale dimensions.
         reader.Skip(1); // RightToLeft.
         LanguageTag? locale = languageId <= ushort.MaxValue ? Lcid.ToLanguageTag((ushort)languageId) : null;
         return new InnoLanguage(NullIfEmpty(name), languageId, codePage, locale);
@@ -559,6 +693,11 @@ internal static partial class InnoFormatReader
 
     private static int GetSetupFlagByteCount(Version version, bool unicode)
     {
+        if (version >= new Version(6, 7, 0))
+        {
+            return 8;
+        }
+
         int count = 0;
         Add(1); // DisableStartupPrompt
         Add(1); // CreateAppDir
@@ -664,6 +803,19 @@ internal static partial class InnoFormatReader
         InnoCompression compression,
         InnoProbeOptions options)
     {
+        if (offsets.PayloadEncrypted)
+        {
+            return new InnoPayloadScanResult(
+                [],
+                [
+                    new AnalysisDiagnostic(
+                        "INNO014",
+                        "The Inno Setup file payload is encrypted; embedded architecture and dependency evidence is unavailable without the password.",
+                        RequiresManualAnalysis: true),
+                ],
+                IsComplete: false);
+        }
+
         long start = offsets.DataOffset > 0 ? offsets.DataOffset : offsets.HeaderOffset;
         long available = Math.Max(0, stream.Length - start);
         int scanLimit = Math.Min(options.MaximumPayloadScanBytes, options.MaximumAggregatePayloadBytes);
@@ -1241,6 +1393,14 @@ internal sealed class InnoBinaryReader
     {
         Ensure(1);
         return _data[_position++];
+    }
+
+    public ushort ReadUInt16()
+    {
+        Ensure(2);
+        ushort result = BinaryPrimitives.ReadUInt16LittleEndian(_data.AsSpan(_position));
+        _position += 2;
+        return result;
     }
 
     public uint ReadUInt32()

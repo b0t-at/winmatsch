@@ -21,6 +21,8 @@ public class ExeAnalyzerTests
         Assert.Equal(
             [
                 typeof(AdvancedInstallerProbe),
+                typeof(JavaArchiveProbe),
+                typeof(SevenZipSfxProbe),
                 typeof(BurnProbe),
                 typeof(InnoProbe),
                 typeof(NsisProbe),
@@ -55,6 +57,42 @@ public class ExeAnalyzerTests
             SquirrelFixtures.BuildClassicSetup(
                 SquirrelFixtures.BuildNupkg(SquirrelFixtures.NuspecXml())),
             DetectedInstallerFormat.Squirrel);
+
+    [Fact]
+    public void Seven_zip_self_extractor_uses_embedded_payload_architecture()
+    {
+        byte[] stub = PeFixtures.BuildExe(Machine.I386);
+        byte[] archive = SevenZipFixtures.Build(("core/app.exe", DependencyFixtures.BuildPe(Machine.Amd64)));
+        using var stream = new MemoryStream([.. stub, .. archive]);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "app-installer.exe");
+
+        Assert.Equal(DetectedInstallerFormat.GenericInstallerExe, analysis.Format);
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(Architecture.X64, installer.Architecture);
+        Assert.Equal(InstallerType.Exe, installer.InstallerType);
+        Assert.True(analysis.IsSelfExtractorStub);
+        Assert.Empty(analysis.Diagnostics);
+    }
+
+    [Fact]
+    public void Java_archive_wrapper_with_multi_architecture_native_libraries_is_neutral()
+    {
+        byte[] stub = PeFixtures.BuildExe(Machine.I386);
+        using MemoryStream jar = DependencyFixtures.BuildZip(
+            ("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\nMain-Class: example.Main\n"u8.ToArray()),
+            ("example/Main.class", [0xCA, 0xFE, 0xBA, 0xBE]),
+            ("native/win32-x86/jnidispatch.dll", [1]),
+            ("native/win32-x86-64/jnidispatch.dll", [1]),
+            ("native/win32-aarch64/jnidispatch.dll", [1]));
+        using var stream = new MemoryStream([.. stub, .. jar.ToArray()]);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "hmcl.exe");
+
+        Assert.Equal(DetectedInstallerFormat.PortableExe, analysis.Format);
+        Assert.Equal(Architecture.Neutral, Assert.Single(analysis.Installers).Architecture);
+        Assert.Equal("JAVA001", Assert.Single(analysis.Diagnostics).Code);
+    }
 
     [Fact]
     public void Advanced_installer_wins_when_the_stub_also_has_squirrel_markers()
@@ -224,6 +262,23 @@ public class ExeAnalyzerTests
         Assert.Equal(DetectedInstallerFormat.PortableExe, analysis.Format);
     }
 
+    [Theory]
+    [InlineData("tool-x64.exe", Architecture.X64)]
+    [InlineData("tool-aarch64.exe", Architecture.Arm64)]
+    public void Explicit_filename_architecture_overrides_an_x86_generic_wrapper(
+        string fileName,
+        Architecture expected)
+    {
+        using MemoryStream stream = PeFixtures.BuildExeStream(machine: Machine.I386);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, fileName);
+
+        Assert.Equal(expected, Assert.Single(analysis.Installers).Architecture);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("ARCH001", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+    }
+
     [Fact]
     public void Elevation_requirement_flows_from_the_manifest_into_the_installer()
     {
@@ -275,4 +330,5 @@ public class ExeAnalyzerTests
         ("ProductLanguage", "1033"),
         ("ALLUSERS", "1"),
     ];
+
 }

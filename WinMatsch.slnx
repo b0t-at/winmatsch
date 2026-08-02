@@ -23,4 +23,5 @@
     <Project Path="tests/WinMatsch.Validation.Tests/WinMatsch.Validation.Tests.csproj" />
     <Project Path="tests/WinMatsch.Workflows.Tests/WinMatsch.Workflows.Tests.csproj" />
   </Folder>
+  <Project Path="c:/Users/KlausDandl/AppData/Local/Temp/winmatsch-probe-check/winmatsch-probe-check.csproj" />
 </Solution>

@@ -662,6 +662,8 @@ public static class AssetMappingPlanner
         => previous is null
             || candidate is null
             || previous == candidate
+            || (previous is InstallerType.Msi or InstallerType.Wix
+                && candidate is InstallerType.Msi or InstallerType.Wix)
             || (previous == InstallerType.Exe
                 && candidate is InstallerType.Inno or InstallerType.Nullsoft or InstallerType.Wix or InstallerType.Burn);
 

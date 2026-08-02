@@ -201,6 +201,30 @@ public sealed class InstallerDownloaderTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadAsync_PreservesInitialExtension_WhenRedirectTargetHasNoFileExtension()
+    {
+        byte[] payload = CreatePayload(64);
+        var initial = new Uri("https://github.com/example/app/releases/download/v1/app%401.0.zip");
+        using StubHttpMessageHandler stub = new((request, _) =>
+        {
+            if (request.RequestUri == initial)
+            {
+                var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+                redirect.Headers.Location = new Uri("https://release-assets.example.com/51b1c6bf-bf6b-4511-a554-dac5653b7425");
+                return redirect;
+            }
+
+            return Ok(request, payload);
+        });
+        using InstallerDownloader downloader = new(stub);
+
+        DownloadResult result = await downloader.DownloadAsync(initial.AbsoluteUri, _tempDir);
+
+        Assert.Equal("app@1.0.zip", result.FileName);
+        Assert.Equal("https://release-assets.example.com/51b1c6bf-bf6b-4511-a554-dac5653b7425", result.FinalUrl);
+    }
+
+    [Fact]
     public async Task DownloadAsync_CapturesLastModifiedHeader()
     {
         var lastModified = new DateTimeOffset(2026, 5, 4, 12, 30, 0, TimeSpan.Zero);

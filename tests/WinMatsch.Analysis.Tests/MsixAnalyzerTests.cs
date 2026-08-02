@@ -149,7 +149,7 @@ public class MsixAnalyzerTests
     }
 
     [Fact]
-    public void Pre_1809_families_without_msix_mentions_are_appx()
+    public void Appx_extension_selects_appx_independently_of_target_os_version()
     {
         using MemoryStream package = MsixFixtures.BuildPackage(MsixFixtures.PackageManifest(dependencies: """
             <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.14393.0" MaxVersionTested="10.0.16299.0" />
@@ -162,11 +162,11 @@ public class MsixAnalyzerTests
     }
 
     [Fact]
-    public void A_family_at_or_above_1809_makes_the_package_msix()
+    public void Msix_extension_selects_msix_independently_of_target_os_version()
     {
         using MemoryStream package = MsixFixtures.BuildPackage(MsixFixtures.PackageManifest(dependencies: """
-            <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.14393.0" MaxVersionTested="10.0.22621.0" />
-            <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+            <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.14393.0" MaxVersionTested="10.0.16299.0" />
+            <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.16299.0" MaxVersionTested="10.0.16299.0" />
             """));
 
         InstallerAnalysis analysis = _analyzer.Analyze(package, "app.msix");
@@ -175,7 +175,7 @@ public class MsixAnalyzerTests
     }
 
     [Fact]
-    public void An_msix_mention_makes_a_pre_1809_package_msix()
+    public void Appx_extension_remains_appx_when_the_manifest_mentions_msix()
     {
         string manifest = MsixFixtures.PackageManifest(dependencies: """
             <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.14393.0" MaxVersionTested="10.0.16299.0" />
@@ -185,9 +185,9 @@ public class MsixAnalyzerTests
             StringComparison.Ordinal);
         using MemoryStream package = MsixFixtures.BuildPackage(manifest);
 
-        InstallerAnalysis analysis = _analyzer.Analyze(package, "app.msix");
+        InstallerAnalysis analysis = _analyzer.Analyze(package, "app.appx");
 
-        Assert.Equal(InstallerType.Msix, Assert.Single(analysis.Installers).InstallerType);
+        Assert.Equal(InstallerType.Appx, Assert.Single(analysis.Installers).InstallerType);
     }
 
     [Fact]

@@ -18,6 +18,8 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
     private static readonly IReadOnlyList<IExeFormatProbe> _probes =
     [
         new AdvancedInstallerProbe(),
+        new JavaArchiveProbe(),
+        new SevenZipSfxProbe(),
         new BurnProbe(),
         new InnoProbe(),
         new NsisProbe(),
@@ -55,19 +57,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
             InstallerAnalysis? probed = probe.Probe(peFile, stream);
             if (probed is not null)
             {
-                return new InstallerAnalysis
-                {
-                    Format = probed.Format,
-                    Installers = probed.Installers,
-                    ProductName = probed.ProductName,
-                    Publisher = probed.Publisher,
-                    ProductVersion = probed.ProductVersion,
-                    FileVersion = probed.FileVersion ?? version.FileVersion,
-                    IsSelfExtractorStub = probed.IsSelfExtractorStub,
-                    Copyright = probed.Copyright,
-                    Zip = probed.Zip,
-                    Diagnostics = probed.Diagnostics,
-                };
+                return CompleteProbedAnalysis(probed, version, fileName);
             }
         }
 
@@ -76,7 +66,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
             || (!HasVersionEvidence(version) && ContainsInstallerKeyword(Path.GetFileName(fileName)));
         bool isSelfExtractorStub = IsSelfExtractorStub(version);
 
-        return new InstallerAnalysis
+        InstallerAnalysis fallback = new()
         {
             Format = isInstaller ? DetectedInstallerFormat.GenericInstallerExe : DetectedInstallerFormat.PortableExe,
             Installers = [isInstaller ? CreateGenericInstaller(peFile, version) : CreatePortableInstaller(peFile)],
@@ -87,6 +77,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
             IsSelfExtractorStub = isSelfExtractorStub,
             Copyright = version.LegalCopyright,
         };
+        return ApplyFilenameArchitectureHint(fallback, fileName, "ARCH001");
     }
 
     private static Installer CreateGenericInstaller(PeFile peFile, VersionInfo version)
@@ -120,6 +111,93 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
         Architecture = peFile.Architecture,
         InstallerType = InstallerType.Portable,
     };
+
+    private static InstallerAnalysis CompleteProbedAnalysis(
+        InstallerAnalysis probed,
+        VersionInfo version,
+        string fileName)
+    {
+        IReadOnlyList<AnalysisDiagnostic> diagnostics = probed.Diagnostics;
+        if (probed.Format == DetectedInstallerFormat.Nullsoft
+            && UrlArchitectureDetector.Detect(Path.GetFileName(fileName)) == Architecture.Arm64
+            && probed.Installers.All(static installer => installer.Architecture == Architecture.X64))
+        {
+            foreach (Installer installer in probed.Installers)
+            {
+                installer.Architecture = Architecture.Arm64;
+            }
+
+            diagnostics =
+            [
+                .. diagnostics,
+                new AnalysisDiagnostic(
+                    "NSIS004",
+                    "The asset filename identifies ARM64, overriding generic 64-bit NSIS script evidence. Verify the package manually.",
+                    RequiresManualAnalysis: true),
+            ];
+        }
+
+        InstallerAnalysis completed = new()
+        {
+            Format = probed.Format,
+            Installers = probed.Installers,
+            ProductName = probed.ProductName,
+            Publisher = probed.Publisher,
+            ProductVersion = probed.ProductVersion,
+            FileVersion = probed.FileVersion ?? version.FileVersion,
+            IsSelfExtractorStub = probed.IsSelfExtractorStub,
+            Copyright = probed.Copyright,
+            Zip = probed.Zip,
+            Diagnostics = diagnostics,
+        };
+        return ApplyFilenameArchitectureHint(completed, fileName, "ARCH001");
+    }
+
+    private static InstallerAnalysis ApplyFilenameArchitectureHint(
+        InstallerAnalysis analysis,
+        string fileName,
+        string diagnosticCode)
+    {
+        Architecture? hint = UrlArchitectureDetector.Detect(Path.GetFileName(fileName));
+        bool hasOnlyMissingOrStubEvidence = analysis.Installers.All(
+            static installer => installer.Architecture is null or Architecture.X86);
+        bool hasManualWrapperConflict = analysis.Diagnostics.Any(static diagnostic => diagnostic.RequiresManualAnalysis)
+            && analysis.Format is DetectedInstallerFormat.InnoSetup
+                or DetectedInstallerFormat.Nullsoft
+                or DetectedInstallerFormat.GenericInstallerExe;
+        if (hint is null
+            || (!hasOnlyMissingOrStubEvidence && !hasManualWrapperConflict)
+            || analysis.Installers.All(installer => installer.Architecture == hint))
+        {
+            return analysis;
+        }
+
+        foreach (Installer installer in analysis.Installers)
+        {
+            installer.Architecture = hint;
+        }
+
+        return new InstallerAnalysis
+        {
+            Format = analysis.Format,
+            Installers = analysis.Installers,
+            ProductName = analysis.ProductName,
+            Publisher = analysis.Publisher,
+            ProductVersion = analysis.ProductVersion,
+            FileVersion = analysis.FileVersion,
+            IsSelfExtractorStub = analysis.IsSelfExtractorStub,
+            Copyright = analysis.Copyright,
+            Zip = analysis.Zip,
+            Diagnostics =
+            [
+                .. analysis.Diagnostics,
+                new AnalysisDiagnostic(
+                    diagnosticCode,
+                    $"The asset filename identifies {hint}, overriding missing or x86 wrapper architecture evidence. Verify the package manually.",
+                    RequiresManualAnalysis: true),
+            ],
+        };
+    }
 
     private static bool HasVersionEvidence(VersionInfo version)
         => version.ProductName is not null

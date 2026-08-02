@@ -4,7 +4,7 @@ using WinMatsch.Core;
 namespace WinMatsch.Analysis.Inno;
 
 /// <summary>
-/// Bounded clean-room reader for Inno Setup 5.5.7 through 6.4.0.1 setup-data families.
+/// Bounded clean-room reader for Inno Setup 5.5.7 through 7.0.0.3 setup-data families.
 /// The loader offsets, checksummed header blocks and version-dependent main header are parsed
 /// directly. Embedded payload PE evidence takes precedence over broad compatibility
 /// expressions such as <c>x86compatible</c>.
@@ -29,7 +29,7 @@ public sealed class InnoProbe : IExeFormatProbe
         {
             metadata = InspectForAnalysis(peFile, stream);
         }
-        catch (UnsupportedInnoVersionException exception)
+        catch (Exception exception) when (exception is UnsupportedInnoVersionException or UnsupportedInnoEncryptionException)
         {
             VersionInfo unsupportedVersion = peFile.VersionInfo;
             return new InstallerAnalysis
@@ -51,7 +51,7 @@ public sealed class InnoProbe : IExeFormatProbe
                 Diagnostics =
                 [
                     new AnalysisDiagnostic(
-                        "INNO010",
+                        exception is UnsupportedInnoEncryptionException ? "INNO013" : "INNO010",
                         $"{exception.Message} Header metadata was not interpreted; verify the installer manually.",
                         RequiresManualAnalysis: true),
                 ],
@@ -73,51 +73,97 @@ public sealed class InnoProbe : IExeFormatProbe
         string? displayVersion = SafeArpValue(metadata.AppVersion);
         string? publisher = SafeArpValue(metadata.Publisher);
         string? productCode = canClaimArp ? metadata.ProductCode : null;
-        var installer = new Installer
+        Installer CreateInstaller(Architecture? architecture)
         {
-            Architecture = metadata.EffectiveArchitecture,
-            InstallerType = InstallerType.Inno,
-            Scope = metadata.Scope,
-            ElevationRequirement = metadata.ElevationRequirement,
-            ProductCode = productCode,
-            InstallerLocale = metadata.Languages.Count == 1 ? metadata.Languages[0].Locale : null,
-            UnsupportedOSArchitectures = metadata.UnsupportedOSArchitectures.Count == 0
-                ? null
-                : [.. metadata.UnsupportedOSArchitectures],
-        };
+            var installer = new Installer
+            {
+                Architecture = architecture,
+                InstallerType = InstallerType.Inno,
+                Scope = metadata.Scope,
+                ElevationRequirement = metadata.ElevationRequirement,
+                ProductCode = productCode,
+                InstallerLocale = metadata.Languages.Count == 1 ? metadata.Languages[0].Locale : null,
+                UnsupportedOSArchitectures = metadata.UnsupportedOSArchitectures.Count == 0
+                    ? null
+                    : [.. metadata.UnsupportedOSArchitectures],
+            };
+            string? installLocation = NormalizeInstallLocation(metadata);
+            if (installLocation is not null)
+            {
+                installer.InstallationMetadata = new InstallationMetadata { DefaultInstallLocation = installLocation };
+            }
 
-        string? installLocation = NormalizeInstallLocation(metadata);
-        if (installLocation is not null)
-        {
-            installer.InstallationMetadata = new InstallationMetadata { DefaultInstallLocation = installLocation };
+            if (canClaimArp
+                && (displayName is not null || displayVersion is not null || publisher is not null || productCode is not null))
+            {
+                installer.AppsAndFeaturesEntries =
+                [
+                    new AppsAndFeaturesEntry
+                    {
+                        DisplayName = displayName,
+                        DisplayVersion = displayVersion,
+                        Publisher = publisher,
+                        ProductCode = productCode,
+                        InstallerType = InstallerType.Inno,
+                    },
+                ];
+            }
+
+            return installer;
         }
 
-        if (canClaimArp
-            && (displayName is not null || displayVersion is not null || publisher is not null || productCode is not null))
-        {
-            installer.AppsAndFeaturesEntries =
-            [
-                new AppsAndFeaturesEntry
-                {
-                    DisplayName = displayName,
-                    DisplayVersion = displayVersion,
-                    Publisher = publisher,
-                    ProductCode = productCode,
-                    InstallerType = InstallerType.Inno,
-                },
-            ];
-        }
+        Installer[] installers =
+        [
+            .. GetInstallerArchitectures(metadata)
+                .Select(CreateInstaller),
+        ];
 
         return new InstallerAnalysis
         {
             Format = DetectedInstallerFormat.InnoSetup,
-            Installers = [installer],
+            Installers = installers,
             ProductName = displayName ?? version.ProductName,
             ProductVersion = displayVersion ?? version.ProductVersion,
             Publisher = publisher ?? version.CompanyName,
             Copyright = version.LegalCopyright,
             Diagnostics = metadata.Diagnostics,
         };
+    }
+
+    private List<Architecture?> GetInstallerArchitectures(InnoSetupMetadata metadata)
+    {
+        if (metadata.EffectiveArchitecture is { } effective)
+        {
+            return [effective];
+        }
+
+        if (!InnoArchitectureExpression.TryEvaluate(
+                metadata.ArchitecturesAllowed,
+                _options,
+                out InnoArchitectureExpression.Evaluation allowed)
+            || allowed.Targets == 0
+            || allowed.Targets != allowed.PositiveArchitectureHints)
+        {
+            return [null];
+        }
+
+        List<Architecture?> architectures = [];
+        if ((allowed.Targets & InnoArchitectureExpression.X86) != 0)
+        {
+            architectures.Add(Architecture.X86);
+        }
+
+        if ((allowed.Targets & InnoArchitectureExpression.X64) != 0)
+        {
+            architectures.Add(Architecture.X64);
+        }
+
+        if ((allowed.Targets & InnoArchitectureExpression.Arm64) != 0)
+        {
+            architectures.Add(Architecture.Arm64);
+        }
+
+        return architectures.Count > 1 ? architectures : [null];
     }
 
     /// <summary>Returns detailed setup directives and payload evidence, or null for a non-Inno PE.</summary>
@@ -127,7 +173,7 @@ public sealed class InnoProbe : IExeFormatProbe
         {
             return InspectForAnalysis(peFile, stream);
         }
-        catch (UnsupportedInnoVersionException exception)
+        catch (Exception exception) when (exception is UnsupportedInnoVersionException or UnsupportedInnoEncryptionException)
         {
             throw new InvalidDataException(exception.Message, exception);
         }
@@ -274,11 +320,11 @@ public sealed class InnoProbe : IExeFormatProbe
         if (allowedIsEmpty && headerArchitecture is null)
         {
             return new ArchitectureDecision(
-                stubArchitecture == Architecture.X86 ? null : stubArchitecture,
+                stubArchitecture,
                 Conclusive: false,
                 new AnalysisDiagnostic(
                     "INNO001",
-                    "ArchitecturesAllowed is empty and no decisive embedded payload architecture was found.",
+                    "ArchitecturesAllowed is empty, which defaults to x86-compatible setup mode; no decisive embedded payload architecture was found.",
                     RequiresManualAnalysis: true));
         }
 

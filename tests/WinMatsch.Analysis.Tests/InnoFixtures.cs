@@ -65,6 +65,8 @@ internal static class InnoFixtures
 
         public uint LoaderRevision { get; set; } = 1;
 
+        public byte EncryptionUse { get; set; }
+
         public bool CorruptHeaderChecksum { get; set; }
 
         public uint? FirstStringLengthOverride { get; set; }
@@ -86,14 +88,24 @@ internal static class InnoFixtures
             ? CompressLzma(mainHeader, options.LzmaDictionarySizeOverride)
             : mainHeader;
         byte[] framed = FrameChunks(packedHeader);
-        byte[] blockHeader = new byte[9];
-        BinaryPrimitives.WriteUInt32LittleEndian(
-            blockHeader.AsSpan(4),
-            options.StoredHeaderSizeOverride ?? (uint)framed.Length);
-        blockHeader[8] = options.CompressHeader ? (byte)1 : (byte)0;
+        byte[] blockHeader = new byte[options.Version >= new Version(6, 7, 0) ? 13 : 9];
+        if (options.Version >= new Version(6, 7, 0))
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(
+                blockHeader.AsSpan(4),
+                options.StoredHeaderSizeOverride ?? (uint)framed.Length);
+        }
+        else
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                blockHeader.AsSpan(4),
+                options.StoredHeaderSizeOverride ?? (uint)framed.Length);
+        }
+
+        blockHeader[^1] = options.CompressHeader ? (byte)1 : (byte)0;
         BinaryPrimitives.WriteUInt32LittleEndian(
             blockHeader,
-            FixtureCrc32(blockHeader.AsSpan(4, 5)));
+            FixtureCrc32(blockHeader.AsSpan(4)));
         if (options.CorruptHeaderChecksum)
         {
             blockHeader[0] ^= 0x5A;
@@ -102,11 +114,15 @@ internal static class InnoFixtures
         byte[] setupVersion = new byte[64];
         string versionText = $"Inno Setup Setup Data ({options.Version}){(options.Unicode ? " (u)" : "")}";
         Encoding.ASCII.GetBytes(versionText).CopyTo(setupVersion, 0);
-        byte[] setupHeader = [.. setupVersion, .. blockHeader, .. framed];
+        byte[] encryptionHeader = options.Version >= new Version(6, 7, 0)
+            ? BuildEncryptionHeader(options.EncryptionUse)
+            : [];
+        byte[] setupHeader = [.. setupVersion, .. encryptionHeader, .. blockHeader, .. framed];
 
         byte[] stub = PeFixtures.BuildExe(Machine.I386);
         int tableOffset = stub.Length;
-        int setupHeaderOffset = tableOffset + 44;
+        int tableSize = options.LoaderRevision == 2 ? 64 : 44;
+        int setupHeaderOffset = tableOffset + tableSize;
         int dataOffset = setupHeaderOffset + setupHeader.Length;
         byte[] table = BuildLoaderTable(
             setupHeaderOffset,
@@ -217,6 +233,21 @@ internal static class InnoFixtures
             AddString(options.ArchitecturesInstallIn64BitMode);
         }
 
+        if (options.Version >= new Version(6, 4, 3))
+        {
+            AddString(""); // CloseApplicationsFilterExcludes
+        }
+
+        if (options.Version >= new Version(6, 7, 0))
+        {
+            AddString(""); // SevenZipLibraryName
+            AddString("yes"); // UsePreviousAppDir
+            AddString("yes"); // UsePreviousGroup
+            AddString("yes"); // UsePreviousSetupType
+            AddString("yes"); // UsePreviousTasks
+            AddString("yes"); // UsePreviousUserInfo
+        }
+
         AddString("", forceAnsi: true);
         AddString("", forceAnsi: true);
         AddString("", forceAnsi: true);
@@ -228,9 +259,14 @@ internal static class InnoFixtures
         }
 
         AddUInt32((uint)options.Languages.Count);
-        for (int i = 0; i < 15; i++)
+        for (int i = 0; i < (options.Version >= new Version(6, 7, 0) ? 16 : 15); i++)
         {
             AddUInt32(0);
+        }
+
+        if (options.Version >= new Version(7, 0, 0, 3))
+        {
+            AddUInt32(1); // CompiledCodeVersion.
         }
 
         bytes.AddRange(new byte[20]);
@@ -239,13 +275,25 @@ internal static class InnoFixtures
             bytes.AddRange(new byte[8]);
         }
 
-        if (options.Version >= new Version(6, 0, 0))
+        if (options.Version >= new Version(6, 7, 0))
         {
-            bytes.AddRange(new byte[9]);
+            bytes.AddRange(new byte[9]); // Resize percentages and WizardDarkStyle.
+            bytes.Add(0); // WizardImageAlphaFormat.
+            bytes.AddRange(new byte[24]); // Wizard colors.
+            bytes.AddRange(new byte[2]); // Wizard opacities.
+            bytes.Add(0); // WizardLightControlStyling.
+        }
+        else
+        {
+            if (options.Version >= new Version(6, 0, 0))
+            {
+                bytes.AddRange(new byte[9]);
+            }
+
+            bytes.Add(0); // WizardImageAlphaFormat
+            bytes.AddRange(new byte[options.Version >= new Version(6, 4, 0) ? 48 : 28]);
         }
 
-        bytes.Add(0); // WizardImageAlphaFormat
-        bytes.AddRange(new byte[options.Version >= new Version(6, 4, 0) ? 48 : 28]);
         bytes.AddRange(new byte[12]);
         bytes.Add(1); // UninstallLogMode
         bytes.Add(0); // DirExistsWarning
@@ -273,14 +321,29 @@ internal static class InnoFixtures
             AddString(language.Name);
             AddString(language.Name);
             AddString("Segoe UI");
+            if (options.Version < new Version(6, 7, 0))
+            {
+                AddString("Segoe UI");
+            }
+
             AddString("Segoe UI");
-            AddString("Segoe UI");
-            AddString("Segoe UI");
+            if (options.Version < new Version(6, 7, 0))
+            {
+                AddString("Segoe UI");
+            }
+
             AddString("");
             AddString("");
             AddString("");
             AddString("");
-            AddUInt32(language.LanguageId);
+            if (options.Version >= new Version(6, 7, 0))
+            {
+                AddUInt16(checked((ushort)language.LanguageId));
+            }
+            else
+            {
+                AddUInt32(language.LanguageId);
+            }
             if (!options.Unicode)
             {
                 AddUInt32(language.CodePage);
@@ -318,6 +381,23 @@ internal static class InnoFixtures
             BinaryPrimitives.WriteUInt32LittleEndian(encoded, value);
             bytes.AddRange(encoded);
         }
+
+        void AddUInt16(ushort value)
+        {
+            byte[] encoded = new byte[2];
+            BinaryPrimitives.WriteUInt16LittleEndian(encoded, value);
+            bytes.AddRange(encoded);
+        }
+    }
+
+    private static byte[] BuildEncryptionHeader(byte encryptionUse)
+    {
+        byte[] header = new byte[49];
+        header[0] = encryptionUse;
+        byte[] result = new byte[53];
+        BinaryPrimitives.WriteUInt32LittleEndian(result, FixtureCrc32(header));
+        header.CopyTo(result, 4);
+        return result;
     }
 
     private static byte[] BuildLoaderTable(
@@ -326,16 +406,29 @@ internal static class InnoFixtures
         uint revision,
         bool corrupt)
     {
-        byte[] table = new byte[44];
+        byte[] table = new byte[revision == 2 ? 64 : 44];
         byte[] magic = [0x72, 0x44, 0x6C, 0x50, 0x74, 0x53, 0xCD, 0xE6, 0xD7, 0x7B, 0x0B, 0x2A];
         magic.CopyTo(table, 0);
         BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(12), revision);
-        BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(32), (uint)headerOffset);
-        BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(36), (uint)dataOffset);
-        BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(40), FixtureCrc32(table.AsSpan(0, 40)));
+        if (revision == 2)
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(table.AsSpan(16), dataOffset);
+            BinaryPrimitives.WriteInt64LittleEndian(table.AsSpan(24), dataOffset);
+            BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(32), 0);
+            BinaryPrimitives.WriteInt32LittleEndian(table.AsSpan(36), 0);
+            BinaryPrimitives.WriteInt64LittleEndian(table.AsSpan(40), headerOffset);
+            BinaryPrimitives.WriteInt64LittleEndian(table.AsSpan(48), dataOffset);
+            BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(60), FixtureCrc32(table.AsSpan(0, 60)));
+        }
+        else
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(32), (uint)headerOffset);
+            BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(36), (uint)dataOffset);
+            BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(40), FixtureCrc32(table.AsSpan(0, 40)));
+        }
         if (corrupt)
         {
-            table[40] ^= 0x80;
+            table[^1] ^= 0x80;
         }
 
         return table;
@@ -381,6 +474,8 @@ internal static class InnoFixtures
         => version switch
         {
             { Major: 5, Minor: 6, Build: 0 } => 6,
+            { Major: >= 7 } => 8,
+            { Major: 6, Minor: >= 7 } => 8,
             { Major: 6, Minor: >= 4 } => 6,
             _ => throw new NotSupportedException($"No independent fixture layout is defined for setup data {version}."),
         };

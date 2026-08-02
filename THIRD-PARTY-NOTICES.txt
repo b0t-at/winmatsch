@@ -20,7 +20,7 @@ Source: https://github.com/aaubry/YamlDotNet
 Copyright (c) 2008-2014 Antoine Aubry and contributors
 License: MIT
 
-SharpCompress 0.50.1
+SharpCompress 0.50.3
 Source: https://github.com/adamhathcock/sharpcompress
 Copyright (c) 2014 Adam Hathcock
 License: MIT

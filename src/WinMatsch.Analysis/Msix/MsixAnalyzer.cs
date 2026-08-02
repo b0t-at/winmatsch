@@ -1,5 +1,4 @@
 using System.IO.Compression;
-using System.Text;
 using System.Xml;
 using WinMatsch.Core;
 
@@ -15,9 +14,6 @@ public sealed class MsixAnalyzer : IInstallerAnalyzer
     private const string ManifestEntryName = "AppxManifest.xml";
     private const string RestrictedCapabilitiesNamespace =
         "http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities";
-
-    /// <summary>Windows 10 1809, the first release that installs .msix packages.</summary>
-    private static readonly MinimumOSVersion _firstMsixOSVersion = new("10.0.17763.0");
 
     public bool CanAnalyze(string fileName)
     {
@@ -42,7 +38,7 @@ public sealed class MsixAnalyzer : IInstallerAnalyzer
         var installer = new Installer
         {
             Architecture = MsixReader.ParseArchitecture(manifest.ProcessorArchitecture),
-            InstallerType = DetermineInstallerType(manifest, manifestBytes),
+            InstallerType = DetermineInstallerType(fileName),
             PackageFamilyName = manifest.IdentityName is not null && manifest.IdentityPublisher is not null
                 ? MsixPackageFamilyName.Create(manifest.IdentityName, manifest.IdentityPublisher)
                 : null,
@@ -65,30 +61,10 @@ public sealed class MsixAnalyzer : IInstallerAnalyzer
         };
     }
 
-    /// <summary>
-    /// Distinguishes legacy AppX from MSIX: a package is AppX only when every declared
-    /// target device family predates Windows 10 1809 (the first MSIX-capable release) and
-    /// nothing in the manifest mentions MSIX. Packages without target device families, or
-    /// with unparseable minimum versions, are treated as MSIX.
-    /// </summary>
-    private static InstallerType DetermineInstallerType(ParsedManifest manifest, byte[] manifestBytes)
-    {
-        if (manifest.TargetFamilyMinVersions.Count == 0)
-        {
-            return InstallerType.Msix;
-        }
-
-        foreach (string? minVersion in manifest.TargetFamilyMinVersions)
-        {
-            if (!MinimumOSVersion.TryCreate(minVersion, out MinimumOSVersion? parsed) || parsed! >= _firstMsixOSVersion)
-            {
-                return InstallerType.Msix;
-            }
-        }
-
-        string manifestText = Encoding.UTF8.GetString(manifestBytes);
-        return manifestText.Contains("msix", StringComparison.OrdinalIgnoreCase) ? InstallerType.Msix : InstallerType.Appx;
-    }
+    private static InstallerType DetermineInstallerType(string fileName)
+        => string.Equals(Path.GetExtension(fileName), ".appx", StringComparison.OrdinalIgnoreCase)
+            ? InstallerType.Appx
+            : InstallerType.Msix;
 
     private static ParsedManifest ParseManifest(byte[] manifestBytes)
     {

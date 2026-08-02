@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using Xunit;
 
 namespace WinMatsch.E2E.Tests;
@@ -169,7 +170,12 @@ internal sealed class StaticHttpMessageHandler(
 
 internal sealed class EnvironmentFactAttribute : FactAttribute
 {
-    public EnvironmentFactAttribute(string variable, string? requiredValue = null)
+    public EnvironmentFactAttribute(
+        string variable,
+        string? requiredValue = null,
+        [CallerFilePath] string sourceFilePath = "",
+        [CallerLineNumber] int sourceLineNumber = 0)
+        : base(sourceFilePath, sourceLineNumber)
     {
         string? actual = Environment.GetEnvironmentVariable(variable);
         if (requiredValue is null ? string.IsNullOrWhiteSpace(actual) : actual != requiredValue)
@@ -183,7 +189,12 @@ internal sealed class EnvironmentFactAttribute : FactAttribute
 
 internal sealed class WindowsEnvironmentFactAttribute : FactAttribute
 {
-    public WindowsEnvironmentFactAttribute(string variable, string requiredValue)
+    public WindowsEnvironmentFactAttribute(
+        string variable,
+        string requiredValue,
+        [CallerFilePath] string sourceFilePath = "",
+        [CallerLineNumber] int sourceLineNumber = 0)
+        : base(sourceFilePath, sourceLineNumber)
     {
         if (!OperatingSystem.IsWindows())
         {

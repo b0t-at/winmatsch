@@ -974,9 +974,17 @@ public sealed class InstallerDownloader : IDisposable, IAsyncDisposable
 
     private static string ResolveFileName(HttpResponseMessage response, Uri initialUri, Uri finalUri)
     {
-        string? candidate = FileNameFromContentDisposition(response.Content.Headers.ContentDisposition)
-            ?? FileNameFromUrl(finalUri)
-            ?? FileNameFromUrl(initialUri);
+        string? contentDispositionName = FileNameFromContentDisposition(response.Content.Headers.ContentDisposition);
+        string? finalUrlName = FileNameFromUrl(finalUri);
+        string? initialUrlName = FileNameFromUrl(initialUri);
+        string? candidate = contentDispositionName ?? finalUrlName ?? initialUrlName;
+        if (contentDispositionName is null
+            && string.IsNullOrEmpty(Path.GetExtension(finalUrlName))
+            && !string.IsNullOrEmpty(Path.GetExtension(initialUrlName)))
+        {
+            candidate = initialUrlName;
+        }
+
         return SanitizeFileName(candidate);
     }
 

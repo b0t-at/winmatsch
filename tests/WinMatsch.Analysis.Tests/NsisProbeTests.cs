@@ -490,6 +490,19 @@ public class NsisProbeTests
         Assert.Equal(NsisFixtures.DefaultDisplayName, analysis.ProductName);
     }
 
+    [Fact]
+    public void ExeAnalyzer_uses_arm64_asset_name_to_override_generic_64_bit_nsis_script_evidence()
+    {
+        using var stream = new MemoryStream(NsisFixtures.BuildInstaller());
+
+        InstallerAnalysis analysis = new ExeAnalyzer().Analyze(stream, "contoso-setup-arm64.exe");
+
+        Assert.Equal(Architecture.Arm64, Assert.Single(analysis.Installers).Architecture);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("NSIS004", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+    }
+
     private static InstallerAnalysis? Probe(byte[] installer)
     {
         using var stream = new MemoryStream(installer);

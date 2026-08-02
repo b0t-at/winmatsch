@@ -46,7 +46,7 @@ public class ZipAnalyzerTests
     [Theory]
     [InlineData("app.msixbundle", InstallerType.Msix)]
     [InlineData("app.MSIX", InstallerType.Msix)]
-    [InlineData("app.appx", InstallerType.Msix)]
+    [InlineData("app.appx", InstallerType.Appx)]
     [InlineData("app.appxbundle", InstallerType.Msix)]
     public void Nested_installer_type_is_preserved_from_inner_analysis(string entryName, InstallerType expected)
     {

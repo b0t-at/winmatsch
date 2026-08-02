@@ -116,9 +116,13 @@ internal static class InnoArchitectureExpression
                 return false;
             }
 
-            while (_token == TokenKind.Or)
+            while (_token is TokenKind.Or or TokenKind.Identifier)
             {
-                ReadNextToken();
+                if (_token == TokenKind.Or)
+                {
+                    ReadNextToken();
+                }
+
                 if (!TryParseAnd(out Evaluation right))
                 {
                     return false;
