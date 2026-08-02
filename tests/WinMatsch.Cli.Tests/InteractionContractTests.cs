@@ -1,4 +1,6 @@
+using Spectre.Console;
 using WinMatsch.Cli.Hosting;
+using WinMatsch.Cli.Interaction;
 using WinMatsch.Cli.Tests.Harness;
 using Xunit;
 
@@ -209,22 +211,26 @@ public sealed class InteractionContractTests
     }
 
     [Fact]
-    public async Task Plain_interactive_terminal_uses_spectre_progress()
+    public async Task Spectre_interaction_renders_progress_when_terminal_capability_is_enabled()
     {
-        var harness = new CliHarness { UseFakeInteraction = false };
-        harness.Modules.Add(new ProbeModule(async context =>
-        {
-            int value = await context.Interaction.RunProgressAsync(
-                "Analyzing",
-                _ => Task.FromResult(42),
-                context.CancellationToken);
-            Assert.Equal(42, value);
-            return ExitCodes.Success;
-        }));
+        using var error = new StringWriter();
+        error.NewLine = "\n";
+        var interaction = new SpectreUserInteraction(
+            SpectreUserInteraction.CreateErrorConsole(
+                error,
+                colorEnabled: true,
+                AnsiSupport.Yes),
+            progressEnabled: true);
 
-        CliRunResult result = await harness.RunAsync(["probe"]);
+        int value = await interaction.RunProgressAsync(
+            "Analyzing",
+            async cancellationToken =>
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
+                return 42;
+            });
 
-        Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Contains("Analyzing", result.StandardError, StringComparison.Ordinal);
+        Assert.Equal(42, value);
+        Assert.Contains("Analyzing", error.ToString(), StringComparison.Ordinal);
     }
 }

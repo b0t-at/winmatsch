@@ -12,6 +12,12 @@
       "ARCH-2",
       "DUP-1"
     ],
+    "expectedRuleExecutions": [],
+    "nonExecutableRuleReasons": {
+      "ARCH-1": "Tokenless filename architecture handling is owned by release discovery and mapping.",
+      "ARCH-2": "Electron payload architecture analysis is owned by Analysis and workflow mapping.",
+      "DUP-1": "Release asset duplicate collapse is owned by workflow mapping rather than the Rules pipeline."
+    },
     "expectedBehavior": "Map -x64 to x64, -arm64 to arm64, and the tokenless setup asset to x86."
   },
   "provenance": {

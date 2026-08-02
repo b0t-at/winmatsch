@@ -38,6 +38,10 @@ public sealed record FixtureRegression
 
     public required IReadOnlyList<string> RuleIds { get; init; }
 
+    public required IReadOnlyList<string> ExpectedRuleExecutions { get; init; }
+
+    public required IReadOnlyDictionary<string, string> NonExecutableRuleReasons { get; init; }
+
     public required string ExpectedBehavior { get; init; }
 }
 

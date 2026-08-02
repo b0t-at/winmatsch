@@ -12,6 +12,12 @@
       "ARCH-5",
       "MAP-1"
     ],
+    "expectedRuleExecutions": [],
+    "nonExecutableRuleReasons": {
+      "ARCH-2": "Electron payload architecture analysis is owned by Analysis and workflow mapping.",
+      "ARCH-5": "Ambiguous multi-architecture payload resolution is owned by explicit workflow mapping input.",
+      "MAP-1": "The explicit neutral URL override is consumed by workflow mapping rather than the Rules pipeline."
+    },
     "expectedBehavior": "Keep ia32 and x64 assets and retain the tokenless asset only through an explicit neutral mapping."
   },
   "provenance": {

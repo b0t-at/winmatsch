@@ -11,6 +11,11 @@
       "TYPE-1",
       "MAP-3"
     ],
+    "expectedRuleExecutions": [],
+    "nonExecutableRuleReasons": {
+      "TYPE-1": "Installer topology replacement is owned by production analysis and workflow mapping.",
+      "MAP-3": "Release asset remapping is owned by workflow mapping rather than the Rules pipeline."
+    },
     "expectedBehavior": "Emit zip installers with portable nested type and all three nested executable paths."
   },
   "provenance": {

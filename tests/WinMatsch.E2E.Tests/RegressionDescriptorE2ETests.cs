@@ -84,6 +84,14 @@ public sealed class RegressionDescriptorE2ETests
                         && requestRecord.Uri == asset.Url));
             Assert.NotEmpty(fixture.Descriptor.Regression.RuleIds);
             Assert.False(string.IsNullOrWhiteSpace(fixture.Descriptor.Regression.ExpectedBehavior));
+            Assert.All(
+                fixture.Descriptor.Regression.ExpectedRuleExecutions,
+                expectedRuleId => Assert.Contains(
+                    result.Plan.Rules.Executions,
+                    execution => execution.RuleId == expectedRuleId));
+            Assert.All(
+                fixture.Descriptor.Regression.NonExecutableRuleReasons,
+                static classification => Assert.False(string.IsNullOrWhiteSpace(classification.Value)));
             Assert.Contains(
                 result.Plan.Rules.Executions,
                 static execution => execution.RuleId == "PIPE-1");

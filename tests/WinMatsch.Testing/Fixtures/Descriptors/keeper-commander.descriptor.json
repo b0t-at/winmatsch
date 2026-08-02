@@ -10,6 +10,10 @@
     "ruleIds": [
       "ARCH-4"
     ],
+    "expectedRuleExecutions": [],
+    "nonExecutableRuleReasons": {
+      "ARCH-4": "Embedded payload architecture analysis is owned by Analysis and workflow mapping."
+    },
     "expectedBehavior": "Retain the learned x64 architecture for the Keeper Commander installer."
   },
   "provenance": {

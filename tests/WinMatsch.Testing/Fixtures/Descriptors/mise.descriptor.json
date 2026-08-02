@@ -11,6 +11,11 @@
       "META-4",
       "PIPE-1"
     ],
+    "expectedRuleExecutions": [
+      "META-4",
+      "PIPE-1"
+    ],
+    "nonExecutableRuleReasons": {},
     "expectedBehavior": "Replace leading hyphen list markers with bullet characters while preserving the release-note text."
   },
   "provenance": {

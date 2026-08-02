@@ -11,6 +11,11 @@
       "ARCH-3",
       "MAP-2"
     ],
+    "expectedRuleExecutions": [],
+    "nonExecutableRuleReasons": {
+      "ARCH-3": "Filename architecture precedence is owned by release discovery and mapping.",
+      "MAP-2": "Distinct release asset mapping is owned by workflow mapping rather than the Rules pipeline."
+    },
     "expectedBehavior": "Map win32, win64, and win64a archives to x86, x64, and arm64 respectively."
   },
   "provenance": {

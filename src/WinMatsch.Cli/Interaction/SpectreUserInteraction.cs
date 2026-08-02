@@ -26,11 +26,17 @@ public sealed class SpectreUserInteraction : IUserInteraction
 
     /// <summary>Creates a Spectre console over the given standard error writer.</summary>
     public static IAnsiConsole CreateErrorConsole(TextWriter error, bool colorEnabled)
+        => CreateErrorConsole(error, colorEnabled, AnsiSupport.Detect);
+
+    internal static IAnsiConsole CreateErrorConsole(
+        TextWriter error,
+        bool colorEnabled,
+        AnsiSupport ansiSupport)
     {
         ArgumentNullException.ThrowIfNull(error);
         return AnsiConsole.Create(new AnsiConsoleSettings
         {
-            Ansi = colorEnabled ? AnsiSupport.Yes : AnsiSupport.No,
+            Ansi = colorEnabled ? ansiSupport : AnsiSupport.No,
             ColorSystem = colorEnabled ? ColorSystemSupport.Detect : ColorSystemSupport.NoColors,
             Interactive = InteractionSupport.Yes,
             Out = new AnsiConsoleOutput(error),

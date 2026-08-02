@@ -12,6 +12,13 @@
       "SCOPE-1",
       "ARP-1"
     ],
+    "expectedRuleExecutions": [
+      "SCOPE-1",
+      "ARP-1"
+    ],
+    "nonExecutableRuleReasons": {
+      "MAP-1": "Architecture-specific URL mapping is owned by workflow mapping rather than the Rules pipeline."
+    },
     "expectedBehavior": "Create four entries: x86/x64 crossed with user/machine, retaining matching ARP metadata."
   },
   "provenance": {

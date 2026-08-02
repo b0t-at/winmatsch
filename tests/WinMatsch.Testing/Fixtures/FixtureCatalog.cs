@@ -134,6 +134,7 @@ public static class FixtureCatalog
         }
 
         ValidateSha256(descriptor.Id, descriptor.Provenance.ManifestSha256);
+        ValidateRegressionRules(descriptor);
 
         foreach (FixtureAsset asset in descriptor.Assets)
         {
@@ -152,6 +153,34 @@ public static class FixtureCatalog
         {
             throw new InvalidDataException(
                 $"Fixture '{descriptor.Id}' assigns different hashes to the same URL.");
+        }
+    }
+
+    private static void ValidateRegressionRules(FixtureDescriptor descriptor)
+    {
+        FixtureRegression regression = descriptor.Regression;
+        string[] classifiedRuleIds = regression.ExpectedRuleExecutions
+            .Concat(regression.NonExecutableRuleReasons.Keys)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (!regression.RuleIds.Order(StringComparer.Ordinal).SequenceEqual(
+                classifiedRuleIds,
+                StringComparer.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Fixture '{descriptor.Id}' must classify every regression rule id exactly once as executable or owned elsewhere.");
+        }
+
+        if (regression.RuleIds.Distinct(StringComparer.Ordinal).Count() != regression.RuleIds.Count)
+        {
+            throw new InvalidDataException(
+                $"Fixture '{descriptor.Id}' repeats a regression rule id.");
+        }
+
+        if (regression.NonExecutableRuleReasons.Values.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new InvalidDataException(
+                $"Fixture '{descriptor.Id}' must explain every non-executable regression rule id.");
         }
     }
 

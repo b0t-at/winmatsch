@@ -9,8 +9,16 @@
     "summary": "A learned x64/x86 compatibility pair intentionally reuses one amd64 asset.",
     "ruleIds": [
       "DUP-2",
-      "ARCH-4"
+      "ARCH-4",
+      "DEP-1"
     ],
+    "expectedRuleExecutions": [
+      "DEP-1"
+    ],
+    "nonExecutableRuleReasons": {
+      "DUP-2": "Intentional compatibility duplicates are resolved by workflow mapping before Rules execution.",
+      "ARCH-4": "PE architecture analysis is owned by Analysis and workflow mapping."
+    },
     "expectedBehavior": "Preserve x64 and x86 entries with architecture-matched VC runtime dependencies."
   },
   "provenance": {

@@ -11,6 +11,12 @@
       "SCOPE-1",
       "DUP-2"
     ],
+    "expectedRuleExecutions": [
+      "SCOPE-1"
+    ],
+    "nonExecutableRuleReasons": {
+      "DUP-2": "Intentional duplicate preservation is resolved by the workflow duplicate comparator before Rules execution."
+    },
     "expectedBehavior": "Preserve two x64 entries with per-installer scope and ALLUSERS=1/2 switches."
   },
   "provenance": {

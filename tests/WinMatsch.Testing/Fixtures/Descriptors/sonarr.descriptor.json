@@ -10,6 +10,10 @@
     "ruleIds": [
       "ARP-2"
     ],
+    "expectedRuleExecutions": [
+      "ARP-2"
+    ],
+    "nonExecutableRuleReasons": {},
     "expectedBehavior": "Preserve the ARP product code but omit DisplayVersion 4."
   },
   "provenance": {

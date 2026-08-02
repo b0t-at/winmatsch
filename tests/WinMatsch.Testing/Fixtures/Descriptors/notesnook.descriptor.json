@@ -12,6 +12,13 @@
       "MAP-2",
       "ARP-1"
     ],
+    "expectedRuleExecutions": [
+      "ARP-1"
+    ],
+    "nonExecutableRuleReasons": {
+      "MAP-1": "Architecture-specific URL mapping is owned by workflow mapping rather than the Rules pipeline.",
+      "MAP-2": "Setup and portable asset separation is owned by workflow mapping rather than the Rules pipeline."
+    },
     "expectedBehavior": "Map plain architecture assets to nullsoft and _portable assets to portable for x64 and arm64."
   },
   "provenance": {
