@@ -1058,6 +1058,36 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
+    public async Task Canonical_retitle_invalidates_cached_negative_title_evidence()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+            OnSearch = static (fake, call) =>
+            {
+                if (call == 2)
+                {
+                    fake.UpdatePullRequest(7, pullRequest => pullRequest with
+                    {
+                        Title = "Update version: Example.App version 2.0.0",
+                    });
+                }
+            },
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Unrelated maintenance",
+            Body = null,
+        });
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Equal(["branch", "commit"], client.Mutations);
+    }
+
+    [Fact]
     public async Task Pull_request_with_wrong_head_is_never_reported_as_success()
     {
         var client = new FakeGitHubClient

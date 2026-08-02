@@ -539,7 +539,13 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
             current.BaseSha!);
         if (_cache.TryGetValue(key, out PullRequestManifestEvidence? cached))
         {
-            return cached;
+            return cached with
+            {
+                HasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                    current.Title,
+                    plan.Request.LocalPlan.PackageIdentifier,
+                    plan.Request.LocalPlan.PackageVersion),
+            };
         }
 
         PullRequestManifestEvidence evidence = await GetEvidenceCoreAsync(
