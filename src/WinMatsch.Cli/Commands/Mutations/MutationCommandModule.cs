@@ -651,6 +651,13 @@ public sealed class MutationCommandModule : ICommandModule
                     journaled,
                     submissionRequest,
                     context).ConfigureAwait(false);
+                if (!submissionHandle.Diagnostics.IsDefaultOrEmpty)
+                {
+                    foreach (string diagnostic in submissionHandle.Diagnostics)
+                    {
+                        context.Output.WriteDiagnostic(MutationRedact(diagnostic));
+                    }
+                }
             }
         }
 
@@ -971,7 +978,7 @@ public sealed class MutationCommandModule : ICommandModule
                 or UnauthorizedAccessException)
         {
             throw new CliOperationException(
-                $"Submission journal preparation failed: {exception.Message}",
+                $"Submission journal preparation failed: {MutationRedact(exception.Message)}",
                 exception);
         }
     }
@@ -997,7 +1004,7 @@ public sealed class MutationCommandModule : ICommandModule
                 or HttpRequestException)
         {
             throw new CliOperationException(
-                $"Journaled remote submission failed: {exception.Message}",
+                $"Journaled remote submission failed: {MutationRedact(exception.Message)}",
                 exception);
         }
     }
@@ -1027,7 +1034,7 @@ public sealed class MutationCommandModule : ICommandModule
                 or HttpRequestException)
         {
             throw new CliOperationException(
-                $"Pending submission recovery failed: {exception.Message}",
+                $"Pending submission recovery failed: {MutationRedact(exception.Message)}",
                 exception);
         }
     }

@@ -48,15 +48,27 @@ public static partial class DurableFileSystem
         {
             if (Fsync(descriptor) != 0)
             {
+                int error = Marshal.GetLastPInvokeError();
+                if (IsUnsupportedDirectorySync(error))
+                {
+                    return;
+                }
+
                 throw new IOException(
-                    $"Directory synchronization failed with operating-system error {Marshal.GetLastPInvokeError()}.");
+                    $"Directory synchronization failed with operating-system error {error}.");
             }
         }
+
         finally
         {
             _ = Close(descriptor);
         }
     }
+
+    private static bool IsUnsupportedDirectorySync(int error)
+        => error == 22
+            || OperatingSystem.IsLinux() && error == 95
+            || OperatingSystem.IsMacOS() && error == 45;
 
     [LibraryImport(
         "kernel32.dll",

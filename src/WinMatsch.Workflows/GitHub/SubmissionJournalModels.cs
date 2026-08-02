@@ -150,11 +150,18 @@ public sealed record SubmissionJournalEntry
 
 public sealed record SubmissionJournalHandle(
     string Id,
-    string LocalPlanFingerprint);
+    string LocalPlanFingerprint,
+    ImmutableArray<string> Diagnostics = default);
+
+public sealed record SubmissionJournalCorruption(
+    string EvidencePath,
+    string? RepositoryFileSystemIdentity,
+    string? PackageIdentifier);
 
 public sealed record SubmissionJournalRecoveryResult(
     ImmutableArray<SubmissionJournalEntry> Activated,
-    ImmutableArray<string> Diagnostics);
+    ImmutableArray<string> Diagnostics,
+    ImmutableArray<SubmissionJournalCorruption> Corruptions = default);
 
 public sealed class VerifiedSubmissionRecoveryRequest
 {
@@ -174,6 +181,10 @@ public sealed record SubmissionJournalOptions
         "submission-journals");
 
     public string? OverrideStoreDirectory { get; init; }
+
+    public TimeSpan LockTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    public TimeSpan LockRetryDelay { get; init; } = TimeSpan.FromMilliseconds(25);
 }
 
 public sealed class SubmissionJournalConflictException : IOException

@@ -536,7 +536,10 @@ public sealed class GitHubFeedbackWorkflowTests
             $"winmatsch-feedback-test-{Guid.NewGuid():N}");
         try
         {
-            var store = new FileFeedbackStateStore(root);
+            string? synchronizedDirectory = null;
+            var store = new FileFeedbackStateStore(
+                root,
+                directory => synchronizedDirectory = directory);
             var item = new FeedbackWorkItem(
                 GitHubLifecycleTestSupport.Upstream.ToString(),
                 20,
@@ -554,6 +557,7 @@ public sealed class GitHubFeedbackWorkflowTests
             Assert.Contains("\"pullRequestNumber\": 20", json, StringComparison.Ordinal);
             Assert.Contains("\"state\": \"AwaitingApprovedRepair\"", json, StringComparison.Ordinal);
             Assert.Empty(Directory.EnumerateFiles(root, "*.tmp"));
+            Assert.Equal(root, synchronizedDirectory);
             System.Collections.Immutable.ImmutableArray<FeedbackWorkItem> pending =
                 await store.GetPendingAsync(
                     GitHubLifecycleTestSupport.Upstream.ToString(),

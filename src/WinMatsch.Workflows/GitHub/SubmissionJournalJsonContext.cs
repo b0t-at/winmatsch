@@ -10,6 +10,7 @@ namespace WinMatsch.Workflows.GitHub;
 [JsonSerializable(typeof(SubmissionJournalEntry))]
 [JsonSerializable(typeof(SubmissionJournalEnvelope))]
 [JsonSerializable(typeof(SubmissionPreparedIntent))]
+[JsonSerializable(typeof(SubmissionJournalScope))]
 [JsonSerializable(typeof(ImmutableArray<SubmissionJournalEntry>))]
 internal sealed partial class SubmissionJournalJsonContext : JsonSerializerContext;
 
@@ -19,3 +20,7 @@ internal sealed record SubmissionJournalEnvelope(
 
 internal sealed record SubmissionPreparedIntent(
     SubmissionJournalEntry Entry);
+
+internal sealed record SubmissionJournalScope(
+    string RepositoryFileSystemIdentity,
+    string PackageIdentifier);

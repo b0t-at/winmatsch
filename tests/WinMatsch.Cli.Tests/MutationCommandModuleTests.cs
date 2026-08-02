@@ -369,6 +369,45 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(0, submission.ResumeCalls);
     }
 
+    [Theory]
+    [InlineData("prepare", "Submission journal preparation failed")]
+    [InlineData("execute", "Journaled remote submission failed")]
+    [InlineData("resume", "Pending submission recovery failed")]
+    public async Task Journal_exception_paths_redact_nested_aggregate_secrets(
+        string stage,
+        string expectedPrefix)
+    {
+        string secret = "ghp_" + new string('A', 30);
+        var nested = new AggregateException(
+            "journal aggregate",
+            new IOException($"token={secret}"));
+        var failure = new IOException($"journal boundary: {nested.Message}", nested);
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = stage == "resume"
+                ? request => FakeMutationWorkflow.Result(
+                    request,
+                    WorkflowResultCode.NoChanges)
+                : null,
+        };
+
+        var submission = new FakeJournaledSubmissionWorkflow
+        {
+            PrepareFailure = stage == "prepare" ? failure : null,
+            ExecutePreparedFailure = stage == "execute" ? failure : null,
+            ResumeFailure = stage == "resume" ? failure : null,
+        };
+        CliHarness harness = CreateHarness(workflow, submission);
+
+        CliRunResult result = await harness.RunAsync(
+            ["update", "Example.App", "1.0", "--submit", "--yes"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains(expectedPrefix, result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", result.StandardError, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Json_question_never_prompts_and_returns_missing_input()
     {
@@ -1993,7 +2032,15 @@ internal sealed class FakeSubmissionWorkflow : ISubmissionWorkflow
 
 internal sealed class FakeJournaledSubmissionWorkflow : IJournaledSubmissionWorkflow
 {
+    private GitHubSubmissionRequest? _request;
+
     public int ResumeCalls { get; private set; }
+
+    public Exception? PrepareFailure { get; init; }
+
+    public Exception? ExecutePreparedFailure { get; init; }
+
+    public Exception? ResumeFailure { get; init; }
 
     public Task<GitHubLifecycleResult> ExecuteAsync(
         GitHubSubmissionRequest request,
@@ -2003,12 +2050,41 @@ internal sealed class FakeJournaledSubmissionWorkflow : IJournaledSubmissionWork
     public Task<SubmissionJournalHandle> PrepareAsync(
         GitHubSubmissionRequest request,
         CancellationToken cancellationToken = default)
-        => throw new NotSupportedException();
+    {
+        if (PrepareFailure is not null)
+        {
+            throw PrepareFailure;
+        }
+
+        _request = request;
+        return Task.FromResult(new SubmissionJournalHandle(
+            Guid.NewGuid().ToString("N"),
+            request.LocalPlan.Fingerprint));
+    }
 
     public Task<GitHubLifecycleResult> ExecutePreparedAsync(
         SubmissionJournalHandle handle,
         CancellationToken cancellationToken = default)
-        => throw new NotSupportedException();
+    {
+        if (ExecutePreparedFailure is not null)
+        {
+            throw ExecutePreparedFailure;
+        }
+
+        GitHubSubmissionRequest request = _request
+            ?? throw new InvalidOperationException("No prepared request is available.");
+        return Task.FromResult(new GitHubLifecycleResult
+        {
+            Code = GitHubLifecycleResultCode.Succeeded,
+            Plan = GitHubLifecycleWorkflow.Plan(request),
+            RemoteState = new()
+            {
+                PullRequestCreated = true,
+                PullRequestNumber = 42,
+                PullRequestUri = new Uri("https://example.test/pull/42"),
+            },
+        });
+    }
 
     public Task<GitHubLifecycleResult?> ResumePendingAsync(
         string outputDirectory,
@@ -2018,6 +2094,11 @@ internal sealed class FakeJournaledSubmissionWorkflow : IJournaledSubmissionWork
         CancellationToken cancellationToken = default)
     {
         ResumeCalls++;
+        if (ResumeFailure is not null)
+        {
+            throw ResumeFailure;
+        }
+
         return Task.FromResult<GitHubLifecycleResult?>(null);
     }
 

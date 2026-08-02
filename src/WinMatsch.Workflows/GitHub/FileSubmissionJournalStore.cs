@@ -15,17 +15,41 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
     private readonly string _rootDirectory;
     private readonly string _overrideStoreDirectory;
     private readonly IWorkflowClock _clock;
+    private readonly TimeSpan _lockTimeout;
+    private readonly TimeSpan _lockRetryDelay;
+    private readonly ISubmissionJournalLockWaitStrategy _lockWaitStrategy;
 
     public FileSubmissionJournalStore(
         SubmissionJournalOptions? options = null,
         IWorkflowClock? clock = null)
+        : this(options, clock, SystemSubmissionJournalLockWaitStrategy.Instance)
+    {
+    }
+
+    internal FileSubmissionJournalStore(
+        SubmissionJournalOptions? options,
+        IWorkflowClock? clock,
+        ISubmissionJournalLockWaitStrategy lockWaitStrategy)
     {
         SubmissionJournalOptions resolved = options ?? new SubmissionJournalOptions();
+        if (resolved.LockTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "LockTimeout must be positive.");
+        }
+
+        if (resolved.LockRetryDelay <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "LockRetryDelay must be positive.");
+        }
+
         _rootDirectory = Path.GetFullPath(resolved.RootDirectory);
         _overrideStoreDirectory = Path.GetFullPath(
             resolved.OverrideStoreDirectory
             ?? OverridePackStoreOptions.CreateDefault().RootDirectory);
         _clock = clock ?? new SystemWorkflowClock();
+        _lockTimeout = resolved.LockTimeout;
+        _lockRetryDelay = resolved.LockRetryDelay;
+        _lockWaitStrategy = lockWaitStrategy ?? throw new ArgumentNullException(nameof(lockWaitStrategy));
     }
 
     public async Task<SubmissionJournalHandle> PrepareAsync(
@@ -42,11 +66,18 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
 
         ValidateSecretFree(request);
         EnsureRoot();
-        await using FileStream fileLock = AcquireGlobalLock();
+        await using FileStream fileLock = await AcquireGlobalLockAsync(cancellationToken)
+            .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         SubmissionRepositoryIdentity repository = CreateRepositoryIdentity(
             request.LocalPlan.OutputDirectory);
-        RecoverPreparedIntentsUnderLock(repository, cancellationToken);
+        var diagnostics = ImmutableArray.CreateBuilder<string>();
+        var corruptions = ImmutableArray.CreateBuilder<SubmissionJournalCorruption>();
+        RecoverPreparedIntentsUnderLock(
+            repository,
+            diagnostics,
+            corruptions,
+            cancellationToken);
         GitHubSubmissionPlan remotePlan = GitHubLifecycleWorkflow.Plan(request);
         if (!remotePlan.CanApply)
         {
@@ -58,8 +89,8 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         SubmissionJournalRemoteRequest remoteRequest = Snapshot(request, remotePlan);
         ValidateSecretFree(remoteRequest);
         string remoteRequestFingerprint = SubmissionRequestFingerprint.Create(remoteRequest);
-        SubmissionJournalEntry? existing = ReadAllEntries("*.journal")
-            .Concat(ReadAllIntents())
+        SubmissionJournalEntry? existing = ReadAllEntries("*.journal", diagnostics, corruptions)
+            .Concat(ReadAllIntents(diagnostics, corruptions))
             .FirstOrDefault(entry =>
                 string.Equals(
                     entry.Repository.FileSystemIdentity,
@@ -69,6 +100,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
                 && entry.LocalPlan.PackageVersion == request.LocalPlan.PackageVersion
                 && entry.RemoteRequest.UpstreamRepository == request.UpstreamRepository
                 && entry.State is not SubmissionJournalState.Cancelled);
+        AddKnownCorruptions(diagnostics, corruptions);
         if (existing is not null)
         {
             if (!string.Equals(
@@ -88,9 +120,20 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
                     "A different pending submission already owns this repository package version.");
             }
 
-            return new(existing.Id, existing.LocalPlan.Fingerprint);
+            ThrowIfMatchingCorruption(
+                corruptions,
+                repository,
+                request.LocalPlan.PackageIdentifier);
+            return new(
+                existing.Id,
+                existing.LocalPlan.Fingerprint,
+                diagnostics.ToImmutable());
         }
 
+        ThrowIfMatchingCorruption(
+            corruptions,
+            repository,
+            request.LocalPlan.PackageIdentifier);
         string id = Guid.NewGuid().ToString("N");
         DateTimeOffset now = _clock.UtcNow;
         var entry = new SubmissionJournalEntry
@@ -104,11 +147,12 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             CreatedAt = now,
             UpdatedAt = now,
         };
+        WriteScope(id, entry);
         WriteEnvelope(
             IntentPath(id),
             new SubmissionPreparedIntent(entry),
             SubmissionJournalJsonContext.Default.SubmissionPreparedIntent);
-        return new(id, entry.LocalPlan.Fingerprint);
+        return new(id, entry.LocalPlan.Fingerprint, diagnostics.ToImmutable());
     }
 
     public async Task<SubmissionJournalEntry> ActivateAsync(
@@ -118,7 +162,8 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         ArgumentNullException.ThrowIfNull(handle);
         EnsureId(handle.Id);
         EnsureRoot();
-        await using FileStream fileLock = AcquireGlobalLock();
+        await using FileStream fileLock = await AcquireGlobalLockAsync(cancellationToken)
+            .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         string journalPath = JournalPath(handle.Id);
         if (File.Exists(journalPath))
@@ -147,16 +192,22 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
         EnsureRoot();
-        await using FileStream fileLock = AcquireGlobalLock();
+        await using FileStream fileLock = await AcquireGlobalLockAsync(cancellationToken)
+            .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         string canonical = CanonicalPath(outputDirectory);
         var activated = ImmutableArray.CreateBuilder<SubmissionJournalEntry>();
         var diagnostics = ImmutableArray.CreateBuilder<string>();
-        foreach (string path in Directory.EnumerateFiles(_rootDirectory, "*.intent")
+        var corruptions = ImmutableArray.CreateBuilder<SubmissionJournalCorruption>();
+        foreach (string path in Directory.GetFiles(_rootDirectory, "*.intent")
                      .Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            SubmissionJournalEntry entry = ReadIntent(path);
+            if (!TryReadIntent(path, diagnostics, corruptions, out SubmissionJournalEntry entry))
+            {
+                continue;
+            }
+
             if (!string.Equals(
                     entry.Repository.CanonicalPath,
                     canonical,
@@ -168,7 +219,21 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             string journalPath = JournalPath(entry.Id);
             if (File.Exists(journalPath))
             {
-                DeleteDurably(path);
+                if (TryReadEntry(
+                        journalPath,
+                        diagnostics,
+                        corruptions,
+                        out _))
+                {
+                    DeleteDurably(path);
+                }
+                else
+                {
+                    diagnostics.Add(
+                        $"Retained submission intent '{entry.Id}' because its journal was quarantined; "
+                        + "manual reconciliation is required before this package can resume.");
+                }
+
                 continue;
             }
 
@@ -183,6 +248,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             if (VerifyUncommittedState(entry, out string? uncommittedDiagnostic))
             {
                 DeleteDurably(path);
+                DeleteDurably(ScopePath(entry.Id));
                 diagnostics.Add(
                     $"Discarded uncommitted submission intent '{entry.Id}'.");
                 continue;
@@ -193,18 +259,28 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
                 + (committedDiagnostic ?? uncommittedDiagnostic ?? "local state is mixed."));
         }
 
-        return new(activated.ToImmutable(), diagnostics.ToImmutable());
+        AddKnownCorruptions(diagnostics, corruptions);
+        return new(
+            activated.ToImmutable(),
+            diagnostics.ToImmutable(),
+            corruptions.ToImmutable());
     }
 
     private void RecoverPreparedIntentsUnderLock(
         SubmissionRepositoryIdentity repository,
+        ImmutableArray<string>.Builder diagnostics,
+        ImmutableArray<SubmissionJournalCorruption>.Builder corruptions,
         CancellationToken cancellationToken)
     {
-        foreach (string path in Directory.EnumerateFiles(_rootDirectory, "*.intent")
+        foreach (string path in Directory.GetFiles(_rootDirectory, "*.intent")
                      .Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            SubmissionJournalEntry entry = ReadIntent(path);
+            if (!TryReadIntent(path, diagnostics, corruptions, out SubmissionJournalEntry entry))
+            {
+                continue;
+            }
+
             if (!string.Equals(
                     entry.Repository.FileSystemIdentity,
                     repository.FileSystemIdentity,
@@ -216,7 +292,20 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             string journalPath = JournalPath(entry.Id);
             if (File.Exists(journalPath))
             {
-                DeleteDurably(path);
+                if (TryReadEntry(
+                        journalPath,
+                        diagnostics,
+                        corruptions,
+                        out _))
+                {
+                    DeleteDurably(path);
+                }
+                else
+                {
+                    diagnostics.Add(
+                        $"Retained submission intent '{entry.Id}' because its journal was quarantined; "
+                        + "manual reconciliation is required before this package can resume.");
+                }
             }
             else if (VerifyCommittedState(entry, out _))
             {
@@ -226,6 +315,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             else if (VerifyUncommittedState(entry, out _))
             {
                 DeleteDurably(path);
+                DeleteDurably(ScopePath(entry.Id));
             }
         }
     }
@@ -234,11 +324,14 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         CancellationToken cancellationToken)
     {
         EnsureRoot();
-        await using FileStream fileLock = AcquireGlobalLock();
+        await using FileStream fileLock = await AcquireGlobalLockAsync(cancellationToken)
+            .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
+        var diagnostics = ImmutableArray.CreateBuilder<string>();
+        var corruptions = ImmutableArray.CreateBuilder<SubmissionJournalCorruption>();
         return
         [
-            .. ReadAllEntries("*.journal")
+            .. ReadAllEntries("*.journal", diagnostics, corruptions)
                 .Where(static entry => entry.State is not SubmissionJournalState.Cancelled)
                 .OrderBy(static entry => entry.CreatedAt)
                 .ThenBy(static entry => entry.Id, StringComparer.Ordinal),
@@ -251,10 +344,17 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
     {
         EnsureId(id);
         EnsureRoot();
-        await using FileStream fileLock = AcquireGlobalLock();
+        await using FileStream fileLock = await AcquireGlobalLockAsync(cancellationToken)
+            .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         string path = JournalPath(id);
-        return File.Exists(path) ? ReadEntry(path) : null;
+        if (File.Exists(path))
+        {
+            return ReadEntry(path);
+        }
+
+        ThrowIfQuarantined(id);
+        return null;
     }
 
     public async Task<SubmissionJournalEntry> RecordRemoteStateAsync(
@@ -268,7 +368,8 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         EnsureId(id);
         ArgumentNullException.ThrowIfNull(remoteState);
         EnsureRoot();
-        await using FileStream fileLock = AcquireGlobalLock();
+        await using FileStream fileLock = await AcquireGlobalLockAsync(cancellationToken)
+            .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         string path = JournalPath(id);
         SubmissionJournalEntry current = ReadEntry(path);
@@ -293,7 +394,8 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
     {
         EnsureId(id);
         EnsureRoot();
-        await using FileStream fileLock = AcquireGlobalLock();
+        await using FileStream fileLock = await AcquireGlobalLockAsync(cancellationToken)
+            .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         string path = JournalPath(id);
         SubmissionJournalEntry current = ReadEntry(path);
@@ -323,7 +425,8 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
     {
         EnsureId(id);
         EnsureRoot();
-        await using FileStream fileLock = AcquireGlobalLock();
+        await using FileStream fileLock = await AcquireGlobalLockAsync(cancellationToken)
+            .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         string path = JournalPath(id);
         SubmissionJournalEntry current = ReadEntry(path);
@@ -337,6 +440,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         }
 
         DeleteDurably(path);
+        DeleteDurably(ScopePath(id));
     }
 
     private static SubmissionJournalLocalPlan Snapshot(LocalOperationPlan plan)
@@ -630,46 +734,164 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         return true;
     }
 
-    private SubmissionJournalEntry[] ReadAllEntries(string pattern)
+    private SubmissionJournalEntry[] ReadAllEntries(
+        string pattern,
+        ImmutableArray<string>.Builder diagnostics,
+        ImmutableArray<SubmissionJournalCorruption>.Builder corruptions)
     {
         if (!Directory.Exists(_rootDirectory))
         {
             return [];
         }
 
-        return Directory.EnumerateFiles(_rootDirectory, pattern)
-            .Order(StringComparer.Ordinal)
-            .Select(ReadEntry)
-            .ToArray();
+        var entries = new List<SubmissionJournalEntry>();
+        foreach (string path in Directory.GetFiles(_rootDirectory, pattern)
+                     .Order(StringComparer.Ordinal))
+        {
+            if (TryReadEntry(path, diagnostics, corruptions, out SubmissionJournalEntry entry))
+            {
+                entries.Add(entry);
+            }
+        }
+
+        return [.. entries];
     }
 
-    private SubmissionJournalEntry[] ReadAllIntents()
+    private SubmissionJournalEntry[] ReadAllIntents(
+        ImmutableArray<string>.Builder diagnostics,
+        ImmutableArray<SubmissionJournalCorruption>.Builder corruptions)
     {
         if (!Directory.Exists(_rootDirectory))
         {
             return [];
         }
 
-        return Directory.EnumerateFiles(_rootDirectory, "*.intent")
-            .Order(StringComparer.Ordinal)
-            .Select(ReadIntent)
-            .ToArray();
+        var entries = new List<SubmissionJournalEntry>();
+        foreach (string path in Directory.GetFiles(_rootDirectory, "*.intent")
+                     .Order(StringComparer.Ordinal))
+        {
+            if (TryReadIntent(path, diagnostics, corruptions, out SubmissionJournalEntry entry))
+            {
+                entries.Add(entry);
+            }
+        }
+
+        return [.. entries];
     }
 
     private SubmissionJournalEntry ReadEntry(string path)
     {
-        SubmissionJournalEntry entry = ReadEnvelope(
-            path,
-            SubmissionJournalJsonContext.Default.SubmissionJournalEntry);
-        return ValidateAndMigrateRemoteFingerprint(path, entry, preparedIntent: false);
+        if (!File.Exists(path) && ArtifactId(path) is string missingId)
+        {
+            ThrowIfQuarantined(missingId);
+        }
+
+        try
+        {
+            return ReadEntryCore(path);
+        }
+        catch (SubmissionJournalTamperedException exception)
+        {
+            SubmissionJournalCorruption corruption = Quarantine(path, exception);
+            throw QuarantinedException(path, corruption, exception);
+        }
     }
 
     private SubmissionJournalEntry ReadIntent(string path)
     {
+        if (!File.Exists(path) && ArtifactId(path) is string missingId)
+        {
+            ThrowIfQuarantined(missingId);
+        }
+
+        try
+        {
+            return ReadIntentCore(path);
+        }
+        catch (SubmissionJournalTamperedException exception)
+        {
+            SubmissionJournalCorruption corruption = Quarantine(path, exception);
+            throw QuarantinedException(path, corruption, exception);
+        }
+    }
+
+    private SubmissionJournalEntry ReadEntryCore(string path)
+    {
         SubmissionJournalEntry entry = ReadEnvelope(
             path,
-            SubmissionJournalJsonContext.Default.SubmissionPreparedIntent).Entry;
-        return ValidateAndMigrateRemoteFingerprint(path, entry, preparedIntent: true);
+            SubmissionJournalJsonContext.Default.SubmissionJournalEntry);
+        ValidateEntryShape(path, entry);
+        entry = ValidateAndMigrateRemoteFingerprint(path, entry, preparedIntent: false);
+        EnsureScope(entry);
+        return entry;
+    }
+
+    private SubmissionJournalEntry ReadIntentCore(string path)
+    {
+        SubmissionPreparedIntent intent = ReadEnvelope(
+            path,
+            SubmissionJournalJsonContext.Default.SubmissionPreparedIntent);
+        SubmissionJournalEntry entry = intent.Entry
+            ?? throw new SubmissionJournalTamperedException(
+                $"Submission journal '{Path.GetFileName(path)}' has no prepared entry.");
+        ValidateEntryShape(path, entry);
+        entry = ValidateAndMigrateRemoteFingerprint(path, entry, preparedIntent: true);
+        EnsureScope(entry);
+        return entry;
+    }
+
+    private bool TryReadEntry(
+        string path,
+        ImmutableArray<string>.Builder diagnostics,
+        ImmutableArray<SubmissionJournalCorruption>.Builder corruptions,
+        out SubmissionJournalEntry entry)
+        => TryReadArtifact(path, ReadEntryCore, diagnostics, corruptions, out entry);
+
+    private bool TryReadIntent(
+        string path,
+        ImmutableArray<string>.Builder diagnostics,
+        ImmutableArray<SubmissionJournalCorruption>.Builder corruptions,
+        out SubmissionJournalEntry entry)
+        => TryReadArtifact(path, ReadIntentCore, diagnostics, corruptions, out entry);
+
+    private bool TryReadArtifact(
+        string path,
+        Func<string, SubmissionJournalEntry> read,
+        ImmutableArray<string>.Builder diagnostics,
+        ImmutableArray<SubmissionJournalCorruption>.Builder corruptions,
+        out SubmissionJournalEntry entry)
+    {
+        try
+        {
+            entry = read(path);
+            return true;
+        }
+        catch (SubmissionJournalTamperedException exception)
+        {
+            SubmissionJournalCorruption corruption = Quarantine(path, exception);
+            corruptions.Add(corruption);
+            diagnostics.Add(CorruptionDiagnostic(path, corruption));
+            entry = null!;
+            return false;
+        }
+    }
+
+    private static void ValidateEntryShape(
+        string path,
+        SubmissionJournalEntry entry)
+    {
+        string? artifactId = ArtifactId(path);
+        if (artifactId is null
+            || !string.Equals(entry.Id, artifactId, StringComparison.Ordinal)
+            || entry.Repository is null
+            || entry.LocalPlan is null
+            || entry.RemoteRequest is null
+            || entry.LocalPlan.PackageIdentifier is null
+            || entry.LocalPlan.PackageVersion is null)
+        {
+            throw new SubmissionJournalTamperedException(
+                $"Submission journal '{Path.GetFileName(path)}' has inconsistent required identity fields.");
+        }
     }
 
     private SubmissionJournalEntry ValidateAndMigrateRemoteFingerprint(
@@ -677,7 +899,20 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         SubmissionJournalEntry entry,
         bool preparedIntent)
     {
-        string actual = SubmissionRequestFingerprint.Create(entry.RemoteRequest);
+        string actual;
+        try
+        {
+            actual = SubmissionRequestFingerprint.Create(entry.RemoteRequest);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+                or InvalidOperationException
+                or NullReferenceException)
+        {
+            throw new SubmissionJournalTamperedException(
+                $"Submission journal '{Path.GetFileName(path)}' has an invalid remote request.",
+                exception);
+        }
         if (entry.RemoteRequestFingerprintVersion
             is not (0 or SubmissionRequestFingerprint.CurrentVersion))
         {
@@ -729,10 +964,207 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             entry,
             SubmissionJournalJsonContext.Default.SubmissionJournalEntry);
 
+    private void WriteScope(string id, SubmissionJournalEntry entry)
+        => WriteEnvelope(
+            ScopePath(id),
+            new SubmissionJournalScope(
+                entry.Repository.FileSystemIdentity,
+                entry.LocalPlan.PackageIdentifier.Value),
+            SubmissionJournalJsonContext.Default.SubmissionJournalScope);
+
+    private void EnsureScope(SubmissionJournalEntry entry)
+    {
+        string path = ScopePath(entry.Id);
+        if (!File.Exists(path))
+        {
+            WriteScope(entry.Id, entry);
+            return;
+        }
+
+        SubmissionJournalScope scope;
+        try
+        {
+            scope = ReadEnvelope(
+                path,
+                SubmissionJournalJsonContext.Default.SubmissionJournalScope);
+        }
+        catch (SubmissionJournalTamperedException exception)
+        {
+            throw new SubmissionJournalTamperedException(
+                $"Submission journal '{entry.Id}' has unreadable scope metadata.",
+                exception);
+        }
+
+        if (!string.Equals(
+                scope.RepositoryFileSystemIdentity,
+                entry.Repository.FileSystemIdentity,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                scope.PackageIdentifier,
+                entry.LocalPlan.PackageIdentifier.Value,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new SubmissionJournalTamperedException(
+                $"Submission journal '{entry.Id}' does not match its durable scope metadata.");
+        }
+    }
+
+    private SubmissionJournalCorruption Quarantine(
+        string path,
+        SubmissionJournalTamperedException cause)
+    {
+        string evidencePath = $"{path}.{Guid.NewGuid():N}.corrupt";
+        SubmissionJournalScope? scope = TryReadScope(ArtifactId(path));
+        try
+        {
+            File.Move(path, evidencePath);
+            DurableFileSystem.FlushDirectory(_rootDirectory);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new SubmissionJournalTamperedException(
+                $"Untrusted submission journal '{Path.GetFileName(path)}' could not be quarantined. "
+                + "No journal operation was performed; resolve the file access problem and retry.",
+                new AggregateException(cause, exception));
+        }
+
+        return new(
+            evidencePath,
+            scope?.RepositoryFileSystemIdentity,
+            scope?.PackageIdentifier);
+    }
+
+    private SubmissionJournalScope? TryReadScope(string? id)
+    {
+        if (id is null)
+        {
+            return null;
+        }
+
+        string path = ScopePath(id);
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            return ReadEnvelope(
+                path,
+                SubmissionJournalJsonContext.Default.SubmissionJournalScope);
+        }
+        catch (SubmissionJournalTamperedException)
+        {
+            return null;
+        }
+    }
+
+    private void AddKnownCorruptions(
+        ImmutableArray<string>.Builder diagnostics,
+        ImmutableArray<SubmissionJournalCorruption>.Builder corruptions)
+    {
+        var known = corruptions
+            .Select(static corruption => corruption.EvidencePath)
+            .ToHashSet(PathComparer());
+        foreach (string path in Directory.GetFiles(_rootDirectory, "*.corrupt")
+                     .Order(StringComparer.Ordinal))
+        {
+            if (!known.Add(path))
+            {
+                continue;
+            }
+
+            SubmissionJournalScope? scope = TryReadScope(ArtifactId(path));
+            var corruption = new SubmissionJournalCorruption(
+                path,
+                scope?.RepositoryFileSystemIdentity,
+                scope?.PackageIdentifier);
+            corruptions.Add(corruption);
+            diagnostics.Add(CorruptionDiagnostic(path, corruption));
+        }
+    }
+
+    private static void ThrowIfMatchingCorruption(
+        IEnumerable<SubmissionJournalCorruption> corruptions,
+        SubmissionRepositoryIdentity repository,
+        PackageIdentifier packageIdentifier)
+    {
+        SubmissionJournalCorruption? matching = corruptions.FirstOrDefault(corruption =>
+            string.Equals(
+                corruption.RepositoryFileSystemIdentity,
+                repository.FileSystemIdentity,
+                StringComparison.Ordinal)
+            && string.Equals(
+                corruption.PackageIdentifier,
+                packageIdentifier.Value,
+                StringComparison.OrdinalIgnoreCase));
+        if (matching is null)
+        {
+            return;
+        }
+
+        throw new SubmissionJournalTamperedException(
+            $"A quarantined submission journal may contain unfinished remote work for package "
+            + $"'{packageIdentifier}'. Inspect the preserved evidence "
+            + $"'{matching.EvidencePath}' before retrying this package.");
+    }
+
+    private void ThrowIfQuarantined(string id)
+    {
+        string? evidencePath = Directory.GetFiles(_rootDirectory, $"{id}.*.corrupt")
+            .Order(StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (evidencePath is not null)
+        {
+            throw new SubmissionJournalTamperedException(
+                $"Submission journal '{id}' was quarantined as "
+                + $"'{evidencePath}'; inspect the preserved evidence before retrying.");
+        }
+    }
+
+    private static SubmissionJournalTamperedException QuarantinedException(
+        string path,
+        SubmissionJournalCorruption corruption,
+        SubmissionJournalTamperedException cause)
+        => new(
+            $"Untrusted submission journal '{Path.GetFileName(path)}' was atomically quarantined as "
+            + $"'{corruption.EvidencePath}'. The evidence was preserved for inspection.",
+            cause);
+
+    private static string CorruptionDiagnostic(
+        string path,
+        SubmissionJournalCorruption corruption)
+        => $"Quarantined untrusted submission journal '{Path.GetFileName(path)}' as "
+            + $"'{corruption.EvidencePath}'. The evidence was preserved; "
+            + (corruption.PackageIdentifier is null
+                ? "its package scope could not be verified, so inspect it manually."
+                : $"submissions for package '{corruption.PackageIdentifier}' remain blocked until it is reviewed.");
+
+    private static string? ArtifactId(string path)
+    {
+        string name = Path.GetFileName(path);
+        int separator = name.IndexOf('.');
+        string id = separator < 0 ? name : name[..separator];
+        return Guid.TryParseExact(id, "N", out _) ? id : null;
+    }
+
     private static T ReadEnvelope<T>(string path, JsonTypeInfo<T> typeInfo)
     {
-        RejectReparsePoint(path);
-        byte[] envelopeBytes = File.ReadAllBytes(path);
+        byte[] envelopeBytes;
+        try
+        {
+            RejectReparsePoint(path);
+            envelopeBytes = File.ReadAllBytes(path);
+        }
+        catch (Exception exception) when (
+            exception is IOException and not (FileNotFoundException or DirectoryNotFoundException)
+                or UnauthorizedAccessException)
+        {
+            throw new SubmissionJournalTamperedException(
+                $"Submission journal '{Path.GetFileName(path)}' could not be read and must not be trusted.",
+                exception);
+        }
+
         SubmissionJournalEnvelope? envelope;
         try
         {
@@ -757,7 +1189,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         {
             payload = Convert.FromBase64String(envelope.Payload);
         }
-        catch (FormatException exception)
+        catch (Exception exception) when (exception is FormatException or ArgumentException)
         {
             throw new SubmissionJournalTamperedException(
                 $"Submission journal '{Path.GetFileName(path)}' has invalid payload encoding.",
@@ -770,7 +1202,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         {
             expected = Convert.FromHexString(envelope.Sha256);
         }
-        catch (FormatException exception)
+        catch (Exception exception) when (exception is FormatException or ArgumentException)
         {
             throw new SubmissionJournalTamperedException(
                 $"Submission journal '{Path.GetFileName(path)}' has invalid integrity metadata.",
@@ -844,26 +1276,53 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         }
     }
 
-    private FileStream AcquireGlobalLock()
+    private async Task<FileStream> AcquireGlobalLockAsync(
+        CancellationToken cancellationToken)
     {
         string path = Path.Combine(_rootDirectory, ".lock");
-        try
+        DateTimeOffset deadline = _lockWaitStrategy.UtcNow + _lockTimeout;
+        while (true)
         {
-            var stream = new FileStream(
-                path,
-                FileMode.OpenOrCreate,
-                FileAccess.ReadWrite,
-                FileShare.None,
-                bufferSize: 1,
-                FileOptions.WriteThrough);
-            SetPrivateFileMode(path);
-            return stream;
-        }
-        catch (IOException exception)
-        {
-            throw new SubmissionJournalConflictException(
-                "Another process is updating the submission journal.",
-                exception);
+            cancellationToken.ThrowIfCancellationRequested();
+            FileStream stream;
+            try
+            {
+                stream = new FileStream(
+                    path,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    bufferSize: 1,
+                    FileOptions.Asynchronous | FileOptions.WriteThrough);
+            }
+            catch (IOException exception)
+            {
+                TimeSpan remaining = deadline - _lockWaitStrategy.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    throw new SubmissionJournalConflictException(
+                        $"Timed out after {_lockTimeout.TotalMilliseconds:0} ms waiting for the "
+                        + "submission journal lock. Another process may still be updating the "
+                        + "journal; wait for it to finish and retry.",
+                        exception);
+                }
+
+                await _lockWaitStrategy.DelayAsync(
+                    remaining < _lockRetryDelay ? remaining : _lockRetryDelay,
+                    cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            try
+            {
+                SetPrivateFileMode(path);
+                return stream;
+            }
+            catch
+            {
+                stream.Dispose();
+                throw;
+            }
         }
     }
 
@@ -882,6 +1341,8 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
     private string JournalPath(string id) => Path.Combine(_rootDirectory, $"{id}.journal");
 
     private string IntentPath(string id) => Path.Combine(_rootDirectory, $"{id}.intent");
+
+    private string ScopePath(string id) => Path.Combine(_rootDirectory, $"{id}.scope");
 
     private static void DeleteDurably(string path)
     {
@@ -1071,6 +1532,11 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;
 
+    private static StringComparer PathComparer()
+        => OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+
     private static void SetPrivateFileMode(string path)
     {
         if (!OperatingSystem.IsWindows())
@@ -1090,4 +1556,26 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
         |\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b",
         RegexOptions.CultureInvariant)]
     private static partial Regex SecretValueRegex();
+}
+
+internal interface ISubmissionJournalLockWaitStrategy
+{
+    public DateTimeOffset UtcNow { get; }
+
+    public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken);
+}
+
+internal sealed class SystemSubmissionJournalLockWaitStrategy :
+    ISubmissionJournalLockWaitStrategy
+{
+    public static SystemSubmissionJournalLockWaitStrategy Instance { get; } = new();
+
+    private SystemSubmissionJournalLockWaitStrategy()
+    {
+    }
+
+    public DateTimeOffset UtcNow => DateTimeOffset.UtcNow;
+
+    public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+        => Task.Delay(delay, cancellationToken);
 }

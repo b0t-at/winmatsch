@@ -685,7 +685,27 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
         RepositoryCoordinates upstreamRepository,
         CancellationToken cancellationToken = default)
     {
-        _ = await _journals.RecoverAsync(outputDirectory, cancellationToken).ConfigureAwait(false);
+        SubmissionJournalRecoveryResult recovery = await _journals
+            .RecoverAsync(outputDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        if (!recovery.Corruptions.IsDefaultOrEmpty
+            && recovery.Corruptions.Any(corruption =>
+                string.Equals(
+                    corruption.PackageIdentifier,
+                    packageIdentifier.Value,
+                    StringComparison.OrdinalIgnoreCase)))
+        {
+            SubmissionJournalCorruption matching = recovery.Corruptions.First(corruption =>
+                string.Equals(
+                    corruption.PackageIdentifier,
+                    packageIdentifier.Value,
+                    StringComparison.OrdinalIgnoreCase));
+            throw new SubmissionJournalTamperedException(
+                $"A quarantined submission journal may contain unfinished remote work for package "
+                + $"'{packageIdentifier}'. Inspect the preserved evidence "
+                + $"'{Path.GetFileName(matching.EvidencePath)}' before resuming this package.");
+        }
+
         ImmutableArray<SubmissionJournalEntry> candidates =
         [
             .. (await _journals.ListPendingAsync(cancellationToken).ConfigureAwait(false))
@@ -711,7 +731,23 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
                 "Multiple pending submission journals match this package version.");
         }
 
-        return await ExecuteEntryAsync(candidates[0], cancellationToken).ConfigureAwait(false);
+        GitHubLifecycleResult result = await ExecuteEntryAsync(
+            candidates[0],
+            cancellationToken).ConfigureAwait(false);
+        if (recovery.Diagnostics.IsDefaultOrEmpty)
+        {
+            return result;
+        }
+
+        return result with
+        {
+            Diagnostics =
+            [
+                .. result.Diagnostics,
+                .. recovery.Diagnostics.Select(static diagnostic =>
+                    new GitHubLifecycleDiagnostic("GH2042", diagnostic)),
+            ],
+        };
     }
 
     public Task<ImmutableArray<SubmissionJournalEntry>> ListPendingAsync(

@@ -2,19 +2,29 @@ using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using WinMatsch.Core;
 
 namespace WinMatsch.Workflows.GitHub;
 
 public sealed class FileFeedbackStateStore : IFeedbackStateStore
 {
     private readonly string _rootDirectory;
+    private readonly Action<string> _flushDirectory;
 
     public FileFeedbackStateStore(string? rootDirectory = null)
+        : this(rootDirectory, DurableFileSystem.FlushDirectory)
+    {
+    }
+
+    internal FileFeedbackStateStore(
+        string? rootDirectory,
+        Action<string> flushDirectory)
     {
         _rootDirectory = rootDirectory ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "WinMatsch",
             "feedback");
+        _flushDirectory = flushDirectory ?? throw new ArgumentNullException(nameof(flushDirectory));
     }
 
     public async Task PersistAsync(
@@ -71,6 +81,7 @@ public sealed class FileFeedbackStateStore : IFeedbackStateStore
             }
 
             File.Move(temporary, destination, overwrite: true);
+            _flushDirectory(_rootDirectory);
         }
         finally
         {
