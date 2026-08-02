@@ -142,16 +142,9 @@ internal static partial class InnoFormatReader
                 continue;
             }
 
-            try
-            {
-                return ReadOffsetTable(stream, candidate);
-            }
-            catch (InvalidDataException)
-            {
-                // A structurally plausible loader table claims this executable. Surface its
-                // corruption instead of silently classifying a damaged Inno installer as generic.
-                throw;
-            }
+            // A structurally plausible loader table claims this executable. Surface corruption
+            // instead of silently classifying a damaged Inno installer as generic.
+            return ReadOffsetTable(stream, candidate);
         }
 
         return null;

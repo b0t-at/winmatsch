@@ -42,8 +42,8 @@ Initial development toward a first release. Implemented so far:
 - Documented the dependency policy (license, transitives, trim/AOT,
   currency) and why JsonSchema.Net stays on the MIT-licensed 8.x line.
 - Documented previously implicit behavior: LF line-ending normalization,
-  local write transactions and their recovery journals, the token requirement
-  for `show`/`list-versions`, the learned-override store behind approved
+  local write transactions and their recovery journals, anonymous public
+  `show`/`list-versions` reads with optional authentication, the learned-override store behind approved
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
