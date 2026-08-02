@@ -17,6 +17,56 @@
 > agent's self-report; **this section is the independent check of it.**
 > This section supersedes §0's self-assessment where they differ.
 
+### R.0 Final remediation closeout — 2026-08-02
+
+> **Final status after the section-R remediation:** audited from the exact
+> integrated parent `dcc862958ae9b23c03883bbb639fd3293536f7c0`, covering every
+> production change in `c213af522b03e3c4273d9a2c87b45bcf4073d6f4..dcc8629`,
+> plus independent closeout fix `7b6b207`. The original R findings and
+> historical remediation record below are preserved; this subsection is the
+> final disposition. No live GitHub mutation was performed.
+
+**Final verdict: section R is closed.** R-N1, R-N2, both stale-ledger findings,
+every listed minor/nit, and the integration defects found during this final
+read are resolved. The bounded evidence and parser changes preserve the
+original B1/B2, M1–M18, and A1–A29 contracts: resource exhaustion degrades
+only dependency evidence; corruption, I/O, cancellation, rate-limit, identity,
+and uncertain-remote-state failures remain distinct and fail closed.
+
+| R item | Final code/test disposition |
+|---|---|
+| R-N1 request complexity | `959225e` batches changed-file evidence through GraphQL (50 PR nodes/request), `b6bf2cc` keys/revalidates cache entries by upstream repository + PR number + head SHA + node/base identity, `11b083b` caps discovery at 1,000 open PRs, `c300dcf` accepts GitHub's `CHANGED` status, `496d120` caps cumulative REST fallback at 64 requests, and `e2f477e`/`8cb4d21` preserve GraphQL/REST rate-limit classification. `Production_scale_discovery_batches_and_reuses_pinned_head_evidence` proves 400 PRs use 8 initial GraphQL requests, zero on an unchanged repeat, and one after a single head moves; focused R-N1 run: **3 passed**. GraphQL unavailable above the 64-PR REST bound, truncated/renamed completion above 16 PRs, pagination loops, incomplete batches, and rate limits all stop before mutation. |
+| R-N2 ZIP boundaries/taxonomy | `0e97e0c` converts dependency-analysis resource ceilings to `Unavailable` + DEP003, `58f127f` introduces the distinct resource-limit exception, `035bed0` keeps malformed declarations corrupt, `c255a5f` propagates corrupt payload failures, and `3ee1891` rejects inconsistent expanded sizes. Exact unit boundaries cover **4,096 complete; 4,097 and 10,000 unavailable; 10,001 rejected by `FileAnalyzer` while dependency evidence still degrades**. Truncation/inconsistent declarations remain `InvalidDataException`, ordinary I/O propagates, and cancellation remains `OperationCanceledException`. Focused boundary run: **7 passed**; live real-process 4,097-entry CLI run: **1 passed**, exit 0 with unavailable evidence and DEP003. |
+| Corrupt journals, scope, and crash windows | `a790848` adds atomic quarantine, scope sidecars, bounded lock wait, feedback directory sync, and durable writes; `586c600`, `04a4443`, and `dcc8629` close migration, quarantine, cross-directory replacement, completion, and interrupted-scope windows. Final trace found that resume still re-read the global pending list and matched corruption by package without repository identity; `7b6b207` returns the valid pending snapshot with recovery, binds corruption to the recovered repository filesystem identity, lets proven-unrelated packages continue, and still blocks unknown/same-repository+package evidence. It also redacts persisted `LastError` diagnostics. Full journal class stress: **24 tests × 20 iterations = 480 passed**, including lock wait/timeout/cancellation, corrupt intent/journal quarantine, scope conflict interruption, activation/completion, and learned-override ordering. |
+| CLI ownership/open/cache nits | `8356ac6` gives token validation an owned-client default and caller-owned injected-client behavior, accepts the documented Windows `explorer.exe` handoff exit, applies mutation-consistent feedback cache defaults, and tests CLI/env precedence. Final trace found two adjacent ownership gaps; `7b6b207` removes the inline maintenance `HttpClient` leak and prevents `GitHubPullRequestMetadataSource` from disposing caller-owned clients. |
+| E2E isolation/tooling nits | `f738cbb` isolates regression overrides in a temporary store, reuses the production cache lock in the lock host, adds checksum-pinned compiler mirror fallback, and moves tooling logic behind parser-tested helpers. `cde3667` requires MakeAppx to have valid Microsoft Authenticode, the pinned SDK major/minor/build, and at least the approved file version; no runner-latest fallback is accepted. The real compiled corpus passed for Inno, NSIS, WiX MSI/duplicate MSI/Burn, and MSIX. |
+| Mechanical plan/CHANGELOG/Inno items | `32de600` reconciles `DRY_RUN` precedence and the now-present P8 compiled-corpus job in `plan.md`, corrects anonymous `show`/`list-versions` behavior in CHANGELOG, and removes the surviving no-op Inno catch. |
+
+The exact-tree verification at code head `7b6b207` was:
+
+| Gate | Final result |
+|---|---|
+| Restore/build | All **19 projects** restored; Release build **0 warnings, 0 errors**. |
+| Full tests, serialized (`-m:1`) | **2,340 passed, 0 failed, 3 skipped** (2,343 total). |
+| Full tests, default parallel | **2,340 passed, 0 failed, 3 skipped** (2,343 total), identical counts. |
+| Focused R-N1 | **3 passed**: production-scale request budget/cache invalidation and rate-limit fail-closed classification. |
+| Focused R-N2 | **7 boundary cases passed** plus **1 live CLI case passed**. |
+| Journal stress | **480 passed** across 20 fresh-process iterations. |
+| Full hermetic E2E | **30 passed, 0 failed, 3 skipped**. The compiled gate was then enabled separately and passed; the two token-gated GitHub E2E tests remained opt-in, including the deliberately mutating test. |
+| Windows compiled corpus | **1 passed, 0 skipped** with the checksum-pinned installed tools and approved MakeAppx. |
+| Trimmed publishes | `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64`: **6/6** self-contained, trimmed, single-file outputs with LICENSE/notices; native `win-x64` version/help/analyze-help/completion/config-path smoke passed. |
+| Format/tooling | `dotnet format --verify-no-changes` clean; PowerShell tooling tests passed; every repository `.ps1`/`.psm1`/`.psd1` parsed cleanly. |
+| Workflow gates | actionlint **1.7.12** clean; zizmor **1.29.0**, auditor/offline/minimum-low, no findings (one ignored by the tool). |
+| Action pins | Live GitHub release metadata resolved all six committed comments and SHAs exactly: checkout 7.0.1, setup-dotnet 6.0.0, upload-artifact 7.0.1, download-artifact 8.0.1, zizmor-action 0.6.2, action-gh-release 3.0.2. No pin was stale. |
+
+**Residuals:** no actionable section-R code issue remains. The genuine accepted
+residuals remain those already disclosed in §0: A9 audit-attribution precision,
+no committed NuGet lockfiles, deferred artifact attestations and administrator
+repository-setting enforcement, manual branch deletion, and opt-in live GitHub
+tests. The deliberately mutating live GitHub E2E was not run. Detailed command
+logs and the concise command/count ledger are in the closeout session artifacts,
+under `files/closeout-logs` and `files/final-r-closeout.md`.
+
 ### R.1 Verdict
 
 **The remediation is genuine and essentially complete: every blocker and major
