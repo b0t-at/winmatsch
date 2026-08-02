@@ -51,6 +51,55 @@ jobs:
           path: TestResults/
           if-no-files-found: ignore
 
+  windows-compiled-corpus:
+    name: Windows compiled installer corpus
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          global-json-file: global.json
+
+      - name: Acquire pinned compilers and build corpus
+        shell: pwsh
+        env:
+          WINMATSCH_COMPILED_CORPUS_OUTPUT: ${{ runner.temp }}\winmatsch-compiled-corpus
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:WINMATSCH_COMPILED_CORPUS_OUTPUT | Out-Null
+          & pwsh -NoProfile -File tests\WinMatsch.Testing\Tools\Build-WindowsInstallerCorpus.ps1 `
+            -OutputDirectory $env:WINMATSCH_COMPILED_CORPUS_OUTPUT `
+            -AcquireTools 2>&1 |
+            Tee-Object -FilePath "$env:WINMATSCH_COMPILED_CORPUS_OUTPUT\corpus-hashes.txt"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Run compiled corpus tests
+        env:
+          WINMATSCH_E2E_COMPILE_WINDOWS_FIXTURES: "1"
+        run: >
+          dotnet test tests\WinMatsch.E2E.Tests\WinMatsch.E2E.Tests.csproj
+          --configuration Release
+          --filter "FullyQualifiedName~WindowsCompiledCorpusTests"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=windows-compiled-corpus.trx"
+          --results-directory TestResults
+
+      - name: Upload compiled corpus failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-compiled-corpus-failure
+          path: |
+            TestResults/windows-compiled-corpus.trx
+            ${{ runner.temp }}\winmatsch-compiled-corpus\*.txt
+          if-no-files-found: ignore
+
   format:
     name: Format check
     runs-on: ubuntu-latest

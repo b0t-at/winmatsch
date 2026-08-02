@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Description>Reusable hermetic fixture descriptors, acquisition, recordings, and test doubles for WinMatsch tests.</Description>
+    <Description>Reusable hermetic fixture descriptors, acquisition, and test doubles for WinMatsch tests.</Description>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
