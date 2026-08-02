@@ -137,10 +137,7 @@ public sealed class RealProcessTests
 
             Assert.Equal(ExitCodes.Success, result.ExitCode);
             Assert.Contains("\"format\":\"portableExe\"", result.StandardOutput, StringComparison.Ordinal);
-            Assert.Contains(
-                "Downloading and analyzing installer",
-                result.StandardError,
-                StringComparison.Ordinal);
+            Assert.Equal(string.Empty, result.StandardError);
         }
         finally
         {

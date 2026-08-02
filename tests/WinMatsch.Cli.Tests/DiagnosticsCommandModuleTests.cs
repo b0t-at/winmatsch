@@ -37,10 +37,7 @@ public sealed class DiagnosticsCommandModuleTests
             ["analyze", "fixture.exe", "--format", "json"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Contains(
-            "Downloading and analyzing installer",
-            result.StandardError,
-            StringComparison.Ordinal);
+        Assert.Equal(string.Empty, result.StandardError);
         Assert.Equal(
             "{\"schemaVersion\":\"1.0\",\"input\":\"fixture.exe\",\"fileName\":\"fixture.exe\","
             + "\"remote\":false,\"fromCache\":false,"
@@ -128,10 +125,7 @@ public sealed class DiagnosticsCommandModuleTests
             ["validate", "manifests", "--offline", "--format", "json"]);
 
         Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
-        Assert.Contains(
-            "Downloading and validating manifests",
-            result.StandardError,
-            StringComparison.Ordinal);
+        Assert.Equal(string.Empty, result.StandardError);
         Assert.Equal(
             "{\"schemaVersion\":\"1.0\",\"isValid\":false,\"canProceed\":false,"
             + "\"networkMode\":\"offline\",\"networkModeCode\":\"offline\","
