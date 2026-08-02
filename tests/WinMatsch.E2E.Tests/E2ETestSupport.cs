@@ -5,11 +5,12 @@ namespace WinMatsch.E2E.Tests;
 
 internal sealed class TemporaryDirectory : IDisposable
 {
-    public TemporaryDirectory()
+    public TemporaryDirectory(string purpose = "run")
     {
         Path = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(),
             "winmatsch-e2e",
+            purpose,
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path);
     }
@@ -18,6 +19,25 @@ internal sealed class TemporaryDirectory : IDisposable
 
     public void Dispose()
     {
+        const int maximumAttempts = 5;
+        for (int attempt = 1; attempt < maximumAttempts; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(Path))
+                {
+                    Directory.Delete(Path, recursive: true);
+                }
+
+                return;
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(50 * attempt));
+            }
+        }
+
         if (Directory.Exists(Path))
         {
             Directory.Delete(Path, recursive: true);

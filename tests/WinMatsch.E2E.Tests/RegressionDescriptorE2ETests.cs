@@ -1,7 +1,11 @@
+using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using WinMatsch.Core;
+using WinMatsch.Rules;
+using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Testing.Fixtures;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Operations;
@@ -41,11 +45,7 @@ public sealed class RegressionDescriptorE2ETests
             }
             using var temporary = new TemporaryDirectory();
             RegressionFixturePipeline.WritePreviousManifests(fixture, temporary.Path);
-            LocalWorkflowEngine engine = RegressionFixturePipeline.CreateEngine(
-                fixture,
-                assets,
-                out FixtureHttpMessageHandler handler,
-                out FixtureReleaseSource releaseSource);
+            using RegressionFixtureRun run = RegressionFixturePipeline.CreateEngine(fixture, assets);
             WorkflowOperationRequest request = RegressionFixturePipeline.CreateRequest(fixture, temporary.Path);
             string[] explicitAssetUrls = fixture.Descriptor.Assets
                 .Where(static asset => asset.Synthetic.ExplicitArchitecture is not null)
@@ -65,8 +65,8 @@ public sealed class RegressionDescriptorE2ETests
 
             WorkflowOperationResult result = request switch
             {
-                NewOperationRequest create => await engine.NewAsync(create),
-                UpdateOperationRequest update => await engine.UpdateAsync(update),
+                NewOperationRequest create => await run.Engine.NewAsync(create),
+                UpdateOperationRequest update => await run.Engine.UpdateAsync(update),
                 _ => throw new InvalidDataException($"Unsupported fixture operation '{request.GetType().Name}'."),
             };
 
@@ -75,11 +75,11 @@ public sealed class RegressionDescriptorE2ETests
                 $"{fixture.Descriptor.Id}:{Environment.NewLine}{RegressionFixturePipeline.Describe(result)}");
             Assert.False(result.Applied);
             Assert.Empty(result.Plan.Questions);
-            Assert.Equal(fixture.Descriptor.Assets.Count, releaseSource.DiscoveredCount);
+            Assert.Equal(fixture.Descriptor.Assets.Count, run.ReleaseSource.DiscoveredCount);
             Assert.All(
                 fixture.Descriptor.Assets,
                 asset => Assert.Contains(
-                    handler.Requests,
+                    run.Handler.Requests,
                     requestRecord => requestRecord.Method == HttpMethod.Get
                         && requestRecord.Uri == asset.Url));
             Assert.NotEmpty(fixture.Descriptor.Regression.RuleIds);
@@ -138,6 +138,60 @@ public sealed class RegressionDescriptorE2ETests
                 AssertGoldens(fixture, result.Plan.AfterDocuments);
             }
         }
+    }
+
+    [Fact]
+    public async Task Developer_profile_pack_cannot_affect_an_isolated_regression_run()
+    {
+        RegressionFixture fixture = FixtureCatalog.All[0];
+        IReadOnlyDictionary<string, byte[]> assets = RegressionFixturePipeline.BuildAssets(fixture);
+        using var developerProfile = new TemporaryDirectory("developer-profile");
+        OverridePackYaml.WriteFile(
+        Path.Combine(
+            developerProfile.Path,
+            $"{fixture.Descriptor.Package.Identifier.ToUpperInvariant()}.yaml"),
+        new OverridePack
+        {
+            PackageIdentifier = new PackageIdentifier(fixture.Descriptor.Package.Identifier),
+            RuleModes = ImmutableDictionary<string, RuleMode>.Empty.Add(
+                "PIPE-1",
+                RuleMode.Disabled),
+        });
+        LocalWorkflowEngine profileEngine = RegressionFixturePipeline.CreateEngineWithOverrideStore(
+        fixture,
+        assets,
+        new OverridePackStoreOptions { RootDirectory = developerProfile.Path });
+        using var profileOutput = new TemporaryDirectory();
+        WorkflowOperationResult profileResult = await profileEngine.NewAsync(
+        Assert.IsType<NewOperationRequest>(
+            RegressionFixturePipeline.CreateRequest(fixture, profileOutput.Path)));
+        RuleExecution profileExecution = Assert.Single(
+        profileResult.Plan.Rules.Executions,
+        static execution => execution.RuleId == "PIPE-1");
+        Assert.Equal(RuleMode.Disabled, profileExecution.Mode);
+        Assert.Equal(RuleModeSource.PackageOverride, profileExecution.ModeSource);
+
+        using var isolatedOutput = new TemporaryDirectory();
+        string isolatedStorePath;
+        using (RegressionFixtureRun run = RegressionFixturePipeline.CreateEngine(fixture, assets))
+        {
+            isolatedStorePath = run.OverrideStorePath;
+            WorkflowOperationResult isolatedResult = await run.Engine.NewAsync(
+                Assert.IsType<NewOperationRequest>(
+                    RegressionFixturePipeline.CreateRequest(fixture, isolatedOutput.Path)));
+
+            Assert.Equal(WorkflowResultCode.Succeeded, isolatedResult.Code);
+            RuleExecution isolatedExecution = Assert.Single(
+                isolatedResult.Plan.Rules.Executions,
+                static execution => execution.RuleId == "PIPE-1");
+            Assert.Equal(RuleMode.Apply, isolatedExecution.Mode);
+            Assert.Equal(RuleModeSource.Default, isolatedExecution.ModeSource);
+            Assert.NotEqual(
+                Path.GetFullPath(developerProfile.Path),
+                Path.GetFullPath(run.OverrideStorePath));
+        }
+
+        Assert.False(Directory.Exists(isolatedStorePath));
     }
 
     [Fact]

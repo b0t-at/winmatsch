@@ -6,4 +6,8 @@
     <IsAotCompatible>false</IsAotCompatible>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WinMatsch.Downloads\WinMatsch.Downloads.csproj" />
+  </ItemGroup>
+
 </Project>

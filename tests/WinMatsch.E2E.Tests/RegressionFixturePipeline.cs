@@ -26,19 +26,42 @@ internal static class RegressionFixturePipeline
             asset => BuildAsset(fixture, asset),
             StringComparer.Ordinal);
 
-    public static LocalWorkflowEngine CreateEngine(
+    public static RegressionFixtureRun CreateEngine(
+        RegressionFixture fixture,
+        IReadOnlyDictionary<string, byte[]> assets)
+    {
+        var overrideStore = new TemporaryDirectory("regression-overrides");
+        var handler = new FixtureHttpMessageHandler(fixture.Descriptor, assets);
+        var releaseSource = new FixtureReleaseSource(fixture.Descriptor, assets);
+        var downloader = new InstallerDownloader(handler);
+        try
+        {
+            LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+                downloader,
+                releaseSource,
+                new FixtureClock(fixture.Descriptor.Provenance.ObservedAt),
+                new OverridePackStoreOptions { RootDirectory = overrideStore.Path });
+            return new(engine, handler, releaseSource, overrideStore);
+        }
+        catch
+        {
+            overrideStore.Dispose();
+            throw;
+        }
+    }
+
+    public static LocalWorkflowEngine CreateEngineWithOverrideStore(
         RegressionFixture fixture,
         IReadOnlyDictionary<string, byte[]> assets,
-        out FixtureHttpMessageHandler handler,
-        out FixtureReleaseSource releaseSource)
+        OverridePackStoreOptions overrideStore)
     {
-        handler = new FixtureHttpMessageHandler(fixture.Descriptor, assets);
-        releaseSource = new FixtureReleaseSource(fixture.Descriptor, assets);
-        var downloader = new InstallerDownloader(handler);
+        var handler = new FixtureHttpMessageHandler(fixture.Descriptor, assets);
+        var releaseSource = new FixtureReleaseSource(fixture.Descriptor, assets);
         return WorkflowProductionComposition.CreateLocalEngine(
-            downloader,
+            new InstallerDownloader(handler),
             releaseSource,
-            new FixtureClock(fixture.Descriptor.Provenance.ObservedAt));
+            new FixtureClock(fixture.Descriptor.Provenance.ObservedAt),
+            overrideStore);
     }
 
     public static WorkflowOperationRequest CreateRequest(RegressionFixture fixture, string outputDirectory)
@@ -467,6 +490,33 @@ internal static class RegressionFixturePipeline
     {
         public DateTimeOffset UtcNow { get; } = value;
     }
+}
+
+internal sealed class RegressionFixtureRun : IDisposable
+{
+    private readonly TemporaryDirectory _overrideStore;
+
+    public RegressionFixtureRun(
+        LocalWorkflowEngine engine,
+        FixtureHttpMessageHandler handler,
+        FixtureReleaseSource releaseSource,
+        TemporaryDirectory overrideStore)
+    {
+        Engine = engine;
+        Handler = handler;
+        ReleaseSource = releaseSource;
+        _overrideStore = overrideStore;
+    }
+
+    public LocalWorkflowEngine Engine { get; }
+
+    public FixtureHttpMessageHandler Handler { get; }
+
+    public FixtureReleaseSource ReleaseSource { get; }
+
+    public string OverrideStorePath => _overrideStore.Path;
+
+    public void Dispose() => _overrideStore.Dispose();
 }
 
 internal sealed class FixtureReleaseSource(

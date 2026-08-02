@@ -787,7 +787,7 @@ public sealed class DownloadCache
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                FileStream processLock = OpenAndLock(lockPath, mode);
+                FileStream processLock = DownloadCacheProcessLock.Open(lockPath, mode);
                 bool returnLock = false;
                 try
                 {
@@ -833,39 +833,6 @@ public sealed class DownloadCache
                 ? remaining
                 : _processLockPollInterval;
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private static FileStream OpenAndLock(string lockPath, FileMode mode)
-    {
-        bool usesExplicitByteRangeLock = !OperatingSystem.IsMacOS();
-        bool usesExclusiveOpenFileLock = !OperatingSystem.IsWindows();
-        var stream = new FileStream(
-            lockPath,
-            mode,
-            FileAccess.ReadWrite,
-            usesExclusiveOpenFileLock
-                ? FileShare.None
-                : FileShare.ReadWrite | FileShare.Delete,
-            bufferSize: 1,
-            FileOptions.None);
-        bool locked = false;
-        try
-        {
-            if (usesExplicitByteRangeLock)
-            {
-                stream.Lock(0, 1);
-            }
-
-            locked = true;
-            return stream;
-        }
-        finally
-        {
-            if (!locked)
-            {
-                stream.Dispose();
-            }
         }
     }
 

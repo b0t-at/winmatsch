@@ -9,20 +9,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$innoVersion = '6.4.0'
-$nsisVersion = '3.10'
-$wixVersion = '5.0.2'
-$windowsSdkVersion = '10.0.26100.0'
-$makeAppxVersion = '10.0.26100.8249'
-$makeAppxSha256 = '408273FECACD211B9E9001F79F33FF38DFB8203D516FF4AFB3685C7BAB26D122'
-$innoInstallerUri = 'https://github.com/jrsoftware/issrc/releases/download/is-6_4_0/innosetup-6.4.0.exe'
-$innoInstallerSha256 = 'A360DB165CFB1D42D195B020700181E7EAF5DB45C1249A24EDB51C3C33E9D659'
-$nsisInstallerUri = 'https://pilotfiber.dl.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10-setup.exe'
-$nsisInstallerSha256 = '4313D352E0DAFD1F22B6517126A655CAE3B444FA758D2845EDDFBE72F24F7BDD'
-$wixPackageUri = 'https://api.nuget.org/v3-flatcontainer/wix/5.0.2/wix.5.0.2.nupkg'
-$wixPackageSha256 = 'F30EF0C74E2A986126539C5780BE93AC24E8136EAF723B1937B26272703AE173'
-$balPackageUri = 'https://api.nuget.org/v3-flatcontainer/wixtoolset.bal.wixext/5.0.2/wixtoolset.bal.wixext.5.0.2.nupkg'
-$balPackageSha256 = '22422B50A925477E33C2B5F78D2965A9A09C6622D17BA5AA5365B20EC662B7C8'
+$toolingModule = Join-Path $PSScriptRoot 'WindowsInstallerCorpus.Tooling.psm1'
+Import-Module $toolingModule -Force
+$toolManifest = Get-WindowsInstallerCorpusToolManifest
+$innoVersion = $toolManifest.InnoVersion
+$nsisVersion = $toolManifest.NsisVersion
+$wixVersion = $toolManifest.WixVersion
+$windowsSdkVersion = $toolManifest.WindowsSdkVersion
 $toolRoot = if ($env:WINMATSCH_COMPILER_TOOL_ROOT) {
     $env:WINMATSCH_COMPILER_TOOL_ROOT
 } elseif ($env:RUNNER_TEMP) {
@@ -37,65 +30,32 @@ $nsisRoot = Join-Path $toolRoot 'nsis'
 $wixRoot = Join-Path $toolRoot 'wix'
 $balRoot = Join-Path $toolRoot 'bal'
 
-function Assert-FileHash([string] $Path, [string] $ExpectedSha256) {
-    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
-    if ($actual -cne $ExpectedSha256) {
-        throw "File '$Path' has SHA-256 '$actual', expected '$ExpectedSha256'."
-    }
-}
-
-function Get-VerifiedFile(
-    [string] $Uri,
-    [string] $Path,
-    [string] $ExpectedSha256,
-    [bool] $AllowDownload
-) {
-    if (-not (Test-Path -LiteralPath $Path)) {
-        if (-not $AllowDownload) {
-            throw "Pinned package '$Path' is absent; rerun with -AcquireTools."
-        }
-
-        & curl.exe --fail --location --silent --show-error --proto '=https' --tlsv1.2 `
-            --output $Path $Uri
-        if ($LASTEXITCODE -ne 0) {
-            throw "Pinned package download from '$Uri' failed."
-        }
-    }
-
-    Assert-FileHash $Path $ExpectedSha256
-    return (Resolve-Path -LiteralPath $Path).Path
-}
-
-function Assert-SignedTool([string] $Path) {
-    $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-        throw "Tool '$Path' does not have a valid Authenticode signature: $($signature.Status)."
-    }
-}
-
 New-Item -ItemType Directory -Force -Path $toolRoot, $packageRoot | Out-Null
-$innoInstaller = Get-VerifiedFile `
-    $innoInstallerUri `
-    (Join-Path $packageRoot "innosetup-$innoVersion.exe") `
-    $innoInstallerSha256 `
-    $AcquireTools.IsPresent
-$nsisInstaller = Get-VerifiedFile `
-    $nsisInstallerUri `
-    (Join-Path $packageRoot "nsis-$nsisVersion-setup.exe") `
-    $nsisInstallerSha256 `
-    $AcquireTools.IsPresent
-$wixPackage = Get-VerifiedFile `
-    $wixPackageUri `
-    (Join-Path $packageRoot "wix.$wixVersion.nupkg") `
-    $wixPackageSha256 `
-    $AcquireTools.IsPresent
-$balPackage = Get-VerifiedFile `
-    $balPackageUri `
-    (Join-Path $packageRoot "WixToolset.Bal.wixext.$wixVersion.nupkg") `
-    $balPackageSha256 `
-    $AcquireTools.IsPresent
-
-Assert-SignedTool $innoInstaller
+$innoAcquisition = Get-VerifiedFile `
+    -Uris $toolManifest.InnoInstallerUris `
+    -Path (Join-Path $packageRoot "innosetup-$innoVersion.exe") `
+    -ExpectedSha256 $toolManifest.InnoInstallerSha256 `
+    -AllowDownload $AcquireTools.IsPresent
+$nsisAcquisition = Get-VerifiedFile `
+    -Uris $toolManifest.NsisInstallerUris `
+    -Path (Join-Path $packageRoot "nsis-$nsisVersion-setup.exe") `
+    -ExpectedSha256 $toolManifest.NsisInstallerSha256 `
+    -AllowDownload $AcquireTools.IsPresent
+$wixAcquisition = Get-VerifiedFile `
+    -Uris $toolManifest.WixPackageUris `
+    -Path (Join-Path $packageRoot "wix.$wixVersion.nupkg") `
+    -ExpectedSha256 $toolManifest.WixPackageSha256 `
+    -AllowDownload $AcquireTools.IsPresent
+$balAcquisition = Get-VerifiedFile `
+    -Uris $toolManifest.BalPackageUris `
+    -Path (Join-Path $packageRoot "WixToolset.Bal.wixext.$wixVersion.nupkg") `
+    -ExpectedSha256 $toolManifest.BalPackageSha256 `
+    -AllowDownload $AcquireTools.IsPresent
+$innoInstaller = $innoAcquisition.Path
+$nsisInstaller = $nsisAcquisition.Path
+$wixPackage = $wixAcquisition.Path
+$balPackage = $balAcquisition.Path
+$innoSigner = Assert-AuthenticodeSignature -Path $innoInstaller
 
 if ($AcquireTools) {
     foreach ($directory in @($innoRoot, $nsisRoot, $wixRoot, $balRoot)) {
@@ -144,7 +104,10 @@ $innoVersionMarker = Join-Path $innoRoot 'unins000.exe'
 $nsis = Join-Path $nsisRoot 'makensis.exe'
 $wix = Join-Path $wixRoot 'wix.exe'
 $balExtension = Join-Path $balRoot 'wixext5\WixToolset.BootstrapperApplications.wixext.dll'
-$makeAppx = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\$windowsSdkVersion\x64\makeappx.exe"
+$defaultWindowsSdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+$makeAppxCandidates = Get-MakeAppxCandidatePaths `
+    -SdkVersion $windowsSdkVersion `
+    -DefaultSdkRoot $defaultWindowsSdkRoot
 
 if (-not (Test-Path -LiteralPath $inno)) { throw "Pinned Inno Setup $innoVersion is not installed." }
 if (-not (Test-Path -LiteralPath $innoVersionMarker)) {
@@ -155,12 +118,7 @@ if (-not (Test-Path -LiteralPath $wix)) { throw "Pinned WiX $wixVersion is not i
 if (-not (Test-Path -LiteralPath $balExtension)) {
     throw "Pinned WiX Bal extension $wixVersion is not installed under '$balRoot'."
 }
-if (-not (Test-Path -LiteralPath $makeAppx)) {
-    throw "Pinned Windows SDK $windowsSdkVersion MakeAppx was not found."
-}
-
-Assert-SignedTool $inno
-Assert-SignedTool $makeAppx
+$installedInnoSigner = Assert-AuthenticodeSignature -Path $inno
 
 $actualInnoVersion = (Get-Item -LiteralPath $innoVersionMarker).VersionInfo.ProductVersion.Trim()
 if ($actualInnoVersion -cne $innoVersion) {
@@ -172,12 +130,12 @@ if ($actualNsisVersion -cne $nsisVersion) {
     throw "NSIS has version '$actualNsisVersion', expected exactly '$nsisVersion'."
 }
 
-$actualSdkVersion = [Version](
-    (Get-Item -LiteralPath $makeAppx).VersionInfo.FileVersion.Split(' ', 2)[0])
-if ($actualSdkVersion -ne [Version]$makeAppxVersion) {
-    throw "MakeAppx has serviced version '$actualSdkVersion', expected exactly '$makeAppxVersion'."
-}
-Assert-FileHash $makeAppx $makeAppxSha256
+$makeAppxAcquisition = Resolve-ApprovedMakeAppx `
+    -CandidatePaths $makeAppxCandidates `
+    -SdkVersion $windowsSdkVersion `
+    -MinimumFileVersion ([Version]$toolManifest.MakeAppxMinimumFileVersion) `
+    -ApprovedSignerOrganization $toolManifest.MakeAppxSignerOrganization
+$makeAppx = $makeAppxAcquisition.Path
 
 $actualWixVersion = (& $wix --version | Select-Object -First 1).Trim()
 $normalizedWixVersion = ($actualWixVersion -split '\+', 2)[0]
@@ -188,11 +146,11 @@ if ($normalizedWixVersion -ne $wixVersion) {
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $resolvedOutput = (Resolve-Path -LiteralPath $OutputDirectory).Path
 
-"TOOL InnoSetup $innoVersion $innoInstallerSha256"
-"TOOL NSIS $nsisVersion $nsisInstallerSha256"
-"TOOL WiX $wixVersion $wixPackageSha256"
-"TOOL WixToolset.Bal.wixext $wixVersion $balPackageSha256"
-"TOOL WindowsSDK-MakeAppx $makeAppxVersion $makeAppxSha256"
+"PROVENANCE InnoSetup version=$innoVersion sha256=$($innoAcquisition.Sha256) source=$($innoAcquisition.Source) installerSigner=$innoSigner installedSigner=$installedInnoSigner constraint=exact-version-sha256-valid-authenticode"
+"PROVENANCE NSIS version=$nsisVersion sha256=$($nsisAcquisition.Sha256) source=$($nsisAcquisition.Source) constraint=exact-version-sha256"
+"PROVENANCE WiX version=$wixVersion sha256=$($wixAcquisition.Sha256) source=$($wixAcquisition.Source) constraint=exact-version-sha256"
+"PROVENANCE WixToolset.Bal.wixext version=$wixVersion sha256=$($balAcquisition.Sha256) source=$($balAcquisition.Source) constraint=exact-version-sha256"
+"PROVENANCE WindowsSDK-MakeAppx sdkVersion=$windowsSdkVersion fileVersion=$($makeAppxAcquisition.FileVersion) sha256=$($makeAppxAcquisition.Sha256) source=$($makeAppxAcquisition.Source) signer=$($makeAppxAcquisition.Signer) constraint=valid-microsoft-authenticode-sdk-build-$(([Version]$windowsSdkVersion).Build)-minimum-$($toolManifest.MakeAppxMinimumFileVersion)"
 
 & $inno "/O$resolvedOutput" '/Ffixture-inno' (Join-Path $sourceRoot 'fixture.iss')
 if ($LASTEXITCODE -ne 0) { throw "Inno fixture compilation failed." }
