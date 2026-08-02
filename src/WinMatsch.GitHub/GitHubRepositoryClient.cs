@@ -1099,6 +1099,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             "DELETED" => PullRequestFileStatus.Removed,
             "RENAMED" => PullRequestFileStatus.Renamed,
             "COPIED" => PullRequestFileStatus.Copied,
+            "CHANGED" => PullRequestFileStatus.Changed,
             _ => throw new GitHubApiException(
                 $"GitHub returned unsupported GraphQL pull request file status '{status}'."),
         };

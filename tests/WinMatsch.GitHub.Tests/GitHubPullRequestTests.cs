@@ -262,6 +262,26 @@ public sealed class GitHubPullRequestTests
     }
 
     [Fact]
+    public async Task Pull_request_changed_files_batch_maps_graphql_changed_status()
+    {
+        PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlFilesJson([pullRequest], changeType: "CHANGED")));
+
+        IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> files =
+            await GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    [pullRequest],
+                    TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            PullRequestFileStatus.Changed,
+            Assert.Single(files[pullRequest.Number]).Status);
+    }
+
+    [Fact]
     public async Task Pull_request_changed_files_batch_fails_closed_before_unbounded_truncation_fallback()
     {
         PullRequestInfo[] pullRequests = CreatePullRequests(17);
@@ -694,7 +714,8 @@ public sealed class GitHubPullRequestTests
 
     private static string GraphQlFilesJson(
         IEnumerable<PullRequestInfo> pullRequests,
-        bool hasNextPage = false)
+        bool hasNextPage = false,
+        string changeType = "MODIFIED")
     {
         string nodes = string.Join(
             ',',
@@ -705,7 +726,7 @@ public sealed class GitHubPullRequestTests
                   "number":{{pullRequest.Number}},
                   "headRefOid":"{{pullRequest.HeadSha}}",
                   "files":{
-                    "nodes":[{"path":"manifests/example.yaml","changeType":"MODIFIED"}],
+                    "nodes":[{"path":"manifests/example.yaml","changeType":"{{changeType}}"}],
                     "pageInfo":{"hasNextPage":{{hasNextPage.ToString().ToLowerInvariant()}}}
                   }
                 }
