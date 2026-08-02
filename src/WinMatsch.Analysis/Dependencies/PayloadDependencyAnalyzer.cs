@@ -323,6 +323,12 @@ public sealed partial class PayloadDependencyAnalyzer
             }
 
             byte[] content = read.Content;
+            if (content.LongLength != entry.Length)
+            {
+                throw new InvalidDataException(
+                    $"Archive payload '{path}' expanded to {content.LongLength} bytes instead of its declared size of {entry.Length} bytes.");
+            }
+
             if (isRuntimeConfig)
             {
                 runtimeConfigs.Add(new RuntimeConfigPayload(path, ParseRuntimeConfig(content)));

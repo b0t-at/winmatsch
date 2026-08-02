@@ -505,21 +505,17 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
-    public void Inflated_declared_length_does_not_consume_the_actual_byte_budget()
+    public void Inflated_declared_length_is_rejected_as_corrupt()
     {
         byte[] pe = DependencyFixtures.BuildPe(Machine.Amd64, "VCRUNTIME140.dll");
         using var archive = new MemoryStream(SquirrelFixtures.BuildStoredZip(
             [("app.exe", pe)],
             declaredSizeOverrideForLastEntry: 200L * 1024 * 1024));
 
-        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "declared-size.zip");
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(
+            () => _analyzer.Analyze(archive, "declared-size.zip"));
 
-        DependencyEvidence evidence = Find(
-            analysis,
-            "app.exe",
-            DependencyEvidenceKind.VisualCppRuntime);
-        Assert.Equal(DependencyEvidenceStatus.Detected, evidence.Status);
-        Assert.True(analysis.IsComplete);
+        Assert.Contains("instead of its declared size", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
