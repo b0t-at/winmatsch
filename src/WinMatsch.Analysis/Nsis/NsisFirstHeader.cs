@@ -18,6 +18,7 @@ internal sealed class NsisFirstHeader
     // firstheader.flags bits (FH_FLAGS_*): 1 = uninstaller, 2 = silent, 4 = no CRC, 8 = force CRC.
     private const uint Signature = 0xDEADBEEF;
     private const int ScanStep = 512;
+    private const int MaxSignatureScanBytes = 1024 * 1024;
 
     private static ReadOnlySpan<byte> Magic => "NullsoftInst"u8;
 
@@ -42,9 +43,10 @@ internal sealed class NsisFirstHeader
     public long DataOffset { get; }
 
     /// <summary>
-    /// Scans the PE overlay in 512-byte steps for the NSIS signature and parses the first
-    /// header. Returns null when the file has no overlay or no signature — it is not an NSIS
-    /// installer.
+    /// Scans the first MiB of the PE overlay in 512-byte steps for the NSIS signature and
+    /// parses the first header. Makensis places the record at the first aligned position;
+    /// the bounded allowance tolerates nonstandard padding without scanning arbitrary payloads.
+    /// Returns null when the file has no overlay or no signature — it is not an NSIS installer.
     /// </summary>
     /// <exception cref="InvalidDataException">
     /// The signature was found but the declared header size is implausible.
@@ -60,7 +62,8 @@ internal sealed class NsisFirstHeader
         // makensis pads the stub to the 512-byte scan granularity before appending the archive.
         long position = (overlayStart + ScanStep - 1) / ScanStep * ScanStep;
         Span<byte> record = stackalloc byte[Size];
-        for (; position + Size <= stream.Length; position += ScanStep)
+        long scanEnd = Math.Min(stream.Length, position + MaxSignatureScanBytes);
+        for (; position + Size <= scanEnd; position += ScanStep)
         {
             stream.Position = position;
             stream.ReadExactly(record);

@@ -856,7 +856,7 @@ internal static partial class InnoFormatReader
             if (candidateLimitExceeded)
             {
                 diagnostics.Add(new AnalysisDiagnostic(
-                    "INNO013",
+                    "INNO015",
                     $"Inno Setup payload inspection found more than {options.MaximumPayloadCandidates} valid PE candidates; remaining architecture evidence was skipped.",
                     RequiresManualAnalysis: true));
             }
@@ -932,7 +932,7 @@ internal static partial class InnoFormatReader
         {
             complete = false;
             diagnostics.Add(new AnalysisDiagnostic(
-                "INNO013",
+                "INNO015",
                 $"Inno Setup payload inspection found more than {options.MaximumPayloadCandidates} valid PE candidates; remaining architecture evidence was skipped.",
                 RequiresManualAnalysis: true));
         }

@@ -11,8 +11,10 @@ namespace WinMatsch.Analysis;
 /// <summary>Reads bounded PE architecture evidence from a 7-Zip self-extracting executable.</summary>
 public sealed class SevenZipSfxProbe : IExeFormatProbe
 {
-    private const int MaxEntries = 256;
-    private const long MaxPayloadBytes = 256L * 1024 * 1024;
+    private const int MaxEntries = AnalysisLimits.MaxArchiveEntries;
+    private const int MaxExecutableEntries = 256;
+    private const long MaxPayloadBytes = AnalysisLimits.MaxEntryBytes;
+    private const long MaxExpandedBytes = AnalysisLimits.MaxExpandedArchiveBytes;
     private const int MaxSignatureScanBytes = 1024 * 1024;
     private static readonly byte[] _sevenZipSignature = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
@@ -34,12 +36,37 @@ public sealed class SevenZipSfxProbe : IExeFormatProbe
                 new ReaderOptions { LeaveStreamOpen = true });
             var payloads = new List<(Architecture Architecture, long Size)>();
             int entries = 0;
+            int executableEntries = 0;
+            long expandedBytes = 0;
+            string? limitReason = null;
             foreach (var entry in archive.Entries)
             {
                 if (++entries > MaxEntries)
                 {
-                    throw new AnalysisResourceLimitException(
-                        $"The 7-Zip self-extractor contains more than {MaxEntries} entries.");
+                    limitReason = $"it contains more than {MaxEntries} entries";
+                    break;
+                }
+
+                if (entry.Size < 0)
+                {
+                    throw new InvalidDataException(
+                        $"The 7-Zip self-extractor entry '{entry.Key}' declares a negative size.");
+                }
+
+                try
+                {
+                    expandedBytes = checked(expandedBytes + entry.Size);
+                }
+                catch (OverflowException)
+                {
+                    limitReason = "its declared expanded size overflows a 64-bit counter";
+                    break;
+                }
+
+                if (expandedBytes > MaxExpandedBytes)
+                {
+                    limitReason = $"its declared expanded size exceeds {MaxExpandedBytes} bytes";
+                    break;
                 }
 
                 if (entry.IsDirectory
@@ -51,10 +78,19 @@ public sealed class SevenZipSfxProbe : IExeFormatProbe
                     continue;
                 }
 
+                if (++executableEntries > MaxExecutableEntries)
+                {
+                    limitReason = $"it contains more than {MaxExecutableEntries} executable candidates";
+                    break;
+                }
+
                 using Stream source = entry.OpenEntryStream();
-                using var payload = new MemoryStream();
-                source.CopyTo(payload);
-                payload.Position = 0;
+                byte[] payloadBytes = AnalysisLimits.ReadBounded(
+                    source,
+                    entry.Size,
+                    $"7-Zip self-extractor entry '{name}'",
+                    MaxPayloadBytes);
+                using var payload = new MemoryStream(payloadBytes, writable: false);
                 PeImportInspection inspection = PeImportReader.Inspect(
                     payload,
                     PayloadDependencyAnalyzerOptions.DefaultMaximumImportDescriptors,
@@ -66,7 +102,15 @@ public sealed class SevenZipSfxProbe : IExeFormatProbe
             }
 
             (Architecture? detectedArchitecture, AnalysisDiagnostic? diagnostic) = SelectArchitecture(payloads);
-            IReadOnlyList<AnalysisDiagnostic> diagnostics = diagnostic is null ? [] : [diagnostic];
+            List<AnalysisDiagnostic> diagnostics = diagnostic is null ? [] : [diagnostic];
+            if (limitReason is not null)
+            {
+                diagnostics.Add(new AnalysisDiagnostic(
+                    "SFX002",
+                    $"7-Zip self-extractor inspection stopped because {limitReason}; architecture is based only on evidence within the configured bounds.",
+                    RequiresManualAnalysis: true));
+            }
+
             return new InstallerAnalysis
             {
                 Format = DetectedInstallerFormat.GenericInstallerExe,

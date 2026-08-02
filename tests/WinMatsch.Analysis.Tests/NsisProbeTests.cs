@@ -371,6 +371,21 @@ public class NsisProbeTests
     }
 
     [Fact]
+    public void Signature_search_is_bounded_for_non_nsis_overlays()
+    {
+        byte[] exe = PeFixtures.BuildExe();
+        byte[] withLargeOverlay = [.. exe, .. new byte[2 * 1024 * 1024]];
+        using var stream = new CountingReadStream(new MemoryStream(withLargeOverlay));
+        using var peFile = new PeFile(stream);
+        stream.ResetBytesRead();
+
+        InstallerAnalysis? analysis = new NsisProbe().Probe(peFile, stream);
+
+        Assert.Null(analysis);
+        Assert.InRange(stream.BytesRead, 1, 64 * 1024);
+    }
+
+    [Fact]
     public void Langtables_before_strings_layout_parses()
     {
         // Tauri's NSIS builds emit the langtables block before the strings block.
@@ -522,5 +537,69 @@ public class NsisProbeTests
         Assert.Equal("NSIS003", diagnostic.Code);
         Assert.True(diagnostic.RequiresManualAnalysis);
         return diagnostic;
+    }
+
+    private sealed class CountingReadStream(Stream inner) : Stream
+    {
+        public long BytesRead { get; private set; }
+
+        public override bool CanRead => inner.CanRead;
+
+        public override bool CanSeek => inner.CanSeek;
+
+        public override bool CanWrite => inner.CanWrite;
+
+        public override long Length => inner.Length;
+
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public void ResetBytesRead() => BytesRead = 0;
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int read = inner.Read(buffer, offset, count);
+            BytesRead += read;
+            return read;
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            int read = inner.Read(buffer);
+            BytesRead += read;
+            return read;
+        }
+
+        public override int ReadByte()
+        {
+            int value = inner.ReadByte();
+            if (value >= 0)
+            {
+                BytesRead++;
+            }
+
+            return value;
+        }
+
+        public override void Flush() => inner.Flush();
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void SetLength(long value) => inner.SetLength(value);
+
+        public override void Write(byte[] buffer, int offset, int count) => inner.Write(buffer, offset, count);
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
     }
 }

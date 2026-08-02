@@ -175,7 +175,7 @@ public sealed partial class PayloadDependencyAnalyzer
             }
 
             diagnostics.AddRange(metadata.Diagnostics.Where(static diagnostic =>
-                diagnostic.Code is "INNO003" or "INNO007" or "INNO008" or "INNO009" or "INNO013"));
+                diagnostic.Code is "INNO003" or "INNO007" or "INNO008" or "INNO009" or "INNO013" or "INNO015"));
             return metadata.PayloadInspectionIsComplete;
         }
         catch (UnsupportedInnoVersionException)

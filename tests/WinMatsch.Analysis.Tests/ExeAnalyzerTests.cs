@@ -21,12 +21,12 @@ public class ExeAnalyzerTests
         Assert.Equal(
             [
                 typeof(AdvancedInstallerProbe),
-                typeof(JavaArchiveProbe),
-                typeof(SevenZipSfxProbe),
                 typeof(BurnProbe),
                 typeof(InnoProbe),
                 typeof(NsisProbe),
                 typeof(SquirrelProbe),
+                typeof(JavaArchiveProbe),
+                typeof(SevenZipSfxProbe),
             ],
             probeTypes);
     }
@@ -52,6 +52,22 @@ public class ExeAnalyzerTests
         => AssertFormat(NsisFixtures.BuildInstaller(), DetectedInstallerFormat.Nullsoft);
 
     [Fact]
+    public void Nsis_outer_format_wins_over_an_embedded_seven_zip_payload()
+    {
+        byte[] installer = NsisFixtures.BuildInstaller(new NsisFixtures.Options
+        {
+            PayloadNames = ["app-64.7z"],
+        });
+        byte[] payload = SevenZipFixtures.Build(("app-64.7z", [1, 2, 3]));
+        using var stream = new MemoryStream([.. installer, .. payload]);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "electron-setup.exe");
+
+        Assert.Equal(DetectedInstallerFormat.Nullsoft, analysis.Format);
+        Assert.Equal(InstallerType.Nullsoft, Assert.Single(analysis.Installers).InstallerType);
+    }
+
+    [Fact]
     public void Squirrel_fixture_is_detected_end_to_end()
         => AssertFormat(
             SquirrelFixtures.BuildClassicSetup(
@@ -73,6 +89,69 @@ public class ExeAnalyzerTests
         Assert.Equal(InstallerType.Exe, installer.InstallerType);
         Assert.True(analysis.IsSelfExtractorStub);
         Assert.Empty(analysis.Diagnostics);
+    }
+
+    [Fact]
+    public void Seven_zip_self_extractor_scans_beyond_the_old_256_entry_limit()
+    {
+        byte[] content = [1];
+        List<(string Name, byte[] Data)> entries =
+        [
+            .. Enumerable.Range(0, 256).Select(index => ($"content/{index}.txt", content)),
+            ("core/app.exe", DependencyFixtures.BuildPe(Machine.Amd64)),
+        ];
+        byte[] stub = PeFixtures.BuildExe(Machine.I386);
+        byte[] archive = SevenZipFixtures.Build([.. entries]);
+        using var stream = new MemoryStream([.. stub, .. archive]);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "app-installer.exe");
+
+        Assert.Equal(Architecture.X64, Assert.Single(analysis.Installers).Architecture);
+        Assert.DoesNotContain(analysis.Diagnostics, static diagnostic => diagnostic.Code == "SFX002");
+    }
+
+    [Fact]
+    public void Seven_zip_self_extractor_executable_candidate_limit_degrades_with_partial_evidence()
+    {
+        byte[] payload = DependencyFixtures.BuildPe(Machine.Amd64);
+        (string Name, byte[] Data)[] entries =
+        [
+            .. Enumerable.Range(0, 257).Select(index => ($"core/app-{index}.exe", payload)),
+        ];
+        byte[] stub = PeFixtures.BuildExe(Machine.I386);
+        byte[] archive = SevenZipFixtures.Build(entries);
+        using var stream = new MemoryStream([.. stub, .. archive]);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "app-installer.exe");
+
+        Assert.Equal(Architecture.X64, Assert.Single(analysis.Installers).Architecture);
+        AnalysisDiagnostic diagnostic = Assert.Single(
+            analysis.Diagnostics,
+            static diagnostic => diagnostic.Code == "SFX002");
+        Assert.True(diagnostic.RequiresManualAnalysis);
+        Assert.Contains("256 executable candidates", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Seven_zip_self_extractor_entry_limit_degrades_with_bounded_evidence()
+    {
+        byte[] content = [1];
+        (string Name, byte[] Data)[] entries =
+        [
+            .. Enumerable.Range(0, AnalysisLimits.MaxArchiveEntries + 1)
+                .Select(index => ($"content/{index}.txt", content)),
+        ];
+        byte[] stub = PeFixtures.BuildExe(Machine.I386);
+        byte[] archive = SevenZipFixtures.Build(entries);
+        using var stream = new MemoryStream([.. stub, .. archive]);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "app-installer.exe");
+
+        AnalysisDiagnostic diagnostic = Assert.Single(
+            analysis.Diagnostics,
+            static diagnostic => diagnostic.Code == "SFX002");
+        Assert.True(diagnostic.RequiresManualAnalysis);
+        Assert.Contains(AnalysisLimits.MaxArchiveEntries.ToString(), diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]

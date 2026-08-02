@@ -1021,7 +1021,7 @@ public class PayloadDependencyAnalyzerTests
         PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "setup.exe");
 
         Assert.False(analysis.IsComplete);
-        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "INNO013");
+        Assert.Contains(analysis.Diagnostics, diagnostic => diagnostic.Code == "INNO015");
     }
 
     [Fact]

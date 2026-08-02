@@ -18,12 +18,14 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
     private static readonly IReadOnlyList<IExeFormatProbe> _probes =
     [
         new AdvancedInstallerProbe(),
-        new JavaArchiveProbe(),
-        new SevenZipSfxProbe(),
         new BurnProbe(),
         new InnoProbe(),
         new NsisProbe(),
         new SquirrelProbe(),
+        // Generic container signatures run last: specific installers such as NSIS may embed
+        // a valid JAR or 7z payload that does not redefine their outer executable format.
+        new JavaArchiveProbe(),
+        new SevenZipSfxProbe(),
     ];
 
     // An EXE whose OriginalFilename or FileDescription contains one of these is treated as an

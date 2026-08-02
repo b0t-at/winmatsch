@@ -8,9 +8,10 @@ copied. Parsing is defensive throughout — see [limits](#limits-and-safety).
 ## Support matrix
 
 Detection is deterministic: files are dispatched by extension, then verified
-by magic bytes; executables are probed by format-specific probes in a fixed
-order (Advanced Installer → Java archive → 7-Zip SFX → Burn → Inno Setup →
-NSIS → Squirrel) before falling back to keyword heuristics.
+by magic bytes; executables are probed in a fixed order (Advanced Installer →
+Burn → Inno Setup → NSIS → Squirrel → Java archive → 7-Zip SFX) before falling
+back to keyword heuristics. Generic container signatures run after specific
+installer formats because those installers may embed archives as payloads.
 
 | Format | Detected as | Evidence extracted |
 | --- | --- | --- |
@@ -23,7 +24,7 @@ NSIS → Squirrel) before falling back to keyword heuristics.
 | Inno Setup (`.exe`) | `InnoSetup` | Inno 5.5.7–7.0.0.3 structures (through Inno Setup 7.0.2), including loader revisions 1/2, architecture expressions/lists, privileges, languages, encryption mode and PE payload evidence, plus PE version info. |
 | Advanced Installer (`.exe`) | `AdvancedInstaller` | 7-Zip SFX-wrapped Advanced Installer payload metadata. |
 | Java executable archive (`.exe`) | `PortableExe` | Detects PE/JAR polyglots and reports neutral when bundled native libraries cover multiple architectures. |
-| 7-Zip SFX (`.exe`) | `GenericInstallerExe` | Bounded embedded PE inspection with installed-application architecture voting; excludes setup/uninstall helper executables. |
+| 7-Zip SFX (`.exe`) | `GenericInstallerExe` | Bounded embedded PE inspection with installed-application architecture voting; excludes setup/uninstall helper executables. Uses the shared 10,000-entry/1 GB archive ceilings and emits `SFX002` with partial evidence when a ceiling is reached. |
 | Squirrel / Clowd.Squirrel (`.exe`) | `Squirrel` | Squirrel package metadata. |
 | Generic installer (`.exe`) | `GenericInstallerExe` | PE version info (product name, company, product version, file version, copyright, original filename, description), architecture, elevation requirement. Chosen when installer keywords (`installer`, `setup`, 7z SFX markers) match but no specific format probe does. |
 | Portable executable (`.exe`) | `PortableExe` | Same PE metadata; classified as portable when no installer signals are present. |
@@ -82,7 +83,9 @@ skipped in ZIP scans.
   scanned for nested installers.
 - **Fully encrypted Inno headers** are identified as Inno but require manual
   analysis (`INNO013`) because header metadata cannot be decrypted without the
-  setup password. File-only encryption does not prevent header inspection.
+  setup password. File-only encryption does not prevent header inspection and
+  reports unavailable payload evidence as `INNO014`; payload candidate-limit
+  exhaustion is reported separately as `INNO015`.
 - **Unknown self-extracting archive formats** fall back to generic EXE
   classification; recognized 7-Zip SFX and Advanced Installer wrappers receive
   bounded payload inspection.

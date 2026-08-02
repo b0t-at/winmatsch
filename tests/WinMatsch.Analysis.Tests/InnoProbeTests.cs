@@ -768,7 +768,7 @@ public class InnoProbeTests
 
         Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
         Assert.False(metadata.ArchitectureIsConclusive);
-        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO013");
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO015");
     }
 
     [Fact]
@@ -793,7 +793,7 @@ public class InnoProbeTests
 
         Assert.Equal(Architecture.X64, metadata.EffectiveArchitecture);
         Assert.False(metadata.ArchitectureIsConclusive);
-        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO013");
+        Assert.Contains(metadata.Diagnostics, diagnostic => diagnostic.Code == "INNO015");
     }
 
     [Fact]
