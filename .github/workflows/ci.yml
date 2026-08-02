@@ -116,7 +116,6 @@ jobs:
           persona: auditor
           min-severity: low
           online-audits: false
-          token: ""
           advanced-security: false
           annotations: true
 
