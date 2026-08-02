@@ -251,7 +251,10 @@ internal static class NsisFixtures
     {
         using var output = new MemoryStream();
         byte[] properties;
-        using (var lzma = new LzmaStream(new LzmaEncoderProperties(), false, output))
+        using (var lzma = LzmaStream.Create(
+                   new LzmaEncoderProperties(),
+                   isLzma2: false,
+                   output))
         {
             properties = lzma.Properties;
             lzma.Write(data);

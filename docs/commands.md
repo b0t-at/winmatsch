@@ -38,6 +38,8 @@ through to the next layer. See the
 | `--no-color` | flag | Disable ANSI color (the `NO_COLOR` environment variable is also honored). |
 | `--config` | file | Path to the user configuration file (default: `~/.config/winmatsch/config.yaml`). |
 | `--token` | token | GitHub token. Precedence: `--token` > `GITHUB_TOKEN` > OS keyring. Never echoed. Prefer `token add --stdin` or `GITHUB_TOKEN` over passing a secret as a process argument. |
+| `--github-api-url` | URL | GitHub REST API base URL. For GHES, use `https://host/api/v3/`. |
+| `--github-graphql-url` | URL | Optional GitHub GraphQL endpoint; safely derived from `--github-api-url` when omitted. |
 | `-?`, `-h`, `--help` | flag | Show help. |
 | `--version` | flag | Show the version (root command only), e.g. `0.1.0+<commit sha>`. |
 
@@ -63,6 +65,9 @@ what would be removed. Exit code 0 means the plan is valid.
 | `WINMATSCH_OUTPUT_FORMAT` | Configuration: `text` or `json`. |
 | `WINMATSCH_OUTPUT_DIRECTORY` | Configuration: output directory. |
 | `WINMATSCH_INTERACTION` | Configuration: `auto`, `always`, or `never`. |
+| `WINMATSCH_GITHUB_API_URL` | GitHub REST API base URL; CLI `--github-api-url` wins. |
+| `WINMATSCH_GITHUB_GRAPHQL_URL` | Explicit GraphQL endpoint; must share the REST endpoint authority. |
+| `DRY_RUN` | Boolean plan-mode fallback. `--dry-run` explicitly wins when present. |
 | `GITHUB_TOKEN` | GitHub token; used when `--token` is not given, before the OS keyring. |
 | `NO_COLOR` | Any non-empty value disables ANSI color ([no-color.org](https://no-color.org)). |
 | `CI`, `GITHUB_ACTIONS`, `TF_BUILD` | Truthy values (`1`, `true`, `yes`) mark the session as CI: `auto` interaction stops prompting. |
@@ -72,27 +77,19 @@ Empty or whitespace-only `WINMATSCH_*` values are treated as unset. A
 malformed value (for example a non-numeric `WINMATSCH_CONCURRENT_DOWNLOADS`)
 fails the invocation with exit code 3.
 
-There is deliberately **no `DRY_RUN` environment variable**: plan mode is the
-`--dry-run` flag only, so a stray exported variable can never silently turn a
-submission into a no-op (or the reverse). The same applies to the approval
-flags — they have no environment equivalents.
+`DRY_RUN=true` (`1`, `yes`, or `on`) selects plan mode and `DRY_RUN=false`
+(`0`, `no`, or `off`) selects apply mode. An explicit `--dry-run` flag wins over
+the environment. Approval flags deliberately have no environment equivalents.
 
 ## GitHub endpoints and GitHub Enterprise
 
-The CLI talks to `https://api.github.com/` and offers **no option,
-configuration key, or environment variable to change the host**, so the
-shipped executable targets `github.com` only. `--repo` selects the
-*repository*, never the host.
-
-The `WinMatsch.GitHub` library is not limited that way: embedders can set
-`GitHubClientOptions.ApiBaseUri` to a GitHub Enterprise Server root (normally
-`https://host/api/v3`). The GraphQL endpoint is then **derived** from it — a
-path ending in `/api/v3` becomes `/api/graphql`, and any other base path gets
-`/graphql` appended (so `https://host/custom` derives
-`https://host/custom/graphql`) — which keeps the token on the configured host.
-An explicit `GraphQlUri` is validated to share the API origin and end in
-`/graphql`; both URIs must be absolute HTTP(S) without user info, query, or
-fragment.
+The CLI defaults to `https://api.github.com/`. For GitHub Enterprise Server,
+pass `--github-api-url https://host/api/v3/` or set
+`WINMATSCH_GITHUB_API_URL`; the CLI safely derives `/api/graphql`. An explicit
+`--github-graphql-url` / `WINMATSCH_GITHUB_GRAPHQL_URL` must share the REST
+endpoint's scheme, host, and port. Both endpoints must be absolute HTTP(S)
+URLs without user info, query, or fragment, so a token cannot be redirected to
+another authority. `--repo` still selects the repository, not the host.
 
 ## Exit codes
 
@@ -178,22 +175,21 @@ defense in depth; do not put secrets into URLs or manifest fields.
 - **Approvals.** Destructive or account-shaping actions (fork creation,
   branch push, PR creation, structural rewrites) require approval. In an
   interactive terminal you are prompted; otherwise pass the specific approval
-  flag (`--yes`, `--allow-structural-rewrite`, `--allow-stable-url-change`,
-  `--allow-shared-content`). Confirmation never defaults to yes.
+  flag (`--yes`, `--approve-reviews`, `--allow-structural-rewrite`,
+  `--allow-stable-url-change`, `--allow-shared-content`). Confirmation never
+  defaults to yes.
   `--allow-structural-rewrite` and `--allow-stable-url-change` compare against
-  the previously merged version, so they take effect on `update` only; `new`
-  accepts them for symmetry and ignores them.
+  the previously merged version, so they are available on `update` only.
 - **Review required.** When the tool detects that a human edited a previously
   merged manifest in a way a new run would revert, it sets
   `requiresReview: true` and lists the conflicts under `rules.reviews`
   instead of silently overwriting the human's work.
-  **Review approval is interactive-only.** `--yes` does *not* approve
-  reviews: the run asks a dedicated confirmation question, so in a session
-  that cannot prompt (`--interaction never`, CI, or `--format json`) the run
-  fails with exit code 4 and the message
-  `Review approval is required; rerun interactively.` — the JSON envelope is
-  not written in that case. An approval given on a terminal *is* remembered:
-  apply mode records it as a learned override pack in the
+  `--yes` does *not* approve reviews. A session that cannot prompt
+  (`--interaction never`, CI, or `--format json`) first emits the full plan,
+  including `requiresReview: true` and the fingerprint-bound
+  `rules.reviews`, then exits 4. Inspect that output and rerun with
+  `--approve-reviews` to approve only the listed reviews. An interactive or
+  explicit approval is remembered: apply mode records it as a learned pack in the
   [override store](configuration.md#keys), so later versions of the package
   reapply the human value instead of asking again. See
   [learned corrections](rules.md#learned-corrections-approved-once-reapplied-later).
@@ -226,10 +222,10 @@ decision rules.
 These commands never write to any repository. `analyze` and `validate` may
 download installers into the local cache.
 
-`show` and `list-versions` read from the GitHub API and **always require a
-token**, even though `microsoft/winget-pkgs` is public: anonymous reads are
-not implemented, so without `--token`, `GITHUB_TOKEN`, or a keyring entry they
-fail with exit code 4. `analyze` and `validate` need no token.
+`show` and `list-versions` read public repositories anonymously when no token
+is available, and retry anonymously if an optional stale token is rejected.
+Private repositories require `--token`, `GITHUB_TOKEN`, or a keyring entry.
+`analyze` and `validate` need no token.
 
 ### analyze
 
@@ -326,9 +322,14 @@ from unchecked journal paths or bytes.
 | `--urls <urls>` | Installer HTTP(S) URLs. |
 | `--release-url <urls>` | Release metadata HTTP(S) URLs. |
 | `--url <spec>` | Installer override in `url`, `url\|arch`, `url\|arch\|scope`, or `url\|arch\|scope\|displayVersion` form. Supplied components must be non-empty valid enum values. |
+| `--allow-shared-content` | Approve distinct installer URLs resolving to identical bytes. |
+
+`update` additionally accepts:
+
+| Option | Description |
+|---|---|
 | `--allow-structural-rewrite` | Approve an installer architecture/type/scope layout rewrite. |
 | `--allow-stable-url-change` | Approve changed bytes behind a stable installer URL. |
-| `--allow-shared-content` | Approve distinct installer URLs resolving to identical bytes. |
 
 `new`, `new-locale`, and `update-locale` additionally accept locale metadata
 options: `--locale`, `--publisher`, `--publisher-url`,

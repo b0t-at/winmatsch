@@ -360,7 +360,10 @@ internal static class InnoFixtures
     {
         using var output = new MemoryStream();
         byte[] properties;
-        using (var lzma = new LzmaStream(new LzmaEncoderProperties(eos: true), false, output))
+        using (var lzma = LzmaStream.Create(
+                   new LzmaEncoderProperties(eos: true),
+                   isLzma2: false,
+                   output))
         {
             properties = lzma.Properties;
             lzma.Write(data);

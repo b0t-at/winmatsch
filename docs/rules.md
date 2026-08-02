@@ -102,12 +102,13 @@ standalone rules; do not reference them in overrides.
 
 ### Line endings and file shape
 
-Every manifest winmatsch writes uses **LF** line endings, no BOM, and exactly
-one trailing newline; `PIPE-1` asserts this on the emitted bytes. The writer
-is a canonicalizing emitter, not a general-purpose YAML round-tripper: it
-imposes its own field order, indentation, scalar styles, and schema header,
-and it always writes LF. So line endings — and formatting generally — are
-*normalized*, not preserved:
+New manifests use **LF** line endings, no BOM, and exactly one trailing
+newline. When replacing an existing manifest, winmatsch preserves that file's
+LF or CRLF convention while retaining the single-trailing-newline contract.
+The writer is still a canonicalizing emitter, not a general-purpose YAML
+round-tripper: it imposes its own field order, indentation, scalar styles, and
+schema header. Formatting other than the existing line-ending convention is
+normalized:
 
 - A version whose upstream files are already in winmatsch's canonical shape
   (LF, canonical ordering and quoting — the common case for manifests this
@@ -115,12 +116,11 @@ and it always writes LF. So line endings — and formatting generally — are
   fields that actually changed.
 - A hand-written upstream manifest with different ordering, quoting, comments
   or blank-line layout is rewritten into the canonical shape even when only
-  one field changed, and a CRLF file additionally shows every line as
-  modified. Every manifest field the schema defines survives — but comments,
+  one field changed. Every manifest field the schema defines survives — but comments,
   field ordering, quoting style, and blank-line layout do not: they are
   replaced by the canonical form, not preserved. Review the diff before
   submitting, and prefer `--dry-run` first on packages known to be
-  hand-maintained or to carry CRLF manifests.
+  hand-maintained.
 
 ### Validation rules (`WM01xx`)
 

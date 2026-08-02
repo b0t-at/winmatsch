@@ -161,7 +161,7 @@ internal static class NsisCompression
                 + $"the analysis limit is {AnalysisLimits.MaxNsisHeaderBytes} bytes.");
         }
 
-        return new LzmaStream(properties, data);
+        return LzmaStream.Create(properties, data, leaveOpen: false);
     }
 
     private static DeflateStream CreateDeflateStream(Stream stream, long offset, long length)

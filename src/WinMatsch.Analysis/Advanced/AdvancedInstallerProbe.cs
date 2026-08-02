@@ -190,12 +190,12 @@ public sealed class AdvancedInstallerProbe : IExeFormatProbe
         try
         {
             using var stream = new MemoryStream(data, writable: false);
-            using SevenZipArchive archive = SevenZipArchive.Open(
+            using var archive = SevenZipArchive.OpenArchive(
                 stream,
                 new ReaderOptions { LeaveStreamOpen = true });
             List<InnerMsi> payloads = [];
             int scanned = 0;
-            foreach (SevenZipArchiveEntry entry in archive.Entries)
+            foreach (var entry in archive.Entries)
             {
                 if (++scanned > MaxFileEntries)
                 {

@@ -40,16 +40,21 @@
 
     <!-- Analysis -->
     <PackageVersion Include="OpenMcdf" Version="3.2.0" />
-    <PackageVersion Include="SharpCompress" Version="1.0.0" />
+    <!--
+      SharpCompress 1.0.0 is unlisted and deprecated by its publisher as an accidental build.
+      0.50.1 is the newest listed release outside the repository's three-day patch cooldown;
+      Dependabot will advance it after newer patches mature.
+    -->
+    <PackageVersion Include="SharpCompress" Version="0.50.1" />
 
     <!-- Cli -->
     <PackageVersion Include="Spectre.Console" Version="0.57.2" />
     <PackageVersion Include="System.CommandLine" Version="2.0.10" />
 
     <!-- Tests -->
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
   </ItemGroup>
 
 </Project>

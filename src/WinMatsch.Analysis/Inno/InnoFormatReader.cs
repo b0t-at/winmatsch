@@ -1017,7 +1017,7 @@ internal static partial class InnoFormatReader
         }
 
         ValidateLzmaDictionary(dictionarySize, maximumDictionaryBytes);
-        return new LzmaStream(properties, input);
+        return LzmaStream.Create(properties, input, leaveOpen: false);
     }
 
     private static LzmaStream CreateLzma2(Stream input, int maximumDictionaryBytes)
@@ -1032,7 +1032,14 @@ internal static partial class InnoFormatReader
             ? uint.MaxValue
             : (uint)((2 | (property & 1)) << ((property / 2) + 11));
         ValidateLzmaDictionary(dictionarySize, maximumDictionaryBytes);
-        return new LzmaStream([(byte)property], input, -1, -1, null!, true);
+        return LzmaStream.Create(
+            [(byte)property],
+            input,
+            inputSize: -1,
+            outputSize: -1,
+            presetDictionary: null!,
+            isLzma2: true,
+            leaveOpen: false);
     }
 
     private static void ValidateLzmaDictionary(uint dictionarySize, int maximumDictionaryBytes)

@@ -13,10 +13,10 @@ the layer it came from.
 **Tokens are never configuration.** There is no config key for the GitHub
 token; see the [security guide](security.md).
 
-**Endpoints are never configuration.** There is no key for the GitHub API
-host: `repository` selects the repository, and the shipped CLI always talks to
-`github.com`. The `WinMatsch.GitHub` library does accept a GitHub Enterprise
-Server root, but the executable does not expose it — see
+GitHub endpoints are intentionally not stored in the YAML configuration file.
+Use `--github-api-url` / `WINMATSCH_GITHUB_API_URL` and, only when necessary,
+`--github-graphql-url` / `WINMATSCH_GITHUB_GRAPHQL_URL`. The GraphQL endpoint
+must share the REST endpoint authority. See
 [GitHub endpoints and GitHub Enterprise](commands.md#github-endpoints-and-github-enterprise).
 
 ## Keys

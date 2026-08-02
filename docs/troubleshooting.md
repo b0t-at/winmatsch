@@ -69,11 +69,11 @@ run stops on purpose. Options:
 - change the responsible rule's mode (`--rule-mode RULE_ID=log-only`), or
 - decide the regenerated value is right and re-run with the review resolved.
 
-Non-interactive and JSON invocations never auto-approve a review: they exit 4
-with `Review approval is required; rerun interactively.` and print no JSON
-envelope, so re-run the same command on a terminal to see the conflicts.
-`--yes` does not cover this gate. Use `--override-store` (or `overrideStore`)
-to relocate the learned-pack store.
+Non-interactive and JSON invocations never auto-approve a review: they emit the
+full plan (including the review fingerprints) and then exit 4. Inspect the
+output and rerun with `--approve-reviews` to approve only those listed
+reviews. `--yes` does not cover this gate. Use `--override-store` (or
+`overrideStore`) to relocate the learned-pack store.
 
 ## Interrupted local writes
 
@@ -126,11 +126,6 @@ the issue closed as by-design:
 
 | Not supported | Detail |
 |---|---|
-| GitHub Enterprise Server / custom API hosts | The CLI exposes no host option; `--repo` picks the repository, not the host. The library accepts a GHES root, the executable does not. See [GitHub endpoints](commands.md#github-endpoints-and-github-enterprise). |
-| Anonymous repository reads | `show` and `list-versions` require a token even for public repositories (exit 4 without one). |
-| `DRY_RUN` (or any) environment variable for plan mode | `--dry-run` is a flag only. |
-| Approving a human-correction review non-interactively | `--yes` does not cover review gates; see above. Approvals given interactively *are* persisted. |
-| CRLF manifests round-tripped verbatim | The emitter always writes LF; see [line endings](rules.md#line-endings-and-file-shape). |
 | Branch deletion during `cleanup` | GitHub has no atomic expected-SHA branch delete, so candidates are reported for manual action. |
 | `remove-dead-versions` submitting pull requests | The hidden command plans and reports only. |
 | Running installers, even sandboxed | Static analysis only; see [analyzer non-goals](analyzers.md#known-unsupported-variants-and-non-goals). |
