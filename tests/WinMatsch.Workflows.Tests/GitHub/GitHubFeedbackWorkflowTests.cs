@@ -647,6 +647,54 @@ public sealed class GitHubFeedbackWorkflowTests
     }
 
     [Fact]
+    public async Task File_feedback_store_retries_directory_sync_after_post_rename_failure()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-feedback-retry-{Guid.NewGuid():N}");
+        try
+        {
+            int synchronizationAttempts = 0;
+            var store = new FileFeedbackStateStore(
+                root,
+                _ =>
+                {
+                    synchronizationAttempts++;
+                    if (synchronizationAttempts == 1)
+                    {
+                        throw new IOException("directory sync failed");
+                    }
+                });
+            var item = new FeedbackWorkItem(
+                GitHubLifecycleTestSupport.Upstream.ToString(),
+                20,
+                FeedbackClassification.HashMismatch,
+                FeedbackWorkState.AwaitingApprovedRepair,
+                DateTimeOffset.UtcNow,
+                DateTimeOffset.UtcNow.AddHours(1),
+                "hash-mismatch",
+                "Awaiting approved repair.");
+
+            await Assert.ThrowsAsync<IOException>(() =>
+                store.PersistAsync(item, CancellationToken.None));
+            Assert.Single(Directory.EnumerateFiles(root, "*.json"));
+
+            await store.PersistAsync(item, CancellationToken.None);
+
+            Assert.Equal(2, synchronizationAttempts);
+            Assert.Single(Directory.EnumerateFiles(root, "*.json"));
+            Assert.Empty(Directory.EnumerateFiles(root, "*.tmp"));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task Durable_pending_work_replays_through_full_submission_workflow()
     {
         var client = new FakeGitHubClient();

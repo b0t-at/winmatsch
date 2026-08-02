@@ -688,6 +688,17 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
         SubmissionJournalRecoveryResult recovery = await _journals
             .RecoverAsync(outputDirectory, cancellationToken)
             .ConfigureAwait(false);
+        SubmissionJournalCorruption? unknown = recovery.Corruptions.FirstOrDefault(corruption =>
+            string.IsNullOrWhiteSpace(corruption.RepositoryFileSystemIdentity)
+            || string.IsNullOrWhiteSpace(corruption.PackageIdentifier));
+        if (unknown is not null)
+        {
+            throw new SubmissionJournalTamperedException(
+                "A quarantined submission journal has no verified package scope, so pending "
+                + "work cannot be proven unrelated. Inspect the preserved evidence "
+                + $"'{unknown.EvidencePath}' before resuming submissions.");
+        }
+
         if (!recovery.Corruptions.IsDefaultOrEmpty
             && recovery.Corruptions.Any(corruption =>
                 string.Equals(

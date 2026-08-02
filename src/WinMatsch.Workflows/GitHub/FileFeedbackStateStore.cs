@@ -60,6 +60,7 @@ public sealed class FileFeedbackStateStore : IFeedbackStateStore
                     cancellationToken).ConfigureAwait(false);
                 if (current is not null && !ShouldReplace(current, item))
                 {
+                    _flushDirectory(_rootDirectory);
                     return;
                 }
             }
@@ -80,7 +81,7 @@ public sealed class FileFeedbackStateStore : IFeedbackStateStore
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            File.Move(temporary, destination, overwrite: true);
+            DurableFileSystem.ReplaceFile(temporary, destination);
             _flushDirectory(_rootDirectory);
         }
         finally

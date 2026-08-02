@@ -23,6 +23,9 @@ public sealed class FileSubmissionJournalStoreTests
         GitHubSubmissionRequest request = Request(repository.Path);
 
         SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        (string handleId, string fingerprint) = handle;
+        Assert.Equal(handle.Id, handleId);
+        Assert.Equal(handle.LocalPlanFingerprint, fingerprint);
         Assert.Empty(await store.ListPendingAsync(default));
         await Assert.ThrowsAsync<SubmissionJournalConflictException>(() =>
             store.ActivateAsync(handle, default));
@@ -198,6 +201,175 @@ public sealed class FileSubmissionJournalStoreTests
             diagnostic => diagnostic.Contains(
                 "Retained submission intent",
                 StringComparison.Ordinal));
+
+        SubmissionJournalRecoveryResult repeated = await store.RecoverAsync(
+            repository.Path,
+            default);
+        Assert.Empty(repeated.Activated);
+        Assert.True(File.Exists(intent));
+        await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+            store.ActivateAsync(handle, default));
+    }
+
+    [Fact]
+    public async Task Recovery_reports_standalone_corrupt_journal_before_pending_selection()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        GitHubSubmissionRequest request = Request(repository.Path);
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        _ = await store.ActivateAsync(handle, default);
+        string journal = System.IO.Path.Combine(state.Path, $"{handle.Id}.journal");
+        byte[] bytes = await File.ReadAllBytesAsync(journal);
+        bytes[^2] ^= 0x01;
+        await File.WriteAllBytesAsync(journal, bytes);
+
+        SubmissionJournalTamperedException listing =
+            await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+                store.ListPendingAsync(default));
+        Assert.Contains("preserved", listing.Message, StringComparison.OrdinalIgnoreCase);
+        SubmissionJournalRecoveryResult recovery = await store.RecoverAsync(
+            repository.Path,
+            default);
+
+        SubmissionJournalCorruption corruption = Assert.Single(recovery.Corruptions);
+        Assert.Equal(request.LocalPlan.PackageIdentifier.Value, corruption.PackageIdentifier);
+        Assert.Single(recovery.Diagnostics);
+        Assert.False(File.Exists(journal));
+        Assert.True(File.Exists(corruption.EvidencePath));
+    }
+
+    [Fact]
+    public async Task Unknown_legacy_corruption_fails_closed_until_evidence_is_reconciled()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(state.Path, $"{Guid.NewGuid():N}.journal"),
+            "{legacy-corruption");
+
+        SubmissionJournalTamperedException exception =
+            await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+                store.PrepareAsync(Request(repository.Path, "Unrelated.App"), default));
+
+        Assert.Contains("cannot be proven unrelated", exception.Message, StringComparison.Ordinal);
+        Assert.Single(Directory.EnumerateFiles(state.Path, "*.corrupt"));
+    }
+
+    [Fact]
+    public async Task Legacy_migration_preserves_original_evidence_when_scope_is_invalid()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        GitHubSubmissionRequest request = Request(repository.Path);
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        SubmissionJournalEntry entry = await store.ActivateAsync(handle, default);
+        string journal = System.IO.Path.Combine(state.Path, $"{entry.Id}.journal");
+        SubmissionJournalEnvelope envelope = JsonSerializer.Deserialize(
+            await File.ReadAllBytesAsync(journal),
+            SubmissionJournalJsonContext.Default.SubmissionJournalEnvelope)!;
+        JsonObject legacy = JsonNode.Parse(Convert.FromBase64String(envelope.Payload))!.AsObject();
+        _ = legacy.Remove("remoteRequestFingerprint");
+        _ = legacy.Remove("remoteRequestFingerprintVersion");
+        byte[] payload = Encoding.UTF8.GetBytes(legacy.ToJsonString());
+        byte[] original = JsonSerializer.SerializeToUtf8Bytes(
+            new SubmissionJournalEnvelope(
+                Convert.ToBase64String(payload),
+                Convert.ToHexString(SHA256.HashData(payload))),
+            SubmissionJournalJsonContext.Default.SubmissionJournalEnvelope);
+        await File.WriteAllBytesAsync(journal, original);
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(state.Path, $"{entry.Id}.scope"),
+            "{invalid-scope");
+
+        await Assert.ThrowsAsync<SubmissionJournalTamperedException>(() =>
+            store.GetAsync(entry.Id, default));
+
+        string evidence = Assert.Single(Directory.EnumerateFiles(state.Path, "*.corrupt"));
+        Assert.Equal(original, await File.ReadAllBytesAsync(evidence));
+    }
+
+    [Fact]
+    public async Task Completion_keeps_journal_retryable_when_scope_cleanup_fails()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        bool failScopeDeletion = false;
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path },
+            new FakeClock(),
+            new ControlledLockWaitStrategy(),
+            path =>
+            {
+                if (failScopeDeletion && path.EndsWith(".scope", StringComparison.Ordinal))
+                {
+                    failScopeDeletion = false;
+                    throw new IOException("scope cleanup failed");
+                }
+
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                    DurableFileSystem.FlushDirectory(System.IO.Path.GetDirectoryName(path)!);
+                }
+            });
+        GitHubSubmissionRequest request = Request(repository.Path);
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        SubmissionJournalEntry entry = await store.ActivateAsync(handle, default);
+        SubmissionJournalEntry branch = await store.RecordRemoteStateAsync(
+            entry.Id,
+            entry.Revision,
+            new RemoteMutationState
+            {
+                Fork = GitHubLifecycleTestSupport.Fork,
+                BranchName = "winmatsch/test",
+                BranchCreated = true,
+            },
+            SubmissionJournalState.BranchCreated,
+            null,
+            default);
+        SubmissionJournalEntry commit = await store.RecordRemoteStateAsync(
+            branch.Id,
+            branch.Revision,
+            branch.RemoteState with
+            {
+                CommitCreated = true,
+                CommitSha = GitHubLifecycleTestSupport.CommitSha,
+            },
+            SubmissionJournalState.CommitCreated,
+            null,
+            default);
+        SubmissionJournalEntry pullRequest = await store.RecordRemoteStateAsync(
+            commit.Id,
+            commit.Revision,
+            commit.RemoteState with
+            {
+                PullRequestCreated = true,
+                PullRequestNumber = 42,
+                PullRequestUri = new Uri("https://example.test/pull/42"),
+            },
+            SubmissionJournalState.PullRequestCreated,
+            null,
+            default);
+        failScopeDeletion = true;
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            store.CompleteAsync(pullRequest.Id, pullRequest.Revision, default));
+        Assert.True(File.Exists(System.IO.Path.Combine(state.Path, $"{entry.Id}.journal")));
+
+        await store.CompleteAsync(pullRequest.Id, pullRequest.Revision, default);
+
+        Assert.False(File.Exists(System.IO.Path.Combine(state.Path, $"{entry.Id}.journal")));
+        Assert.False(File.Exists(System.IO.Path.Combine(state.Path, $"{entry.Id}.scope")));
     }
 
     [Fact]
@@ -625,12 +797,15 @@ public sealed class FileSubmissionJournalStoreTests
         private readonly TaskCompletionSource _release =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public DateTimeOffset UtcNow { get; private set; } =
-            new(2026, 8, 2, 0, 0, 0, TimeSpan.Zero);
+        private TimeSpan _elapsed;
 
         public int DelayCount { get; private set; }
 
         public Task Waiting => _waiting.Task;
+
+        public long GetTimestamp() => 0;
+
+        public TimeSpan GetElapsedTime(long startingTimestamp) => _elapsed;
 
         public async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
         {
@@ -638,7 +813,7 @@ public sealed class FileSubmissionJournalStoreTests
             _waiting.TrySetResult();
             if (advanceTime)
             {
-                UtcNow += delay;
+                _elapsed += delay;
                 return;
             }
 

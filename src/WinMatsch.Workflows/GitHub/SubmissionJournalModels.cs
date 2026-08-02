@@ -150,8 +150,10 @@ public sealed record SubmissionJournalEntry
 
 public sealed record SubmissionJournalHandle(
     string Id,
-    string LocalPlanFingerprint,
-    ImmutableArray<string> Diagnostics = default);
+    string LocalPlanFingerprint)
+{
+    public ImmutableArray<string> Diagnostics { get; init; } = [];
+}
 
 public sealed record SubmissionJournalCorruption(
     string EvidencePath,
@@ -160,8 +162,10 @@ public sealed record SubmissionJournalCorruption(
 
 public sealed record SubmissionJournalRecoveryResult(
     ImmutableArray<SubmissionJournalEntry> Activated,
-    ImmutableArray<string> Diagnostics,
-    ImmutableArray<SubmissionJournalCorruption> Corruptions = default);
+    ImmutableArray<string> Diagnostics)
+{
+    public ImmutableArray<SubmissionJournalCorruption> Corruptions { get; init; } = [];
+}
 
 public sealed class VerifiedSubmissionRecoveryRequest
 {

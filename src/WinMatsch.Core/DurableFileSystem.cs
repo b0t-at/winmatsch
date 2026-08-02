@@ -29,6 +29,31 @@ public static partial class DurableFileSystem
         FlushDirectory(Path.GetDirectoryName(Path.GetFullPath(destination))!);
     }
 
+    public static void MoveFile(string source, string destination)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+        if (OperatingSystem.IsWindows())
+        {
+            if (!MoveFileEx(source, destination, MoveFileWriteThrough))
+            {
+                throw new IOException(
+                    $"Durable file move failed with operating-system error {Marshal.GetLastPInvokeError()}.");
+            }
+
+            return;
+        }
+
+        File.Move(source, destination);
+        string sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(source))!;
+        string destinationDirectory = Path.GetDirectoryName(Path.GetFullPath(destination))!;
+        FlushDirectory(destinationDirectory);
+        if (!string.Equals(sourceDirectory, destinationDirectory, StringComparison.Ordinal))
+        {
+            FlushDirectory(sourceDirectory);
+        }
+    }
+
     public static void FlushDirectory(string directory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
