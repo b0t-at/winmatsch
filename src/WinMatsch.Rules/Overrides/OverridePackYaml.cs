@@ -134,10 +134,11 @@ public static class OverridePackYaml
         lock (_writeLocks.GetOrAdd(fullPath, static _ => new object()))
         {
             string yaml = Write(pack);
-            string? directory = Path.GetDirectoryName(fullPath);
-            Directory.CreateDirectory(directory!);
+            string directory = Path.GetDirectoryName(fullPath)
+                ?? throw new InvalidOperationException("The override-pack path has no parent directory.");
+            Directory.CreateDirectory(directory);
             string temporaryPath = Path.Combine(
-                directory!,
+                directory,
                 $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
             try
             {
@@ -159,7 +160,19 @@ public static class OverridePackYaml
                     stream.Flush(flushToDisk: true);
                 }
 
-                DurableFileSystem.ReplaceFile(temporaryPath, fullPath);
+                if (File.Exists(fullPath))
+                {
+                    File.Replace(
+                        temporaryPath,
+                        fullPath,
+                        destinationBackupFileName: null,
+                        ignoreMetadataErrors: true);
+                }
+                else
+                {
+                    DurableFileSystem.ReplaceFile(temporaryPath, fullPath);
+                }
+
                 using FileStream committed = new(
                     fullPath,
                     FileMode.Open,
@@ -168,6 +181,7 @@ public static class OverridePackYaml
                     bufferSize: 1,
                     FileOptions.WriteThrough);
                 committed.Flush(flushToDisk: true);
+                DurableFileSystem.FlushDirectory(directory);
             }
             finally
             {
