@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Net;
+using System.Security.Cryptography;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
 using Xunit;
@@ -8,6 +10,56 @@ namespace WinMatsch.Validation.Tests;
 
 public sealed class PreflightGateTests
 {
+    [Fact]
+    public async Task Downloader_adapter_keeps_fresh_revalidation_artifact_alive_for_its_owner()
+    {
+        byte[] content = "stable installer"u8.ToArray();
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"winmatsch-preflight-adapter-{Guid.NewGuid():N}");
+        try
+        {
+            var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(content),
+            });
+            using var downloader = new InstallerDownloader(
+                handler,
+                new DownloaderOptions { MaxRetryAttempts = 0 });
+            string revalidationDirectory = Path.Combine(root, "revalidation");
+            var network = new InstallerDownloaderPreflightNetwork(
+                downloader,
+                revalidationDirectory);
+            var previous = new DownloadResult
+            {
+                FilePath = Path.Combine(root, "missing.exe"),
+                FileName = "missing.exe",
+                Sha256 = new Sha256Hash(Convert.ToHexString(SHA256.HashData(content))),
+                SizeInBytes = content.Length,
+                InitialUrl = TestPackageFactory.InstallerUrl,
+                FinalUrl = TestPackageFactory.InstallerUrl,
+            };
+
+            DownloadRevalidationResult result = await network.RevalidateAsync(
+                previous,
+                CancellationToken.None);
+
+            Assert.Equal(DownloadRevalidationStatus.Unchanged, result.Status);
+            Assert.True(File.Exists(result.Result.FilePath));
+            Assert.Equal(
+                Path.GetFullPath(revalidationDirectory),
+                Path.GetDirectoryName(result.Result.FilePath));
+            Assert.Equal(content, await File.ReadAllBytesAsync(result.Result.FilePath));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     [Fact]
     public async Task Valid_gate_probes_urls_revalidates_hash_and_then_invokes_boundary()
     {
@@ -475,6 +527,7 @@ public sealed class PreflightGateTests
         {
             File.Delete(archivePath);
         }
+
     }
 
     [Fact]
@@ -916,4 +969,15 @@ public sealed class PreflightGateTests
             Options = source.Options,
         };
 
+    private sealed class StubHttpMessageHandler(
+        Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(responder(request));
+        }
+    }
 }

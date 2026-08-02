@@ -113,10 +113,21 @@ public interface IPreflightNetwork
         CancellationToken cancellationToken);
 }
 
-/// <summary>Adapts the Downloads project to the preflight network contract.</summary>
-public sealed class InstallerDownloaderPreflightNetwork(InstallerDownloader downloader) : IPreflightNetwork
+/// <summary>
+/// Adapts the Downloads project to the preflight network contract. The caller owns
+/// <paramref name="revalidationDirectory"/> and must keep it alive until the returned result is consumed.
+/// </summary>
+public sealed class InstallerDownloaderPreflightNetwork(
+    InstallerDownloader downloader,
+    string revalidationDirectory) : IPreflightNetwork
 {
     private readonly InstallerDownloader _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+    private readonly string _revalidationDirectory = Path.GetFullPath(
+        string.IsNullOrWhiteSpace(revalidationDirectory)
+            ? throw new ArgumentException(
+                "A revalidation directory is required.",
+                nameof(revalidationDirectory))
+            : revalidationDirectory);
 
     public Task<DownloadProbeResult> ProbeAsync(string url, CancellationToken cancellationToken)
         => _downloader.ProbeAsync(url, cancellationToken);
@@ -132,30 +143,17 @@ public sealed class InstallerDownloaderPreflightNetwork(InstallerDownloader down
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
-        string scratchDirectory = Path.Combine(
-            Path.GetTempPath(),
-            $"winmatsch-preflight-revalidation-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(scratchDirectory);
-        try
+        Directory.CreateDirectory(_revalidationDirectory);
+        DownloadResult current = await _downloader.DownloadFreshAsync(
+            previous.InitialUrl,
+            _revalidationDirectory,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return new()
         {
-            DownloadResult current = await _downloader.DownloadFreshAsync(
-                previous.InitialUrl,
-                scratchDirectory,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            return new()
-            {
-                Status = current.ContentIdentity == previous.ContentIdentity
-                    ? DownloadRevalidationStatus.Unchanged
-                    : DownloadRevalidationStatus.ContentChanged,
-                Result = current,
-            };
-        }
-        finally
-        {
-            if (Directory.Exists(scratchDirectory))
-            {
-                Directory.Delete(scratchDirectory, recursive: true);
-            }
-        }
+            Status = current.ContentIdentity == previous.ContentIdentity
+                ? DownloadRevalidationStatus.Unchanged
+                : DownloadRevalidationStatus.ContentChanged,
+            Result = current,
+        };
     }
 }

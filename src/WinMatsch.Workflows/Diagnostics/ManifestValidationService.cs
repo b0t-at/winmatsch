@@ -95,7 +95,9 @@ public sealed class ManifestValidationService : IManifestValidationService
                 .ConfigureAwait(false);
 
             ValidationReport report = await new PreflightGate(
-                    new InstallerDownloaderPreflightNetwork(downloader))
+                    new InstallerDownloaderPreflightNetwork(
+                        downloader,
+                        Path.Combine(scratchDirectory, "revalidation")))
                 .ValidateAsync(
                     new PreflightRequest
                     {
