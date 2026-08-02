@@ -13,6 +13,8 @@ $innoVersion = '6.4.0'
 $nsisVersion = '3.10'
 $wixVersion = '5.0.2'
 $windowsSdkVersion = '10.0.26100.0'
+$makeAppxVersion = '10.0.26100.8249'
+$makeAppxSha256 = '408273FECACD211B9E9001F79F33FF38DFB8203D516FF4AFB3685C7BAB26D122'
 $innoInstallerUri = 'https://github.com/jrsoftware/issrc/releases/download/is-6_4_0/innosetup-6.4.0.exe'
 $innoInstallerSha256 = 'A360DB165CFB1D42D195B020700181E7EAF5DB45C1249A24EDB51C3C33E9D659'
 $nsisInstallerUri = 'https://pilotfiber.dl.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10-setup.exe'
@@ -172,9 +174,10 @@ if ($actualNsisVersion -cne $nsisVersion) {
 
 $actualSdkVersion = [Version](
     (Get-Item -LiteralPath $makeAppx).VersionInfo.FileVersion.Split(' ', 2)[0])
-if ($actualSdkVersion.Major -ne 10 -or $actualSdkVersion.Minor -ne 0 -or $actualSdkVersion.Build -ne 26100) {
-    throw "MakeAppx has serviced version '$actualSdkVersion', expected SDK build '10.0.26100'."
+if ($actualSdkVersion -ne [Version]$makeAppxVersion) {
+    throw "MakeAppx has serviced version '$actualSdkVersion', expected exactly '$makeAppxVersion'."
 }
+Assert-FileHash $makeAppx $makeAppxSha256
 
 $actualWixVersion = (& $wix --version | Select-Object -First 1).Trim()
 $normalizedWixVersion = ($actualWixVersion -split '\+', 2)[0]
@@ -189,7 +192,7 @@ $resolvedOutput = (Resolve-Path -LiteralPath $OutputDirectory).Path
 "TOOL NSIS $nsisVersion $nsisInstallerSha256"
 "TOOL WiX $wixVersion $wixPackageSha256"
 "TOOL WixToolset.Bal.wixext $wixVersion $balPackageSha256"
-"TOOL WindowsSDK $windowsSdkVersion $((Get-FileHash -LiteralPath $makeAppx -Algorithm SHA256).Hash)"
+"TOOL WindowsSDK-MakeAppx $makeAppxVersion $makeAppxSha256"
 
 & $inno "/O$resolvedOutput" '/Ffixture-inno' (Join-Path $sourceRoot 'fixture.iss')
 if ($LASTEXITCODE -ne 0) { throw "Inno fixture compilation failed." }
