@@ -826,7 +826,7 @@ public sealed class FileOverridePackStore :
         string path,
         CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(_rootDirectory);
+        DurableFileSystem.CreateDirectoryDurably(_rootDirectory);
         string lockPath = $"{path}.lock";
         DateTimeOffset deadline = DateTimeOffset.UtcNow + _lockTimeout;
         while (true)

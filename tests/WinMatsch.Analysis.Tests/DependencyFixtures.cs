@@ -137,6 +137,42 @@ internal static class DependencyFixtures
         return result;
     }
 
+    public static byte[] PromoteToZip64WithEntryCounts(
+        byte[] archive,
+        ulong entriesOnDisk,
+        ulong totalEntries)
+    {
+        ArgumentNullException.ThrowIfNull(archive);
+        int eocdOffset = archive.Length - 22;
+        uint directorySize = BinaryPrimitives.ReadUInt32LittleEndian(
+            archive.AsSpan(eocdOffset + 12));
+        uint directoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(
+            archive.AsSpan(eocdOffset + 16));
+        byte[] zip64 = new byte[76];
+        BinaryPrimitives.WriteUInt32LittleEndian(zip64, 0x06064B50);
+        BinaryPrimitives.WriteUInt64LittleEndian(zip64.AsSpan(4), 44);
+        BinaryPrimitives.WriteUInt16LittleEndian(zip64.AsSpan(12), 45);
+        BinaryPrimitives.WriteUInt16LittleEndian(zip64.AsSpan(14), 45);
+        BinaryPrimitives.WriteUInt64LittleEndian(zip64.AsSpan(24), entriesOnDisk);
+        BinaryPrimitives.WriteUInt64LittleEndian(zip64.AsSpan(32), totalEntries);
+        BinaryPrimitives.WriteUInt64LittleEndian(zip64.AsSpan(40), directorySize);
+        BinaryPrimitives.WriteUInt64LittleEndian(zip64.AsSpan(48), directoryOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(zip64.AsSpan(56), 0x07064B50);
+        BinaryPrimitives.WriteUInt64LittleEndian(zip64.AsSpan(64), checked((ulong)eocdOffset));
+        BinaryPrimitives.WriteUInt32LittleEndian(zip64.AsSpan(72), 1);
+
+        byte[] result = new byte[archive.Length + zip64.Length];
+        archive.AsSpan(0, eocdOffset).CopyTo(result);
+        zip64.CopyTo(result, eocdOffset);
+        archive.AsSpan(eocdOffset).CopyTo(result.AsSpan(eocdOffset + zip64.Length));
+        int newEocdOffset = eocdOffset + zip64.Length;
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(newEocdOffset + 8), ushort.MaxValue);
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(newEocdOffset + 10), ushort.MaxValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(newEocdOffset + 12), uint.MaxValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(newEocdOffset + 16), uint.MaxValue);
+        return result;
+    }
+
     public static MemoryStream BuildCompressedZeroZip(string path, long uncompressedLength)
     {
         var stream = new MemoryStream();

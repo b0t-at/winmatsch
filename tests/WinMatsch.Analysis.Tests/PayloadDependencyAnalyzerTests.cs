@@ -557,6 +557,52 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Contradictory_single_disk_entry_counts_remain_corrupt_before_resource_limits()
+    {
+        using MemoryStream valid = DependencyFixtures.BuildZipWithEntryCount(
+            PayloadDependencyAnalyzerOptions.DefaultMaximumArchiveEntries + 1);
+        byte[] archiveBytes = valid.ToArray();
+        int eocdOffset = archiveBytes.Length - 22;
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            archiveBytes.AsSpan(eocdOffset + 8),
+            PayloadDependencyAnalyzerOptions.DefaultMaximumArchiveEntries);
+        using var archive = new MemoryStream(archiveBytes);
+
+        Assert.Throws<InvalidDataException>(
+            () => _analyzer.Analyze(archive, "contradictory-counts.zip"));
+    }
+
+    [Fact]
+    public void Contradictory_zip64_single_disk_entry_counts_remain_corrupt()
+    {
+        using MemoryStream valid = DependencyFixtures.BuildZip(("app.exe", [1]));
+        byte[] archiveBytes = DependencyFixtures.PromoteToZip64WithEntryCounts(
+            valid.ToArray(),
+            entriesOnDisk: 0,
+            totalEntries: 1);
+        using var archive = new MemoryStream(archiveBytes);
+
+        Assert.Throws<InvalidDataException>(
+            () => _analyzer.Analyze(archive, "contradictory-zip64-counts.zip"));
+    }
+
+    [Fact]
+    public void Matching_zip64_single_disk_entry_counts_are_accepted()
+    {
+        using MemoryStream valid = DependencyFixtures.BuildZip(("app.exe", [1]));
+        byte[] archiveBytes = DependencyFixtures.PromoteToZip64WithEntryCounts(
+            valid.ToArray(),
+            entriesOnDisk: 1,
+            totalEntries: 1);
+        using var archive = new MemoryStream(archiveBytes);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "matching-zip64-counts.zip");
+
+        Assert.True(analysis.IsComplete);
+        Assert.NotEmpty(analysis.Evidence);
+    }
+
+    [Fact]
     public void FileAnalyzer_accepts_its_maximum_while_dependency_evidence_degrades()
     {
         using MemoryStream archive = DependencyFixtures.BuildZipWithEntryCount(

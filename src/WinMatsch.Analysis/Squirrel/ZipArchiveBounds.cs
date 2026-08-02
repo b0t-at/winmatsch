@@ -66,7 +66,14 @@ internal static class ZipArchiveBounds
                 throw new InvalidDataException($"{description} uses a multi-disk ZIP, which is not supported.");
             }
 
-            ulong entryCount = BinaryPrimitives.ReadUInt16LittleEndian(eocd[10..]);
+            ushort entriesOnDisk = BinaryPrimitives.ReadUInt16LittleEndian(eocd[8..]);
+            ushort totalEntries = BinaryPrimitives.ReadUInt16LittleEndian(eocd[10..]);
+            if (entriesOnDisk != totalEntries)
+            {
+                throw Corrupt(description);
+            }
+
+            ulong entryCount = totalEntries;
             ulong directorySize = BinaryPrimitives.ReadUInt32LittleEndian(eocd[12..]);
             ulong directoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(eocd[16..]);
             long eocdOffset = stream.Length - tailLength + eocdIndex;
@@ -161,7 +168,13 @@ internal static class ZipArchiveBounds
             throw Corrupt(description);
         }
 
+        ulong entriesOnDisk = BinaryPrimitives.ReadUInt64LittleEndian(record[24..]);
         entryCount = BinaryPrimitives.ReadUInt64LittleEndian(record[32..]);
+        if (entriesOnDisk != entryCount)
+        {
+            throw Corrupt(description);
+        }
+
         directorySize = BinaryPrimitives.ReadUInt64LittleEndian(record[40..]);
         directoryOffset = BinaryPrimitives.ReadUInt64LittleEndian(record[48..]);
         directoryEnd = recordOffset;

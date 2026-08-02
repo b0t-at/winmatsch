@@ -32,7 +32,7 @@ public sealed class FileFeedbackStateStore : IFeedbackStateStore
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(item);
-        Directory.CreateDirectory(_rootDirectory);
+        DurableFileSystem.CreateDirectoryDurably(_rootDirectory);
         string repositoryKey = Convert.ToHexString(
             SHA256.HashData(
                 Encoding.UTF8.GetBytes(item.Repository.ToUpperInvariant())))[..16];

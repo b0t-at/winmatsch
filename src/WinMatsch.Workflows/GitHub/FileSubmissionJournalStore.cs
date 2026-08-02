@@ -1438,7 +1438,7 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
 
     private void EnsureRoot()
     {
-        Directory.CreateDirectory(_rootDirectory);
+        DurableFileSystem.CreateDirectoryDurably(_rootDirectory);
         RejectReparsePoint(_rootDirectory);
         if (!OperatingSystem.IsWindows())
         {

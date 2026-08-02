@@ -7,6 +7,36 @@ public static partial class DurableFileSystem
     private const uint MoveFileReplaceExisting = 0x1;
     private const uint MoveFileWriteThrough = 0x8;
 
+    public static void CreateDirectoryDurably(string directory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        string fullPath = Path.GetFullPath(directory);
+        var missing = new Stack<string>();
+        string? current = fullPath;
+        while (current is not null && !Directory.Exists(current))
+        {
+            missing.Push(current);
+            string? parent = Path.GetDirectoryName(current);
+            if (string.Equals(parent, current, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            current = parent;
+        }
+
+        Directory.CreateDirectory(fullPath);
+        while (missing.TryPop(out string? created))
+        {
+            FlushDirectory(created);
+            string? parent = Path.GetDirectoryName(created);
+            if (parent is not null)
+            {
+                FlushDirectory(parent);
+            }
+        }
+    }
+
     public static void ReplaceFile(string source, string destination)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(source);

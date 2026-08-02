@@ -53,4 +53,23 @@ public sealed class DurableFileSystemTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [Fact]
+    public void CreateDirectoryDurably_creates_every_missing_path_component()
+    {
+        string root = Directory.CreateTempSubdirectory("winmatsch-durable-directory-").FullName;
+        try
+        {
+            string target = Path.Combine(root, "state", "journals");
+
+            DurableFileSystem.CreateDirectoryDurably(target);
+
+            Assert.True(Directory.Exists(target));
+            Assert.True(Directory.Exists(Path.Combine(root, "state")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }
