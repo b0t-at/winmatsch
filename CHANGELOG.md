@@ -7,6 +7,21 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- Download site for the Azure Storage static website behind Front Door:
+  a single self-contained `site/index.html` (uploaded as the index and
+  404 document and into `/latest/` and every `/v<version>/` folder)
+  renders a version browser, per-version artifact pages with checksums
+  and verify snippets, and best-effort platform/architecture detection
+  from a `/versions.json` manifest. `scripts/publish-download-site.sh`
+  verifies release assets, updates the manifest
+  (`scripts/update-versions-manifest.py`), uploads the immutable
+  `/v<version>/` folder, mirrors the newest stable release to
+  `/latest/` under stable unversioned names (plus `version.txt` and
+  `latest.json`), and optionally purges Front Door. See
+  `docs/download-site.md` for the URL contract and CI wiring.
+
 ### Changed
 
 - Release assets are now published as raw, portable per-platform binaries
