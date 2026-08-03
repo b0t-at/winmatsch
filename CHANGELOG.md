@@ -7,6 +7,17 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- Multilingual NSIS installers no longer claim their first language table as
+  an exclusive installer locale.
+- ZIP analysis ignores deeper helper executables when valid shallower payloads
+  exist, and nested paths follow bounded versioned or uniquely relocated files.
+- Updates deduplicate identical requested URLs while preserving intentional
+  same-URL installer layouts and their per-entry switches and metadata.
+- Fresh analysis may fill previously unspecified scope and locale values, and
+  stale nested metadata is removed from direct executable installers.
+
 ## [0.8.4] - 2026-08-03
 
 ### Fixed

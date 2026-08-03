@@ -764,12 +764,19 @@ public static class AssetMappingPlanner
         bool unauthorizedNestedTypeChange = candidate.NestedType is not null
             && previous.NestedInstallerType != candidate.NestedType;
         bool unauthorizedScopeChange = candidate.Scope is not null
+            && previous.Scope is not null
             && previous.Scope != candidate.Scope
             && !candidate.HasExplicitScope;
         bool unauthorizedLocaleChange = candidate.InstallerLocale is not null
+            && previous.InstallerLocale is not null
             && previous.InstallerLocale != candidate.InstallerLocale;
         bool unauthorizedNestedClear = candidate.ClearsNestedState
-            && previous.NestedInstallerType is not null;
+            && previous.NestedInstallerType is not null
+            && (previous.InstallerType == InstallerType.Zip
+                || string.Equals(
+                    Path.GetExtension(previous.Url.AbsolutePath),
+                    ".zip",
+                    StringComparison.OrdinalIgnoreCase));
         if (structureChanged
             && !request.AllowStructuralRewrite
             && (unauthorizedArchitectureChange

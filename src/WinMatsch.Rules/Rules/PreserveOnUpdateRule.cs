@@ -7,8 +7,9 @@ namespace WinMatsch.Rules;
 /// that analysis or new release data left null. The copied-field list is deliberately explicit:
 /// <list type="bullet">
 /// <item><description>Per installer, matched by effective Architecture+InstallerType+Scope:
-/// <c>InstallerSwitches</c> and <c>Dependencies</c> (deep-cloned; previous root defaults are
-/// looked through).</description></item>
+/// <c>InstallerSwitches</c>, <c>Dependencies</c>, <c>Commands</c>,
+/// <c>AppsAndFeaturesEntries</c>, and <c>InstallationMetadata</c> (deep-cloned; previous root
+/// defaults are looked through).</description></item>
 /// <item><description>On the default locale: <c>Author</c>, <c>Moniker</c>, <c>PublisherUrl</c>,
 /// <c>PublisherSupportUrl</c>, <c>PrivacyUrl</c>, <c>PackageUrl</c>, <c>License</c>,
 /// <c>LicenseUrl</c>, <c>Copyright</c>, <c>CopyrightUrl</c>, <c>ShortDescription</c>,
@@ -73,18 +74,43 @@ public sealed class PreserveOnUpdateRule : IRule
                 continue;
             }
 
-            if (installer.InstallerSwitches is null && manifest.InstallerSwitches is null
-                && EffectiveInstallerValues.GetInstallerSwitches(previousManifest, match) is { } switches)
+            InstallerSwitches? switches = match.InstallerSwitches
+                ?? (manifest.InstallerSwitches is null ? previousManifest.InstallerSwitches : null);
+            if (installer.InstallerSwitches is null && switches is not null)
             {
                 installer.InstallerSwitches = ManifestValues.CloneSwitches(switches);
                 context.AddTrace(this, $"Installers[{i}]: carried InstallerSwitches over from the previous version.");
             }
 
-            if (installer.Dependencies is null && manifest.Dependencies is null
-                && EffectiveInstallerValues.GetDependencies(previousManifest, match) is { } dependencies)
+            Dependencies? dependencies = match.Dependencies
+                ?? (manifest.Dependencies is null ? previousManifest.Dependencies : null);
+            if (installer.Dependencies is null && dependencies is not null)
             {
                 installer.Dependencies = ManifestValues.CloneDependencies(dependencies);
                 context.AddTrace(this, $"Installers[{i}]: carried Dependencies over from the previous version.");
+            }
+
+            if (installer.Commands is null && manifest.Commands is null
+                && (match.Commands ?? previousManifest.Commands) is { } commands)
+            {
+                installer.Commands = ManifestValues.CloneStringList(commands);
+                context.AddTrace(this, $"Installers[{i}]: carried Commands over from the previous version.");
+            }
+
+            if (installer.AppsAndFeaturesEntries is null && manifest.AppsAndFeaturesEntries is null
+                && (match.AppsAndFeaturesEntries ?? previousManifest.AppsAndFeaturesEntries) is { } entries)
+            {
+                installer.AppsAndFeaturesEntries = ManifestValues.CloneList(
+                    entries,
+                    ManifestValues.CloneAppsAndFeaturesEntry);
+                context.AddTrace(this, $"Installers[{i}]: carried AppsAndFeaturesEntries over from the previous version.");
+            }
+
+            if (installer.InstallationMetadata is null && manifest.InstallationMetadata is null
+                && (match.InstallationMetadata ?? previousManifest.InstallationMetadata) is { } metadata)
+            {
+                installer.InstallationMetadata = ManifestValues.CloneInstallationMetadata(metadata);
+                context.AddTrace(this, $"Installers[{i}]: carried InstallationMetadata over from the previous version.");
             }
         }
     }

@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -17,6 +18,107 @@ namespace WinMatsch.Workflows.Tests.Operations;
 
 public sealed class WorkflowProductionCompositionTests
 {
+    [Fact]
+    public async Task Direct_release_source_deduplicates_identical_installer_urls()
+    {
+        var source = new DirectWorkflowReleaseSource();
+        var url = new Uri("https://example.test/setup.exe");
+
+        ImmutableArray<DiscoveredAsset> assets = await source.DiscoverAsync(
+            new PackageIdentifier("Example.Composed"),
+            new ReleaseRequest(null, [url, url], []),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(url, Assert.Single(assets).DownloadUri);
+    }
+
+    [Fact]
+    public async Task Production_update_preserves_same_url_scope_twin_switches()
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+        });
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+            downloader,
+            new DirectWorkflowReleaseSource());
+        string output = CreateDirectory();
+        var url = new Uri("https://example.test/setup.exe");
+        try
+        {
+            WritePrevious(output, scopedTwins: true);
+
+            WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PreviousVersion = new PackageVersion("1.0.0"),
+                PackageVersion = "2.0.0",
+                AllowStableUrlContentChange = true,
+                Release = new(null, [url, url], []),
+            });
+
+            Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+            RawManifestDocument installer = Assert.Single(
+                result.Plan.AfterDocuments,
+                static document => document.RepositoryPath.EndsWith(".installer.yaml", StringComparison.Ordinal));
+            string yaml = Encoding.UTF8.GetString(installer.Content.AsSpan());
+            Assert.Contains("Custom: /CURRENTUSER", yaml, StringComparison.Ordinal);
+            Assert.Contains("Custom: /ALLUSERS", yaml, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Production_update_clears_stale_nested_state_from_direct_executables()
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+        });
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+            downloader,
+            new DirectWorkflowReleaseSource());
+        string output = CreateDirectory();
+        try
+        {
+            WritePrevious(output, staleDirectNestedState: true);
+
+            WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PreviousVersion = new PackageVersion("1.0.0"),
+                PackageVersion = "2.0.0",
+                AllowStructuralRewrite = true,
+                AllowStableUrlContentChange = true,
+                Release = new(null, [new Uri("https://example.test/setup.exe")], []),
+            });
+
+            Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+            RawManifestDocument installer = Assert.Single(
+                result.Plan.AfterDocuments,
+                static document => document.RepositoryPath.EndsWith(".installer.yaml", StringComparison.Ordinal));
+            string yaml = Encoding.UTF8.GetString(installer.Content.AsSpan());
+            Assert.DoesNotContain("NestedInstallerType:", yaml, StringComparison.Ordinal);
+            Assert.DoesNotContain("NestedInstallerFiles:", yaml, StringComparison.Ordinal);
+            Assert.DoesNotContain("ArchiveBinariesDependOnPath:", yaml, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task Production_local_engine_runs_a_full_new_plan_with_direct_urls()
     {
@@ -1281,7 +1383,10 @@ public sealed class WorkflowProductionCompositionTests
         ShortDescription = "Composition test",
     };
 
-    private static void WritePrevious(string output)
+    private static void WritePrevious(
+        string output,
+        bool scopedTwins = false,
+        bool staleDirectNestedState = false)
     {
         var identifier = new PackageIdentifier("Example.Composed");
         var version = new PackageVersion("1.0.0");
@@ -1321,6 +1426,35 @@ public sealed class WorkflowProductionCompositionTests
             },
             Locales = [],
         };
+        if (scopedTwins)
+        {
+            Installer first = Assert.Single(manifests.Installer.Installers!);
+            first.Scope = Scope.User;
+            first.InstallerSwitches = new InstallerSwitches { Custom = "/CURRENTUSER" };
+            manifests.Installer.Installers.Add(new Installer
+            {
+                Architecture = Architecture.X64,
+                Scope = Scope.Machine,
+                InstallerUrl = first.InstallerUrl,
+                InstallerSha256 = first.InstallerSha256,
+                InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" },
+            });
+        }
+
+        if (staleDirectNestedState)
+        {
+            manifests.Installer.NestedInstallerType = InstallerType.Portable;
+            manifests.Installer.NestedInstallerFiles =
+            [
+                new NestedInstallerFile
+                {
+                    RelativeFilePath = "setup.exe",
+                    PortableCommandAlias = "setup",
+                },
+            ];
+            manifests.Installer.ArchiveBinariesDependOnPath = true;
+        }
+
         string directory = Path.Combine(
             output,
             ManifestPaths.GetVersionDirectory(identifier, version).Replace('/', Path.DirectorySeparatorChar));

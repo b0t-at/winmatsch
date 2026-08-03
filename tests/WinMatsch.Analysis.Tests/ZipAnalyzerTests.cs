@@ -204,6 +204,23 @@ public class ZipAnalyzerTests
     }
 
     [Fact]
+    public void Shallower_portable_payload_excludes_deeper_vendor_helpers()
+    {
+        using MemoryStream zip = BuildZip(
+            ("pnpm.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)),
+            ("dist/vendor/helper-x86.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.I386)),
+            ("dist/vendor/helper-x64.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(zip, "pnpm-win32-x64.zip");
+
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(Architecture.X64, installer.Architecture);
+        Assert.Equal("pnpm.exe", Assert.Single(installer.NestedInstallerFiles!).RelativeFilePath);
+        Assert.DoesNotContain(analysis.Diagnostics, static diagnostic => diagnostic.Code == "ZIP002");
+        Assert.Contains(analysis.Diagnostics, static diagnostic => diagnostic.Code == "ZIP003");
+    }
+
+    [Fact]
     public void Universal_portable_archive_produces_one_entry_per_architecture()
     {
         using MemoryStream zip = BuildZip(

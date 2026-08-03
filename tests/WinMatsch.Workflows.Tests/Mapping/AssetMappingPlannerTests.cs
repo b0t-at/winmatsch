@@ -127,6 +127,93 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
+    public void Nested_paths_rederive_v_prefixed_version_directories()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/tool-v1.0.0-x64.zip",
+            Architecture.X64,
+            InstallerType.Zip) with
+        {
+            PackageVersion = new("1.0.0"),
+            NestedInstallerFiles = [new("tool-v1.0.0-x64/tool.exe", "tool")],
+        };
+        DiscoveredAsset candidate = Asset(
+            "tool-v2.0.0-x64.zip",
+            InstallerType.Zip,
+            Architecture.X64);
+        candidate = candidate with
+        {
+            Analysis = BoundAnalysis(
+                candidate,
+                DetectedInstallerFormat.Zip,
+                InstallerType.Zip,
+                Architecture.X64,
+                archiveEntries: ["tool-v2.0.0-x64/tool.exe"],
+                nestedCandidates: ["tool-v2.0.0-x64/tool.exe"],
+                archiveBinariesDependOnPath: true),
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request(
+            [candidate],
+            [previous],
+            version: "2.0.0"));
+
+        Assert.True(plan.CanApply);
+        PlannedInstaller installer = Assert.Single(plan.Decisions).Installer!;
+        Assert.Equal("tool-v2.0.0-x64/tool.exe", Assert.Single(installer.NestedInstallerFiles).RelativeFilePath);
+    }
+
+    [Fact]
+    public void Nested_paths_follow_a_unique_analyzer_selected_parent_directory_move()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/tool.zip",
+            Architecture.X64,
+            InstallerType.Zip) with
+        {
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new("tool.exe", "tool")],
+        };
+        DiscoveredAsset candidate = Asset(
+            "tool.zip",
+            InstallerType.Zip,
+            Architecture.X64);
+        candidate = candidate with
+        {
+            Analysis = BoundAnalysis(
+                candidate,
+                DetectedInstallerFormat.Zip,
+                InstallerType.Zip,
+                Architecture.X64,
+                archiveEntries: ["tool/tool.exe"],
+                nestedCandidates: ["tool/tool.exe"],
+                archiveBinariesDependOnPath: true) with
+            {
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Zip,
+                        NestedInstallerType = InstallerType.Portable,
+                        NestedInstallerFiles = [new("tool/tool.exe", "tool")],
+                        ArchiveBinariesDependOnPath = true,
+                    },
+                ],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([candidate], [previous]));
+
+        Assert.True(plan.CanApply);
+        PlannedNestedInstallerFile nested = Assert.Single(Assert.Single(plan.Decisions).Installer!.NestedInstallerFiles);
+        Assert.Equal("tool/tool.exe", nested.RelativeFilePath);
+        Assert.Equal("tool", nested.PortableCommandAlias);
+    }
+
+    [Fact]
     public void Url_override_parser_accepts_documented_syntax_and_rejects_invalid_values()
     {
         UrlOverride result = UrlOverride.Parse("https://example.test/tool.exe|arm64|machine|2.0-preview");
@@ -394,6 +481,116 @@ public sealed class AssetMappingPlannerTests
         };
 
         AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(request);
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_STRUCTURAL_REWRITE");
+    }
+
+    [Fact]
+    public void Fresh_scope_and_locale_evidence_can_fill_unspecified_previous_values()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/tool-x64.msi",
+            Architecture.X64,
+            InstallerType.Msi);
+        DiscoveredAsset asset = Asset("tool-x64.msi", InstallerType.Msi, Architecture.X64);
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Msi,
+                        Scope = Scope.User,
+                        InstallerLocale = new LanguageTag("en-US"),
+                    },
+                ],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]));
+
+        Assert.True(plan.CanApply);
+        PlannedInstaller installer = Assert.Single(plan.Decisions).Installer!;
+        Assert.Equal(Scope.User, installer.Scope);
+        Assert.Equal(new LanguageTag("en-US"), installer.InstallerLocale);
+    }
+
+    [Fact]
+    public void Fresh_scope_evidence_cannot_replace_an_explicit_previous_scope_without_approval()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/tool-x64.msi",
+            Architecture.X64,
+            InstallerType.Msi) with
+        {
+            Scope = Scope.Machine,
+        };
+        DiscoveredAsset asset = Asset("tool-x64.msi", InstallerType.Msi, Architecture.X64);
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Msi,
+                        Scope = Scope.User,
+                    },
+                ],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]));
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_STRUCTURAL_REWRITE");
+    }
+
+    [Fact]
+    public void Fresh_direct_executable_analysis_clears_impossible_nested_state_without_approval()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/tool.exe",
+            Architecture.X64,
+            InstallerType.Portable) with
+        {
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new("tool.exe", "tool")],
+        };
+        DiscoveredAsset asset = Asset("tool.exe", InstallerType.Portable, Architecture.X64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]));
+
+        Assert.True(plan.CanApply);
+        PlannedInstaller installer = Assert.Single(plan.Decisions).Installer!;
+        Assert.Null(installer.NestedInstallerType);
+        Assert.Empty(installer.NestedInstallerFiles);
+    }
+
+    [Fact]
+    public void Fresh_direct_executable_analysis_still_requires_approval_to_replace_a_zip_layout()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/tool.zip",
+            Architecture.X64,
+            InstallerType.Zip) with
+        {
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new("tool.exe", "tool")],
+        };
+        DiscoveredAsset asset = Asset("tool.exe", InstallerType.Portable, Architecture.X64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]));
 
         Assert.False(plan.CanApply);
         Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_STRUCTURAL_REWRITE");
