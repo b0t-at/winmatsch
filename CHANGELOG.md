@@ -7,6 +7,8 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-08-04
+
 ### Fixed
 
 - Multilingual NSIS installers no longer claim their first language table as
@@ -136,6 +138,10 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.1...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.5...main
+[0.8.5]: https://github.com/b0t-at/winmatsch/compare/v0.8.4...v0.8.5
+[0.8.4]: https://github.com/b0t-at/winmatsch/compare/v0.8.3...v0.8.4
+[0.8.3]: https://github.com/b0t-at/winmatsch/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/b0t-at/winmatsch/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/b0t-at/winmatsch/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/b0t-at/winmatsch/releases/tag/v0.8.0
