@@ -58,6 +58,8 @@ internal static class NsisFixtures
 
         public ushort Lcid { get; set; } = 1033;
 
+        public List<ushort> AdditionalLcids { get; set; } = [];
+
         /// <summary>The string the language table's LANG_NAME slot points at ($(^Name)).</summary>
         public string LangName { get; set; } = DefaultDisplayName;
 
@@ -150,11 +152,19 @@ internal static class NsisFixtures
         // Langtable: LANGID, dialog offset, RTL flag, then the language strings —
         // branding, caption and name per exehead/lang.h (LANG_NAME is index 2).
         int[] langStrings = [0, 0, langNamePtr];
-        byte[] langTable = new byte[10 + (langStrings.Length * 4)];
-        BinaryPrimitives.WriteUInt16LittleEndian(langTable, options.Lcid);
-        for (int i = 0; i < langStrings.Length; i++)
+        ushort[] lcids = [options.Lcid, .. options.AdditionalLcids];
+        int langTableSize = 10 + (langStrings.Length * 4);
+        byte[] langTables = new byte[langTableSize * lcids.Length];
+        for (int tableIndex = 0; tableIndex < lcids.Length; tableIndex++)
         {
-            BinaryPrimitives.WriteInt32LittleEndian(langTable.AsSpan(10 + (i * 4)), langStrings[i]);
+            Span<byte> langTable = langTables.AsSpan(tableIndex * langTableSize, langTableSize);
+            BinaryPrimitives.WriteUInt16LittleEndian(langTable, lcids[tableIndex]);
+            for (int stringIndex = 0; stringIndex < langStrings.Length; stringIndex++)
+            {
+                BinaryPrimitives.WriteInt32LittleEndian(
+                    langTable[(10 + (stringIndex * 4))..],
+                    langStrings[stringIndex]);
+            }
         }
 
         int entriesOffset = FixedPartSize;
@@ -163,7 +173,7 @@ internal static class NsisFixtures
         if (options.LangtablesBeforeStrings)
         {
             langTablesOffset = entriesOffset + (entries.Count * EntrySize);
-            stringsOffset = langTablesOffset + langTable.Length;
+            stringsOffset = langTablesOffset + langTables.Length;
         }
         else
         {
@@ -171,18 +181,18 @@ internal static class NsisFixtures
             langTablesOffset = stringsOffset + stringsBytes.Length;
         }
 
-        int end = Math.Max(stringsOffset + stringsBytes.Length, langTablesOffset + langTable.Length);
+        int end = Math.Max(stringsOffset + stringsBytes.Length, langTablesOffset + langTables.Length);
 
         byte[] header = new byte[end];
         WriteBlockHeader(header, 0, entriesOffset, 0);                 // Pages.
         WriteBlockHeader(header, 1, entriesOffset, 0);                 // Sections.
         WriteBlockHeader(header, 2, entriesOffset, entries.Count);     // Entries.
         WriteBlockHeader(header, 3, stringsOffset, 0);                 // Strings (count unused).
-        WriteBlockHeader(header, 4, langTablesOffset, 1);              // Langtables.
+        WriteBlockHeader(header, 4, langTablesOffset, lcids.Length);   // Langtables.
         WriteBlockHeader(header, 5, end, 0);                           // Ctlcolors.
         WriteBlockHeader(header, 6, end, 0);                           // Bgfont.
         WriteBlockHeader(header, 7, end, 0);                           // Data.
-        BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(100), langTable.Length); // langtable_size.
+        BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(100), langTableSize); // langtable_size.
         BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(280), installDirectoryPtr);
 
         for (int i = 0; i < entries.Count; i++)
@@ -194,7 +204,7 @@ internal static class NsisFixtures
         }
 
         stringsBytes.CopyTo(header, stringsOffset);
-        langTable.CopyTo(header, langTablesOffset);
+        langTables.CopyTo(header, langTablesOffset);
         return header;
     }
 

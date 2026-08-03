@@ -46,6 +46,9 @@ internal sealed class NsisHeader
     /// <summary>The number of instructions in the entries block.</summary>
     public int EntryCount => _blocks[EntriesBlock].Count;
 
+    /// <summary>The number of language tables declared by the installer.</summary>
+    public int LanguageTableCount => _blocks[LangtablesBlock].Count;
+
     /// <summary>The strings block, in raw bytes.</summary>
     public ReadOnlySpan<byte> Strings
         => _data.AsSpan(_blocks[StringsBlock].Offset, _blocks[StringsBlock].Count);

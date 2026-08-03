@@ -19,7 +19,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            run_analyzers: true
+          - os: windows-latest
+            run_analyzers: false
+          - os: macos-latest
+            run_analyzers: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,13 +41,10 @@ jobs:
         run: dotnet restore
 
       - name: Build
-        run: dotnet build --no-restore --configuration Release
+        run: dotnet build --no-restore --configuration Release -p:RunAnalyzersDuringBuild=${{ matrix.run_analyzers }}
 
       - name: Test
-        run: dotnet test --no-build --configuration Release --filter "FullyQualifiedName!~WinMatsch.E2E.Tests" --logger "console;verbosity=normal" --logger "trx;LogFilePrefix=unit" --results-directory TestResults
-
-      - name: Hermetic end-to-end tests
-        run: dotnet test tests/WinMatsch.E2E.Tests/WinMatsch.E2E.Tests.csproj --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFilePrefix=e2e" --results-directory TestResults
+        run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFilePrefix=test" --results-directory TestResults
 
       - name: Upload test results
         if: failure()
@@ -118,6 +121,9 @@ jobs:
           online-audits: false
           advanced-security: false
           annotations: true
+
+      - name: Test release management scripts
+        run: python3 -m unittest discover -s tests/scripts -p "test_*.py" -v
 
       - name: Set up .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0

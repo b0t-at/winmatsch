@@ -20,7 +20,8 @@ namespace WinMatsch.Analysis.Nsis;
 /// (<c>SetRegView 64</c>: <c>EW_SETFLAG</c>, opcode 13, on exec flag 12, <c>alter_reg_view</c>,
 /// with value <c>KEY_WOW64_64KEY</c>). ARM64 is not detectable: NSIS has no ARM64 stub and no
 /// conventional marker, so ARM64-targeting installers are reported as their stub's machine.
-/// The installer locale is the first language table's LCID — the script's default language.
+/// A single language table supplies installer-locale evidence. Multilingual installers leave
+/// the locale unset because the first table is only the script default, not an exclusive locale.
 /// </summary>
 public sealed partial class NsisProbe : IExeFormatProbe
 {
@@ -79,7 +80,8 @@ public sealed partial class NsisProbe : IExeFormatProbe
             InstallerType = InstallerType.Nullsoft,
             Scope = GetScope(installDirectory),
             ElevationRequirement = peFile.RequestedElevation,
-            InstallerLocale = header.GetFirstLangTable() is { } langTable
+            InstallerLocale = header.LanguageTableCount == 1
+                && header.GetFirstLangTable() is { } langTable
                 ? Lcid.ToLanguageTag(langTable.LanguageId)
                 : null,
         };

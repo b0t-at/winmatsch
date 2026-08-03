@@ -38,20 +38,30 @@ The build path is triggered by pushing a `v*` tag:
    (`sha256sum -c`), and creates a **draft** GitHub release with generated
    notes. Publishing the draft is a manual, human step.
 
-## Azure publication workflow (`.github/workflows/publish-azure-release.yml`)
+## Azure publication and synchronization workflow (`.github/workflows/publish-azure-release.yml`)
 
 Publishing the GitHub release triggers the separate **Publish download site**
 workflow. It downloads and verifies the exact final asset set, publishes the
-immutable version directory, updates the public catalog, refreshes the stable
-download aliases when appropriate, and deploys the static index.
+immutable version directory, then synchronizes the public catalog and stable
+download aliases with GitHub Releases. GitHub's published release list is the
+source of truth, and GitHub's `releases/latest` result selects `/latest`.
+
+Deleting a GitHub release triggers the same synchronization without running
+the publication steps. Any live Azure `v<version>/` tree that no longer has a
+published GitHub release is copied to `archive/v<version>/` at the Azure
+Archive access tier, verified, removed from the live namespace and catalog,
+and purged from Front Door. There is no separate removal workflow or approval
+gate: GitHub's permission to delete the release is the authorization boundary.
 
 The workflow uses the `Release` GitHub environment and exchanges GitHub's OIDC
 token for a short-lived Azure token. No storage key, SAS, or client secret is
 stored in GitHub. **Actions > Publish download site > Run workflow** can
-backfill or retry an already-published tag; the job rejects drafts and applies
-the same validation and immutability checks. The publisher implementation is
-always checked out from the default branch, so older releases can be backfilled
-even when their tags predate the download-site scripts.
+backfill or retry an already-published tag, or run with an empty tag to perform
+only synchronization. The publication job rejects drafts and applies the same
+validation, immutability, and synchronization checks. The publisher
+implementation is always checked out from the default branch, so older
+releases can be backfilled even when their tags predate the download-site
+scripts.
 
 ### Azure release layout and catalog contract
 
@@ -84,9 +94,9 @@ The container layout is intentionally append-oriented and CDN-friendly:
 - `versions.json` is the enumeration endpoint and the browser's source of
   truth. It is sorted by semantic-version precedence and includes each
   artifact's RID, platform, architecture, byte size, URL, and SHA-256.
-- `latest/` mirrors only the highest stable semantic version under unversioned
-  names. Backfilling an older release or publishing a prerelease cannot move it
-  backward or replace it.
+- `latest/` mirrors the release selected by GitHub's native latest-release
+  endpoint under unversioned names. Backfilling an older release or publishing
+  a prerelease does not independently choose a different latest version.
 - The mutable site and catalog files use a short revalidation cache policy.
   Updating `versions.json` is protected by its Azure Blob ETag so concurrent or
   stale writers fail instead of losing an entry.
@@ -131,9 +141,11 @@ contract is documented in [download-site.md](download-site.md).
 - **Before publishing the draft:** delete the draft release and the tag
   (`git push origin :refs/tags/v<version>`), fix, re-tag. Azure Storage is not
   changed until the GitHub release is published.
-- **After publishing:** do not delete published artifacts users may have
-  downloaded. Ship a fixed `v<version+1>` instead, and mark the broken
-  release as such in its notes.
+- **After publishing:** prefer shipping a fixed `v<version+1>` because users
+  may already have downloaded the old artifact. To intentionally retract a
+  release, delete it in GitHub; the synchronization run archives its Azure
+  tree and removes it from the live catalog. Tag deletion is a separate GitHub
+  operation.
 - **Partial workflow failure:** the release job refuses to create a draft
   unless all six binaries exist and verify, so a half-failed matrix cannot
   produce an incomplete release; re-run the failed jobs.

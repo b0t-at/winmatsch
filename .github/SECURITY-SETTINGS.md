@@ -12,10 +12,10 @@ The workflow files enforce immutable action references and least-privilege
   organization policy is available.
 - **Settings > Environments > Release**: keep this exact environment name
   because it is part of the Entra federated-credential subject. If deployment
-  branch/tag policies are enabled, allow `v*` tags for publication events and
-  the default branch for published-release backfills. Required reviewers are
-  optional defense in depth; enabling them adds a second approval after the
-  GitHub release is published.
+  branch/tag policies are enabled, allow `v*` tags and the default branch so
+  publication events, release-deletion syncs, and manual backfills can run.
+  Leave required reviewers disabled: permission to publish or delete a GitHub
+  release is the release-management authorization boundary.
 - **Settings > Rules > Rulesets**: protect `main` with pull requests, required
   reviews, and **Require review from Code Owners**. Protect `v*` tags from
   deletion or update and limit tag creation to release maintainers.

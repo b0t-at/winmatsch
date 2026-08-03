@@ -20,6 +20,10 @@ coverage*.json
 coverage*.xml
 *.coverage
 
+# Python
+__pycache__/
+*.py[cod]
+
 # NuGet
 *.nupkg
 *.snupkg

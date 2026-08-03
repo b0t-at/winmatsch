@@ -360,6 +360,22 @@ public class NsisProbeTests
     }
 
     [Fact]
+    public void A_multilingual_installer_does_not_claim_its_first_language_as_the_installer_locale()
+    {
+        var options = new NsisFixtures.Options
+        {
+            Lcid = 1066,
+            AdditionalLcids = [1033],
+        };
+
+        InstallerAnalysis? analysis = Probe(NsisFixtures.BuildInstaller(options));
+
+        Assert.NotNull(analysis);
+        Assert.Null(Assert.Single(analysis.Installers).InstallerLocale);
+        Assert.Equal(NsisFixtures.DefaultDisplayName, analysis.ProductName);
+    }
+
+    [Fact]
     public void A_first_header_deeper_in_the_overlay_is_still_found()
     {
         var options = new NsisFixtures.Options { FirstHeaderPadding = 1024 };

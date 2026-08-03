@@ -47,9 +47,10 @@ curl -fsSL https://<host>/latest/version.txt
   `/latest/` → stable channel page, and both `/v<version>/` and
   `/<version>/` → that release. Canonical links and artifact URLs retain the
   explicit `/v<version>/` form.
-- **One manifest.** `/versions.json` is the single source of truth; the
-  page fetches it at runtime, so publishing a release only writes blobs —
-  no HTML changes, no Front Door configuration changes.
+- **GitHub-authoritative mirror.** Published GitHub Releases are the source of
+  truth. `/versions.json` is the site's synchronized projection, which the page
+  fetches at runtime; GitHub's native latest-release endpoint determines the
+  `/latest` mirror.
 - **`/latest` is a blob mirror, not a redirect.** Releases stay pure
   data-plane uploads (no control-plane permissions needed in CI). The
   mirror uses unversioned file names so the URLs never change, plus a
@@ -132,6 +133,16 @@ The script (bash + python3 + az; no jq required):
    counts, upload and Front Door purge durations. Dry runs summarise the
    upload plan instead.
 
+After publication, and whenever a GitHub release is deleted,
+`scripts/reconcile-download-site.sh` compares the complete published GitHub
+release list with the live Azure `v<version>/` prefixes. Azure-only versions
+are copied to `archive/v<version>/` at the Archive access tier, verified, and
+then removed from the live namespace and `/versions.json`. The reconciler also
+rebuilds `/latest/` from GitHub's designated latest release and purges affected
+Front Door paths. A failed run is safe to rerun: catalog writes use the current
+blob ETag, archive copies are verified before live blobs are removed, and
+existing verified archive copies are reused.
+
 Useful flags: `--dry-run` (stage + print the upload plan, no az calls),
 `--staging DIR` (inspect the exact container layout), `--skip-latest`,
 `--prerelease` (auto-detected from the version string), `--manifest-in`
@@ -168,11 +179,11 @@ is the tighter alternative.
 
 The checked-in
 [publish workflow](../.github/workflows/publish-azure-release.yml) triggers on
-`release: published`, preserving the human draft-review gate from
-[release.md](release.md). It validates the GitHub release, logs in through the
-`Release` environment's Entra OIDC federation, and invokes this script with the
-configured account and container. Its manual input can safely backfill an
-already-published tag.
+both `release: published` and `release: deleted`. Publication validates and
+uploads the GitHub release before synchronization; deletion runs only the
+synchronizer. Both paths log in through the `Release` environment's Entra OIDC
+federation. The manual input can safely backfill an already-published tag, or
+be left empty to run synchronization only.
 
 When the `Release` environment additionally defines the secrets
 `AZURE_AFD_RESOURCE_GROUP`, `AZURE_AFD_PROFILE` and `AZURE_AFD_ENDPOINT`
