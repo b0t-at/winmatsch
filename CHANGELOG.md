@@ -7,6 +7,16 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-08-03
+
+### Fixed
+
+- Repository-backed updates now clone manifests using per-document YAML
+  serialization, allowing the `PIPE-2` rule to upgrade source schemas older
+  than 1.12.0 before the manifest set is written.
+
+## [0.8.3] - 2026-08-03
+
 ### Added
 
 - The Azure publish workflow now renders a job summary on the run page:
@@ -20,6 +30,8 @@ minor versions may contain breaking changes).
   JsonSchema.Net, JsonPointer.Net, Json.More.Net, and Humanizer.Core from
   shipped binaries while preserving VLD diagnostics and exact instance paths
   (issue #9).
+- Repository-backed updates can resolve the latest published source version
+  when the caller does not provide one explicitly.
 
 ## [0.8.2] - 2026-08-03
 
