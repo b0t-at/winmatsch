@@ -74,6 +74,65 @@ public class Wm0007PreserveOnUpdateTests
     }
 
     [Fact]
+    public void Copies_distinct_switches_for_same_architecture_scope_twins()
+    {
+        Installer previousUser = TestManifests.CreateInstaller();
+        previousUser.Scope = Scope.User;
+        previousUser.InstallerSwitches = new InstallerSwitches { Custom = "/CURRENTUSER" };
+        Installer previousMachine = TestManifests.CreateInstaller();
+        previousMachine.Scope = Scope.Machine;
+        previousMachine.InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" };
+        PackageManifests previous = TestManifests.Create(previousUser, previousMachine);
+        previous.Installer.InstallerSwitches = new InstallerSwitches { Upgrade = "--updated" };
+
+        Installer user = TestManifests.CreateInstaller();
+        user.Scope = Scope.User;
+        Installer machine = TestManifests.CreateInstaller();
+        machine.Scope = Scope.Machine;
+        PackageManifests manifests = TestManifests.Create(user, machine);
+        manifests.Installer.InstallerSwitches = new InstallerSwitches { Upgrade = "--updated" };
+
+        _rule.Apply(TestManifests.CreateContext(manifests, previous: previous));
+
+        Assert.Equal("/CURRENTUSER", user.InstallerSwitches?.Custom);
+        Assert.Equal("/ALLUSERS", machine.InstallerSwitches?.Custom);
+        Assert.Equal("--updated", manifests.Installer.InstallerSwitches.Upgrade);
+    }
+
+    [Fact]
+    public void Copies_commands_arp_and_installation_metadata_from_a_matching_entry()
+    {
+        Installer previousInstaller = TestManifests.CreateInstaller();
+        previousInstaller.Commands = ["example"];
+        previousInstaller.AppsAndFeaturesEntries =
+        [
+            new AppsAndFeaturesEntry
+            {
+                Publisher = "Example",
+                ProductCode = "{OLD}",
+                UpgradeCode = "{UPGRADE}",
+            },
+        ];
+        previousInstaller.InstallationMetadata = new InstallationMetadata
+        {
+            DefaultInstallLocation = @"%ProgramFiles%\Example",
+        };
+        PackageManifests previous = TestManifests.Create(previousInstaller);
+
+        Installer installer = TestManifests.CreateInstaller();
+        PackageManifests manifests = TestManifests.Create(installer);
+
+        _rule.Apply(TestManifests.CreateContext(manifests, previous: previous));
+
+        Assert.Equal("example", Assert.Single(installer.Commands!));
+        Assert.Equal("{UPGRADE}", Assert.Single(installer.AppsAndFeaturesEntries!).UpgradeCode);
+        Assert.Equal(@"%ProgramFiles%\Example", installer.InstallationMetadata?.DefaultInstallLocation);
+        Assert.NotSame(previousInstaller.Commands, installer.Commands);
+        Assert.NotSame(previousInstaller.AppsAndFeaturesEntries, installer.AppsAndFeaturesEntries);
+        Assert.NotSame(previousInstaller.InstallationMetadata, installer.InstallationMetadata);
+    }
+
+    [Fact]
     public void Copies_hand_maintained_default_locale_fields_left_null()
     {
         PackageManifests previous = TestManifests.Create(TestManifests.CreateInstaller());

@@ -793,6 +793,7 @@ public sealed class LocalWorkflowEngine
                 mapping,
                 candidate.Installer.Installers,
                 previousInstallers);
+            ClearStaleRootNestedState(candidate.Installer);
         }
 
         ImmutableArray<InstallerEvidence> installerEvidence =
@@ -1934,6 +1935,22 @@ public sealed class LocalWorkflowEngine
                 };
             })
             .ToList();
+
+    private static void ClearStaleRootNestedState(InstallerManifest manifest)
+    {
+        if (manifest.Installers is not { Count: > 0 } installers
+            || installers.Any(installer =>
+                (installer.InstallerType ?? manifest.InstallerType) == InstallerType.Zip
+                || installer.NestedInstallerType is not null
+                || installer.NestedInstallerFiles is { Count: > 0 }))
+        {
+            return;
+        }
+
+        manifest.NestedInstallerType = null;
+        manifest.NestedInstallerFiles = null;
+        manifest.ArchiveBinariesDependOnPath = null;
+    }
 
     private static LocaleManifest CreateLocale(
         PackageIdentifier identifier,

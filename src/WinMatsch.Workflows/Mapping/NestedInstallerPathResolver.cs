@@ -81,8 +81,17 @@ internal static class NestedInstallerPathResolver
             string[] templated = actualPaths
                 .Where(path => templatedPaths.Contains(path, StringComparer.OrdinalIgnoreCase))
                 .ToArray();
+            string[] relocated = (shape?.NestedInstallerFiles ?? [])
+                .Select(static file => file.RelativeFilePath)
+                .Where(path => actualPaths.Contains(path, StringComparer.OrdinalIgnoreCase)
+                    && string.Equals(
+                        Path.GetFileName(path),
+                        Path.GetFileName(nested.RelativeFilePath),
+                        StringComparison.OrdinalIgnoreCase))
+                .ToArray();
             string[] matches = exact
                 .Concat(templated)
+                .Concat(relocated)
                 .GroupBy(static path => path, StringComparer.OrdinalIgnoreCase)
                 .Select(static group => group.Order(StringComparer.Ordinal).First())
                 .Order(StringComparer.Ordinal)
@@ -157,8 +166,11 @@ internal static class NestedInstallerPathResolver
         (string Old, string New)[] representations =
         [
             (oldVersion, newVersion),
+            ($"v{oldVersion}", $"v{newVersion}"),
             (oldVersion.Replace('.', '_'), newVersion.Replace('.', '_')),
+            ($"v{oldVersion.Replace('.', '_')}", $"v{newVersion.Replace('.', '_')}"),
             (oldVersion.Replace('.', '-'), newVersion.Replace('.', '-')),
+            ($"v{oldVersion.Replace('.', '-')}", $"v{newVersion.Replace('.', '-')}"),
         ];
         var templates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach ((string oldToken, string newToken) in representations)

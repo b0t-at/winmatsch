@@ -254,6 +254,7 @@ public sealed class DirectWorkflowReleaseSource : IWorkflowReleaseSource
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(
             request.InstallerUrls
+                .DistinctBy(static uri => uri.AbsoluteUri, StringComparer.Ordinal)
                 .OrderBy(static uri => uri.AbsoluteUri, StringComparer.Ordinal)
                 .Select((uri, index) => new DiscoveredAsset
                 {

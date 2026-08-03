@@ -70,11 +70,35 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
                 "The archive contains no installable payloads (no valid .msi, .msix, .appx, .exe, .msixbundle or .appxbundle entries).");
         }
 
-        List<ResolvedCandidate> resolved = [];
+        var resolvedByCandidate = new List<(Candidate Candidate, List<ResolvedCandidate> Resolved)>();
         foreach (Candidate candidate in candidates)
         {
-            resolved.AddRange(ResolveCandidate(candidate));
+            resolvedByCandidate.Add((candidate, ResolveCandidate(candidate)));
         }
+
+        bool ignoredDeeperPortableHelpers = false;
+        int shallowestDepth = candidates.Min(static candidate => PathDepth(candidate.Path));
+        (Candidate Candidate, List<ResolvedCandidate> Resolved)[] shallowest =
+        [
+            .. resolvedByCandidate.Where(item => PathDepth(item.Candidate.Path) == shallowestDepth),
+        ];
+        if (shallowest.Length == 1
+            && shallowest[0].Resolved.Count > 0
+            && shallowest[0].Resolved.All(static candidate => candidate.NestedType == InstallerType.Portable)
+            && resolvedByCandidate
+                .Where(item => PathDepth(item.Candidate.Path) > shallowestDepth)
+                .SelectMany(static item => item.Resolved)
+                .All(static candidate => candidate.NestedType == InstallerType.Portable))
+        {
+            ignoredDeeperPortableHelpers = resolvedByCandidate.Count > 1;
+            resolvedByCandidate = [shallowest[0]];
+        }
+
+        candidates = [.. resolvedByCandidate.Select(static item => item.Candidate)];
+        List<ResolvedCandidate> resolved =
+        [
+            .. resolvedByCandidate.SelectMany(static item => item.Resolved),
+        ];
 
         bool sameNestedType = resolved.Select(static candidate => candidate.NestedType).Distinct().Count() == 1;
         bool fullyArchitectured = resolved.All(static candidate => candidate.Architecture is not null);
@@ -85,7 +109,10 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         if (candidates.Count == 1
             || (sameNestedType && fullyArchitectured && (portableCollection || oneFilePerArchitecture)))
         {
-            return BuildResolvedAnalysis(resolved, candidates.Select(static candidate => candidate.Path).ToArray());
+            return BuildResolvedAnalysis(
+                resolved,
+                candidates.Select(static candidate => candidate.Path).ToArray(),
+                ignoredDeeperPortableHelpers);
         }
 
         return new InstallerAnalysis
@@ -149,9 +176,12 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         return resolved;
     }
 
+    private static int PathDepth(string path) => path.Count(static character => character == '/');
+
     private static InstallerAnalysis BuildResolvedAnalysis(
         IReadOnlyList<ResolvedCandidate> resolved,
-        IReadOnlyList<string> candidatePaths)
+        IReadOnlyList<string> candidatePaths,
+        bool ignoredDeeperPortableHelpers = false)
     {
         List<Installer> installers = [];
         foreach (IGrouping<(InstallerType NestedType, Architecture? Architecture), ResolvedCandidate> architectureGroup in resolved.GroupBy(
@@ -201,6 +231,12 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
                 "ZIP002",
                 "The archive contains payloads for multiple architectures or incompatible installer metadata; "
                     + "separate ZIP installer entries were produced."));
+        }
+        if (ignoredDeeperPortableHelpers)
+        {
+            diagnostics.Add(new AnalysisDiagnostic(
+                "ZIP003",
+                "A single shallower portable payload was selected; deeper portable executables were treated as bundled helpers."));
         }
 
         return new InstallerAnalysis
