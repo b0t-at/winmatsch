@@ -17,6 +17,8 @@ minor versions may contain breaking changes).
   same-URL installer layouts and their per-entry switches and metadata.
 - Fresh analysis may fill previously unspecified scope and locale values, and
   stale nested metadata is removed from direct executable installers.
+- `submit` maps flat manifest input directories to their canonical WinGet
+  repository paths while preserving the supplied manifest bytes.
 
 ## [0.8.4] - 2026-08-03
 
