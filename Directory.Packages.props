@@ -34,6 +34,9 @@
       has no known security advisories. Its transitives (JsonPointer.Net 6.0.1,
       Json.More.Net 2.2.0, Humanizer.Core 3.0.1) are all MIT; the 7.x JsonPointer.Net line
       pulled in by JsonSchema.Net 9.x carries the same OSMFEULA.
+      Decision record: dependabot PR #8 (9.2.2) was declined on 2026-08-03 under this policy;
+      .github/dependabot.yml now ignores JsonSchema.Net majors, and issue #9 tracks replacing
+      the validator with a self-built Draft-07 subset implementation.
     -->
     <PackageVersion Include="JsonSchema.Net" Version="8.0.5" />
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />
