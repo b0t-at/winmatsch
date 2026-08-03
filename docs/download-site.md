@@ -159,21 +159,23 @@ already-published tag.
   The publisher already sends five-minute cache headers for mutable pages and
   one-year immutable headers for versioned release files.
 - **HTTPS:** enable the built-in HTTP-to-HTTPS redirect with status `308`.
-- **Rule `download-pages`:** match **Request path** with operator **RegEx**,
-  transform **Lowercase**, and these OR-ed values (the Front Door request-path
-  condition omits the leading slash):
+- **Rule `root-page`:** keep the portal configuration shown below for the site
+  root: match **Request path** with operator **Equal** and value `/`, then
+  apply **URL rewrite** with source pattern `/`, destination `/index.html`,
+  and **Preserve unmatched path = No**.
+- **Rule `download-pages`:** for the remaining page routes, match **Request
+  path** with operator **RegEx**, transform **Lowercase**, and enter this as
+  one match value. Front Door's RegEx validator accepts exactly one value, so
+  the alternatives are combined in the expression:
 
   ```text
-  ^/?$
-  ^latest/?$
-  ^v?[0-9]+\.[0-9]+\.[0-9]+/?$
-  ^v?[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+/?$
+  ^latest/?$|^v?[0-9]+\.[0-9]+\.[0-9]+/?$|^v?[0-9]+\.[0-9]+\.[0-9]+-[0-9a-z.-]+/?$
   ```
 
-  Apply **URL rewrite** with source pattern `/`, destination `/index.html`,
-  and **Preserve unmatched path = No**. This serves the SPA shell for `/`,
-  `/latest`, `/latest/`, `/v0.9.0[/]`, and `/0.9.0[/]` while binaries,
-  `versions.json`, checksums, and licenses continue to map directly to blobs.
+  Apply the same **URL rewrite** action as in `root-page`. Together the two
+  rules serve the SPA shell for `/`, `/latest`, `/latest/`, `/v0.9.0[/]`, and
+  `/0.9.0[/]` while binaries, `versions.json`, checksums, and licenses continue
+  to map directly to blobs.
 - **Origin access:** prefer Front Door Premium with Private Link if the
   container should remain private. Otherwise the container needs anonymous
   blob-read access so Front Door can fetch it.
