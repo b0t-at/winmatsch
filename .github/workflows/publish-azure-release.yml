@@ -142,6 +142,9 @@ jobs:
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
           AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+          AZURE_AFD_RESOURCE_GROUP: ${{ secrets.AZURE_AFD_RESOURCE_GROUP }}
+          AZURE_AFD_PROFILE: ${{ secrets.AZURE_AFD_PROFILE }}
+          AZURE_AFD_ENDPOINT: ${{ secrets.AZURE_AFD_ENDPOINT }}
         run: |
           set -euo pipefail
           required=(
@@ -157,6 +160,24 @@ jobs:
               exit 1
             fi
           done
+          afd=(AZURE_AFD_RESOURCE_GROUP AZURE_AFD_PROFILE AZURE_AFD_ENDPOINT)
+          afd_set=0
+          for name in "${afd[@]}"; do
+            if [[ -n "${!name:-}" ]]; then
+              afd_set=$((afd_set + 1))
+            fi
+          done
+          if (( afd_set > 0 && afd_set < ${#afd[@]} )); then
+            echo "::error::Front Door purge needs all of ${afd[*]} (or none to skip purging)."
+            exit 1
+          fi
+          if (( afd_set == 0 )); then
+            echo "::warning::Front Door purge secrets not configured; edge caches serve stale pages for up to five minutes after publish."
+          fi
+          if [[ "${AZURE_AFD_ENDPOINT:-}" == *.* ]]; then
+            echo "::error::AZURE_AFD_ENDPOINT must be the endpoint resource name (e.g. 'WinMatsch'), not the hostname '<name>-<hash>.z0X.azurefd.net'."
+            exit 1
+          fi
 
       - name: Log in to Azure with OIDC
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
@@ -170,6 +191,9 @@ jobs:
         env:
           AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
           AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+          AZURE_AFD_RESOURCE_GROUP: ${{ secrets.AZURE_AFD_RESOURCE_GROUP }}
+          AZURE_AFD_PROFILE: ${{ secrets.AZURE_AFD_PROFILE }}
+          AZURE_AFD_ENDPOINT: ${{ secrets.AZURE_AFD_ENDPOINT }}
         run: |
           set -euo pipefail
           args=(
@@ -182,5 +206,12 @@ jobs:
           )
           if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
             args+=(--prerelease)
+          fi
+          if [[ -n "$AZURE_AFD_RESOURCE_GROUP" && -n "$AZURE_AFD_PROFILE" && -n "$AZURE_AFD_ENDPOINT" ]]; then
+            args+=(
+              --afd-resource-group "$AZURE_AFD_RESOURCE_GROUP"
+              --afd-profile "$AZURE_AFD_PROFILE"
+              --afd-endpoint "$AZURE_AFD_ENDPOINT"
+            )
           fi
           scripts/publish-download-site.sh "${args[@]}"

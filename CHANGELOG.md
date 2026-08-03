@@ -7,6 +7,16 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Changed
+
+- The Azure release workflow now purges the Front Door cache after each
+  publish when the `AZURE_AFD_RESOURCE_GROUP`, `AZURE_AFD_PROFILE` and
+  `AZURE_AFD_ENDPOINT` secrets are configured, so new releases show up on
+  the download site immediately instead of after the five-minute edge TTL.
+  The purge covers the rewrite-rule page URLs (`/latest`, `/v<version>`,
+  `/<version>`) in addition to the mutable blobs. See
+  `docs/download-site.md` for the least-privilege purge role.
+
 ## [0.8.1] - 2026-08-03
 
 ### Added

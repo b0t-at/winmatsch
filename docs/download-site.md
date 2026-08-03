@@ -121,8 +121,12 @@ The script (bash + python3 + az; no jq required):
    `/latest/` (only when this release *is* the newest stable) and the entry
    pages,
 4. removes a deprecated physical `/<version>/index.html` alias if one exists,
-5. optionally purges the Front Door cache for `/`, `/index.html`,
-   `/404.html`, `/versions.json` and `/latest/*`.
+5. optionally purges Front Door: the mutable blob paths (`/`, `/index.html`,
+   `/404.html`, `/versions.json`, `/latest`, `/latest/`, `/latest/*`) plus
+   the rewrite-rule page URLs of the published version (`/v<version>` and
+   `/<version>`, with and without trailing slash) — Front Door caches by
+   request URL, so rewritten page routes are cached separately from
+   `/index.html`.
 
 Useful flags: `--dry-run` (stage + print the upload plan, no az calls),
 `--staging DIR` (inspect the exact container layout), `--skip-latest`,
@@ -134,9 +138,27 @@ already-published path fails. The short-lived `index.html` page shell is the
 only mutable file inside a version directory.
 
 Auth: uses Azure CLI RBAC (`--auth-mode login`; role **Storage Blob Data
-Contributor** on the target container). The Front Door purge additionally needs
-`Microsoft.Cdn/profiles/afdendpoints/purge/action` (e.g. **CDN Profile
-Contributor**).
+Contributor** on the target container). The Front Door purge additionally
+needs the control-plane action
+`Microsoft.Cdn/profiles/afdendpoints/purge/action` on the Front Door profile.
+The least-privileged built-in role that includes it is **CDN Profile
+Contributor** (`Microsoft.Cdn/profiles/*`; the other CDN/Front Door built-in
+roles — CDN Endpoint Contributor, Azure Front Door Profile Reader, the Domain
+and Secret roles — do not cover `afdendpoints/purge`). Assign it at the scope
+of the single Front Door profile to keep the blast radius to that one
+resource:
+
+```sh
+az role assignment create \
+  --role "CDN Profile Contributor" \
+  --assignee-object-id "$(az ad sp show --id <workflow-client-id> --query id -o tsv)" \
+  --assignee-principal-type ServicePrincipal \
+  --scope "/subscriptions/<subscription-id>/resourceGroups/<afd-resource-group>/providers/Microsoft.Cdn/profiles/<afd-profile>"
+```
+
+If even profile-scoped write access is too broad, a purge-only custom role
+(`profiles/read`, `profiles/afdendpoints/read`, `profiles/afdendpoints/purge/action`)
+is the tighter alternative.
 
 ### Suggested CI wiring
 
@@ -147,6 +169,17 @@ The checked-in
 `Release` environment's Entra OIDC federation, and invokes this script with the
 configured account and container. Its manual input can safely backfill an
 already-published tag.
+
+When the `Release` environment additionally defines the secrets
+`AZURE_AFD_RESOURCE_GROUP`, `AZURE_AFD_PROFILE` and `AZURE_AFD_ENDPOINT`
+(all three, or none), the workflow passes the matching `--afd-*` flags so
+every publish ends with a Front Door purge and new releases appear at the
+edge immediately. `AZURE_AFD_ENDPOINT` is the endpoint *resource name* (e.g.
+`WinMatsch`), not the `<name>-<hash>.z0X.azurefd.net` hostname — validation
+rejects values containing a dot. Without the trio the workflow only warns:
+edge PoPs then keep serving cached pages until the five-minute origin TTL
+expires. A failed purge fails the workflow run — rerun it after fixing RBAC;
+republishing the same version is idempotent.
 
 ## Recommended Front Door Standard/Premium configuration
 
@@ -199,10 +232,9 @@ page and manifest intentionally use root-relative links.
   requirement.
 - Enable compression for text content types; binaries are already
   incompressible enough to skip.
-- The checked-in workflow deliberately does not purge Front Door so the OIDC
-  identity needs only container-scoped data-plane RBAC. Purge can be enabled
-  later by passing all three `--afd-*` flags and granting the additional
-  control-plane action.
+- The workflow purges Front Door only when the three `AZURE_AFD_*` secrets
+  are configured, so the OIDC identity can stay on container-scoped
+  data-plane RBAC until the purge-only custom role above is assigned.
 - `$web` must be quoted in shells: `--container '$web'`.
 
 ## Local testing
