@@ -126,7 +126,11 @@ The script (bash + python3 + az; no jq required):
    the rewrite-rule page URLs of the published version (`/v<version>` and
    `/<version>`, with and without trailing slash) — Front Door caches by
    request URL, so rewritten page routes are cached separately from
-   `/index.html`.
+   `/index.html`,
+6. writes a GitHub Actions job summary (when `GITHUB_STEP_SUMMARY` is set)
+   with the published binaries — sizes and SHA-256 digests — plus blob
+   counts, upload and Front Door purge durations. Dry runs summarise the
+   upload plan instead.
 
 Useful flags: `--dry-run` (stage + print the upload plan, no az calls),
 `--staging DIR` (inspect the exact container layout), `--skip-latest`,

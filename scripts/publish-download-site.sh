@@ -51,6 +51,8 @@ VERSION="" DIST="" ACCOUNT="${WINMATSCH_STORAGE_ACCOUNT:-}"
 CONTAINER="${WINMATSCH_WEB_CONTAINER:-\$web}"
 DATE="" PRERELEASE=0 NOTES_URL="" MANIFEST_IN="" STAGING="" DRY_RUN=0 SKIP_LATEST=0
 AFD_RG="" AFD_PROFILE="" AFD_ENDPOINT=""
+COUNT_NEW=0 COUNT_EXISTING=0 COUNT_MUTABLE=0
+UPLOAD_SECS="" PURGE_SECS="" PLANNED_UPLOADS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -333,6 +335,90 @@ AFD_PURGE_PATHS=(
     "/v$VER" "/v$VER/" "/v$VER/index.html" "/$VER" "/$VER/"
 )
 
+# Render a GitHub Actions job summary (binaries, sizes, digests, timings)
+# when running inside a workflow. No-op elsewhere.
+write_summary() {
+    [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
+    SUM_MODE="$1" SUM_TAG="$TAG" SUM_VER="$VER" SUM_DATE="$DATE" \
+    SUM_NOTES_URL="$NOTES_URL" SUM_PRERELEASE="$PRERELEASE" \
+    SUM_LATEST="$LATEST" SUM_REFRESH_LATEST="$REFRESH_LATEST" \
+    SUM_ACCOUNT="$ACCOUNT" SUM_CONTAINER="$CONTAINER" \
+    SUM_NEW="$COUNT_NEW" SUM_EXISTING="$COUNT_EXISTING" SUM_MUTABLE="$COUNT_MUTABLE" \
+    SUM_PLANNED="$PLANNED_UPLOADS" SUM_UPLOAD_SECS="$UPLOAD_SECS" \
+    SUM_PURGE_SECS="$PURGE_SECS" SUM_PURGE_PATHS="${#AFD_PURGE_PATHS[@]}" \
+    SUM_AFD_PROFILE="$AFD_PROFILE" SUM_AFD_ENDPOINT="$AFD_ENDPOINT" \
+    SUM_TOTAL_SECS="$SECONDS" \
+        "$PYTHON" - "$ARTIFACTS_JSON" >>"$GITHUB_STEP_SUMMARY" <<'PY'
+import json, os, sys
+
+artifacts = json.load(open(sys.argv[1], encoding="utf-8"))
+env = os.environ.get
+mode, tag, ver = env("SUM_MODE"), env("SUM_TAG", ""), env("SUM_VER", "")
+
+def dur(raw):
+    s = int(raw or 0)
+    return f"{s // 60}m {s % 60:02d}s" if s >= 60 else f"{s}s"
+
+def human(n):
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024 or unit == "GiB":
+            return f"{n:,.0f} B" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+OS_LABEL = {"windows": "Windows", "linux": "Linux", "macos": "macOS"}
+lines = []
+if mode == "dry-run":
+    lines.append(f"## \N{TEST TUBE} winmatsch {tag} — dry-run upload plan")
+else:
+    lines.append(f"## \N{PACKAGE} winmatsch {tag} published to the download site")
+lines += ["", "| | |", "| --- | --- |"]
+
+channel = "pre-release" if env("SUM_PRERELEASE") == "1" or "-" in ver else "stable"
+lines.append(f"| Release | [{tag}]({env('SUM_NOTES_URL', '')}) · {env('SUM_DATE', '')} · {channel} |")
+
+if env("SUM_REFRESH_LATEST") == "1":
+    lines.append(f"| `/latest` mirror | refreshed — now serves **{ver}** |")
+else:
+    latest = env("SUM_LATEST", "")
+    lines.append(f"| `/latest` mirror | unchanged ({'stays at ' + latest if latest else 'not set'}) |")
+
+if mode == "live":
+    lines.append(f"| Destination | `{env('SUM_ACCOUNT', '')}` / `{env('SUM_CONTAINER', '')}` |")
+    new, existing, mutable = (int(env(k) or 0) for k in ("SUM_NEW", "SUM_EXISTING", "SUM_MUTABLE"))
+    blobs = f"{new} new immutable · {mutable} mutable refreshed"
+    if existing:
+        blobs += f" · {existing} already published"
+    lines.append(f"| Blobs | {blobs} |")
+    lines.append(f"| Upload time | {dur(env('SUM_UPLOAD_SECS'))} |")
+elif env("SUM_PLANNED"):
+    lines.append(f"| Planned uploads | {env('SUM_PLANNED')} blobs (nothing sent to Azure) |")
+
+if env("SUM_AFD_PROFILE") and env("SUM_AFD_ENDPOINT"):
+    target = f"`{env('SUM_AFD_PROFILE')}/{env('SUM_AFD_ENDPOINT')}`"
+    paths = env("SUM_PURGE_PATHS", "0")
+    if mode == "dry-run":
+        lines.append(f"| Front Door purge | would purge {paths} paths on {target} |")
+    else:
+        lines.append(f"| Front Door purge | {paths} paths on {target} · {dur(env('SUM_PURGE_SECS'))} |")
+else:
+    lines.append("| Front Door purge | skipped (not configured; edge TTL ≤ 5 min) |")
+
+if mode == "live":
+    lines.append(f"| Publish time (total) | {dur(env('SUM_TOTAL_SECS'))} |")
+
+total = sum(a["sizeBytes"] for a in artifacts)
+lines += ["", f"### Binaries ({len(artifacts)} files · {human(total)})", "",
+          "| File | Platform | Size | SHA-256 |", "| --- | --- | ---: | --- |"]
+for a in artifacts:
+    plat = f"{OS_LABEL.get(a['os'], a['os'])} {a['arch']}"
+    lines.append(f"| `{a['name']}` | {plat} | {human(a['sizeBytes'])} | `{a['sha256']}` |")
+lines += ["", f"Digests verified against `SHA256SUMS.txt` before upload; canonical files live under `/v{ver}/`.", ""]
+print("\n".join(lines))
+PY
+    log "Wrote job summary"
+}
+
 if [ "$DRY_RUN" -eq 1 ]; then
     log "Dry run — upload plan (staged in $STAGING):"
     printf '%-52s %-32s %s\n' "PATH" "CONTENT-TYPE" "CACHE-CONTROL" >&2
@@ -344,6 +430,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
     if [ -n "$AFD_PROFILE" ] && [ -n "$AFD_ENDPOINT" ] && [ -n "$AFD_RG" ]; then
         log "Would purge Front Door ($AFD_PROFILE/$AFD_ENDPOINT): ${AFD_PURGE_PATHS[*]}"
     fi
+    PLANNED_UPLOADS="$(upload_list | wc -l | tr -d '[:space:]')"
+    write_summary dry-run
     log "No changes were made to Azure."
     exit 0
 fi
@@ -351,6 +439,7 @@ fi
 # ----------------------------------------------------------------- upload
 
 log "Uploading to storage account '$ACCOUNT', container '$CONTAINER'"
+upload_t0=$SECONDS
 upload_mutable() {
     local path="$1" type cache dispo
     local -a args
@@ -361,6 +450,7 @@ upload_mutable() {
     [ -n "$dispo" ] && args+=(--content-disposition "$dispo")
     log "  /$path"
     az storage blob upload "${AZ_AUTH[@]}" "${args[@]}" --output none
+    COUNT_MUTABLE=$((COUNT_MUTABLE + 1))
 }
 
 upload_immutable() {
@@ -379,6 +469,7 @@ upload_immutable() {
            die "refusing to change immutable blob '/$path'"
         fi
         log "  /$path (already published)"
+        COUNT_EXISTING=$((COUNT_EXISTING + 1))
         return
     fi
 
@@ -389,6 +480,7 @@ upload_immutable() {
     [ -n "$dispo" ] && args+=(--content-disposition "$dispo")
     log "  /$path"
     az storage blob upload "${AZ_AUTH[@]}" "${args[@]}" --output none
+    COUNT_NEW=$((COUNT_NEW + 1))
 }
 
 while IFS= read -r path; do
@@ -406,6 +498,7 @@ az storage blob upload "${AZ_AUTH[@]}" \
     --file "$STAGING/versions.json" --name versions.json --overwrite \
     --content-type "$manifest_type" --content-cache "$manifest_cache" \
     --no-progress "${etag_args[@]}" --output none
+COUNT_MUTABLE=$((COUNT_MUTABLE + 1))
 
 if [ "$REFRESH_LATEST" -eq 1 ]; then
     while IFS= read -r path; do
@@ -428,22 +521,26 @@ if [ "$legacy_alias_exists" = "true" ]; then
         --account-name "$ACCOUNT" --container-name "$CONTAINER" \
         --name "$LEGACY_ALIAS" --delete-snapshots include --output none
 fi
-log "Upload complete"
+UPLOAD_SECS=$((SECONDS - upload_t0))
+log "Upload complete (${UPLOAD_SECS}s)"
 
 # ------------------------------------------------------------------ purge
 
 if [ -n "$AFD_PROFILE" ] && [ -n "$AFD_ENDPOINT" ] && [ -n "$AFD_RG" ]; then
     log "Purging Front Door cache ($AFD_PROFILE/$AFD_ENDPOINT)"
+    purge_t0=$SECONDS
     az afd endpoint purge --only-show-errors \
         --resource-group "$AFD_RG" --profile-name "$AFD_PROFILE" \
         --endpoint-name "$AFD_ENDPOINT" \
         --content-paths "${AFD_PURGE_PATHS[@]}" \
         >/dev/null
-    log "Purge complete"
+    PURGE_SECS=$((SECONDS - purge_t0))
+    log "Purge complete (${PURGE_SECS}s)"
 elif [ -n "$AFD_PROFILE$AFD_ENDPOINT$AFD_RG" ]; then
     warn "Front Door purge skipped: need all of --afd-resource-group, --afd-profile, --afd-endpoint"
 else
     log "Front Door purge not requested (pass --afd-* flags to enable)"
 fi
 
+write_summary live
 log "Done. Published $TAG$( [ "$REFRESH_LATEST" -eq 1 ] && printf ' and refreshed /latest/' )."

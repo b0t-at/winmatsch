@@ -7,6 +7,12 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- The Azure publish workflow now renders a job summary on the run page:
+  published binaries with sizes and SHA-256 digests, blob upload counts,
+  and upload/Front Door purge durations (dry runs show the upload plan).
+
 ## [0.8.2] - 2026-08-03
 
 ### Changed
