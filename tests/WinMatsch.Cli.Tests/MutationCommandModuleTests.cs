@@ -941,6 +941,51 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task File_loader_canonicalizes_flat_manifest_directory_inside_output_repository()
+    {
+        string output = Directory.CreateTempSubdirectory("winmatsch-loader-output-").FullName;
+        string input = Directory.CreateDirectory(Path.Combine(output, "downloaded-manifests")).FullName;
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(input, "Example.App.installer.yaml"),
+                "PackageIdentifier: Example.App\n"
+                + "PackageVersion: 2.0.0\n"
+                + "Installers: []\n"
+                + "ManifestType: installer\n"
+                + "ManifestVersion: 1.9.0\n");
+            await File.WriteAllTextAsync(
+                Path.Combine(input, "Example.App.locale.en-US.yaml"),
+                "PackageIdentifier: Example.App\n"
+                + "PackageVersion: 2.0.0\n"
+                + "PackageLocale: en-US\n"
+                + "ManifestType: defaultLocale\n"
+                + "ManifestVersion: 1.9.0\n");
+            await File.WriteAllTextAsync(
+                Path.Combine(input, "Example.App.yaml"),
+                "PackageIdentifier: Example.App\n"
+                + "PackageVersion: 2.0.0\n"
+                + "DefaultLocale: en-US\n"
+                + "ManifestType: version\n"
+                + "ManifestVersion: 1.9.0\n");
+            var loader = new FileSystemRawManifestSetLoader();
+
+            ImmutableArray<RawManifestDocument> documents = await loader.LoadAsync(input, output);
+
+            Assert.All(
+                documents,
+                document => Assert.StartsWith(
+                    "manifests/e/Example/App/2.0.0/",
+                    document.RepositoryPath,
+                    StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Validation_failure_blocks_apply()
     {
         var workflow = new FakeMutationWorkflow

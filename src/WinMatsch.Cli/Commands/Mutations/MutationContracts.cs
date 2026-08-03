@@ -242,14 +242,18 @@ public sealed class FileSystemRawManifestSetLoader : IRawManifestSetLoader
             loaded.Add((file, content, repositoryPath));
         }
 
-        string? inferredDirectory = loaded.Any(static item => item.RepositoryPath is null)
-            ? InferVersionDirectory(loaded)
-            : null;
+        bool preserveRepositoryPaths = loaded.All(static item =>
+            item.RepositoryPath?.StartsWith("manifests/", StringComparison.Ordinal) == true);
+        string? inferredDirectory = preserveRepositoryPaths
+            ? null
+            : InferVersionDirectory(loaded);
         var documents = ImmutableArray.CreateBuilder<RawManifestDocument>(files.Length);
         foreach ((string file, byte[] content, string? repositoryPath) in loaded)
         {
             documents.Add(new(
-                repositoryPath ?? $"{inferredDirectory}/{Path.GetFileName(file)}",
+                preserveRepositoryPaths
+                    ? repositoryPath!
+                    : $"{inferredDirectory}/{Path.GetFileName(file)}",
                 content));
         }
 
