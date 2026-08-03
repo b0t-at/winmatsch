@@ -34,13 +34,6 @@ updates:
       semver-major-days: 30
       semver-minor-days: 7
       semver-patch-days: 3
-    ignore:
-      # JsonSchema.Net majors are license-gated: from 9.0.0 the binaries ship
-      # the OSMFEULA maintenance-fee EULA. See the hold-back comment in
-      # Directory.Packages.props and issue #9 (self-built validator). GitHub
-      # security alerts still fire; only the automatic PRs are suppressed.
-      - dependency-name: "JsonSchema.Net"
-        update-types: ["version-update:semver-major"]
     groups:
       # Minor and patch updates arrive as one batch; majors stay
       # individual PRs so breaking changes get reviewed in isolation.

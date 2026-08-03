@@ -4,9 +4,9 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Json.Schema;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
+using WinMatsch.Validation.Schema;
 using YamlDotNet.Core;
 using YamlDotNet.RepresentationModel;
 
@@ -17,7 +17,7 @@ public static partial class ManifestSchemaValidator
 {
     public static string SchemaVersion => ManifestVersion.Default.Value;
 
-    private const string Draft7Identifier = "http://json-schema.org/draft-07/schema#";
+    private const string Draft7Identifier = Draft7SchemaCompiler.Draft7Identifier;
     private const int MaxNumericScalarCharacters = 256;
 
     private static readonly Dictionary<ManifestType, SchemaEntry> _schemas = LoadSchemas();
@@ -140,33 +140,9 @@ public static partial class ManifestSchemaValidator
                 entry.CanonicalProperties,
                 document.RepositoryPath,
                 findings);
-            EvaluationResults results;
-            try
-            {
-                results = entry.Schema.Evaluate(
-                    instance.RootElement,
-                    new EvaluationOptions
-                    {
-                        OutputFormat = OutputFormat.List,
-                        Culture = CultureInfo.InvariantCulture,
-                    });
-            }
-            catch (FormatException)
-            {
-                findings.Add(Error(
-                    "VLD1003",
-                    "Schema validation could not represent a numeric manifest value.",
-                    document.RepositoryPath));
-                return new ValidationReport(findings);
-            }
-            catch (OverflowException)
-            {
-                findings.Add(Error(
-                    "VLD1003",
-                    "Schema validation found a numeric value outside the supported range.",
-                    document.RepositoryPath));
-                return new ValidationReport(findings);
-            }
+            Draft7EvaluationResult results = Draft7Evaluator.Evaluate(
+                entry.Schema,
+                instance.RootElement);
 
             if (!results.IsValid)
             {
@@ -208,14 +184,7 @@ public static partial class ManifestSchemaValidator
 
         var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         CollectCanonicalProperties(schemaDocument.RootElement, properties);
-        var buildOptions = new BuildOptions
-        {
-            Dialect = Dialect.Draft07,
-            SchemaRegistry = new SchemaRegistry(),
-            VocabularyRegistry = new VocabularyRegistry(),
-            DialectRegistry = new DialectRegistry(),
-        };
-        JsonSchema schema = JsonSchema.FromText(text, buildOptions);
+        Draft7Schema schema = Draft7SchemaCompiler.Compile(text, fileName);
         return new SchemaEntry(schema, properties);
     }
 
@@ -633,23 +602,20 @@ public static partial class ManifestSchemaValidator
     }
 
     private static void AddSchemaErrors(
-        EvaluationResults results,
+        Draft7EvaluationResult results,
         string documentPath,
         List<ValidationFinding> findings)
     {
-        IEnumerable<EvaluationResults> details = results.Details ?? [results];
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (EvaluationResults detail in details)
+        foreach (IGrouping<string, SchemaEvaluationError> location in results.Errors.GroupBy(
+            static error => error.InstanceLocation,
+            StringComparer.Ordinal))
         {
-            if (detail.Errors is null)
+            foreach (SchemaEvaluationError error in location.OrderBy(
+                static error => error.Keyword,
+                StringComparer.Ordinal))
             {
-                continue;
-            }
-
-            foreach ((string keyword, string message) in detail.Errors.OrderBy(static error => error.Key, StringComparer.Ordinal))
-            {
-                string instancePath = detail.InstanceLocation.ToString();
-                string key = $"{instancePath}\0{keyword}\0{message}";
+                string key = $"{error.InstanceLocation}\0{error.Keyword}\0{error.Message}";
                 if (!seen.Add(key))
                 {
                     continue;
@@ -657,8 +623,8 @@ public static partial class ManifestSchemaValidator
 
                 findings.Add(Error(
                     "VLD1003",
-                    $"Schema keyword '{keyword}' failed: {message}",
-                    $"{documentPath}{instancePath}"));
+                    $"Schema keyword '{error.Keyword}' failed: {error.Message}",
+                    $"{documentPath}{error.InstanceLocation}"));
             }
         }
     }
@@ -676,6 +642,6 @@ public static partial class ManifestSchemaValidator
                 : null;
 
     private sealed record SchemaEntry(
-        JsonSchema Schema,
+        Draft7Schema Schema,
         IReadOnlyDictionary<string, string> CanonicalProperties);
 }

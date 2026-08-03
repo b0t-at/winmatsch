@@ -5,16 +5,6 @@ Source: https://github.com/microsoft/winget-cli
 Copyright (c) Microsoft Corporation. All rights reserved.
 License: MIT
 
-JsonSchema.Net 8.0.5, JsonPointer.Net 6.0.1, and Json.More.Net 2.2.0
-Source: https://github.com/json-everything/json-everything
-Copyright (c) .NET Foundation and Contributors
-License: MIT
-
-Humanizer.Core 3.0.1
-Source: https://github.com/Humanizr/Humanizer
-Copyright (c) .NET Foundation and Contributors
-License: MIT
-
 YamlDotNet 18.1.0
 Source: https://github.com/aaubry/YamlDotNet
 Copyright (c) 2008-2014 Antoine Aubry and contributors

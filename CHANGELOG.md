@@ -13,6 +13,14 @@ minor versions may contain breaking changes).
   published binaries with sizes and SHA-256 digests, blob upload counts,
   and upload/Front Door purge durations (dry runs show the upload plan).
 
+### Changed
+
+- Replaced JsonSchema.Net with a reflection-free, load-time-gated Draft-07
+  subset validator tailored to the bundled WinGet schemas. This removes
+  JsonSchema.Net, JsonPointer.Net, Json.More.Net, and Humanizer.Core from
+  shipped binaries while preserving VLD diagnostics and exact instance paths
+  (issue #9).
+
 ## [0.8.2] - 2026-08-03
 
 ### Changed
