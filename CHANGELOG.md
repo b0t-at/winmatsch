@@ -7,6 +7,8 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-03
+
 Initial development toward a first release. Implemented so far:
 
 ### Added
@@ -47,4 +49,5 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/commits/main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.0...main
+[0.8.0]: https://github.com/b0t-at/winmatsch/releases/tag/v0.8.0
