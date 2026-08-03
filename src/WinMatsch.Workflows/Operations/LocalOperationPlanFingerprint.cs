@@ -159,7 +159,7 @@ public static class LocalOperationPlanFingerprint
                 break;
             case UpdateOperationRequest value:
                 writer.Add("package", value.PackageIdentifier.Value);
-                writer.Add("previous-version", value.PreviousVersion.Value);
+                writer.Add("previous-version", value.PreviousVersion?.Value);
                 writer.Add("version", value.PackageVersion);
                 writer.Add("release", CreateComponent(value.Release));
                 writer.Add("assets", CreateComponent(value.Assets));

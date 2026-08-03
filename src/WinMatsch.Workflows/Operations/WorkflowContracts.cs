@@ -24,6 +24,8 @@ public sealed record PackageSnapshot
     public PackageManifests? OriginalBotSubmission { get; init; }
 
     public required ImmutableArray<RawManifestDocument> Documents { get; init; }
+
+    public bool IsRemote { get; init; }
 }
 
 public interface IManifestSnapshotSource

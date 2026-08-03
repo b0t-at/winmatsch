@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Runtime.ExceptionServices;
 using System.Text;
+using WinMatsch.Cli.Commands.Diagnostics;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.Downloads;
@@ -9,6 +10,7 @@ using WinMatsch.GitHub.Auth;
 using WinMatsch.Validation;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.Configuration;
+using WinMatsch.Workflows.Diagnostics;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
@@ -79,19 +81,26 @@ internal sealed class ProductionMutationWorkflow(
 
         using var downloader = new InstallerDownloader(
             DownloaderOptions(configuration, request is SubmitOperationRequest));
-        using HttpClient? gitHubHttp = await CreateReleaseHttpClientAsync(request, cancellationToken)
-            .ConfigureAwait(false);
-        using IGitHubRepositoryClient? gitHub = gitHubHttp is null
-            ? null
-            : new Hosting.RedactingGitHubRepositoryClient(new GitHubRepositoryClient(
-                gitHubHttp,
-                (await tokens.RequireAsync(cancellationToken).ConfigureAwait(false)).Token.RevealValue(),
-                gitHubOptions));
+        using IGitHubRepositoryClient? gitHub = await CreateGitHubClientAsync(
+            request,
+            cancellationToken).ConfigureAwait(false);
         IWorkflowReleaseSource? releases = CreateReleaseSource(request, gitHub, gitHubOptions);
         try
         {
+            LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+                downloader,
+                releases,
+                clock: null,
+                overridePackStoreOptions: OverrideStoreOptions(configuration),
+                fallbackManifestSource: CreateRepositoryManifestSource(request, gitHub));
             if (!usePrepared)
             {
+                if (request is UpdateOperationRequest update)
+                {
+                    request = await engine.ResolveUpdateSourceAsync(update, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
                 (request, _artifactDirectory) = await EnrichAssetsAsync(
                     request,
                     releases,
@@ -107,10 +116,6 @@ internal sealed class ProductionMutationWorkflow(
                 }
             }
 
-            LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
-                downloader,
-                releases,
-                overridePackStoreOptions: OverrideStoreOptions(configuration));
             WorkflowOperationResult result = await new LocalMutationWorkflow(engine)
                 .ExecuteAsync(request, cancellationToken)
                 .ConfigureAwait(false);
@@ -160,18 +165,22 @@ internal sealed class ProductionMutationWorkflow(
             : WithExecutionMode(_preparedRequest, WorkflowExecutionMode.Apply);
         using var downloader = new InstallerDownloader(
             DownloaderOptions(configuration, prepared is SubmitOperationRequest));
-        using HttpClient? gitHubHttp = await CreateReleaseHttpClientAsync(prepared, cancellationToken)
-            .ConfigureAwait(false);
-        using IGitHubRepositoryClient? gitHub = gitHubHttp is null
-            ? null
-            : new Hosting.RedactingGitHubRepositoryClient(new GitHubRepositoryClient(
-                gitHubHttp,
-                (await tokens.RequireAsync(cancellationToken).ConfigureAwait(false)).Token.RevealValue(),
-                gitHubOptions));
+        using IGitHubRepositoryClient? releaseGitHub = await CreateGitHubClientAsync(
+            prepared,
+            cancellationToken).ConfigureAwait(false);
+        using IGitHubRepositoryClient? manifestGitHub =
+            RequiresReleaseDiscovery(prepared)
+                ? await CreateManifestGitHubClientAsync(prepared, cancellationToken)
+                    .ConfigureAwait(false)
+                : null;
         LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
             downloader,
-            CreateReleaseSource(prepared, gitHub, gitHubOptions),
-            overridePackStoreOptions: OverrideStoreOptions(configuration));
+            CreateReleaseSource(prepared, releaseGitHub, gitHubOptions),
+            clock: null,
+            overridePackStoreOptions: OverrideStoreOptions(configuration),
+            fallbackManifestSource: CreateRepositoryManifestSource(
+                prepared,
+                manifestGitHub ?? releaseGitHub));
         WorkflowOperationResult result = await engine.ApplyVerifiedPlanAsync(
             prepared,
             expectedPlanFingerprint,
@@ -247,7 +256,7 @@ internal sealed class ProductionMutationWorkflow(
         return release.InstallerUrls.IsEmpty ? null : new DirectWorkflowReleaseSource();
     }
 
-    private async Task<HttpClient?> CreateReleaseHttpClientAsync(
+    private async Task<IGitHubRepositoryClient?> CreateGitHubClientAsync(
         WorkflowOperationRequest request,
         CancellationToken cancellationToken)
     {
@@ -257,16 +266,66 @@ internal sealed class ProductionMutationWorkflow(
             UpdateOperationRequest value => value.Release,
             _ => null,
         };
-        if (release is null || release.ReleaseUrls.IsEmpty)
+        bool requiresReleaseDiscovery = release is not null && !release.ReleaseUrls.IsEmpty;
+        if (!requiresReleaseDiscovery)
+        {
+            return await CreateManifestGitHubClientAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        _ = ParseGitHubRepository(release!.ReleaseUrls[0], gitHubOptions);
+        ResolvedToken required = await tokens.RequireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return new Hosting.RedactingGitHubRepositoryClient(
+            new GitHubRepositoryClient(required.Token.RevealValue(), gitHubOptions));
+    }
+
+    private async Task<IGitHubRepositoryClient?> CreateManifestGitHubClientAsync(
+        WorkflowOperationRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request is not UpdateOperationRequest)
         {
             return null;
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        _ = ParseGitHubRepository(release.ReleaseUrls[0], gitHubOptions);
-        await Task.CompletedTask.ConfigureAwait(false);
-        return new HttpClient();
+        ResolvedToken? optional;
+        try
+        {
+            optional = await tokens.ResolveAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (TokenStoreException exception)
+        {
+            cleanupWarning?.Invoke(
+                "The token keyring is unavailable; continuing with an anonymous public read: "
+                + exception.Message);
+            optional = null;
+        }
+
+        return new Hosting.RedactingGitHubRepositoryClient(
+            new PublicReadOnlyGitHubClient(
+                gitHubOptions,
+                optional?.Token.RevealValue()));
     }
+
+    private static bool RequiresReleaseDiscovery(WorkflowOperationRequest request)
+        => request switch
+        {
+            NewOperationRequest value => !value.Release.ReleaseUrls.IsEmpty,
+            UpdateOperationRequest value => !value.Release.ReleaseUrls.IsEmpty,
+            _ => false,
+        };
+
+    private RepositoryManifestSnapshotSource? CreateRepositoryManifestSource(
+        WorkflowOperationRequest request,
+        IGitHubRepositoryClient? gitHub)
+        => request is UpdateOperationRequest && gitHub is not null
+            ? new RepositoryManifestSnapshotSource(
+                new RepositoryDiagnosticService(gitHub),
+                configuration.Repository,
+                ((UpdateOperationRequest)request).PreviousVersion)
+            : null;
 
     private static RepositoryCoordinates ParseGitHubRepository(
         Uri releaseUri,

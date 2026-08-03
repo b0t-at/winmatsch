@@ -344,7 +344,7 @@ public sealed record UpdateOperationRequest : WorkflowOperationRequest
 {
     public required PackageIdentifier PackageIdentifier { get; init; }
 
-    public required PackageVersion PreviousVersion { get; init; }
+    public PackageVersion? PreviousVersion { get; init; }
 
     public string? PackageVersion { get; init; }
 

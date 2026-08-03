@@ -61,6 +61,39 @@ public sealed class MutationCommandModuleTests
         Assert.Contains("--override-pack", command.StandardOutput, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Update_accepts_target_version_without_a_positional_source_version()
+    {
+        var workflow = new FakeMutationWorkflow();
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(
+            [
+                "update",
+                "aimotrens.impulsar",
+                "--version",
+                "0.19.6",
+                "--urls",
+                "https://github.com/aimotrens/impulsar/releases/download/v0.19.6/impulsar_windows_amd64.zip",
+                "--urls",
+                "https://github.com/aimotrens/impulsar/releases/download/v0.19.6/impulsar_windows_arm64.zip",
+                "--token",
+                "test-token",
+                "--output",
+                "./",
+            ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(2, workflow.Requests.Count);
+        Assert.All(workflow.Requests, request =>
+        {
+            UpdateOperationRequest update = Assert.IsType<UpdateOperationRequest>(request);
+            Assert.Null(update.PreviousVersion);
+            Assert.Equal("0.19.6", update.PackageVersion);
+            Assert.Equal(2, update.Release!.InstallerUrls.Length);
+        });
+    }
+
     [Theory]
     [MemberData(nameof(Commands))]
     public async Task Every_command_plans_then_applies(string commandLine)
@@ -1160,7 +1193,7 @@ public sealed class MutationCommandModuleTests
             request =>
             {
                 Assert.True(request.ReplacePreviousVersion);
-                Assert.Equal("1.0", request.PreviousVersion.Value);
+                Assert.Equal("1.0", request.PreviousVersion?.Value);
             });
         GitHubSubmissionRequest remote = Assert.Single(submissions.Requests);
         Assert.True(remote.Policy.ReplacePreviousVersion);
@@ -1970,7 +2003,7 @@ internal sealed class FakeMutationWorkflow : IVerifiedMutationWorkflow
                 new PackageVersion(value.PackageVersion ?? "1.0")),
             UpdateOperationRequest value => (
                 value.PackageIdentifier,
-                new PackageVersion(value.PackageVersion ?? value.PreviousVersion.Value)),
+                new PackageVersion(value.PackageVersion ?? value.PreviousVersion?.Value ?? "1.0")),
             RemoveOperationRequest value => (value.PackageIdentifier, value.PackageVersion),
             NewLocaleOperationRequest value => (value.PackageIdentifier, value.PackageVersion),
             UpdateLocaleOperationRequest value => (value.PackageIdentifier, value.PackageVersion),
