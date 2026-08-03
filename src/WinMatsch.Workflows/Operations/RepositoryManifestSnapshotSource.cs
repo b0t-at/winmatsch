@@ -10,11 +10,14 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
 {
     private readonly IRepositoryDiagnosticService _diagnostics;
     private readonly RepositoryCoordinates _repository;
-    private readonly Dictionary<(PackageIdentifier, PackageVersion), PackageSnapshot> _snapshots =
+    private readonly Dictionary<(string Identifier, PackageVersion Version), PackageSnapshot> _snapshots =
         [];
-    private readonly HashSet<(PackageIdentifier, PackageVersion)> _missing = [];
-    private PackageVersion? _sourceVersion;
-    private ImmutableArray<PackageSnapshot>? _versions;
+    private readonly HashSet<(string Identifier, PackageVersion Version)> _missing = [];
+    private readonly PackageVersion? _configuredSourceVersion;
+    private readonly Dictionary<string, PackageVersion> _sourceVersions =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ImmutableArray<PackageSnapshot>> _versions =
+        new(StringComparer.Ordinal);
 
     public RepositoryManifestSnapshotSource(
         IRepositoryDiagnosticService diagnostics,
@@ -23,7 +26,7 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
     {
         _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
         _repository = repository ?? throw new ArgumentNullException(nameof(repository));
-        _sourceVersion = sourceVersion;
+        _configuredSourceVersion = sourceVersion;
     }
 
     public async Task<PackageSnapshot?> LoadAsync(
@@ -32,22 +35,24 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
         PackageVersion packageVersion,
         CancellationToken cancellationToken)
     {
-        if (_sourceVersion is not null && !_sourceVersion.Equals(packageVersion))
+        string identifier = packageIdentifier.Value;
+        PackageVersion? sourceVersion = GetSourceVersion(identifier);
+        if (sourceVersion is not null && !sourceVersion.Equals(packageVersion))
         {
             return null;
         }
 
-        if (_snapshots.TryGetValue((packageIdentifier, packageVersion), out PackageSnapshot? cached))
+        if (_snapshots.TryGetValue((identifier, packageVersion), out PackageSnapshot? cached))
         {
             return cached;
         }
 
-        if (_missing.Contains((packageIdentifier, packageVersion)))
+        if (_missing.Contains((identifier, packageVersion)))
         {
             return null;
         }
 
-        _sourceVersion ??= packageVersion;
+        _sourceVersions[identifier] = packageVersion;
         try
         {
             PackageVersionResult result = await _diagnostics.GetPackageVersionAsync(
@@ -58,12 +63,12 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
                 cancellationToken).ConfigureAwait(false);
             PackageSnapshot snapshot = await CreateSnapshotAsync(result, cancellationToken)
                 .ConfigureAwait(false);
-            _snapshots[(packageIdentifier, packageVersion)] = snapshot;
+            _snapshots[(identifier, packageVersion)] = snapshot;
             return snapshot;
         }
         catch (DiagnosticNotFoundException)
         {
-            _missing.Add((packageIdentifier, packageVersion));
+            _missing.Add((identifier, packageVersion));
             return null;
         }
     }
@@ -73,22 +78,25 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
         PackageIdentifier packageIdentifier,
         CancellationToken cancellationToken)
     {
-        if (_versions is { } cached)
+        string identifier = packageIdentifier.Value;
+        if (_versions.TryGetValue(identifier, out ImmutableArray<PackageSnapshot> cached))
         {
             return cached;
         }
 
         try
         {
-            if (_sourceVersion is not null)
+            PackageVersion? sourceVersion = GetSourceVersion(identifier);
+            if (sourceVersion is not null)
             {
                 PackageSnapshot? source = await LoadAsync(
                     outputDirectory,
                     packageIdentifier,
-                    _sourceVersion,
+                    sourceVersion,
                     cancellationToken).ConfigureAwait(false);
-                _versions = source is null ? [] : [source];
-                return _versions.Value;
+                ImmutableArray<PackageSnapshot> configured = source is null ? [] : [source];
+                _versions[identifier] = configured;
+                return configured;
             }
 
             PackageVersionsResult versions = await _diagnostics.ListVersionsAsync(
@@ -99,25 +107,31 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
                 cancellationToken).ConfigureAwait(false);
             if (versions.Versions.Count == 0)
             {
-                _versions = [];
+                _versions[identifier] = [];
                 return [];
             }
 
-            _sourceVersion = versions.Versions[0];
+            _sourceVersions[identifier] = versions.Versions[0];
             PackageSnapshot? latest = await LoadAsync(
                 outputDirectory,
                 packageIdentifier,
                 versions.Versions[0],
                 cancellationToken).ConfigureAwait(false);
-            _versions = latest is null ? [] : [latest];
-            return _versions.Value;
+            ImmutableArray<PackageSnapshot> resolved = latest is null ? [] : [latest];
+            _versions[identifier] = resolved;
+            return resolved;
         }
         catch (DiagnosticNotFoundException)
         {
-            _versions = [];
+            _versions[identifier] = [];
             return [];
         }
     }
+
+    private PackageVersion? GetSourceVersion(string packageIdentifier)
+        => _sourceVersions.TryGetValue(packageIdentifier, out PackageVersion? sourceVersion)
+            ? sourceVersion
+            : _configuredSourceVersion;
 
     private static async Task<PackageSnapshot> CreateSnapshotAsync(
         PackageVersionResult result,

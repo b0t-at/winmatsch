@@ -136,9 +136,10 @@ public sealed class MutationCommandModule : ICommandModule
     private void RegisterUpdate(ICommandRegistry registry)
     {
         var package = PackageArgument();
-        var previousVersion = VersionArgument();
+        var previousVersion = VersionArgument("previousVersion");
         previousVersion.Description =
-            "Source package version; defaults to the latest version in winget-pkgs.";
+            "Source package version; defaults to the latest version under --output, "
+            + "then the configured repository.";
         var options = new MutationOptions(
             includeRelease: true,
             includeMetadata: false,
@@ -1683,7 +1684,7 @@ public sealed class MutationCommandModule : ICommandModule
         Arity = ArgumentArity.ZeroOrOne,
     };
 
-    private static Argument<string> VersionArgument() => new("version")
+    private static Argument<string> VersionArgument(string name = "version") => new(name)
     {
         Description = "Exact package version, including repository casing.",
         Arity = ArgumentArity.ZeroOrOne,

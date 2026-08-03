@@ -351,16 +351,28 @@ exit code 4.
 ### update
 
 ```text
-winmatsch update [<package> [<version>]] [options]
+winmatsch update [<package> [<previousVersion>]] [options]
 ```
 
 Update an existing exact package version. Carries hand-maintained fields
 forward from the previous version (rule `WM0007`) and templates
 version-bearing ARP fields (`ARP-1`).
 
+`previousVersion` selects the exact manifest used as the update template. If it
+is omitted, winmatsch uses the highest package version under `--output`, or the
+highest version from the configured repository's default branch when no local
+version exists. The repository defaults to `microsoft/winget-pkgs`. Supplying
+the source explicitly is useful when intentionally basing an update on an older
+version; the resolved source remains pinned between plan and apply.
+
+Remote source manifests are read-only and are not copied into `--output`; only
+the target version is written. Repository reads use `--token`, `GITHUB_TOKEN`,
+or the keyring when available, and otherwise fall back to anonymous public
+access. Remote submission always requires a token.
+
 | Extra option | Description |
 |---|---|
-| `--replace <version>` | Replace the previous version, optionally naming its exact version. |
+| `--replace <version>` | Replace a local previous version, optionally naming its exact version. |
 
 ### remove
 

@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Net;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.Diagnostics;
@@ -109,10 +110,74 @@ public sealed class RepositoryManifestSnapshotSourceTests
         Assert.Equal(1, diagnostics.GetCalls);
     }
 
-    private static PackageVersionResult PackageVersion(string versionValue)
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    public async Task Repository_api_failures_are_not_treated_as_missing(
+        HttpStatusCode statusCode)
+    {
+        PackageVersionResult latest = PackageVersion("1.10");
+        var diagnostics = new FakeRepositoryDiagnosticService(latest)
+        {
+            ListFailure = new GitHubApiException(
+                "Repository read failed.",
+                statusCode,
+                requestId: null),
+        };
+        var source = new RepositoryManifestSnapshotSource(
+            diagnostics,
+            new RepositoryCoordinates("microsoft", "winget-pkgs"));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => source.ListVersionsAsync(
+                ".",
+                latest.Identifier,
+                CancellationToken.None));
+
+        Assert.Equal(statusCode, exception.StatusCode);
+    }
+
+    [Fact]
+    public async Task Cache_is_scoped_by_exact_package_identifier()
+    {
+        PackageVersionResult first = PackageVersion("1.10");
+        PackageVersionResult second = PackageVersion("2.0", "Other.Tool");
+        var diagnostics = new FakeRepositoryDiagnosticService(first, second);
+        var source = new RepositoryManifestSnapshotSource(
+            diagnostics,
+            new RepositoryCoordinates("microsoft", "winget-pkgs"));
+
+        ImmutableArray<PackageSnapshot> firstSnapshots = await source.ListVersionsAsync(
+            ".",
+            first.Identifier,
+            CancellationToken.None);
+        ImmutableArray<PackageSnapshot> secondSnapshots = await source.ListVersionsAsync(
+            ".",
+            second.Identifier,
+            CancellationToken.None);
+        ImmutableArray<PackageSnapshot> wrongCase = await source.ListVersionsAsync(
+            ".",
+            new PackageIdentifier("example.App"),
+            CancellationToken.None);
+        _ = await source.ListVersionsAsync(
+            ".",
+            first.Identifier,
+            CancellationToken.None);
+
+        Assert.Equal("1.10", Assert.Single(firstSnapshots).PackageVersion.Value);
+        Assert.Equal("2.0", Assert.Single(secondSnapshots).PackageVersion.Value);
+        Assert.Empty(wrongCase);
+        Assert.Equal(3, diagnostics.ListCalls);
+        Assert.Equal(2, diagnostics.GetCalls);
+    }
+
+    private static PackageVersionResult PackageVersion(
+        string versionValue,
+        string identifierValue = "Example.App")
     {
         var repository = new RepositoryCoordinates("microsoft", "winget-pkgs");
-        var identifier = new PackageIdentifier("Example.App");
+        var identifier = new PackageIdentifier(identifierValue);
         var version = new PackageVersion(versionValue);
         var locale = new LanguageTag("en-US");
         var manifests = new PackageManifests
@@ -200,12 +265,22 @@ public sealed class RepositoryManifestSnapshotSourceTests
         }
     }
 
-    private sealed class FakeRepositoryDiagnosticService(
-        PackageVersionResult latest) : IRepositoryDiagnosticService
+    private sealed class FakeRepositoryDiagnosticService : IRepositoryDiagnosticService
     {
+        private readonly Dictionary<string, PackageVersionResult> _latest;
+
+        public FakeRepositoryDiagnosticService(params PackageVersionResult[] latest)
+        {
+            _latest = latest.ToDictionary(
+                static result => result.Identifier.Value,
+                StringComparer.Ordinal);
+        }
+
         public int GetCalls { get; private set; }
 
         public int ListCalls { get; private set; }
+
+        public Exception? ListFailure { get; init; }
 
         public Task<PackageVersionResult> GetPackageVersionAsync(
             RepositoryCoordinates repository,
@@ -215,7 +290,12 @@ public sealed class RepositoryManifestSnapshotSourceTests
             CancellationToken cancellationToken = default)
         {
             GetCalls++;
-            return Task.FromResult(latest);
+            return _latest.TryGetValue(identifier.Value, out PackageVersionResult? latest)
+                && latest.Version.Equals(version)
+                    ? Task.FromResult(latest)
+                    : Task.FromException<PackageVersionResult>(
+                        new DiagnosticNotFoundException(
+                            $"Package '{identifier.Value}' version '{version.Value}' was not found."));
         }
 
         public Task<PackageVersionsResult> ListVersionsAsync(
@@ -226,14 +306,23 @@ public sealed class RepositoryManifestSnapshotSourceTests
             CancellationToken cancellationToken = default)
         {
             ListCalls++;
-            return Task.FromResult(new PackageVersionsResult(
-                repository,
-                "master",
-                identifier,
-                skip,
-                limit,
-                1,
-                [latest.Version]));
+            if (ListFailure is not null)
+            {
+                return Task.FromException<PackageVersionsResult>(ListFailure);
+            }
+
+            return _latest.TryGetValue(identifier.Value, out PackageVersionResult? latest)
+                ? Task.FromResult(new PackageVersionsResult(
+                    repository,
+                    "master",
+                    identifier,
+                    skip,
+                    limit,
+                    1,
+                    [latest.Version]))
+                : Task.FromException<PackageVersionsResult>(
+                    new DiagnosticNotFoundException(
+                        $"Package '{identifier.Value}' was not found."));
         }
     }
 
