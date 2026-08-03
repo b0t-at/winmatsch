@@ -35,7 +35,7 @@
       Json.More.Net 2.2.0, Humanizer.Core 3.0.1) are all MIT; the 7.x JsonPointer.Net line
       pulled in by JsonSchema.Net 9.x carries the same OSMFEULA.
     -->
-    <PackageVersion Include="JsonSchema.Net" Version="8.0.5" />
+    <PackageVersion Include="JsonSchema.Net" Version="9.2.2" />
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />
 
     <!-- Analysis -->
