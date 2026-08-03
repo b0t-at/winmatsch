@@ -15,6 +15,9 @@ minor versions may contain breaking changes).
   directly with no extraction step. `LICENSE` and `THIRD-PARTY-NOTICES.txt`
   are published once per release as shared assets (identical across all
   platforms) rather than duplicated inside each archive.
+- Release binaries now compress their embedded managed assemblies, reducing
+  all six assets by 32–35% while preserving self-contained execution. The
+  release workflow also enforces a 20 MiB per-binary size budget.
 
 ## [0.8.0] - 2026-08-03
 

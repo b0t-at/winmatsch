@@ -56,10 +56,11 @@ Release binaries are published for six runtime identifiers:
 | Linux | `linux-x64`, `linux-arm64` |
 | macOS | `osx-x64`, `osx-arm64` |
 
-Each is a single, self-contained, trimmed executable (no .NET runtime
-install required, no installer, nothing to extract) — download it and run
-it directly. `LICENSE` and `THIRD-PARTY-NOTICES.txt` are published once per
-release as separate assets (identical for every platform).
+Each is a single, self-contained, trimmed executable with its managed
+assemblies compressed (no .NET runtime install required, no installer,
+nothing to extract) — download it and run it directly. `LICENSE` and
+`THIRD-PARTY-NOTICES.txt` are published once per release as separate assets
+(identical for every platform).
 
 ## Install
 

@@ -22,10 +22,11 @@ Triggered by pushing a `v*` tag:
    hermetic test suite including the E2E project.
 2. **Publish** (six jobs): for each RID — `win-x64`, `win-arm64`,
    `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` — publishes a
-   self-contained, trimmed, single-file executable with trim-analysis
-   warnings treated as errors and the tag version stamped in. Verifies the
-   executable, `LICENSE`, and `THIRD-PARTY-NOTICES.txt` are present, smokes
-   the binary on hosts whose architecture matches
+   self-contained, trimmed, single-file executable with its managed
+   assemblies compressed, trim-analysis warnings treated as errors, and the
+   tag version stamped in. Verifies the executable, `LICENSE`, and
+   `THIRD-PARTY-NOTICES.txt` are present, rejects binaries above the 20 MiB
+   size budget, and smokes the binary on hosts whose architecture matches
    (`--version` must equal the tag version exactly, ignoring the `+<sha>`
    suffix; `--help`, `analyze --help`, `completion bash`, `config path`),
    then copies the raw executable to a deterministic release name

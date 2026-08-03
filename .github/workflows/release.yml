@@ -81,6 +81,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       RID: ${{ matrix.rid }}
+      MAX_RELEASE_BINARY_SIZE_BYTES: "20971520" # 20 MiB
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,6 +103,7 @@ jobs:
             --self-contained \
             -p:PublishSingleFile=true \
             -p:PublishTrimmed=true \
+            -p:EnableCompressionInSingleFile=true \
             -p:SuppressTrimAnalysisWarnings=false \
             -p:Version=${GITHUB_REF_NAME#v} \
             --output "publish/$RID"
@@ -121,6 +123,12 @@ jobs:
               exit 1
             fi
           done
+          size_bytes=$(wc -c < "$exe")
+          echo "Published executable size: $size_bytes bytes"
+          if (( size_bytes > MAX_RELEASE_BINARY_SIZE_BYTES )); then
+            echo "::error::Release binary '$exe' is $size_bytes bytes, exceeding the 20 MiB size budget."
+            exit 1
+          fi
 
       - name: Smoke test
         if: matrix.smoke
