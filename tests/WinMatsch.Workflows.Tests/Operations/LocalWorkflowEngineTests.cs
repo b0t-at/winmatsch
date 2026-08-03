@@ -1348,7 +1348,9 @@ public sealed class LocalWorkflowEngineTests
 
             string canonical = SecurePath.CanonicalizeOutputRoot(requested);
 
-            Assert.Equal(Path.GetFullPath(requested), canonical);
+            Assert.Equal(
+                Path.Combine(SecurePath.CanonicalizeOutputRoot(alias), "nested", "output"),
+                canonical);
             Assert.Throws<InvalidDataException>(() => SecurePath.ValidateOutputRoot(canonical));
         }
         finally
