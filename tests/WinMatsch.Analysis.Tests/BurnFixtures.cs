@@ -36,13 +36,17 @@ internal static class BurnFixtures
         string? arpXml = DefaultArpXml,
         bool includeRelatedBundle = true,
         string? registrationVersion = "2.5.0.0",
-        string? installCondition = null)
+        string? installCondition = null,
+        string? msiPackageXml = null)
     {
         string versionAttribute = registrationVersion is null ? "" : $" Version=\"{registrationVersion}\"";
         string relatedBundle = includeRelatedBundle
             ? $"<RelatedBundle Id=\"{BundleUpgradeCode}\" Action=\"Upgrade\" />"
             : "";
         string conditionAttribute = installCondition is null ? "" : $" InstallCondition=\"{installCondition}\"";
+        msiPackageXml ??=
+            $"<MsiPackage Id=\"MainPackage\" ProductCode=\"{{11111111-2222-3333-4444-555555555555}}\" "
+            + $"Version=\"2.5.0\"{conditionAttribute} />";
 
         return $$"""
             <?xml version="1.0" encoding="utf-8"?>
@@ -52,7 +56,7 @@ internal static class BurnFixtures
               </Registration>
               {{relatedBundle}}
               <Chain>
-                <MsiPackage Id="MainPackage" ProductCode="{11111111-2222-3333-4444-555555555555}" Version="2.5.0"{{conditionAttribute}} />
+                {{msiPackageXml}}
               </Chain>
             </BurnManifest>
             """;
@@ -237,7 +241,13 @@ internal static class BurnFixtures
         private readonly List<(int TypeId, byte[] Data)> _resources;
 
         public StubBuilder(Machine machine, byte[] wixburnData, List<(int TypeId, byte[] Data)> resources)
-            : base(new PEHeaderBuilder(machine: machine, imageCharacteristics: Characteristics.ExecutableImage), deterministicIdProvider: null)
+            : base(
+                new PEHeaderBuilder(
+                    machine: machine,
+                    imageCharacteristics: Characteristics.ExecutableImage),
+                deterministicIdProvider: static _ => new BlobContentId(
+                    new Guid("28FF516A-D0D2-4B2A-9DF6-A07D50AC0D90"),
+                    0x5EED5678))
         {
             _wixburnData = wixburnData;
             _resources = resources;

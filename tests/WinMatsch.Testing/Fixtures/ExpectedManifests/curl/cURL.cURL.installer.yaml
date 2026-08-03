@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Created with winmatsch synthetic regression fixture
+
+PackageIdentifier: cURL.cURL
+PackageVersion: 8.12.1.4
+InstallerType: zip
+NestedInstallerType: portable
+Installers:
+- Architecture: x86
+  NestedInstallerFiles:
+  - RelativeFilePath: curl-8.12.1_4-win32-mingw/bin/curl.exe
+  InstallerUrl: https://curl.se/windows/dl-8.12.1_4/curl-8.12.1_4-win32-mingw.zip
+  InstallerSha256: FCE4B7F136AB4EBB62E94471F4577FB138C901A88C14A93D8958D7F83DEC6C63
+- Architecture: x64
+  NestedInstallerFiles:
+  - RelativeFilePath: curl-8.12.1_4-win64-mingw/bin/curl.exe
+  InstallerUrl: https://curl.se/windows/dl-8.12.1_4/curl-8.12.1_4-win64-mingw.zip
+  InstallerSha256: 8904868ADAF4D944E911AC52C05A433DFEC2E84298FED3E3A27DBF31E700E1CB
+- Architecture: arm64
+  NestedInstallerFiles:
+  - RelativeFilePath: curl-8.12.1_4-win64a-mingw/bin/curl.exe
+  InstallerUrl: https://curl.se/windows/dl-8.12.1_4/curl-8.12.1_4-win64a-mingw.zip
+  InstallerSha256: 371CCBADC07B4BD05312EBA3388756FA39B5E570136148350657836FB65506A0
+ManifestType: installer
+ManifestVersion: 1.12.0

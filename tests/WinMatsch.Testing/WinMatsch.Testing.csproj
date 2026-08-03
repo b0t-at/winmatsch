@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Reusable hermetic fixture descriptors, acquisition, and test doubles for WinMatsch tests.</Description>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Fixtures\**\*.json" />
+    <EmbeddedResource Include="Fixtures\**\*.yaml">
+      <WithCulture>false</WithCulture>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WinMatsch.Core\WinMatsch.Core.csproj" />
+  </ItemGroup>
+
+</Project>

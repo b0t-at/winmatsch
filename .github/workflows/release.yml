@@ -5,87 +5,208 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build (${{ matrix.rid }})
+  gate:
+    name: Validate tag and run full test gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate tag format
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$ ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' is not a valid release tag (expected v<major>.<minor>.<patch>[-prerelease])."
+            exit 1
+          fi
+
+      - name: Verify CLI project exists
+        shell: bash
+        run: |
+          if [[ ! -f src/WinMatsch.Cli/WinMatsch.Cli.csproj ]]; then
+            echo "::error::src/WinMatsch.Cli/WinMatsch.Cli.csproj is missing; refusing to release."
+            exit 1
+          fi
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test --no-build --configuration Release --filter "FullyQualifiedName!~WinMatsch.E2E.Tests" --logger "console;verbosity=normal"
+
+      - name: Hermetic end-to-end tests
+        run: dotnet test tests/WinMatsch.E2E.Tests/WinMatsch.E2E.Tests.csproj --no-build --configuration Release --logger "console;verbosity=normal"
+
+  publish:
+    name: Publish (${{ matrix.rid }})
+    needs: gate
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             rid: win-x64
+            smoke: true
           - os: windows-latest
             rid: win-arm64
+            smoke: false
           - os: ubuntu-latest
             rid: linux-x64
+            smoke: true
           - os: ubuntu-latest
             rid: linux-arm64
+            smoke: false
           - os: macos-latest
             rid: osx-x64
+            smoke: false
           - os: macos-latest
             rid: osx-arm64
+            smoke: true
     runs-on: ${{ matrix.os }}
+    env:
+      RID: ${{ matrix.rid }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
 
-      # The CLI project lands in a later milestone; publish is wired up front so the
-      # release pipeline is exercised from day one. Skips gracefully until it exists.
       - name: Publish
         shell: bash
         run: |
-          if [ -f src/WinMatsch.Cli/WinMatsch.Cli.csproj ]; then
-            dotnet publish src/WinMatsch.Cli/WinMatsch.Cli.csproj \
-              --configuration Release \
-              --runtime ${{ matrix.rid }} \
-              --self-contained \
-              -p:PublishSingleFile=true \
-              -p:PublishTrimmed=true \
-              -p:Version=${GITHUB_REF_NAME#v} \
-              --output artifacts/${{ matrix.rid }}
-          else
-            echo "CLI project not present yet; nothing to publish."
-          fi
+          set -euo pipefail
+          test -f src/WinMatsch.Cli/WinMatsch.Cli.csproj
+          dotnet publish src/WinMatsch.Cli/WinMatsch.Cli.csproj \
+            --configuration Release \
+            --runtime "$RID" \
+            --self-contained \
+            -p:PublishSingleFile=true \
+            -p:PublishTrimmed=true \
+            -p:SuppressTrimAnalysisWarnings=false \
+            -p:Version=${GITHUB_REF_NAME#v} \
+            --output "publish/$RID"
 
-      - name: Upload artifacts
-        if: hashFiles('artifacts/**') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: winmatsch-${{ matrix.rid }}
-          path: artifacts/${{ matrix.rid }}/
-
-  release:
-    name: Create release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Package and checksum
+      - name: Verify publish output
         shell: bash
         run: |
-          mkdir -p dist
-          for dir in artifacts/winmatsch-*; do
-            rid=${dir#artifacts/winmatsch-}
-            case "$rid" in
-              win-*) (cd "$dir" && zip -r "../../dist/winmatsch-$rid.zip" .) ;;
-              *)     tar -czf "dist/winmatsch-$rid.tar.gz" -C "$dir" . ;;
-            esac
+          set -euo pipefail
+          dir="publish/$RID"
+          case "$RID" in
+            win-*) exe="$dir/winmatsch.exe" ;;
+            *)     exe="$dir/winmatsch" ;;
+          esac
+          for f in "$exe" "$dir/LICENSE" "$dir/THIRD-PARTY-NOTICES.txt"; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::Expected release file '$f' is missing."
+              exit 1
+            fi
           done
-          (cd dist && sha256sum * > SHA256SUMS.txt) || true
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Smoke test
+        if: matrix.smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RID" in
+            win-*) exe="publish/$RID/winmatsch.exe" ;;
+            *)     exe="publish/$RID/winmatsch" ;;
+          esac
+          version=$("$exe" --version)
+          echo "winmatsch --version: $version"
+          if [[ "${version%%+*}" != "${GITHUB_REF_NAME#v}" ]]; then
+            echo "::error::Executable version '$version' does not match tag version '${GITHUB_REF_NAME#v}'."
+            exit 1
+          fi
+          "$exe" --help > /dev/null
+          "$exe" analyze --help > /dev/null
+          "$exe" completion bash > /dev/null
+          "$exe" config path > /dev/null
+
+      - name: Package (zip)
+        if: startsWith(matrix.rid, 'win-')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "publish/${env:RID}/*" -DestinationPath "dist/winmatsch-${env:GITHUB_REF_NAME}-${env:RID}.zip"
+
+      - name: Package (tar.gz)
+        if: ${{ !startsWith(matrix.rid, 'win-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf "dist/winmatsch-${GITHUB_REF_NAME}-${RID}.tar.gz" -C "publish/${RID}" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: winmatsch-${{ matrix.rid }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create draft release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Create the draft release and upload its assets.
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Verify archives and generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          mv artifacts/* dist/
+          cd dist
+          expected=(
+            "winmatsch-$GITHUB_REF_NAME-win-x64.zip"
+            "winmatsch-$GITHUB_REF_NAME-win-arm64.zip"
+            "winmatsch-$GITHUB_REF_NAME-linux-x64.tar.gz"
+            "winmatsch-$GITHUB_REF_NAME-linux-arm64.tar.gz"
+            "winmatsch-$GITHUB_REF_NAME-osx-x64.tar.gz"
+            "winmatsch-$GITHUB_REF_NAME-osx-arm64.tar.gz"
+          )
+          for f in "${expected[@]}"; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::Expected release archive '$f' is missing."
+              exit 1
+            fi
+          done
+          for f in *.zip; do unzip -t "$f" > /dev/null; done
+          for f in *.tar.gz; do tar -tzf "$f" > /dev/null; done
+          sha256sum "${expected[@]}" > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Create draft GitHub release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           draft: true
           files: dist/*
+          fail_on_unmatched_files: true
           generate_release_notes: true

@@ -51,6 +51,7 @@ internal static class TestManifests
             Architecture = architecture,
             InstallerType = installerType,
             InstallerUrl = url,
+            InstallerSha256 = new Sha256Hash(new string('0', Sha256Hash.Length)),
             Scope = scope,
         };
 

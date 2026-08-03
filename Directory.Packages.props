@@ -5,18 +5,57 @@
     <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
 
+  <!--
+    Dependency policy (see CONTRIBUTING.md "Dependencies"):
+      * Every shipped package must be permissively licensed (MIT/BSD/Apache-2.0/MPL-2.0),
+        trim- and AOT-analyzable, and listed in THIRD-PARTY-NOTICES.txt with its exact version.
+      * Prefer the latest stable version. A deliberate hold-back must carry a comment here
+        naming the concrete blocker and how to re-evaluate it.
+      * The LicenseNoticeTests drift-guard fails the build when a pin here is missing
+        from THIRD-PARTY-NOTICES.txt.
+  -->
   <ItemGroup>
     <!-- Core -->
-    <PackageVersion Include="YamlDotNet" Version="16.3.0" />
+    <!--
+      JsonSchema.Net is deliberately held at the 8.x line, the last release published under a
+      plain MIT license. From 9.0.0 onward the NuGet package ships license file OSMFEULA.txt
+      (json-everything's "Open Source Maintenance Fee" EULA): the source stays MIT, but the
+      *redistributed binary* adds a monthly maintenance-fee obligation for users who employ it
+      in revenue-generating activity. The exact terms move between releases — 9.0.0 applies the
+      fee to every revenue-generating user, while 9.4.0 exempts those under US$10,000 annual
+      gross revenue — which is itself the point: it is an additional, mutable, non-permissive
+      term on the artifact we redistribute inside every self-contained release archive, so
+      taking it is a licensing decision, not a version bump.
+      Re-evaluate when: (a) json-everything relicenses its binaries under plain MIT, or
+      (b) the project explicitly accepts the then-current OSMFEULA terms and records that
+      decision in THIRD-PARTY-NOTICES.txt, or (c) 8.x stops receiving security fixes — at which
+      point building the MIT source ourselves, or replacing the Draft-07 validator, becomes the
+      cheaper option. 8.0.5 validates the pinned WinGet 1.12.0 Draft-07 schemas correctly and
+      has no known security advisories. Its transitives (JsonPointer.Net 6.0.1,
+      Json.More.Net 2.2.0, Humanizer.Core 3.0.1) are all MIT; the 7.x JsonPointer.Net line
+      pulled in by JsonSchema.Net 9.x carries the same OSMFEULA.
+    -->
+    <PackageVersion Include="JsonSchema.Net" Version="8.0.5" />
+    <PackageVersion Include="YamlDotNet" Version="18.1.0" />
 
     <!-- Analysis -->
-    <PackageVersion Include="OpenMcdf" Version="3.1.4" />
-    <PackageVersion Include="SharpCompress" Version="1.0.0" />
+    <PackageVersion Include="OpenMcdf" Version="3.2.0" />
+    <!--
+      SharpCompress 1.0.0 is unlisted and deprecated by its publisher as an accidental build.
+      0.50.3 was manually reviewed despite the normal three-day patch cooldown: changes from
+      0.50.1 are limited to GZip seek rewind and RAR5 async-corruption fixes with no public API
+      changes. Future automatic updates remain subject to the cooldown.
+    -->
+    <PackageVersion Include="SharpCompress" Version="0.50.3" />
+
+    <!-- Cli -->
+    <PackageVersion Include="Spectre.Console" Version="0.57.2" />
+    <PackageVersion Include="System.CommandLine" Version="2.0.10" />
 
     <!-- Tests -->
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
-    <PackageVersion Include="xunit" Version="2.9.3" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.2" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
   </ItemGroup>
 
 </Project>

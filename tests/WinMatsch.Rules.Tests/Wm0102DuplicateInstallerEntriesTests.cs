@@ -24,7 +24,7 @@ public class Wm0102DuplicateInstallerEntriesTests
     }
 
     [Fact]
-    public void Each_colliding_key_is_reported_once()
+    public void Each_additional_colliding_installer_is_reported()
     {
         PackageManifests manifests = TestManifests.Create(
             TestManifests.CreateInstaller(url: "https://example.com/a.msi"),
@@ -34,7 +34,7 @@ public class Wm0102DuplicateInstallerEntriesTests
 
         _rule.Apply(context);
 
-        Assert.Single(context.Findings);
+        Assert.Equal(2, context.Findings.Count);
     }
 
     [Fact]
@@ -75,5 +75,75 @@ public class Wm0102DuplicateInstallerEntriesTests
         _rule.Apply(context);
 
         Assert.Empty(context.Findings);
+    }
+
+    [Fact]
+    public void Absent_scope_and_locale_are_wildcards()
+    {
+        Installer wildcard = TestManifests.CreateInstaller(url: "https://example.com/a.exe");
+        wildcard.InstallerLocale = null;
+        Installer known = TestManifests.CreateInstaller(
+            url: "https://example.com/b.exe",
+            scope: Scope.User);
+        known.InstallerLocale = new LanguageTag("en-US");
+        PackageManifests manifests = TestManifests.Create(wildcard, known);
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Single(context.Findings);
+    }
+
+    [Fact]
+    public void Known_different_locales_are_distinct()
+    {
+        Installer english = TestManifests.CreateInstaller(
+            installerType: InstallerType.Exe,
+            url: "https://example.com/en.exe");
+        english.InstallerLocale = new LanguageTag("en-US");
+        Installer german = TestManifests.CreateInstaller(
+            installerType: InstallerType.Exe,
+            url: "https://example.com/de.exe");
+        german.InstallerLocale = new LanguageTag("de-DE");
+        PackageManifests manifests = TestManifests.Create(english, german);
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Empty(context.Findings);
+    }
+
+    [Fact]
+    public void Known_different_archive_nested_types_are_distinct()
+    {
+        Installer portable = TestManifests.CreateInstaller(
+            installerType: InstallerType.Zip,
+            url: "https://example.com/portable.zip");
+        portable.NestedInstallerType = InstallerType.Portable;
+        Installer msi = TestManifests.CreateInstaller(
+            installerType: InstallerType.Zip,
+            url: "https://example.com/msi.zip");
+        msi.NestedInstallerType = InstallerType.Msi;
+        PackageManifests manifests = TestManifests.Create(portable, msi);
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Empty(context.Findings);
+    }
+
+    [Fact]
+    public void Wildcard_bridge_does_not_collapse_known_different_scopes()
+    {
+        PackageManifests manifests = TestManifests.Create(
+            TestManifests.CreateInstaller(url: "https://example.com/user.exe", scope: Scope.User),
+            TestManifests.CreateInstaller(url: "https://example.com/machine.exe", scope: Scope.Machine),
+            TestManifests.CreateInstaller(url: "https://example.com/unknown.exe"));
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Equal("Installers[2]", finding.Path);
     }
 }

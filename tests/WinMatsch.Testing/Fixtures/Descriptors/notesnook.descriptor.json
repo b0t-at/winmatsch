@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 2,
+  "id": "notesnook",
+  "package": {
+    "identifier": "Streetwriters.Notesnook",
+    "version": "3.2.4"
+  },
+  "regression": {
+    "summary": "Setup and portable assets with the same architecture must retain distinct URLs and installer types.",
+    "ruleIds": [
+      "MAP-1",
+      "MAP-2",
+      "ARP-1"
+    ],
+    "expectedRuleExecutions": [
+      "ARP-1"
+    ],
+    "nonExecutableRuleReasons": {
+      "MAP-1": "Architecture-specific URL mapping is owned by workflow mapping rather than the Rules pipeline.",
+      "MAP-2": "Setup and portable asset separation is owned by workflow mapping rather than the Rules pipeline."
+    },
+    "expectedBehavior": "Map plain architecture assets to nullsoft and _portable assets to portable for x64 and arm64."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 292471,
+    "outcome": "merged-with-observed-regression",
+    "headCommit": "8cba385d14623cf8f0bc17a492a4b2c5d092a3af",
+    "mergeCommit": "f135b040368c5887f3296581a57ad9a6e6c7e8de",
+    "observedAt": "2025-09-27T16:14:54Z",
+    "manifestPath": "manifests/s/Streetwriters/Notesnook/3.2.4/Streetwriters.Notesnook.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/8cba385d14623cf8f0bc17a492a4b2c5d092a3af/manifests/s/Streetwriters/Notesnook/3.2.4/Streetwriters.Notesnook.installer.yaml",
+    "manifestSha256": "9455BE34F0EF45F21701D2436789975BC817C2042B87C42E7C77B9D284570AB0"
+  },
+  "assets": [
+    {
+      "fileName": "notesnook_win_x64.exe",
+      "url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64.exe",
+      "sha256": "C12A1F9A11D912636528918DC900BAA0213A942C4621031BE9CF1C04A447D5EE",
+      "syntheticSha256": "61E4290B4CF2F08B9CD5DF6E9BD473CA00C3F99963AE1DEBF672B6F099E7D7AE",
+      "synthetic": {
+        "kind": "nullsoft",
+        "architecture": "x64"
+      }
+    },
+    {
+      "fileName": "notesnook_win_x64_portable.exe",
+      "url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64_portable.exe",
+      "sha256": "0BBE8D413AEB04D8C7257CB83FA4BE63DE64BAE5702242B621F959A79D676D60",
+      "syntheticSha256": "74911C9560100A8D9E824C26CD53C0205B6580202FC847D898E4A96A5F8B478C",
+      "synthetic": {
+        "kind": "portable",
+        "architecture": "x64"
+      }
+    },
+    {
+      "fileName": "notesnook_win_arm64.exe",
+      "url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64.exe",
+      "sha256": "05F5D7DDA56507DB2D2F95660EBC57B092D24F4A41D9504777DA2B24A9A93659",
+      "syntheticSha256": "6F3C593798A4CF2C80B943048CE46427EEF995FC14BA2EB11AE55536E920316B",
+      "synthetic": {
+        "kind": "nullsoft",
+        "architecture": "arm64"
+      }
+    },
+    {
+      "fileName": "notesnook_win_arm64_portable.exe",
+      "url": "https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64_portable.exe",
+      "sha256": "AC8713CA2FAC92E262497DDD31D5A3FB92CA8202742C6B497C1C6CA44AC6107E",
+      "syntheticSha256": "6955AA31045FCD75687FF3851BC3EDCEE15E6CA62480F2F9ED0B919047C9B024",
+      "synthetic": {
+        "kind": "portable",
+        "architecture": "arm64"
+      }
+    }
+  ],
+  "scenario": {
+    "locale": {
+      "packageName": "Notesnook"
+    }
+  },
+  "expectedManifestDirectory": "notesnook"
+}

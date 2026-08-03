@@ -1,0 +1,64 @@
+THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+
+WinGet manifest schemas 1.12.0
+Source: https://github.com/microsoft/winget-cli
+Copyright (c) Microsoft Corporation. All rights reserved.
+License: MIT
+
+JsonSchema.Net 8.0.5, JsonPointer.Net 6.0.1, and Json.More.Net 2.2.0
+Source: https://github.com/json-everything/json-everything
+Copyright (c) .NET Foundation and Contributors
+License: MIT
+
+Humanizer.Core 3.0.1
+Source: https://github.com/Humanizr/Humanizer
+Copyright (c) .NET Foundation and Contributors
+License: MIT
+
+YamlDotNet 18.1.0
+Source: https://github.com/aaubry/YamlDotNet
+Copyright (c) 2008-2014 Antoine Aubry and contributors
+License: MIT
+
+SharpCompress 0.50.3
+Source: https://github.com/adamhathcock/sharpcompress
+Copyright (c) 2014 Adam Hathcock
+License: MIT
+
+Spectre.Console 0.57.2 and Spectre.Console.Ansi 0.57.2
+Source: https://github.com/spectreconsole/spectre.console
+Copyright (c) 2020 Patrik Svensson, Phil Scott, Nils Andresen
+License: MIT
+
+System.CommandLine 2.0.10
+Source: https://github.com/dotnet/command-line-api
+Copyright (c) Microsoft Corporation. All rights reserved.
+License: MIT
+
+OpenMcdf 3.2.0
+Source: https://github.com/openmcdf/openmcdf/tree/6514d7b9955c555c96a307252a19dcdb85cf9332
+Copyright (c) 2010-2026 Federico Blaseotto, Jeremy Powell
+License: Mozilla Public License 2.0
+License text: https://www.mozilla.org/MPL/2.0/
+The corresponding source code for the distributed OpenMcdf version is available
+at the source URL above.
+
+The MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notices and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

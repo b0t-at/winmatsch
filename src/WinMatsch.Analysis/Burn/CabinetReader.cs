@@ -40,6 +40,11 @@ internal static class CabinetReader
         int folderCount = ReadUInt16(cabinet, 26);
         int fileCount = ReadUInt16(cabinet, 28);
         int flags = ReadUInt16(cabinet, 30);
+        if (fileCount > AnalysisLimits.MaxArchiveEntries)
+        {
+            throw new InvalidDataException(
+                $"The cabinet contains {fileCount} files; the analysis limit is {AnalysisLimits.MaxArchiveEntries}.");
+        }
 
         // CFHEADER optional reserve areas: per-header, per-folder and per-data sizes.
         int folderReserve = 0;
@@ -111,10 +116,13 @@ internal static class CabinetReader
         int compression = folder.Compression & CompressionTypeMask;
         if (compression is not CompressionNone and not CompressionMsZip)
         {
-            throw new InvalidDataException($"The cabinet uses unsupported compression type {compression}; only none and MSZIP are supported.");
+            throw new InvalidDataException(
+                $"The cabinet uses unsupported compression type {compression}; only none and MSZIP are supported. Manual analysis is required.");
         }
 
         long needed = folderOffset + (long)fileLength;
+        AnalysisLimits.ValidateAllocation(fileLength, "The cabinet file", AnalysisLimits.MaxEntryBytes);
+        AnalysisLimits.ValidateAllocation(needed, "The expanded cabinet folder extent", AnalysisLimits.MaxExpandedArchiveBytes);
         using var output = new MemoryStream();
         int position = checked((int)folder.FirstDataOffset);
         for (int block = 0; block < folder.BlockCount && output.Length < needed; block++)

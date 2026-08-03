@@ -47,6 +47,20 @@ public static class YamlValues
         _ => throw UnknownYamlValue<Architecture>(value),
     };
 
+    public static string ToUnsupportedOSArchitectureYaml(this Architecture value) => value switch
+    {
+        Architecture.Neutral => throw UnknownEnumValue(value),
+        _ => value.ToYaml(),
+    };
+
+    public static Architecture ParseUnsupportedOSArchitecture(string value)
+    {
+        Architecture architecture = ParseArchitecture(value);
+        return architecture == Architecture.Neutral
+            ? throw UnknownYamlValue<Architecture>(value)
+            : architecture;
+    }
+
     public static string ToYaml(this InstallerType value) => value switch
     {
         InstallerType.Msix => "msix",
@@ -80,6 +94,20 @@ public static class YamlValues
         "font" => InstallerType.Font,
         _ => throw UnknownYamlValue<InstallerType>(value),
     };
+
+    public static string ToNestedInstallerTypeYaml(this InstallerType value) => value switch
+    {
+        InstallerType.Zip or InstallerType.Pwa => throw UnknownEnumValue(value),
+        _ => value.ToYaml(),
+    };
+
+    public static InstallerType ParseNestedInstallerType(string value)
+    {
+        InstallerType type = ParseInstallerType(value);
+        return type is InstallerType.Zip or InstallerType.Pwa
+            ? throw UnknownYamlValue<InstallerType>(value)
+            : type;
+    }
 
     public static string ToYaml(this Scope value) => value switch
     {
@@ -286,40 +314,40 @@ public static class YamlValues
     public static string ToYaml(this IconResolution value) => value switch
     {
         IconResolution.Custom => "custom",
-        IconResolution.Size16 => "16",
-        IconResolution.Size20 => "20",
-        IconResolution.Size24 => "24",
-        IconResolution.Size30 => "30",
-        IconResolution.Size32 => "32",
-        IconResolution.Size36 => "36",
-        IconResolution.Size40 => "40",
-        IconResolution.Size48 => "48",
-        IconResolution.Size60 => "60",
-        IconResolution.Size64 => "64",
-        IconResolution.Size72 => "72",
-        IconResolution.Size80 => "80",
-        IconResolution.Size96 => "96",
-        IconResolution.Size256 => "256",
+        IconResolution.Size16 => "16x16",
+        IconResolution.Size20 => "20x20",
+        IconResolution.Size24 => "24x24",
+        IconResolution.Size30 => "30x30",
+        IconResolution.Size32 => "32x32",
+        IconResolution.Size36 => "36x36",
+        IconResolution.Size40 => "40x40",
+        IconResolution.Size48 => "48x48",
+        IconResolution.Size60 => "60x60",
+        IconResolution.Size64 => "64x64",
+        IconResolution.Size72 => "72x72",
+        IconResolution.Size80 => "80x80",
+        IconResolution.Size96 => "96x96",
+        IconResolution.Size256 => "256x256",
         _ => throw UnknownEnumValue(value),
     };
 
     public static IconResolution ParseIconResolution(string value) => Normalize(value) switch
     {
         "custom" => IconResolution.Custom,
-        "16" => IconResolution.Size16,
-        "20" => IconResolution.Size20,
-        "24" => IconResolution.Size24,
-        "30" => IconResolution.Size30,
-        "32" => IconResolution.Size32,
-        "36" => IconResolution.Size36,
-        "40" => IconResolution.Size40,
-        "48" => IconResolution.Size48,
-        "60" => IconResolution.Size60,
-        "64" => IconResolution.Size64,
-        "72" => IconResolution.Size72,
-        "80" => IconResolution.Size80,
-        "96" => IconResolution.Size96,
-        "256" => IconResolution.Size256,
+        "16x16" => IconResolution.Size16,
+        "20x20" => IconResolution.Size20,
+        "24x24" => IconResolution.Size24,
+        "30x30" => IconResolution.Size30,
+        "32x32" => IconResolution.Size32,
+        "36x36" => IconResolution.Size36,
+        "40x40" => IconResolution.Size40,
+        "48x48" => IconResolution.Size48,
+        "60x60" => IconResolution.Size60,
+        "64x64" => IconResolution.Size64,
+        "72x72" => IconResolution.Size72,
+        "80x80" => IconResolution.Size80,
+        "96x96" => IconResolution.Size96,
+        "256x256" => IconResolution.Size256,
         _ => throw UnknownYamlValue<IconResolution>(value),
     };
 

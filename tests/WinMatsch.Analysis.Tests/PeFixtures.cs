@@ -49,7 +49,7 @@ internal static class PeFixtures
         metadata.AddModule(
             0,
             metadata.GetOrAddString("test.exe"),
-            metadata.GetOrAddGuid(Guid.NewGuid()),
+            metadata.GetOrAddGuid(new Guid("F47DFB66-3C7A-4A89-8D8C-4E6A8A42C4B3")),
             default,
             default);
         metadata.AddAssembly(
@@ -74,7 +74,10 @@ internal static class PeFixtures
             new PEHeaderBuilder(machine: machine, imageCharacteristics: characteristics),
             new MetadataRootBuilder(metadata),
             ilStream: new BlobBuilder(),
-            nativeResources: resources.Count == 0 ? null : new ResourceSection(resources));
+            nativeResources: resources.Count == 0 ? null : new ResourceSection(resources),
+            deterministicIdProvider: static _ => new BlobContentId(
+                new Guid("F47DFB66-3C7A-4A89-8D8C-4E6A8A42C4B3"),
+                0x5EED9012));
 
         var output = new BlobBuilder();
         peBuilder.Serialize(output);

@@ -1,0 +1,178 @@
+using System.IO.Compression;
+using System.Threading;
+
+namespace WinMatsch.Analysis;
+
+/// <summary>Resource ceilings shared by archive-backed analyzers.</summary>
+internal static class AnalysisLimits
+{
+    public const int MaxArchiveEntries = 10_000;
+    public const int MaxDependencyArchiveEntries = 4_096;
+    public const int MaxArchivePathDepth = 64;
+    public const int MaxArchivePathLength = 2_048;
+    public const long MaxEntryBytes = 256L * 1024 * 1024;
+    public const long MaxExpandedArchiveBytes = 1024L * 1024 * 1024;
+    public const long MaxDependencyCentralDirectoryBytes = 16L * 1024 * 1024;
+    public const int MaxNestedArchives = 4;
+    public const int MaxPeSections = 96;
+    public const int MaxResourceBytes = 16 * 1024 * 1024;
+    public const int MaxMsiStreamBytes = 64 * 1024 * 1024;
+    public const int MaxNsisHeaderBytes = 64 * 1024 * 1024;
+
+    private static readonly AsyncLocal<int> _archiveDepth = new();
+
+    public static IDisposable EnterArchive(string description)
+    {
+        int depth = _archiveDepth.Value + 1;
+        if (depth > MaxNestedArchives)
+        {
+            throw new AnalysisResourceLimitException(
+                $"{description} exceeds the supported nesting limit of {MaxNestedArchives} archives. Manual analysis is required.");
+        }
+
+        _archiveDepth.Value = depth;
+        return new ArchiveScope();
+    }
+
+    public static void ValidateArchive(ZipArchive archive, string description)
+    {
+        if (archive.Entries.Count > MaxArchiveEntries)
+        {
+            throw new AnalysisResourceLimitException(
+                $"{description} contains {archive.Entries.Count} entries; the analysis limit is {MaxArchiveEntries}.");
+        }
+
+        long total = 0;
+        foreach (ZipArchiveEntry entry in archive.Entries)
+        {
+            ValidateAllocation(entry.Length, $"{description} entry '{entry.FullName}'", MaxEntryBytes);
+            try
+            {
+                total = checked(total + entry.Length);
+            }
+            catch (OverflowException exception)
+            {
+                throw new AnalysisResourceLimitException(
+                    $"{description} declares an overflowing expanded size.",
+                    exception);
+            }
+        }
+
+        ValidateExpandedSize(total, description);
+    }
+
+    public static byte[] ReadEntryBytes(ZipArchiveEntry entry, string description)
+    {
+        ValidateAllocation(entry.Length, description, MaxEntryBytes);
+        byte[] bytes = new byte[checked((int)entry.Length)];
+        using Stream stream = entry.Open();
+        try
+        {
+            stream.ReadExactly(bytes);
+        }
+        catch (EndOfStreamException exception)
+        {
+            throw new InvalidDataException($"{description} ends before its declared size.", exception);
+        }
+
+        if (stream.ReadByte() != -1)
+        {
+            throw new InvalidDataException($"{description} expands beyond its declared size.");
+        }
+
+        return bytes;
+    }
+
+    public static byte[] ReadBounded(
+        Stream source,
+        long declaredSize,
+        string description,
+        long maximum)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximum);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(maximum, int.MaxValue);
+        if (declaredSize < 0)
+        {
+            throw new InvalidDataException($"{description} declares a negative size of {declaredSize} bytes.");
+        }
+
+        using var output = new MemoryStream(
+            (int)Math.Min(Math.Min(declaredSize, maximum), 64 * 1024));
+        byte[] buffer = new byte[81920];
+        while (output.Length < declaredSize)
+        {
+            int allowed = (int)Math.Min(
+                buffer.Length,
+                Math.Min(declaredSize - output.Length, maximum + 1 - output.Length));
+            if (allowed <= 0)
+            {
+                throw new AnalysisResourceLimitException(
+                    $"{description} exceeds the analysis allocation limit of {Math.Min(maximum, int.MaxValue)} bytes.");
+            }
+
+            int read = source.Read(buffer, 0, allowed);
+            if (read == 0)
+            {
+                throw new InvalidDataException($"{description} ends before its declared size.");
+            }
+
+            if (output.Length + read > maximum)
+            {
+                throw new AnalysisResourceLimitException(
+                    $"{description} exceeds the analysis allocation limit of {Math.Min(maximum, int.MaxValue)} bytes.");
+            }
+
+            output.Write(buffer, 0, read);
+        }
+
+        if (source.ReadByte() != -1)
+        {
+            throw new InvalidDataException($"{description} expands beyond its declared size.");
+        }
+
+        return output.ToArray();
+    }
+
+    public static void ValidateAllocation(long size, string description, long maximum)
+    {
+        if (size < 0)
+        {
+            throw new InvalidDataException($"{description} declares a negative size of {size} bytes.");
+        }
+
+        if (size > maximum || size > int.MaxValue)
+        {
+            throw new AnalysisResourceLimitException(
+                $"{description} declares {size} bytes; the analysis allocation limit is {Math.Min(maximum, int.MaxValue)} bytes.");
+        }
+    }
+
+    public static void ValidateExpandedSize(long size, string description)
+    {
+        if (size < 0)
+        {
+            throw new InvalidDataException($"{description} declares a negative expanded size of {size} bytes.");
+        }
+
+        if (size > MaxExpandedArchiveBytes)
+        {
+            throw new AnalysisResourceLimitException(
+                $"{description} expands to {size} bytes; the analysis limit is {MaxExpandedArchiveBytes} bytes.");
+        }
+    }
+
+    private sealed class ArchiveScope : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (!_disposed)
+            {
+                _archiveDepth.Value--;
+                _disposed = true;
+            }
+        }
+    }
+}

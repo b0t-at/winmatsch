@@ -30,10 +30,12 @@ public class ZipAnalyzerTests
         Assert.Equal(DetectedInstallerFormat.Zip, analysis.Format);
         Installer installer = Assert.Single(analysis.Installers);
         Assert.Equal(InstallerType.Zip, installer.InstallerType);
-        Assert.Equal(InstallerType.Msi, installer.NestedInstallerType);
+        Assert.Equal(InstallerType.Wix, installer.NestedInstallerType);
         NestedInstallerFile nested = Assert.Single(installer.NestedInstallerFiles!);
         Assert.Equal("installers/app.msi", nested.RelativeFilePath);
         Assert.Equal(Architecture.X64, installer.Architecture); // From the nested MSI's Template.
+        Assert.Equal(Scope.User, installer.Scope);
+        Assert.Null(installer.ProductCode);
         Assert.Equal("Contoso Editor", analysis.ProductName);
         Assert.Equal("Contoso Ltd", analysis.Publisher);
         Assert.Equal("2.4.1", analysis.ProductVersion);
@@ -45,14 +47,65 @@ public class ZipAnalyzerTests
     [InlineData("app.msixbundle", InstallerType.Msix)]
     [InlineData("app.MSIX", InstallerType.Msix)]
     [InlineData("app.appx", InstallerType.Appx)]
-    [InlineData("app.appxbundle", InstallerType.Appx)]
-    public void Nested_installer_type_is_mapped_from_the_extension(string entryName, InstallerType expected)
+    [InlineData("app.appxbundle", InstallerType.Msix)]
+    public void Nested_installer_type_is_preserved_from_inner_analysis(string entryName, InstallerType expected)
     {
-        using MemoryStream zip = BuildZip((entryName, [1, 2, 3]));
+        byte[] payload = Path.GetExtension(entryName).Contains("bundle", StringComparison.OrdinalIgnoreCase)
+            ? MsixFixtures.BuildBundle("""
+                <Bundle xmlns="http://schemas.microsoft.com/appx/2013/bundle">
+                  <Identity Name="Contoso.App" Publisher="CN=Contoso" Version="1.0.0.0" />
+                  <Packages><Package Type="application" Architecture="x64" /></Packages>
+                </Bundle>
+                """).ToArray()
+            : MsixFixtures.BuildPackage(MsixFixtures.PackageManifest()).ToArray();
+        using MemoryStream zip = BuildZip((entryName, payload));
 
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
 
         Assert.Equal(expected, Assert.Single(analysis.Installers).NestedInstallerType);
+    }
+
+    [Fact]
+    public void Nested_msi_preserves_product_scope_locale_and_arp_metadata()
+    {
+        const string productCode = "{5A2FEA1B-0F30-4F86-9F92-01A45C5A1E30}";
+        byte[] msi = MsiFixtures.BuildMsi(
+            [
+                ("ProductCode", productCode),
+                ("ProductName", "Contoso Editor"),
+                ("ProductVersion", "2.4.1"),
+                ("Manufacturer", "Contoso Ltd"),
+                ("ProductLanguage", "1033"),
+                ("ALLUSERS", "1"),
+            ],
+            creatingApplication: "Plain MSI Builder");
+        using MemoryStream zip = BuildZip(("installers/app.msi", msi));
+
+        Installer installer = Assert.Single(_analyzer.Analyze(zip, "app.zip").Installers);
+
+        Assert.Equal(InstallerType.Msi, installer.NestedInstallerType);
+        Assert.Equal(productCode, installer.ProductCode);
+        Assert.Equal(Scope.Machine, installer.Scope);
+        Assert.Equal(new LanguageTag("en-US"), installer.InstallerLocale);
+        Assert.Equal(productCode, Assert.Single(installer.AppsAndFeaturesEntries!).ProductCode);
+    }
+
+    [Fact]
+    public void Nested_nsis_preserves_type_scope_locale_elevation_and_arp_metadata()
+    {
+        byte[] nsis = NsisFixtures.BuildInstaller(new NsisFixtures.Options
+        {
+            ManifestXml = PeFixtures.ManifestXml("requireAdministrator"),
+        });
+        using MemoryStream zip = BuildZip(("installers/setup.exe", nsis));
+
+        Installer installer = Assert.Single(_analyzer.Analyze(zip, "app.zip").Installers);
+
+        Assert.Equal(InstallerType.Nullsoft, installer.NestedInstallerType);
+        Assert.Equal(Scope.Machine, installer.Scope);
+        Assert.Equal(new LanguageTag("en-US"), installer.InstallerLocale);
+        Assert.Equal(ElevationRequirement.ElevationRequired, installer.ElevationRequirement);
+        Assert.Equal(NsisFixtures.DefaultDisplayName, Assert.Single(installer.AppsAndFeaturesEntries!).DisplayName);
     }
 
     [Fact]
@@ -81,6 +134,24 @@ public class ZipAnalyzerTests
     }
 
     [Fact]
+    public void Single_nested_cumulus_exe_preserves_separate_file_version()
+    {
+        byte[] portableExe = PeFixtures.BuildExe(
+            version: new VersionStrings(
+                ProductName: "Cumulus MX",
+                ProductVersion: "Cumulus MX build 4088",
+                FileVersion: "4.5.2.0",
+                OriginalFilename: "CumulusMX.exe",
+                FileDescription: "Cumulus MX"));
+        using MemoryStream zip = BuildZip(("CumulusMX.exe", portableExe));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(zip, "cumulus.zip");
+
+        Assert.Equal("Cumulus MX build 4088", analysis.ProductVersion);
+        Assert.Equal("4.5.2.0", analysis.FileVersion);
+    }
+
+    [Fact]
     public void Single_nested_installer_exe_keeps_nested_type_exe()
     {
         byte[] installerExe = PeFixtures.BuildExe(
@@ -99,8 +170,8 @@ public class ZipAnalyzerTests
     public void Multiple_candidates_are_reported_without_choosing_one()
     {
         using MemoryStream zip = BuildZip(
-            ("a/setup-x64.exe", [1]),
-            ("b/setup-x86.msi", [2]));
+            ("a/setup-x64.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)),
+            ("b/setup-x86.msi", MsiFixtures.BuildMsi([])));
 
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "multi.zip");
 
@@ -112,6 +183,50 @@ public class ZipAnalyzerTests
         Assert.NotNull(analysis.Zip);
         Assert.False(analysis.Zip.HasSingleCandidate);
         Assert.Equal(["a/setup-x64.exe", "b/setup-x86.msi"], analysis.Zip.NestedInstallerCandidates);
+        Assert.True(Assert.Single(analysis.Diagnostics).RequiresManualAnalysis);
+    }
+
+    [Fact]
+    public void Multiple_portable_binaries_for_one_architecture_are_grouped_with_distinct_aliases()
+    {
+        using MemoryStream zip = BuildZip(
+            ("bin/tool.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)),
+            ("bin/helper.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(zip, "tools.zip");
+
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(Architecture.X64, installer.Architecture);
+        Assert.Equal(InstallerType.Portable, installer.NestedInstallerType);
+        List<NestedInstallerFile> nestedFiles = Assert.IsType<List<NestedInstallerFile>>(installer.NestedInstallerFiles);
+        Assert.Equal(["tool", "helper"], nestedFiles.Select(static file => file.PortableCommandAlias));
+        Assert.Equal(["bin/tool.exe", "bin/helper.exe"], nestedFiles.Select(static file => file.RelativeFilePath));
+    }
+
+    [Fact]
+    public void Universal_portable_archive_produces_one_entry_per_architecture()
+    {
+        using MemoryStream zip = BuildZip(
+            ("x86/tool.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.I386)),
+            ("x64/tool.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(zip, "universal.zip");
+
+        Assert.Equal([Architecture.X86, Architecture.X64], analysis.Installers.Select(static installer => installer.Architecture));
+        Assert.All(analysis.Installers, static installer => Assert.Equal(InstallerType.Portable, installer.NestedInstallerType));
+        Assert.Contains(analysis.Diagnostics, static diagnostic => diagnostic.Code == "ZIP002");
+    }
+
+    [Fact]
+    public void Duplicate_derived_portable_aliases_require_manual_selection()
+    {
+        using MemoryStream zip = BuildZip(
+            ("a/tool.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)),
+            ("b/tool.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(zip, "tools.zip"));
+
+        Assert.Contains("duplicate command alias", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -126,7 +241,7 @@ public class ZipAnalyzerTests
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
 
         Installer installer = Assert.Single(analysis.Installers);
-        Assert.Equal(InstallerType.Msi, installer.NestedInstallerType);
+        Assert.Equal(InstallerType.Wix, installer.NestedInstallerType);
         Assert.Equal("payload/app.msi", Assert.Single(installer.NestedInstallerFiles!).RelativeFilePath);
     }
 
@@ -176,6 +291,63 @@ public class ZipAnalyzerTests
         using MemoryStream zip = BuildZip(("/evil.exe", [1]));
 
         Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(zip, "evil.zip"));
+    }
+
+    [Fact]
+    public void Entry_with_drive_rooted_path_is_rejected_as_hostile()
+    {
+        using MemoryStream zip = BuildZip((@"C:\evil.exe", PeFixtures.BuildExe()));
+
+        Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(zip, "evil.zip"));
+    }
+
+    [Fact]
+    public void Excessive_path_depth_is_rejected()
+    {
+        string path = string.Join('/', Enumerable.Repeat("nested", AnalysisLimits.MaxArchivePathDepth + 1)) + "/app.exe";
+        using MemoryStream zip = BuildZip((path, PeFixtures.BuildExe()));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(zip, "deep.zip"));
+
+        Assert.Contains("path depth", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Excessive_entry_count_is_rejected_before_candidate_analysis()
+    {
+        (string Name, byte[]? Content)[] entries = Enumerable.Range(0, AnalysisLimits.MaxArchiveEntries + 1)
+            .Select(static index => ($"docs/{index}.txt", (byte[]?)Array.Empty<byte>()))
+            .ToArray();
+        using MemoryStream zip = BuildZip(entries);
+
+        AnalysisResourceLimitException exception = Assert.Throws<AnalysisResourceLimitException>(
+            () => _analyzer.Analyze(zip, "many.zip"));
+
+        Assert.Contains("entries", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(AnalysisLimits.MaxArchiveEntries.ToString(), exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Installable_extension_with_wrong_magic_requires_manual_analysis()
+    {
+        using MemoryStream zip = BuildZip(("setup.exe", "not a PE"u8.ToArray()));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(zip, "bad.zip"));
+
+        Assert.Contains("magic", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Manual analysis is required", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Plain_zip_disguised_as_nested_msix_is_not_misclassified()
+    {
+        using MemoryStream disguisedPackage = BuildZip(("setup.exe", PeFixtures.BuildExe()));
+        using MemoryStream outer = BuildZip(("payload.msix", disguisedPackage.ToArray()));
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(outer, "outer.zip"));
+
+        Assert.Contains("required MSIX/AppX package manifest", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Manual analysis is required", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

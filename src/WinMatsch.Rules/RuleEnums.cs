@@ -9,7 +9,7 @@ public enum RuleCategory
     /// <summary>Inspects the manifests and reports findings without mutating them.</summary>
     Validation,
 
-    /// <summary>Applies package-specific, data-driven fixups (see <c>QuirkPack</c>).</summary>
+    /// <summary>Applies package-specific, data-driven fixups from override packs.</summary>
     Quirk,
 
     /// <summary>Enforces repository or organization policy.</summary>
@@ -22,4 +22,29 @@ public enum RuleSeverity
     Info,
     Warning,
     Error,
+}
+
+/// <summary>Controls whether a rule mutates, only proposes, or does not run.</summary>
+public enum RuleMode
+{
+    Apply,
+    LogOnly,
+    Disabled,
+}
+
+/// <summary>The configuration layer that selected an effective rule mode.</summary>
+public enum RuleModeSource
+{
+    Default,
+    UserConfig,
+    PackageOverride,
+    CommandOverride,
+}
+
+/// <summary>How strongly the evidence supports a recorded rule change.</summary>
+public enum RuleChangeConfidence
+{
+    Low,
+    Medium,
+    High,
 }

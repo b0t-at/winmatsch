@@ -1,4 +1,5 @@
 using WinMatsch.Core;
+using WinMatsch.Rules.OverridePacks;
 using Xunit;
 
 namespace WinMatsch.Rules.Tests;
@@ -118,5 +119,57 @@ public class Wm0201ApplyPackageQuirksTests
         RuleTraceEntry entry = Assert.Single(context.Trace);
         Assert.Equal(RuleIds.ApplyPackageQuirks, entry.RuleId);
         Assert.Contains("Comments", entry.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Chrome_log_only_proposes_the_same_evidence_backed_change_without_mutation()
+    {
+        Installer installer = TestManifests.CreateInstaller(url: "https://dl.google.com/chrome.msi");
+        installer.AppsAndFeaturesEntries = [new AppsAndFeaturesEntry { DisplayVersion = "66.0.3359.22" }];
+        PackageManifests manifests = CreateChromeManifests(installer);
+        ManifestContext context = TestManifests.CreateContext(
+            manifests,
+            evidence: [CreateCommentsEvidence("https://dl.google.com/chrome.msi", "138.0.7204.97")]);
+        var configuration = new RuleRuntimeConfiguration(
+            commandOverrides: new Dictionary<string, RuleMode>
+            {
+                [RuleIds.ApplyPackageQuirks] = RuleMode.LogOnly,
+            });
+
+        RulePipeline.Create(
+            [new ApplyPackageQuirksRule()],
+            configuration,
+            OverridePackSet.BuiltIn).Run(context);
+
+        Assert.Equal("66.0.3359.22", installer.AppsAndFeaturesEntries[0].DisplayVersion);
+        RuleChange change = Assert.Single(
+            context.Changes,
+            item => item.RuleId == RuleIds.ApplyPackageQuirks
+                && item.FieldPath.EndsWith(".DisplayVersion", StringComparison.Ordinal));
+        Assert.Equal("66.0.3359.22", change.Before);
+        Assert.Equal("138.0.7204.97", change.After);
+        Assert.Equal(RuleMode.LogOnly, change.Mode);
+        Assert.Equal(RuleChangeConfidence.High, change.Confidence);
+        Assert.Contains("Comments", change.SourceEvidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Chrome_change_evidence_redacts_signed_url_queries()
+    {
+        const string url = "https://dl.google.com/chrome.msi?sig=do-not-log";
+        Installer installer = TestManifests.CreateInstaller(url: url);
+        PackageManifests manifests = CreateChromeManifests(installer);
+        ManifestContext context = TestManifests.CreateContext(
+            manifests,
+            evidence: [CreateCommentsEvidence(url, "138.0.7204.97")]);
+
+        RulePipeline.Create(
+            [new ApplyPackageQuirksRule()],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.BuiltIn).Run(context);
+
+        RuleChange change = Assert.Single(context.Changes);
+        Assert.DoesNotContain("do-not-log", change.SourceEvidence, StringComparison.Ordinal);
+        Assert.DoesNotContain("?sig=", change.SourceEvidence, StringComparison.Ordinal);
     }
 }

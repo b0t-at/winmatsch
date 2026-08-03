@@ -1,3 +1,4 @@
+using WinMatsch.Core;
 using Xunit;
 
 namespace WinMatsch.Analysis.Tests;
@@ -29,6 +30,16 @@ public class FileAnalyzerTests
     }
 
     [Fact]
+    public void Analyze_dispatches_specialized_exe_content_through_the_production_registry()
+    {
+        using var stream = new MemoryStream(InnoFixtures.BuildInstaller());
+
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(stream, "setup.exe");
+
+        Assert.Equal(DetectedInstallerFormat.InnoSetup, analysis.Format);
+    }
+
+    [Fact]
     public void Analyze_dispatches_to_the_msi_analyzer()
     {
         using var stream = new MemoryStream(MsiFixtures.BuildMsi([("ProductName", "Contoso")]));
@@ -49,6 +60,59 @@ public class FileAnalyzerTests
     }
 
     [Fact]
+    public void Packaging_change_from_exe_to_zip_is_reanalyzed_from_magic()
+    {
+        byte[] msi = MsiFixtures.BuildMsi([("ProductName", "Contoso")]);
+        using var stream = new MemoryStream();
+        using (var archive = new System.IO.Compression.ZipArchive(
+            stream,
+            System.IO.Compression.ZipArchiveMode.Create,
+            leaveOpen: true))
+        {
+            System.IO.Compression.ZipArchiveEntry entry = archive.CreateEntry("payload/app.msi");
+            using Stream entryStream = entry.Open();
+            entryStream.Write(msi);
+        }
+
+        stream.Position = 0;
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(stream, "previously-an-exe.exe");
+
+        Assert.Equal(DetectedInstallerFormat.Zip, analysis.Format);
+        Assert.Equal(InstallerType.Zip, Assert.Single(analysis.Installers).InstallerType);
+    }
+
+    [Fact]
+    public void Packaging_change_from_zip_to_exe_is_reanalyzed_from_magic()
+    {
+        using MemoryStream stream = PeFixtures.BuildExeStream();
+
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(stream, "previously-a-zip.zip");
+
+        Assert.Equal(DetectedInstallerFormat.PortableExe, analysis.Format);
+        Assert.Equal(InstallerType.Portable, Assert.Single(analysis.Installers).InstallerType);
+    }
+
+    [Fact]
+    public void Msix_content_renamed_to_zip_is_still_analyzed_as_msix()
+    {
+        using MemoryStream stream = MsixFixtures.BuildPackage(MsixFixtures.PackageManifest());
+
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(stream, "renamed.zip");
+
+        Assert.Equal(DetectedInstallerFormat.Msix, analysis.Format);
+    }
+
+    [Fact]
+    public void Known_extension_with_unrecognized_magic_requires_manual_analysis()
+    {
+        using var stream = new MemoryStream("not an installer"u8.ToArray());
+
+        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => FileAnalyzer.Analyze(stream, "fake.msi"));
+
+        Assert.Contains("Manual analysis is required", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Unknown_extension_throws_not_supported()
     {
         using var stream = new MemoryStream([1, 2, 3]);
@@ -57,6 +121,17 @@ public class FileAnalyzerTests
             () => FileAnalyzer.Analyze(stream, "app.7z"));
 
         Assert.Contains(".7z", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unknown_extension_with_supported_content_still_throws_not_supported()
+    {
+        using MemoryStream stream = PeFixtures.BuildExeStream();
+
+        NotSupportedException exception = Assert.Throws<NotSupportedException>(
+            () => FileAnalyzer.Analyze(stream, "renamed.bin"));
+
+        Assert.Contains(".bin", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

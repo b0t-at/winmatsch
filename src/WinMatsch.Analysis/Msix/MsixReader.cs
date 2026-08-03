@@ -12,15 +12,7 @@ internal static class MsixReader
 
     /// <summary>Reads a zip entry fully into memory.</summary>
     public static byte[] ReadEntryBytes(ZipArchiveEntry entry)
-    {
-        using var buffer = new MemoryStream(checked((int)entry.Length));
-        using (Stream entryStream = entry.Open())
-        {
-            entryStream.CopyTo(buffer);
-        }
-
-        return buffer.ToArray();
-    }
+        => AnalysisLimits.ReadEntryBytes(entry, $"MSIX entry '{entry.FullName}'");
 
     /// <summary>
     /// The SHA-256 of the package's <c>AppxSignature.p7x</c> entry (the manifest's

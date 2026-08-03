@@ -133,6 +133,25 @@ public class PeFileTests
     }
 
     [Fact]
+    public void Oversized_resource_directory_is_rejected_before_materialization()
+    {
+        byte[] executable = PeFixtures.BuildExe(version: new VersionStrings(ProductName: "Ignored"));
+        int peHeaderOffset = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(executable.AsSpan(0x3C));
+        int optionalHeaderOffset = peHeaderOffset + 24;
+        ushort magic = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(executable.AsSpan(optionalHeaderOffset));
+        int dataDirectoriesOffset = optionalHeaderOffset + (magic == 0x20B ? 112 : 96);
+        int resourceDirectorySizeOffset = dataDirectoriesOffset + (2 * 8) + 4;
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(
+            executable.AsSpan(resourceDirectorySizeOffset),
+            AnalysisLimits.MaxResourceBytes + 1);
+        using var stream = new MemoryStream(executable);
+
+        using var peFile = new PeFile(stream);
+
+        Assert.Null(peFile.VersionInfo.ProductName);
+    }
+
+    [Fact]
     public void Non_pe_content_throws_bad_image_format()
     {
         using var stream = new MemoryStream([1, 2, 3, 4, 5, 6, 7, 8]);

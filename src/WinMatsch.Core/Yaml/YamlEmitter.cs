@@ -73,11 +73,11 @@ internal sealed partial class YamlEmitter
         }
     }
 
-    /// <summary>Writes a sequence of string scalars; omitted entirely when null or empty.</summary>
+    /// <summary>Writes a sequence of string scalars; omitted when null and emitted as [] when empty.</summary>
     public void StringSequence(string key, IEnumerable<string>? items)
         => ScalarSequence(key, items, static item => item);
 
-    /// <summary>Writes a sequence of scalars using a formatter; omitted entirely when null or empty.</summary>
+    /// <summary>Writes a sequence of scalars using a formatter; omitted when null and emitted as [] when empty.</summary>
     public void ScalarSequence<T>(string key, IEnumerable<T>? items, Func<T, string> format)
     {
         if (items is null)
@@ -98,9 +98,14 @@ internal sealed partial class YamlEmitter
             AppendIndent();
             _builder.Append("- ").Append(NeedsQuoting(formatted) ? DoubleQuote(formatted) : formatted).Append('\n');
         }
+
+        if (first)
+        {
+            EmptySequence(key);
+        }
     }
 
-    /// <summary>Writes a sequence of integers as plain (unquoted) YAML numbers; omitted entirely when null or empty.</summary>
+    /// <summary>Writes integers as plain YAML numbers; omitted when null and emitted as [] when empty.</summary>
     public void NumberSequence(string key, IEnumerable<long>? items)
     {
         if (items is null)
@@ -120,7 +125,16 @@ internal sealed partial class YamlEmitter
             AppendIndent();
             _builder.Append("- ").Append(item.ToString(CultureInfo.InvariantCulture)).Append('\n');
         }
+
+        if (first)
+        {
+            EmptySequence(key);
+        }
     }
+
+    public void EmptySequence(string key) => WriteKeyValue(key, "[]");
+
+    public void EmptyMapping(string key) => WriteKeyValue(key, "{}");
 
     /// <summary>Writes a nested mapping. The caller is responsible for skipping empty mappings.</summary>
     public void Mapping(string key, Action<YamlEmitter> body)
@@ -131,11 +145,17 @@ internal sealed partial class YamlEmitter
         _indent--;
     }
 
-    /// <summary>Writes a sequence of mappings; omitted entirely when null or empty.</summary>
+    /// <summary>Writes a sequence of mappings; omitted when null and emitted as [] when empty.</summary>
     public void MappingSequence<T>(string key, IReadOnlyList<T>? items, Action<YamlEmitter, T> writeItem)
     {
-        if (items is null || items.Count == 0)
+        if (items is null)
         {
+            return;
+        }
+
+        if (items.Count == 0)
+        {
+            EmptySequence(key);
             return;
         }
 

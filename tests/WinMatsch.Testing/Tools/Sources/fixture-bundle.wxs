@@ -1,0 +1,17 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle
+      Name="WinMatsch compiled Burn fixture"
+      Manufacturer="WinMatsch"
+      Version="1.0.0"
+      UpgradeCode="2099BBF4-D902-4F5B-88D5-C7D962329F1D">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+          Theme="hyperlinkLicense"
+          LicenseUrl="" />
+    </BootstrapperApplication>
+    <Chain>
+      <MsiPackage SourceFile="__MSI_PATH__" />
+    </Chain>
+  </Bundle>
+</Wix>

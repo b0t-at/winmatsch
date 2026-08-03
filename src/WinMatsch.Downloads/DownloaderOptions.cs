@@ -34,4 +34,47 @@ public sealed class DownloaderOptions
     /// Generous by default because installers can be huge.
     /// </summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// The maximum time to wait for a connection (including TLS) to be established. Applies only
+    /// to the default handler; a custom handler configures its own connect behavior.
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> disables the limit.
+    /// </summary>
+    public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The maximum time to wait for response headers, or for the next payload bytes while
+    /// streaming, before the attempt counts as stalled and is retried as a transient failure.
+    /// Catches dead connections long before <see cref="Timeout"/> would.
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> disables stall detection.
+    /// </summary>
+    public TimeSpan StallTimeout { get; set; } = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Optional persistent cache directory. A null or empty value disables caching so callers retain
+    /// full control over persistence.
+    /// </summary>
+    public string? CacheDirectory { get; set; }
+
+    /// <summary>The maximum age of a cache entry when the origin did not provide a shorter freshness lifetime.</summary>
+    public TimeSpan CacheTtl { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>The maximum number of payloads retained in the persistent cache.</summary>
+    public int CacheMaxEntries { get; set; } = 64;
+
+    /// <summary>The maximum aggregate payload size retained in the persistent cache.</summary>
+    public long CacheMaxBytes { get; set; } = 5L * 1024 * 1024 * 1024;
+
+    /// <summary>The maximum time to wait for another process to release the persistent cache lock.</summary>
+    public TimeSpan CacheProcessLockTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>The minimum age of an owned cache temp file before maintenance may remove it.</summary>
+    public TimeSpan CacheAbandonedTemporaryFileAge { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// The clock used for HTTP age and freshness calculations. Override in deterministic hosts or tests.
+    /// </summary>
+    public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
+
+    internal DownloadDestinationHooks? DestinationHooks { get; set; }
 }

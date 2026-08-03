@@ -1,0 +1,529 @@
+namespace WinMatsch.Rules;
+
+internal static class RuleLogSanitizer
+{
+    private const int MaximumTextLength = 65_536;
+    private const int MaximumJwtHeaderLength = 4_096;
+    private const int MaximumJwtPayloadLength = 16_384;
+
+    private static readonly string[] _sensitivePathTerms =
+    [
+        "password",
+        "passwd",
+        "secret",
+        "credential",
+        "accessToken",
+        "refreshToken",
+        "authorization",
+        "apiKey",
+        "installerSwitches",
+    ];
+
+    public static string? Sanitize(string fieldPath, string? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        foreach (string term in _sensitivePathTerms)
+        {
+            if (fieldPath.Contains(term, StringComparison.OrdinalIgnoreCase))
+            {
+                return "[REDACTED]";
+            }
+        }
+
+        return SanitizeText(value);
+    }
+
+    public static string SanitizeMessage(string message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        return SanitizeText(message);
+    }
+
+    private static string SanitizeText(string value)
+    {
+        if (value.Length > MaximumTextLength)
+        {
+            return "[REDACTED]";
+        }
+
+        if (TryDecodeSensitiveText(value, out string decoded))
+        {
+            value = decoded;
+        }
+
+        var result = new System.Text.StringBuilder(value.Length);
+        int position = 0;
+        while (position < value.Length)
+        {
+            int start = FindNextUriStart(value, position);
+            if (start < 0)
+            {
+                result.Append(value, position, value.Length - position);
+                break;
+            }
+
+            result.Append(value, position, start - position);
+            int end = start;
+            while (end < value.Length && !IsUriTerminator(value[end]))
+            {
+                end++;
+            }
+
+            string candidate = value[start..end];
+            if (TrySanitizeUri(candidate, out string? sanitizedUri))
+            {
+                result.Append(sanitizedUri);
+            }
+            else
+            {
+                result.Append(candidate);
+            }
+
+            position = end;
+        }
+
+        string sanitized = result.ToString();
+        return ContainsBoundedCredential(sanitized) ? "[REDACTED]" : sanitized;
+    }
+
+    private static int FindNextUriStart(string value, int position)
+    {
+        int separator = value.IndexOf("://", position, StringComparison.Ordinal);
+        while (separator >= 0)
+        {
+            int start = separator;
+            while (start > position && IsSchemeCharacter(value[start - 1]))
+            {
+                start--;
+            }
+
+            if (start < separator && char.IsAsciiLetter(value[start]))
+            {
+                return start;
+            }
+
+            separator = value.IndexOf("://", separator + 3, StringComparison.Ordinal);
+        }
+
+        return -1;
+    }
+
+    private static bool IsSchemeCharacter(char value)
+        => char.IsAsciiLetterOrDigit(value) || value is '+' or '-' or '.';
+
+    private static bool TryDecodeSensitiveText(string value, out string decoded)
+    {
+        string current = value;
+        const int maximumDecodeIterations = 5;
+        for (int iteration = 0; iteration < maximumDecodeIterations; iteration++)
+        {
+            if (!TryUnescape(current, out string next))
+            {
+                decoded = "[REDACTED]";
+                return true;
+            }
+
+            if (string.Equals(next, current, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            current = next;
+            if (current.Length > 65_536)
+            {
+                decoded = "[REDACTED]";
+                return true;
+            }
+
+            if (iteration == maximumDecodeIterations - 1 && current.Contains('%'))
+            {
+                decoded = "[REDACTED]";
+                return true;
+            }
+        }
+
+        if (!string.Equals(current, value, StringComparison.Ordinal)
+            && (current.Contains("http://", StringComparison.OrdinalIgnoreCase)
+                || current.Contains("https://", StringComparison.OrdinalIgnoreCase)
+                || ContainsBoundedCredential(current)))
+        {
+            decoded = current;
+            return true;
+        }
+
+        decoded = null!;
+        return false;
+    }
+
+    private static bool TrySanitizeUri(string value, out string? sanitized)
+    {
+        int query = value.IndexOf('?');
+        int fragment = value.IndexOf('#');
+        int suffix = query < 0 ? fragment : fragment < 0 ? query : Math.Min(query, fragment);
+        string valueWithoutSuffix = suffix < 0 ? value : value[..suffix];
+        if (!Uri.TryCreate(valueWithoutSuffix, UriKind.Absolute, out Uri? uri))
+        {
+            sanitized = "[REDACTED]";
+            return true;
+        }
+
+        string decodedPath = uri.AbsolutePath;
+        const int maximumDecodeIterations = 5;
+        for (int iteration = 0; iteration < maximumDecodeIterations; iteration++)
+        {
+            if (!TryUnescape(decodedPath, out string next))
+            {
+                sanitized = "[REDACTED]";
+                return true;
+            }
+
+            if (string.Equals(next, decodedPath, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            decodedPath = next;
+            if (decodedPath.Length > 65_536)
+            {
+                sanitized = "[REDACTED]";
+                return true;
+            }
+
+            if (iteration == maximumDecodeIterations - 1
+                && decodedPath.Contains('%'))
+            {
+                sanitized = "[REDACTED]";
+                return true;
+            }
+        }
+
+        if (ContainsBoundedCredential(decodedPath))
+        {
+            sanitized = "[REDACTED]";
+            return true;
+        }
+
+        var safe = new UriBuilder(uri)
+        {
+            UserName = string.Empty,
+            Password = string.Empty,
+            Query = string.Empty,
+            Fragment = string.Empty,
+        };
+        sanitized = safe.Uri.AbsoluteUri;
+        return true;
+    }
+
+    private static bool ContainsBoundedCredential(string value)
+    {
+        ReadOnlySpan<string> assignmentNames =
+        [
+            "token",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "api_token",
+            "oauth_token",
+            "client_secret",
+            "oauth_client_secret",
+            "access-token",
+            "refresh-token",
+            "id-token",
+            "api-token",
+            "oauth-token",
+            "client-secret",
+            "oauth-client-secret",
+            "accessToken",
+            "refreshToken",
+            "idToken",
+            "apiToken",
+            "oauthToken",
+            "clientSecret",
+            "oauthClientSecret",
+            "password",
+            "passwd",
+            "secret",
+            "api-key",
+            "apikey",
+            "api_key",
+            "authorization",
+            "credential",
+            "session",
+            "cookie",
+        ];
+        foreach (string name in assignmentNames)
+        {
+            int searchStart = 0;
+            while (searchStart < value.Length)
+            {
+                int index = value.IndexOf(name, searchStart, StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
+                {
+                    break;
+                }
+
+                int end = index + name.Length;
+                bool boundedBefore = index == 0 || !IsIdentifierCharacter(value[index - 1]);
+                bool boundedAfter = end == value.Length || !IsIdentifierCharacter(value[end]);
+                if (boundedBefore && boundedAfter)
+                {
+                    int next = end;
+                    if (next < value.Length && value[next] is '\'' or '"')
+                    {
+                        next++;
+                    }
+
+                    while (next < value.Length && char.IsWhiteSpace(value[next]))
+                    {
+                        next++;
+                    }
+
+                    if (next < value.Length && value[next] is ':' or '=')
+                    {
+                        return true;
+                    }
+
+                    bool commandSwitch = index >= 2 && value[index - 2] == '-' && value[index - 1] == '-'
+                        || index >= 1 && value[index - 1] == '/';
+                    if (commandSwitch && next > end && next < value.Length)
+                    {
+                        return true;
+                    }
+                }
+
+                searchStart = end;
+            }
+        }
+
+        return ContainsBearerToken(value)
+            || ContainsBasicCredentials(value)
+            || LooksLikeJwt(value);
+    }
+
+    private static bool IsUriTerminator(char value)
+        => char.IsWhiteSpace(value) || value is ')' or ']' or '}' or '\'' or '"';
+
+    private static bool IsIdentifierCharacter(char value)
+        => char.IsAsciiLetterOrDigit(value) || value == '_';
+
+    private static bool ContainsBearerToken(string value)
+    {
+        foreach (ReadOnlyMemory<char> token in FindAuthorizationTokens(value, "bearer"))
+        {
+            if (token.Length > 0 && IsAuthorizationToken(token.Span))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryUnescape(string value, out string decoded)
+    {
+        try
+        {
+            decoded = Uri.UnescapeDataString(value);
+            return true;
+        }
+        catch (UriFormatException)
+        {
+            decoded = null!;
+            return false;
+        }
+    }
+
+    private static bool ContainsBasicCredentials(string value)
+    {
+        foreach (ReadOnlyMemory<char> token in FindAuthorizationTokens(value, "basic"))
+        {
+            string encoded = token.ToString().TrimEnd('.', ',', ';', '`', '>');
+            int maximumDecodedLength = ((encoded.Length + 3) / 4) * 3;
+            byte[] decoded = new byte[maximumDecodedLength];
+            if (Convert.TryFromBase64String(encoded, decoded, out int bytesWritten)
+                && decoded.AsSpan(0, bytesWritten).Contains((byte)':'))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<ReadOnlyMemory<char>> FindAuthorizationTokens(string value, string scheme)
+    {
+        int searchStart = 0;
+        while (searchStart < value.Length)
+        {
+            int index = value.IndexOf(scheme, searchStart, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                yield break;
+            }
+
+            int end = index + scheme.Length;
+            bool boundedBefore = index == 0 || !IsIdentifierCharacter(value[index - 1]);
+            if (boundedBefore && end < value.Length && char.IsWhiteSpace(value[end]))
+            {
+                int tokenStart = end;
+                while (tokenStart < value.Length && char.IsWhiteSpace(value[tokenStart]))
+                {
+                    tokenStart++;
+                }
+
+                int tokenEnd = tokenStart;
+                while (tokenEnd < value.Length
+                    && IsAuthorizationTokenCharacter(value[tokenEnd]))
+                {
+                    tokenEnd++;
+                }
+
+                yield return value.AsMemory(tokenStart, tokenEnd - tokenStart);
+            }
+
+            searchStart = end;
+        }
+    }
+
+    private static bool LooksLikeJwt(string value)
+    {
+        for (int start = 0; start < value.Length; start++)
+        {
+            if (!IsBase64UrlCharacter(value[start]))
+            {
+                continue;
+            }
+
+            int firstEnd = ReadBase64UrlSegment(value, start);
+            if (firstEnd - start < 6 || firstEnd >= value.Length || value[firstEnd] != '.')
+            {
+                start = firstEnd;
+                continue;
+            }
+
+            int secondStart = firstEnd + 1;
+            int secondEnd = ReadBase64UrlSegment(value, secondStart);
+            if (secondEnd - secondStart < 6 || secondEnd >= value.Length || value[secondEnd] != '.')
+            {
+                start = secondEnd;
+                continue;
+            }
+
+            int thirdStart = secondEnd + 1;
+            int thirdEnd = ReadBase64UrlSegment(value, thirdStart);
+            bool tokenBoundary = thirdEnd == value.Length
+                || !IsBase64UrlCharacter(value[thirdEnd]) && value[thirdEnd] != '.';
+            int headerLength = firstEnd - start;
+            int payloadLength = secondEnd - secondStart;
+            if (thirdEnd - thirdStart >= 6
+                && tokenBoundary
+                && (headerLength > MaximumJwtHeaderLength
+                    || payloadLength > MaximumJwtPayloadLength
+                    || IsJwtJsonSegment(
+                        value.AsSpan(start, headerLength),
+                        requireAlgorithm: true)
+                        && IsJwtJsonSegment(
+                            value.AsSpan(secondStart, payloadLength),
+                            requireAlgorithm: false)))
+            {
+                return true;
+            }
+
+            start = thirdEnd;
+        }
+
+        return false;
+    }
+
+    private static bool IsJwtJsonSegment(
+        ReadOnlySpan<char> encoded,
+        bool requireAlgorithm)
+    {
+        if (encoded.Length == 0)
+        {
+            return false;
+        }
+
+        int unpaddedLength = encoded.Length;
+        while (unpaddedLength > 0 && encoded[unpaddedLength - 1] == '=')
+        {
+            unpaddedLength--;
+        }
+
+        int paddedLength = (unpaddedLength + 3) / 4 * 4;
+        Span<char> base64 = paddedLength <= 1024
+            ? stackalloc char[paddedLength]
+            : new char[paddedLength];
+        for (int i = 0; i < unpaddedLength; i++)
+        {
+            base64[i] = encoded[i] switch
+            {
+                '-' => '+',
+                '_' => '/',
+                var character => character,
+            };
+        }
+
+        base64[unpaddedLength..].Fill('=');
+        int maximumDecodedLength = paddedLength / 4 * 3;
+        byte[] decoded = new byte[maximumDecodedLength];
+        if (!Convert.TryFromBase64Chars(base64, decoded, out int bytesWritten))
+        {
+            return false;
+        }
+
+        try
+        {
+            using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(
+                decoded.AsMemory(0, bytesWritten),
+                new System.Text.Json.JsonDocumentOptions { MaxDepth = 8 });
+            if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            return !requireAlgorithm
+                || document.RootElement.TryGetProperty("alg", out System.Text.Json.JsonElement algorithm)
+                    && algorithm.ValueKind == System.Text.Json.JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(algorithm.GetString());
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static int ReadBase64UrlSegment(string value, int start)
+    {
+        int end = start;
+        while (end < value.Length && IsBase64UrlCharacter(value[end]))
+        {
+            end++;
+        }
+
+        return end;
+    }
+
+    private static bool IsBase64UrlCharacter(char value)
+        => char.IsAsciiLetterOrDigit(value) || value is '-' or '_' or '=';
+
+    private static bool IsAuthorizationTokenCharacter(char value)
+        => IsBase64UrlCharacter(value) || value is '.' or '~' or '+' or '/';
+
+    private static bool IsAuthorizationToken(ReadOnlySpan<char> value)
+    {
+        foreach (char character in value)
+        {
+            if (!IsAuthorizationTokenCharacter(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}

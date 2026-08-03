@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 2,
+  "id": "clouddrive2",
+  "package": {
+    "identifier": "Waytech.CloudDrive2",
+    "version": "0.9.8"
+  },
+  "regression": {
+    "summary": "A static ARP DisplayVersion overlaps every package version and must not be emitted.",
+    "ruleIds": [
+      "ARP-2"
+    ],
+    "expectedRuleExecutions": [
+      "ARP-2"
+    ],
+    "nonExecutableRuleReasons": {},
+    "expectedBehavior": "Preserve the ARP product code but omit DisplayVersion 1.0."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 287069,
+    "outcome": "closed-unmerged-with-observed-regression",
+    "headCommit": "45cf87119118a53be961052f0fd3cc114a2e4295",
+    "mergeCommit": "70d268245c8c42515ee0f65864055b1d90f74467",
+    "observedAt": "2025-09-09T12:29:04Z",
+    "manifestPath": "manifests/w/Waytech/CloudDrive2/0.9.8/Waytech.CloudDrive2.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/45cf87119118a53be961052f0fd3cc114a2e4295/manifests/w/Waytech/CloudDrive2/0.9.8/Waytech.CloudDrive2.installer.yaml",
+    "manifestSha256": "F967823B8EC3F8493DC7DDD74E47D773406E9DF0A0D4834E57A27F126ABC6433"
+  },
+  "assets": [
+    {
+      "fileName": "CloudDrive2Setup-X64-0.9.8.exe",
+      "url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-X64-0.9.8.exe",
+      "sha256": "762C0CDE3C285C8317503452A2EC1FDCA9276056DD1443412C8418DC217F0D6B",
+      "syntheticSha256": "422C09BC27137689E7AE803F5CF8998368F6332ECFF0E07C3072DAF2A7898C47",
+      "synthetic": {
+        "kind": "inno",
+        "architecture": "x64"
+      }
+    },
+    {
+      "fileName": "CloudDrive2Setup-Arm64-0.9.8.exe",
+      "url": "https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-Arm64-0.9.8.exe",
+      "sha256": "4C5E6803A5615D023F084CD4B95D445DD9B335EAF2CAC2315459B08C9E44FEC4",
+      "syntheticSha256": "36B6D3113A51702E294D308ED806391BA882C876AF5089BC3C0816877A400223",
+      "synthetic": {
+        "kind": "inno",
+        "architecture": "arm64"
+      }
+    }
+  ],
+  "scenario": {
+    "operation": "update",
+    "previousVersion": "0.9.7",
+    "previousInstallers": [
+      {
+        "assetFileName": "CloudDrive2Setup-X64-0.9.8.exe",
+        "architecture": "x64",
+        "installerType": "inno",
+        "displayName": "CloudDrive2 0.9.7",
+        "displayVersion": "0.9.7",
+        "productCode": "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+      },
+      {
+        "assetFileName": "CloudDrive2Setup-Arm64-0.9.8.exe",
+        "architecture": "arm64",
+        "installerType": "inno",
+        "displayName": "CloudDrive2 0.9.7",
+        "displayVersion": "0.9.7",
+        "productCode": "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+      }
+    ],
+    "locale": {
+      "packageName": "CloudDrive2"
+    }
+  },
+  "expectedManifestDirectory": "clouddrive2"
+}

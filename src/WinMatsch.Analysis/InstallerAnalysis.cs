@@ -40,9 +40,21 @@ public sealed class InstallerAnalysis
     /// <summary>The product version harvested from the binary (for example <c>ProductVersion</c> version string).</summary>
     public string? ProductVersion { get; init; }
 
+    /// <summary>The PE file version harvested separately from <see cref="ProductVersion"/>.</summary>
+    public string? FileVersion { get; init; }
+
+    /// <summary>
+    /// Whether this analysis came from a generic self-extractor stub whose PE version describes
+    /// the extraction engine rather than the packaged product.
+    /// </summary>
+    public bool IsSelfExtractorStub { get; init; }
+
     /// <summary>The copyright notice harvested from the binary (for example <c>LegalCopyright</c> version string).</summary>
     public string? Copyright { get; init; }
 
     /// <summary>What was found inside the archive; only set by archive analyzers.</summary>
     public ZipContents? Zip { get; init; }
+
+    /// <summary>Non-fatal findings that should be shown before generating a manifest.</summary>
+    public IReadOnlyList<AnalysisDiagnostic> Diagnostics { get; init; } = [];
 }

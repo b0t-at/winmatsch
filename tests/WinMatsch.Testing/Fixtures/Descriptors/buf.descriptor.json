@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 2,
+  "id": "buf",
+  "package": {
+    "identifier": "bufbuild.buf",
+    "version": "1.64.0"
+  },
+  "regression": {
+    "summary": "A release packaging change from standalone executables to archives must replace, not preserve, the previous installer topology.",
+    "ruleIds": [
+      "TYPE-1",
+      "MAP-3"
+    ],
+    "expectedRuleExecutions": [],
+    "nonExecutableRuleReasons": {
+      "TYPE-1": "Installer topology replacement is owned by production analysis and workflow mapping.",
+      "MAP-3": "Release asset remapping is owned by workflow mapping rather than the Rules pipeline."
+    },
+    "expectedBehavior": "Emit zip installers with portable nested type and all three nested executable paths."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 335275,
+    "outcome": "merged",
+    "headCommit": "07f30e3b071c4f53cbfc6030510036b142cda190",
+    "mergeCommit": "e8f3102dab4111f9c837fcfac5ede85ebb45899b",
+    "observedAt": "2026-01-30T18:11:24Z",
+    "manifestPath": "manifests/b/bufbuild/buf/1.64.0/bufbuild.buf.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/07f30e3b071c4f53cbfc6030510036b142cda190/manifests/b/bufbuild/buf/1.64.0/bufbuild.buf.installer.yaml",
+    "manifestSha256": "42CB2FEE9B56CB8AB7D1AE1CBF420760F68A7F1BEA259F0F75DFCC5B1312E992"
+  },
+  "assets": [
+    {
+      "fileName": "buf-Windows-x86_64.zip",
+      "url": "https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-x86_64.zip",
+      "sha256": "097B0BA51F424FC6811EA30BA3A0A70A75C457126CA09FA45CC5DA4CFEFCB26E",
+      "syntheticSha256": "A08FC86D9BA755B003EE0033C7D4340687F8B6EB963527273A12597D996D5EC5",
+      "synthetic": {
+        "kind": "zip",
+        "architecture": "x64",
+        "nestedPayloadPaths": [
+          "buf/bin/buf.exe",
+          "buf/bin/protoc-gen-buf-breaking.exe",
+          "buf/bin/protoc-gen-buf-lint.exe"
+        ]
+      }
+    },
+    {
+      "fileName": "buf-Windows-arm64.zip",
+      "url": "https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-arm64.zip",
+      "sha256": "DA90612C292920CFD1625588A319FBFACDDCFC5E40BB78FC49B147D19000CED7",
+      "syntheticSha256": "1A2F907588643E88FD1E87371A166E93CFA3C71F4BA3AF1BEB23753A443C1757",
+      "synthetic": {
+        "kind": "zip",
+        "architecture": "arm64",
+        "nestedPayloadPaths": [
+          "buf/bin/buf.exe",
+          "buf/bin/protoc-gen-buf-breaking.exe",
+          "buf/bin/protoc-gen-buf-lint.exe"
+        ]
+      }
+    }
+  ],
+  "scenario": {
+    "locale": {
+      "packageName": "buf"
+    }
+  },
+  "expectedManifestDirectory": "buf"
+}

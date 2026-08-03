@@ -1,4 +1,5 @@
 using WinMatsch.Core;
+using WinMatsch.Rules.OverridePacks;
 using Xunit;
 
 namespace WinMatsch.Rules.Tests;
@@ -55,20 +56,8 @@ public class RulePipelineTests
 
         Assert.Equal(ids.Count, new HashSet<string>(ids, StringComparer.Ordinal).Count);
         Assert.Equal(
-            new[]
-            {
-                RuleIds.PreserveOnUpdate,
-                RuleIds.ApplyPackageQuirks,
-                RuleIds.PushDownRootFields,
-                RuleIds.ScrubEmptyStrings,
-                RuleIds.NormalizeProductCodes,
-                RuleIds.DedupeArpVsDefaultLocale,
-                RuleIds.RemoveDuplicateInstallers,
-                RuleIds.HoistCommonInstallerFields,
-                RuleIds.DisplayVersionConsistency,
-                RuleIds.DuplicateInstallerEntries,
-                RuleIds.InstallerTypeConsistency,
-            },
+            ProductionRuleComposer.Compose(overridePacks: OverridePackSet.BuiltIn)
+                .Select(static rule => rule.Id),
             ids);
     }
 
@@ -82,6 +71,16 @@ public class RulePipelineTests
     public void Constructor_rejects_mutating_rules_ordered_after_validation_rules()
     {
         Assert.Throws<ArgumentException>(() => new RulePipeline([new FakeRule("WM9001", RuleCategory.Validation), new FakeRule("WM9002", RuleCategory.Quirk)]));
+    }
+
+    [Fact]
+    public void Legacy_null_calls_remain_source_compatible_and_unambiguous()
+    {
+        var explicitPipeline = new RulePipeline([], null);
+        RulePipeline defaultPipeline = RulePipeline.CreateDefault(null);
+
+        Assert.Empty(explicitPipeline.Rules);
+        Assert.NotEmpty(defaultPipeline.Rules);
     }
 
     [Fact]
@@ -157,6 +156,133 @@ public class RulePipelineTests
     }
 
     [Fact]
+    public void Removed_installer_change_uses_pre_rule_evidence()
+    {
+        Installer first = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+        Installer duplicate = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+        Installer third = TestManifests.CreateInstaller(url: "https://example.test/c.exe");
+        PackageManifests manifests = TestManifests.Create(first, duplicate, third);
+        ManifestContext context = TestManifests.CreateContext(
+            manifests,
+            evidence:
+            [
+                new InstallerEvidence { InstallerUrl = first.InstallerUrl!, Properties = new Dictionary<string, string>() },
+                new InstallerEvidence { InstallerUrl = third.InstallerUrl!, Properties = new Dictionary<string, string>() },
+            ]);
+
+        RulePipeline.Create(
+            [new RemoveDuplicateInstallersRule()],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        Assert.DoesNotContain(
+            context.Changes,
+            change => change.FieldPath.StartsWith("Installers[1]", StringComparison.Ordinal)
+                && change.SourceEvidence.Contains("c.exe", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Structural_commit_preserves_retained_installer_objects()
+    {
+        Installer first = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+        Installer duplicate = TestManifests.CreateInstaller(url: "https://example.test/a.exe");
+        Installer retained = TestManifests.CreateInstaller(url: "https://example.test/b.exe");
+        PackageManifests manifests = TestManifests.Create(first, duplicate, retained);
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        RulePipeline.Create(
+            [new RemoveDuplicateInstallersRule()],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        Assert.Collection(
+            manifests.Installer.Installers!,
+            installer => Assert.Same(first, installer),
+            installer => Assert.Same(retained, installer));
+        Assert.DoesNotContain(duplicate, manifests.Installer.Installers!);
+    }
+
+    [Theory]
+    [InlineData(RuleMode.Apply)]
+    [InlineData(RuleMode.LogOnly)]
+    public void Unsnapshotable_rule_output_fails_closed_with_mode_parity(RuleMode mode)
+    {
+        PackageManifests manifests = TestManifests.Create(TestManifests.CreateInstaller());
+        PackageManifests previous = TestManifests.Create(TestManifests.CreateInstaller());
+        PackageManifests original = TestManifests.Create(TestManifests.CreateInstaller());
+        previous.DefaultLocale.ShortDescription = "previous-safe";
+        original.DefaultLocale.ShortDescription = "original-safe";
+        var runtime = new RuleRuntimeConfiguration(
+            commandOverrides: new Dictionary<string, RuleMode>
+            {
+                [UnsnapshotableOutputRule.RuleId] = mode,
+            });
+        ManifestContext context = new()
+        {
+            Manifests = manifests,
+            Previous = previous,
+            OriginalBotSubmission = original,
+        };
+
+        RulePipeline.Create(
+            [new UnsnapshotableOutputRule()],
+            runtime,
+            OverridePackSet.Empty).Run(context);
+
+        Assert.Single(manifests.Installer.Installers!);
+        Assert.Equal("previous-safe", previous.DefaultLocale.ShortDescription);
+        Assert.Equal("original-safe", original.DefaultLocale.ShortDescription);
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Equal(UnsnapshotableOutputRule.RuleId, finding.RuleId);
+        Assert.Contains("no changes were applied", finding.Message, StringComparison.Ordinal);
+        Assert.Empty(context.Changes);
+    }
+
+    [Theory]
+    [InlineData(RuleMode.Apply)]
+    [InlineData(RuleMode.LogOnly)]
+    public void Unsnapshotable_rule_input_fails_closed_without_invoking_rule(RuleMode mode)
+    {
+        PackageManifests manifests = TestManifests.Create(TestManifests.CreateInstaller());
+        manifests.Installer.Installers!.Add(null!);
+        var rule = new InvocationTrackingRule();
+        var runtime = new RuleRuntimeConfiguration(
+            commandOverrides: new Dictionary<string, RuleMode>
+            {
+                [rule.Id] = mode,
+            });
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        RulePipeline.Create([rule], runtime, OverridePackSet.Empty).Run(context);
+
+        Assert.False(rule.WasInvoked);
+        Assert.Equal(2, manifests.Installer.Installers.Count);
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Contains("input manifest state", finding.Message, StringComparison.Ordinal);
+        Assert.Empty(context.Changes);
+    }
+
+    [Fact]
+    public void Apply_invokes_stateful_rule_once_and_commits_validated_result()
+    {
+        Installer installer = TestManifests.CreateInstaller();
+        PackageManifests manifests = TestManifests.Create(installer);
+        var rule = new StatefulRule();
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        RulePipeline.Create(
+            [rule],
+            new RuleRuntimeConfiguration(),
+            OverridePackSet.Empty).Run(context);
+
+        Assert.Equal(1, rule.InvocationCount);
+        Assert.Equal("RUN-1", installer.ProductCode);
+        Assert.Contains(context.Changes, change =>
+            change.FieldPath.EndsWith(".ProductCode", StringComparison.Ordinal)
+            && change.After == "RUN-1");
+    }
+
+    [Fact]
     public void Full_pipeline_normalizes_a_messy_manifest_end_to_end()
     {
         Installer a = TestManifests.CreateInstaller(url: "https://example.com/app-x64.msi");
@@ -179,5 +305,59 @@ public class RulePipelineTests
         Assert.Null(b.InstallerSwitches);
         Assert.Equal("{AB12CD34-EF56-7890-ABCD-EF1234567890}", a.ProductCode);
         Assert.NotEmpty(context.Trace);
+    }
+
+    private sealed class UnsnapshotableOutputRule : IRule
+    {
+        public const string RuleId = "WM9990";
+
+        public string Id => RuleId;
+
+        public RuleCategory Category => RuleCategory.Normalization;
+
+        public RuleSeverity Severity => RuleSeverity.Error;
+
+        public string Description => "Produces a deliberately malformed graph for snapshot tests.";
+
+        public void Apply(ManifestContext context)
+        {
+            context.Manifests.Installer.Installers!.Add(null!);
+            context.Previous!.DefaultLocale.ShortDescription = "mutated";
+            context.OriginalBotSubmission!.DefaultLocale.ShortDescription = "mutated";
+        }
+    }
+
+    private sealed class InvocationTrackingRule : IRule
+    {
+        public string Id => "WM9989";
+
+        public RuleCategory Category => RuleCategory.Normalization;
+
+        public RuleSeverity Severity => RuleSeverity.Error;
+
+        public string Description => "Tracks whether malformed input reached the rule.";
+
+        public bool WasInvoked { get; private set; }
+
+        public void Apply(ManifestContext context) => WasInvoked = true;
+    }
+
+    private sealed class StatefulRule : IRule
+    {
+        public string Id => "WM9988";
+
+        public RuleCategory Category => RuleCategory.Normalization;
+
+        public RuleSeverity Severity => RuleSeverity.Info;
+
+        public string Description => "Changes output based on invocation count.";
+
+        public int InvocationCount { get; private set; }
+
+        public void Apply(ManifestContext context)
+        {
+            InvocationCount++;
+            context.Manifests.Installer.Installers![0].ProductCode = $"RUN-{InvocationCount}";
+        }
     }
 }

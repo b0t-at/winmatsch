@@ -96,18 +96,20 @@ public sealed class PeFile : IDisposable
         }
 
         DirectoryEntry directory = peHeader.ResourceTableDirectory;
-        if (directory.RelativeVirtualAddress == 0 || directory.Size <= 0)
+        if (directory.RelativeVirtualAddress == 0
+            || directory.Size <= 0
+            || directory.Size > AnalysisLimits.MaxResourceBytes)
         {
             return null;
         }
 
         PEMemoryBlock block = _reader.GetSectionData(directory.RelativeVirtualAddress);
-        if (block.Length == 0)
+        if (block.Length < directory.Size)
         {
             return null;
         }
 
-        ReadOnlySpan<byte> resources = block.GetContent().AsSpan();
+        ReadOnlySpan<byte> resources = block.GetContent(0, directory.Size).AsSpan();
 
         (int Offset, bool IsSubdirectory)? typeEntry = FindIdEntry(resources, 0, resourceTypeId);
         if (typeEntry is not { IsSubdirectory: true })
@@ -138,7 +140,10 @@ public sealed class PeFile : IDisposable
         uint dataRva = BinaryPrimitives.ReadUInt32LittleEndian(resources[dataEntryOffset..]);
         uint dataSize = BinaryPrimitives.ReadUInt32LittleEndian(resources[(dataEntryOffset + 4)..]);
         long dataOffset = dataRva - (long)(uint)directory.RelativeVirtualAddress;
-        if (dataSize == 0 || dataOffset < 0 || dataOffset + dataSize > resources.Length)
+        if (dataSize == 0
+            || dataSize > AnalysisLimits.MaxResourceBytes
+            || dataOffset < 0
+            || dataOffset + dataSize > resources.Length)
         {
             return null;
         }

@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+# Created with winmatsch synthetic regression fixture
+
+PackageIdentifier: TeamSonarr.Sonarr
+PackageVersion: 4.0.15.2941
+PackageLocale: en-US
+Publisher: WinMatsch synthetic fixture
+PackageName: Sonarr
+License: MIT
+ShortDescription: Synthetic regression fixture for sonarr.
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

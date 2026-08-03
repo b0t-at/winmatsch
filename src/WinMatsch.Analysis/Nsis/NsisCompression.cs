@@ -22,6 +22,9 @@ namespace WinMatsch.Analysis.Nsis;
 /// solid bzip2;</item>
 /// <item>anything else → solid deflate (NSIS zlib mode is a raw deflate stream, no wrapper).</item>
 /// </list>
+/// A solid stream's decompressed data keeps the non-solid framing: it starts with a uint32
+/// echoing the header size, then the header — the echo is validated and skipped, as 7-Zip's
+/// reader does.
 /// Supported compressors are raw deflate and raw LZMA1 (5-byte property header, no size
 /// field). NSIS's bzip2 is a modified format without the standard stream header that ordinary
 /// bzip2 decoders reject, and NSIS builds rarely use it — it is detected and reported as
@@ -59,7 +62,10 @@ internal static class NsisCompression
 
         if (IsLzma(prefix))
         {
-            return Decompress(CreateLzmaStream(stream, firstHeader.DataOffset, available), firstHeader.HeaderSize);
+            return Decompress(
+                CreateLzmaStream(stream, firstHeader.DataOffset, available),
+                firstHeader.HeaderSize,
+                solid: true);
         }
 
         // The high-bit test must precede the solid-bzip2 test: a non-solid size prefix like
@@ -82,7 +88,7 @@ internal static class NsisCompression
             Stream data = IsLzma(block)
                 ? CreateLzmaStream(stream, firstHeader.DataOffset + 4, blockSize)
                 : CreateDeflateStream(stream, firstHeader.DataOffset + 4, blockSize);
-            return Decompress(data, firstHeader.HeaderSize);
+            return Decompress(data, firstHeader.HeaderSize, solid: false);
         }
 
         if (IsBzip2(prefix))
@@ -90,7 +96,10 @@ internal static class NsisCompression
             throw UnsupportedBzip2();
         }
 
-        return Decompress(CreateDeflateStream(stream, firstHeader.DataOffset, available), firstHeader.HeaderSize);
+        return Decompress(
+            CreateDeflateStream(stream, firstHeader.DataOffset, available),
+            firstHeader.HeaderSize,
+            solid: true);
     }
 
     /// <summary>
@@ -109,7 +118,9 @@ internal static class NsisCompression
         => data.Length >= 2 && data[0] == Bzip2BlockMagic && data[1] < 14;
 
     private static InvalidDataException UnsupportedBzip2()
-        => new("The NSIS installer uses NSIS-modified bzip2 compression, which is not supported.");
+        => new(
+            "The NSIS installer uses NSIS-modified bzip2 compression, which this analyzer cannot decode safely. "
+            + "Manual analysis is required; do not infer the installer type or architecture from the x86 stub.");
 
     private static byte[] ReadStored(Stream stream, long offset, int headerSize, long available)
     {
@@ -140,7 +151,8 @@ internal static class NsisCompression
             if (first[0] == 1)
             {
                 throw new InvalidDataException(
-                    "The NSIS installer uses LZMA with the BCJ x86 filter, which is not supported.");
+                    "The NSIS installer uses LZMA with the BCJ x86 filter, which this analyzer cannot decode safely. "
+                    + "Manual analysis is required; do not infer the installer type or architecture from the x86 stub.");
             }
 
             data.ReadExactly(first); // Filter flag 0: the props byte follows.
@@ -149,17 +161,41 @@ internal static class NsisCompression
         byte[] properties = new byte[5];
         properties[0] = first[0];
         data.ReadExactly(properties.AsSpan(1));
-        return new LzmaStream(properties, data);
+        uint dictionarySize = BinaryPrimitives.ReadUInt32LittleEndian(properties.AsSpan(1));
+        if (dictionarySize == 0 || dictionarySize > AnalysisLimits.MaxNsisHeaderBytes)
+        {
+            data.Dispose();
+            throw new InvalidDataException(
+                $"The NSIS LZMA dictionary declares {dictionarySize} bytes; "
+                + $"the analysis limit is {AnalysisLimits.MaxNsisHeaderBytes} bytes.");
+        }
+
+        return LzmaStream.Create(properties, data, leaveOpen: false);
     }
 
     private static DeflateStream CreateDeflateStream(Stream stream, long offset, long length)
         => new(new BoundedReadStream(stream, offset, length), CompressionMode.Decompress);
 
-    private static byte[] Decompress(Stream data, int headerSize)
+    private static byte[] Decompress(Stream data, int headerSize, bool solid)
     {
         byte[] header = new byte[headerSize];
         try
         {
+            if (solid)
+            {
+                // The solid stream keeps the non-solid framing: a uint32 header-size echo
+                // precedes the header (7-Zip's reader validates the same dword).
+                byte[] echo = new byte[4];
+                data.ReadExactly(echo);
+                uint declared = BinaryPrimitives.ReadUInt32LittleEndian(echo);
+                if (declared != (uint)headerSize)
+                {
+                    throw new InvalidDataException(
+                        $"The NSIS solid stream declares a {declared}-byte installer header, "
+                        + $"but the first header declares {headerSize} bytes.");
+                }
+            }
+
             data.ReadExactly(header);
         }
         catch (EndOfStreamException exception)

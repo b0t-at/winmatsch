@@ -1,0 +1,25 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="WinMatsch compiled WiX fixture"
+      Manufacturer="WinMatsch"
+      Version="1.0.0"
+      UpgradeCode="B5AC681B-3A13-4D72-B0EE-07AF5F5E83E2">
+    <MediaTemplate EmbedCab="yes" />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="WinMatschFixture">
+        <Component Id="FixtureComponent" Guid="C705A254-9DBA-44F4-A183-AD54352A81E4">
+          <RegistryValue
+              Root="HKLM"
+              Key="Software\WinMatsch\Fixture"
+              Name="Installed"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main">
+      <ComponentRef Id="FixtureComponent" />
+    </Feature>
+  </Package>
+</Wix>

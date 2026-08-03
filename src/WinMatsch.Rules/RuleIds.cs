@@ -20,4 +20,5 @@ public static class RuleIds
     public const string InstallerTypeConsistency = "WM0103";
 
     public const string ApplyPackageQuirks = "WM0201";
+    public const string ApplyOverridePackFields = "WM0202";
 }
