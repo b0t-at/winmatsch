@@ -431,10 +431,11 @@
             }
             if (win) {
                 var wName = opts.stable ? stableName(win) : win.name;
+                var wOutput = "winmatsch.exe";
                 html += '<div class="os-group">Windows (PowerShell)</div>' + snippetHtml("snippet-win", [
-                    "Invoke-WebRequest " + dir + wName + " -OutFile " + wName,
-                    "(Get-FileHash " + wName + ").Hash  # compare with SHA256SUMS.txt",
-                    ".\\" + wName + " --version"
+                    "Invoke-WebRequest " + dir + wName + " -OutFile " + wOutput,
+                    "(Get-FileHash .\\" + wOutput + ").Hash  # compare with SHA256SUMS.txt",
+                    ".\\" + wOutput + " --version"
                 ]);
             }
             return html;

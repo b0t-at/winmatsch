@@ -7,6 +7,8 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-03
+
 ### Added
 
 - Download site for an Azure Blob container behind Front Door:
@@ -33,6 +35,8 @@ minor versions may contain breaking changes).
 - Release binaries now compress their embedded managed assemblies, reducing
   all six assets by 32–35% while preserving self-contained execution. The
   release workflow also enforces a 20 MiB per-binary size budget.
+- Windows download snippets consistently save the selected architecture build
+  as `winmatsch.exe` and use that local name for verification and execution.
 
 ## [0.8.0] - 2026-08-03
 
@@ -76,5 +80,6 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.0...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.1...main
+[0.8.1]: https://github.com/b0t-at/winmatsch/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/b0t-at/winmatsch/releases/tag/v0.8.0
