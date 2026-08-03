@@ -917,6 +917,40 @@ public sealed class PreflightGateTests
     }
 
     [Fact]
+    public async Task Refreshed_redirect_signature_does_not_block_unchanged_content()
+    {
+        const string first =
+            "https://cdn.example.com/releases/setup.exe?sig=first&expires=1";
+        const string refreshed =
+            "https://cdn.example.com/releases/setup.exe?sig=second&expires=2";
+        PreflightRequest original = TestPackageFactory.CreateRequest();
+        InstallerArtifact artifact = Assert.Single(original.InstallerArtifacts);
+        var request = new PreflightRequest
+        {
+            Documents = original.Documents,
+            Changes = original.Changes,
+            ExistingVersions = original.ExistingVersions,
+            Options = original.Options,
+            InstallerArtifacts =
+            [
+                new InstallerArtifact(
+                    artifact.InstallerUrl,
+                    TestPackageFactory.CopyDownload(
+                        artifact.Download,
+                        finalUrl: first)),
+            ],
+        };
+        var network = new FakePreflightNetwork { RevalidatedFinalUrl = refreshed };
+        var boundary = new FakeBoundary();
+
+        ValidationReport report = await new PreflightGate(network)
+            .ExecuteAsync(request, boundary);
+
+        Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD6011");
+        Assert.Equal(1, boundary.InvocationCount);
+    }
+
+    [Fact]
     public async Task Downloader_policy_failure_becomes_a_deterministic_probe_error()
     {
         PackageManifests manifests = TestPackageFactory.CreateManifests();
