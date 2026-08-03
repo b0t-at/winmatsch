@@ -27,7 +27,7 @@ SCHEMA_VERSION = 1
 PROJECT = "winmatsch"
 
 _SEMVER_RE = re.compile(
-    r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
     r"(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
 )
 
@@ -44,6 +44,8 @@ def parse_semver(version: str):
         return (*core, 1, ())
     identifiers = []
     for ident in pre.split("."):
+        if not ident or (ident.isdigit() and len(ident) > 1 and ident.startswith("0")):
+            raise ValueError(f"not a semantic version: {version!r}")
         if ident.isdigit():
             identifiers.append((0, int(ident), ""))
         else:
@@ -52,7 +54,8 @@ def parse_semver(version: str):
 
 
 def normalize_version(version: str) -> str:
-    return version.strip().lstrip("vV")
+    normalized = version.strip()
+    return normalized[1:] if normalized.startswith(("v", "V")) else normalized
 
 
 def is_prerelease(version: str) -> bool:
@@ -71,8 +74,21 @@ def load_manifest(path: Path | None) -> dict:
         }
     with path.open(encoding="utf-8") as handle:
         manifest = json.load(handle)
+    if manifest.get("schemaVersion") != SCHEMA_VERSION:
+        raise ValueError(f"{path}: unsupported schemaVersion")
+    if manifest.get("project") != PROJECT:
+        raise ValueError(f"{path}: unexpected project")
     if not isinstance(manifest.get("versions"), list):
         raise ValueError(f"{path}: 'versions' must be a list")
+    seen = set()
+    for entry in manifest["versions"]:
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: every version entry must be an object")
+        version = normalize_version(entry.get("version", ""))
+        parse_semver(version)
+        if version in seen:
+            raise ValueError(f"{path}: duplicate version {version!r}")
+        seen.add(version)
     return manifest
 
 
@@ -91,14 +107,26 @@ def build_entry(args, artifacts: list[dict]) -> dict:
 
 
 def upsert(manifest: dict, entry: dict, updated: str) -> dict:
+    existing_entry = next(
+        (
+            existing
+            for existing in manifest["versions"]
+            if normalize_version(existing.get("version", "")) == entry["version"]
+        ),
+        None,
+    )
+    if existing_entry is not None and existing_entry != entry:
+        raise ValueError(f"version {entry['version']!r} is already cataloged with different metadata")
     versions = [
         existing
         for existing in manifest["versions"]
         if normalize_version(existing.get("version", "")) != entry["version"]
     ]
-    versions.append(entry)
+    versions.append(existing_entry or entry)
     versions.sort(key=lambda v: parse_semver(normalize_version(v["version"])), reverse=True)
     stable = [v for v in versions if not v.get("prerelease")]
+    previous_updated = manifest.get("updated")
+    updated = max(value for value in (previous_updated, updated) if value)
     manifest.update(
         {
             "schemaVersion": SCHEMA_VERSION,

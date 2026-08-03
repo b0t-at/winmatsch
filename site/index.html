@@ -217,7 +217,7 @@
             for (var i = 0; i < list.length; i++) {
                 if (!list[i].prerelease) { return list[i]; }
             }
-            return list[0] || null;
+            return null;
         }
 
         function versionDir(entry) {
@@ -299,6 +299,15 @@
             var osKey = detected.os === "macos" ? "osx" : detected.os === "windows" ? "win" : "linux";
             var rid = osKey + "-" + detected.arch;
             return (artifacts || []).filter(function (a) { return a.rid === rid; })[0] || null;
+        }
+
+        function artifactForOs(artifacts, os, detected) {
+            if (detected && detected.os === os) {
+                var detectedArtifact = matchArtifact(artifacts, detected);
+                if (detectedArtifact) { return detectedArtifact; }
+            }
+            var matches = (artifacts || []).filter(function (a) { return a.os === os; });
+            return matches.filter(function (a) { return a.arch === "x64"; })[0] || matches[0] || null;
         }
 
         /* ---------- routing ---------- */
@@ -396,20 +405,29 @@
                 "</div></div>";
         }
 
-        function verifySection(entry, opts) {
+        function verifySection(entry, detected, opts) {
             var origin = location.origin;
             var dir = origin + (opts.stable ? "/latest/" : versionDir(entry));
-            var win = entry.artifacts.filter(function (a) { return a.os === "windows"; })[0];
-            var unix = entry.artifacts.filter(function (a) { return a.os !== "windows"; })[0];
+            var linux = artifactForOs(entry.artifacts, "linux", detected);
+            var macos = artifactForOs(entry.artifacts, "macos", detected);
+            var win = artifactForOs(entry.artifacts, "windows", detected);
             var html = "<h2>Verify &amp; run</h2>";
-            if (unix) {
-                var uName = opts.stable ? stableName(unix) : unix.name;
-                html += '<div class="os-group">Linux / macOS</div>' + snippetHtml("snippet-unix", [
-                    "curl -fLO " + dir + uName,
+            if (linux) {
+                var lName = opts.stable ? stableName(linux) : linux.name;
+                html += '<div class="os-group">Linux</div>' + snippetHtml("snippet-linux", [
+                    "curl -fLO " + dir + lName,
                     "curl -fsSL " + dir + "SHA256SUMS.txt | sha256sum -c --ignore-missing",
-                    "chmod +x " + uName + " && ./" + uName + " --version"
-                ]) + '<p class="small muted">macOS may quarantine downloads: ' +
-                    '<code>xattr -d com.apple.quarantine ' + esc(uName) + "</code></p>";
+                    "chmod +x " + lName + " && ./" + lName + " --version"
+                ]);
+            }
+            if (macos) {
+                var mName = opts.stable ? stableName(macos) : macos.name;
+                html += '<div class="os-group">macOS</div>' + snippetHtml("snippet-macos", [
+                    "curl -fLO " + dir + mName,
+                    'curl -fsSL ' + dir + 'SHA256SUMS.txt | grep -F "  ' + mName + '" | shasum -a 256 -c -',
+                    "xattr -d com.apple.quarantine " + mName + " 2>/dev/null || true",
+                    "chmod +x " + mName + " && ./" + mName + " --version"
+                ]);
             }
             if (win) {
                 var wName = opts.stable ? stableName(win) : win.name;
@@ -462,7 +480,7 @@
                 stable: opts.stable,
                 suggested: matchArtifact(entry.artifacts, detected)
             });
-            html += verifySection(entry, opts);
+            html += verifySection(entry, detected, opts);
             app.innerHTML = html;
             copyButtonsBind(app);
         }
@@ -470,6 +488,7 @@
         function renderHome(manifest, detected) {
             document.title = "winmatsch downloads";
             var latest = latestEntry(manifest);
+            var versions = manifest.versions || [];
             var html = "<h1>winmatsch</h1>" +
                 '<p class="sub">Automated WinGet package manifest updates — one static binary, no runtime required.</p>';
             if (latest) {
@@ -486,21 +505,39 @@
                         '— or pick another build below.</span></p>';
                 }
                 html += "</div>";
-                html += "<h2>Quick install</h2>" +
-                    '<div class="os-group">Linux / macOS</div>' + snippetHtml("qi-unix", [
-                        "curl -fLO " + location.origin + "/latest/winmatsch-linux-x64",
-                        "chmod +x winmatsch-linux-x64 && ./winmatsch-linux-x64 --version"
-                    ]) +
-                    '<div class="os-group">Windows (PowerShell)</div>' + snippetHtml("qi-win", [
-                        "Invoke-WebRequest " + location.origin + "/latest/winmatsch-win-x64.exe -OutFile winmatsch.exe",
+                html += "<h2>Quick install</h2>";
+                var quickLinux = artifactForOs(latest.artifacts, "linux", detected);
+                var quickMacos = artifactForOs(latest.artifacts, "macos", detected);
+                var quickWindows = artifactForOs(latest.artifacts, "windows", detected);
+                if (quickLinux) {
+                    var quickLinuxName = stableName(quickLinux);
+                    html += '<div class="os-group">Linux</div>' + snippetHtml("qi-linux", [
+                        "curl -fLO " + location.origin + "/latest/" + quickLinuxName,
+                        "chmod +x " + quickLinuxName + " && ./" + quickLinuxName + " --version"
+                    ]);
+                }
+                if (quickMacos) {
+                    var quickMacosName = stableName(quickMacos);
+                    html += '<div class="os-group">macOS</div>' + snippetHtml("qi-macos", [
+                        "curl -fLO " + location.origin + "/latest/" + quickMacosName,
+                        "xattr -d com.apple.quarantine " + quickMacosName + " 2>/dev/null || true",
+                        "chmod +x " + quickMacosName + " && ./" + quickMacosName + " --version"
+                    ]);
+                }
+                if (quickWindows) {
+                    var quickWindowsName = stableName(quickWindows);
+                    html += '<div class="os-group">Windows (PowerShell)</div>' + snippetHtml("qi-win", [
+                        "Invoke-WebRequest " + location.origin + "/latest/" + quickWindowsName + " -OutFile winmatsch.exe",
                         ".\\winmatsch.exe --version"
-                    ]) +
-                    '<p class="small muted">Swap the file name for your platform — see the full list on the ' +
+                    ]);
+                }
+                html += '<p class="small muted">Architecture selection is a best guess — see every build on the ' +
                     '<a href="/latest/">latest</a> page.</p>';
             } else {
-                html += '<div class="banner">No releases have been published yet.</div>';
+                html += '<div class="banner">' + (versions.length
+                    ? "No stable release has been published yet. Pre-releases are listed below."
+                    : "No releases have been published yet.") + "</div>";
             }
-            var versions = manifest.versions || [];
             if (versions.length) {
                 html += "<h2>All versions</h2><table><thead><tr>" +
                     '<th>Version</th><th>Released</th><th class="hide-sm">Channel</th><th></th></tr></thead><tbody>';

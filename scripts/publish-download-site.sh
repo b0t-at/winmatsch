@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Publish a winmatsch release to the Azure Storage static-website download site.
+# Publish a winmatsch release and download index to an Azure Blob container.
 #
-# Layout produced in the $web container (see docs/download-site.md):
+# Layout produced in the selected container (see docs/download-site.md):
 #   /index.html /404.html /versions.json          short-TTL entry points
 #   /v<version>/...                               immutable canonical release
 #   /latest/...                                   stable unversioned mirror
@@ -11,8 +11,7 @@
 # inspected without touching Azure.
 #
 # Requirements: bash, python3, sha256sum, az (unless --dry-run).
-# Auth: uses --auth-mode login (RBAC: Storage Blob Data Contributor) unless
-# AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_KEY is set.
+# Auth: Azure CLI login via OIDC/RBAC (Storage Blob Data Contributor).
 
 set -euo pipefail
 
@@ -80,6 +79,9 @@ done
 if [ "$DRY_RUN" -eq 0 ] && [ -z "$ACCOUNT" ]; then
     die "--account (or WINMATSCH_STORAGE_ACCOUNT) is required unless --dry-run"
 fi
+if [ "$DRY_RUN" -eq 0 ] && [ -n "$MANIFEST_IN" ]; then
+    die "--manifest-in is only supported with --dry-run; live updates must use the current blob ETag"
+fi
 
 PYTHON="$(command -v python3 || command -v python)" || die "python3 not found"
 command -v sha256sum >/dev/null || die "sha256sum not found"
@@ -87,10 +89,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
     command -v az >/dev/null || die "az CLI not found (use --dry-run to stage locally)"
 fi
 
-AZ_AUTH=()
-if [ -z "${AZURE_STORAGE_CONNECTION_STRING:-}" ] && [ -z "${AZURE_STORAGE_KEY:-}" ]; then
-    AZ_AUTH=(--auth-mode login)
-fi
+AZ_AUTH=(--auth-mode login --only-show-errors)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -109,6 +108,8 @@ if [ -z "$STAGING" ]; then
     KEEP_STAGING="$DRY_RUN"   # keep temp staging around for inspection on dry runs
 else
     mkdir -p "$STAGING"
+    [ -z "$(find "$STAGING" -mindepth 1 -print -quit)" ] \
+        || die "staging directory must be empty: $STAGING"
     KEEP_STAGING=1
 fi
 cleanup() { [ "${KEEP_STAGING:-1}" -eq 1 ] || rm -rf "$STAGING"; }
@@ -123,26 +124,50 @@ SUMS="$DIST/SHA256SUMS.txt"
 binary_name() {
     local rid="$1" ext=""
     case "$rid" in win-*) ext=".exe" ;; esac
-    printf 'winmatsch-%s-%s%s' "$TAG" "$rid" "$ext"
+    printf 'winmatsch-%s-%s%s\n' "$TAG" "$rid" "$ext"
 }
 
 log "Verifying release artifacts in $DIST"
-MISSING=0
+EXPECTED_FILES="$STAGING/.expected-files"
+ACTUAL_FILES="$STAGING/.actual-files"
+EXPECTED_CHECKSUMS="$STAGING/.expected-checksums"
+ACTUAL_CHECKSUMS="$STAGING/.actual-checksums"
+{
+    for rid in "${RIDS[@]}"; do
+        binary_name "$rid"
+    done
+    printf '%s\n' LICENSE THIRD-PARTY-NOTICES.txt SHA256SUMS.txt
+} | LC_ALL=C sort >"$EXPECTED_FILES"
+find "$DIST" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' \
+    | LC_ALL=C sort >"$ACTUAL_FILES"
+if ! diff -u "$EXPECTED_FILES" "$ACTUAL_FILES"; then
+    die "dist directory does not contain exactly the expected files for $TAG"
+fi
+
 for rid in "${RIDS[@]}"; do
     name="$(binary_name "$rid")"
-    if [ ! -s "$DIST/$name" ]; then
-        warn "missing or empty: $name"
-        MISSING=1
-    elif ! grep -Fq " $name" "$SUMS" && ! grep -Fq "*$name" "$SUMS"; then
-        warn "no checksum entry for $name in SHA256SUMS.txt"
-        MISSING=1
-    fi
+    [ -s "$DIST/$name" ] || die "missing or empty: $name"
 done
-[ "$MISSING" -eq 0 ] || die "dist directory is incomplete for $TAG"
 for extra in LICENSE THIRD-PARTY-NOTICES.txt; do
-    [ -f "$DIST/$extra" ] || die "missing $DIST/$extra"
+    [ -s "$DIST/$extra" ] || die "missing or empty: $extra"
 done
-(cd "$DIST" && sha256sum --check --quiet --ignore-missing SHA256SUMS.txt) \
+{
+    for rid in "${RIDS[@]}"; do
+        binary_name "$rid"
+    done
+    printf '%s\n' LICENSE THIRD-PARTY-NOTICES.txt
+} | LC_ALL=C sort >"$EXPECTED_CHECKSUMS"
+if ! awk '
+    NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-fA-F]+$/ { exit 1 }
+    END { if (NR == 0) exit 1 }
+' "$SUMS"; then
+    die "SHA256SUMS.txt contains a malformed checksum line"
+fi
+awk '{print $2}' "$SUMS" | sed 's/^\*//' | LC_ALL=C sort >"$ACTUAL_CHECKSUMS"
+if ! diff -u "$EXPECTED_CHECKSUMS" "$ACTUAL_CHECKSUMS"; then
+    die "SHA256SUMS.txt does not cover exactly the expected release files"
+fi
+(cd "$DIST" && sha256sum --check --strict --quiet SHA256SUMS.txt) \
     || die "checksum verification failed"
 log "Checksums OK"
 
@@ -176,19 +201,28 @@ for rid, (os_name, arch) in rid_meta.items():
 json.dump(artifacts, sys.stdout, indent=2)
 PY
 
-# Fetch the current manifest unless one was supplied.
+# Fetch the current manifest and its ETag unless an offline dry run supplied one.
 CURRENT_MANIFEST="$STAGING/.current-versions.json"
+MANIFEST_ETAG=""
 if [ -n "$MANIFEST_IN" ]; then
     cp "$MANIFEST_IN" "$CURRENT_MANIFEST"
 elif [ "$DRY_RUN" -eq 1 ]; then
     warn "dry run without --manifest-in: starting from an empty manifest"
     rm -f "$CURRENT_MANIFEST"
 else
-    log "Downloading current versions.json"
-    if ! az storage blob download "${AZ_AUTH[@]}" \
+    exists="$(az storage blob exists "${AZ_AUTH[@]}" \
+        --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+        --name versions.json --query exists --output tsv)"
+    if [ "$exists" = "true" ]; then
+        MANIFEST_ETAG="$(az storage blob show "${AZ_AUTH[@]}" \
+            --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+            --name versions.json --query properties.etag --output tsv)"
+        log "Downloading current versions.json at ETag $MANIFEST_ETAG"
+        az storage blob download "${AZ_AUTH[@]}" \
             --account-name "$ACCOUNT" --container-name "$CONTAINER" \
             --name versions.json --file "$CURRENT_MANIFEST" --no-progress \
-            >/dev/null 2>&1; then
+            --if-match "$MANIFEST_ETAG" --overwrite --output none
+    else
         warn "no existing versions.json (first release?) — starting fresh"
         rm -f "$CURRENT_MANIFEST"
     fi
@@ -279,13 +313,14 @@ headers_for() {
     printf '%s|%s|%s' "$type" "$cache" "$dispo"
 }
 
-# Upload order keeps the site consistent: immutable version folder first,
-# then the latest mirror, then the manifest and entry pages that reference them.
+# The dry-run plan mirrors live publication order: immutable version folder,
+# ETag-guarded catalog, mutable latest mirror, then entry pages.
 upload_list() {
     (cd "$STAGING" && {
-        find "v$VER" -type f | LC_ALL=C sort
+        find "v$VER" -type f ! -name index.html | LC_ALL=C sort
+        printf '%s\n' versions.json
         [ "$REFRESH_LATEST" -eq 1 ] && find latest -type f | LC_ALL=C sort
-        printf '%s\n' versions.json index.html 404.html
+        printf '%s\n' index.html 404.html "v$VER/index.html"
     })
 }
 
@@ -303,15 +338,70 @@ fi
 # ----------------------------------------------------------------- upload
 
 log "Uploading to storage account '$ACCOUNT', container '$CONTAINER'"
-while IFS= read -r path; do
+upload_mutable() {
+    local path="$1" type cache dispo
+    local -a args
     IFS='|' read -r type cache dispo <<<"$(headers_for "$path")"
     args=(--account-name "$ACCOUNT" --container-name "$CONTAINER"
           --file "$STAGING/$path" --name "$path" --overwrite
           --content-type "$type" --content-cache "$cache" --no-progress)
     [ -n "$dispo" ] && args+=(--content-disposition "$dispo")
     log "  /$path"
-    az storage blob upload "${AZ_AUTH[@]}" "${args[@]}" >/dev/null
-done < <(upload_list)
+    az storage blob upload "${AZ_AUTH[@]}" "${args[@]}" --output none
+}
+
+upload_immutable() {
+    local path="$1" type cache dispo digest exists remote_digest
+    local -a args
+    IFS='|' read -r type cache dispo <<<"$(headers_for "$path")"
+    digest="$(sha256sum "$STAGING/$path" | cut -d ' ' -f 1)"
+    exists="$(az storage blob exists "${AZ_AUTH[@]}" \
+        --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+        --name "$path" --query exists --output tsv)"
+    if [ "$exists" = "true" ]; then
+        remote_digest="$(az storage blob show "${AZ_AUTH[@]}" \
+           --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+           --name "$path" --query metadata.sha256 --output tsv)"
+        if [ "$remote_digest" != "$digest" ]; then
+           die "refusing to change immutable blob '/$path'"
+        fi
+        log "  /$path (already published)"
+        return
+    fi
+
+    args=(--account-name "$ACCOUNT" --container-name "$CONTAINER"
+          --file "$STAGING/$path" --name "$path" --overwrite false
+          --if-none-match '*' --metadata "sha256=$digest"
+          --content-type "$type" --content-cache "$cache" --no-progress)
+    [ -n "$dispo" ] && args+=(--content-disposition "$dispo")
+    log "  /$path"
+    az storage blob upload "${AZ_AUTH[@]}" "${args[@]}" --output none
+}
+
+while IFS= read -r path; do
+    upload_immutable "$path"
+done < <(cd "$STAGING" && find "v$VER" -type f ! -name index.html | LC_ALL=C sort)
+
+etag_args=(--if-none-match '*')
+if [ -n "$MANIFEST_ETAG" ]; then
+    etag_args=(--if-match "$MANIFEST_ETAG")
+fi
+IFS='|' read -r manifest_type manifest_cache _ <<<"$(headers_for versions.json)"
+log "  /versions.json"
+az storage blob upload "${AZ_AUTH[@]}" \
+    --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+    --file "$STAGING/versions.json" --name versions.json --overwrite \
+    --content-type "$manifest_type" --content-cache "$manifest_cache" \
+    --no-progress "${etag_args[@]}" --output none
+
+if [ "$REFRESH_LATEST" -eq 1 ]; then
+    while IFS= read -r path; do
+        upload_mutable "$path"
+    done < <(cd "$STAGING" && find latest -type f | LC_ALL=C sort)
+fi
+upload_mutable index.html
+upload_mutable 404.html
+upload_mutable "v$VER/index.html"
 log "Upload complete"
 
 # ------------------------------------------------------------------ purge

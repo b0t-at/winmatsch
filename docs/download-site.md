@@ -1,8 +1,9 @@
-# Download site (Azure Storage static website + Front Door)
+# Download site (Azure Blob Storage + Front Door)
 
-The download site distributes winmatsch release binaries from an Azure
-Storage **static website** (the `$web` container) behind **Azure Front
-Door**. There is no web server and no compute: every URL is either a blob
+The release workflow writes the complete winmatsch download site into the
+configured Azure Blob container (`winmatsch` in the current deployment). It is
+designed to sit behind **Azure Front Door** with that container mounted at the
+origin root. There is no web server and no compute: every URL is either a blob
 or a page rendered client-side from a JSON manifest.
 
 ## URL contract
@@ -40,12 +41,11 @@ curl -fsSL https://<host>/latest/version.txt
 - **One page, three roles.** `site/index.html` is self-contained (inline
   CSS/JS, no external assets). It is uploaded to `/index.html`,
   `/404.html`, `/latest/index.html` and every `/v<version>/index.html`.
-  Azure static websites serve the configured *index document* for each
-  "directory" request, and the page routes client-side on
-  `location.pathname`: root → version browser, `/latest/` → stable
-  channel page, `/v<version>/` → that release. As the 404 *error
-  document* the same file also heals `/latest` (no trailing slash) and
-  unknown paths by rendering the right view or a version list.
+  The hosting layer serves `index.html` for each directory request, and the
+  page routes client-side on `location.pathname`: root → version browser,
+  `/latest/` → stable channel page, `/v<version>/` → that release. As the
+  error document the same file also heals slash-less or unknown paths by
+  rendering the right view or a version list.
 - **One manifest.** `/versions.json` is the single source of truth; the
   page fetches it at runtime, so publishing a release only writes blobs —
   no HTML changes, no Front Door configuration changes.
@@ -105,94 +105,73 @@ scripts/publish-download-site.sh \
     --version v0.9.0 \
     --dist dist/ \
     --account <storage-account> \
-    --afd-resource-group <rg> --afd-profile <profile> --afd-endpoint <endpoint>
+    --container winmatsch
 ```
 
 The script (bash + python3 + az; no jq required):
 
 1. verifies all six binaries, `SHA256SUMS.txt`, `LICENSE` and
    `THIRD-PARTY-NOTICES.txt` are present and the checksums match,
-2. downloads the current `/versions.json` and upserts the release via
-   `scripts/update-versions-manifest.py` (semver sort, `latest` recompute),
+2. reads the current `/versions.json` at a specific Azure Blob ETag and
+   upserts the release via `scripts/update-versions-manifest.py` (semver sort,
+   `latest` recompute),
 3. stages the full layout locally, then uploads in a safe order:
-   immutable `/v<version>/` first, then `/latest/` (only when this release
-   *is* the newest stable), then `versions.json` and the entry pages,
+   immutable `/v<version>/` first, the ETag-guarded `versions.json`, then
+   `/latest/` (only when this release *is* the newest stable) and the entry
+   pages,
 4. optionally purges the Front Door cache for `/`, `/index.html`,
    `/404.html`, `/versions.json` and `/latest/*`.
 
 Useful flags: `--dry-run` (stage + print the upload plan, no az calls),
 `--staging DIR` (inspect the exact container layout), `--skip-latest`,
 `--prerelease` (auto-detected from the version string), `--manifest-in`
-(offline manifest for tests). Re-running the same version is idempotent —
-blobs are overwritten in place.
+(offline manifest for dry-run tests). Re-running the same version is
+idempotent when its catalog metadata and SHA-256 values are unchanged. Existing
+versioned release files are never overwritten; a different file at an
+already-published path fails. The short-lived `index.html` page shell is the
+only mutable file inside a version directory.
 
-Auth: uses `az` RBAC (`--auth-mode login`; role **Storage Blob Data
-Contributor** on the account) unless `AZURE_STORAGE_CONNECTION_STRING` or
-`AZURE_STORAGE_KEY` is set. The Front Door purge additionally needs
+Auth: uses Azure CLI RBAC (`--auth-mode login`; role **Storage Blob Data
+Contributor** on the target container). The Front Door purge additionally needs
 `Microsoft.Cdn/profiles/afdendpoints/purge/action` (e.g. **CDN Profile
 Contributor**).
 
 ### Suggested CI wiring
 
-Trigger on `release: published` so the human draft-review gate from
-[release.md](release.md) still applies — the site only updates once a
-maintainer publishes the draft release:
-
-```yaml
-name: Publish download site
-on:
-  release:
-    types: [published]
-permissions:
-  id-token: write
-  contents: read
-jobs:
-  publish:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download release assets
-        run: gh release download "$TAG" --dir dist
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Publish
-        run: |
-          scripts/publish-download-site.sh \
-            --version "${{ github.event.release.tag_name }}" \
-            --dist dist \
-            --account "${{ vars.DOWNLOAD_SITE_STORAGE_ACCOUNT }}" \
-            --afd-resource-group "${{ vars.DOWNLOAD_SITE_RG }}" \
-            --afd-profile "${{ vars.DOWNLOAD_SITE_AFD_PROFILE }}" \
-            --afd-endpoint "${{ vars.DOWNLOAD_SITE_AFD_ENDPOINT }}"
-```
-
-Mark pre-releases with `--prerelease` (or rely on auto-detection from
-tags like `v0.9.0-rc.1`).
+The checked-in
+[publish workflow](../.github/workflows/publish-azure-release.yml) triggers on
+`release: published`, preserving the human draft-review gate from
+[release.md](release.md). It validates the GitHub release, logs in through the
+`Release` environment's Entra OIDC federation, and invokes this script with the
+configured account and container. Its manual input can safely backfill an
+already-published tag.
 
 ## Front Door / storage notes
 
-- Point the Front Door origin at the **static website endpoint**
-  (`<account>.z<zone>.web.core.windows.net`), *not* the blob endpoint —
-  index and error documents only work on the web endpoint.
-- Set index document = `index.html` and error document = `404.html`
-  (`az storage blob service-properties update --static-website ...`).
+- With the configured named container, point Front Door at the blob endpoint,
+  mount `/winmatsch` as the route's origin path, and configure equivalent
+  index/error routing for `/`, `/latest/`, and `/v<version>/`. The public
+  origin must not include the container segment because the page and manifest
+  intentionally use root-relative URLs.
+- Azure Storage's native static website endpoint is an alternative, but it
+  always serves from the reserved `$web` container. To use that endpoint,
+  configure `AZURE_STORAGE_CONTAINER=$web`, then set index document =
+  `index.html` and error document = `404.html`.
 - Let Front Door honor origin `Cache-Control` headers (default). The
   publish script sets long/immutable TTLs for `/v<version>/` assets and
   short TTLs everywhere else, so purging is a safety net rather than a
   requirement.
 - Enable compression for text content types; binaries are already
   incompressible enough to skip.
-- Optional polish: a Front Door rule that 308-redirects `/latest` →
-  `/latest/` and `/v<x>` → `/v<x>/`. Without it, Azure returns the 404
-  error document for slash-less directory URLs — which is this same page,
-  so visitors still land on the right view (with a 404 status code).
-- `$web` must be quoted in shells: `--container-name '$web'`.
+- A Front Door rule can 308-redirect `/latest` → `/latest/` and `/v<x>` →
+  `/v<x>/`. The native static website endpoint can fall back to the configured
+  `404.html`; a named-container Front Door route needs the equivalent error
+  rewrite.
+- The checked-in workflow deliberately does not purge Front Door so the OIDC
+  identity needs only container-scoped data-plane RBAC. Purge can be enabled
+  later by passing all three `--afd-*` flags and granting the additional
+  control-plane action.
+- `$web` must be quoted in shells: `--container '$web'`.
 
 ## Local testing
 

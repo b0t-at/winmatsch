@@ -40,16 +40,18 @@ The build path is triggered by pushing a `v*` tag:
 
 ## Azure publication workflow (`.github/workflows/publish-azure-release.yml`)
 
-Publishing the GitHub release triggers the separate **Publish Azure release**
-workflow. It downloads and verifies the final published assets, writes the
-immutable `releases/<tag>/` directory, adds the release to the public catalog,
-and updates the matching latest pointer.
+Publishing the GitHub release triggers the separate **Publish download site**
+workflow. It downloads and verifies the exact final asset set, publishes the
+immutable version directory, updates the public catalog, refreshes the stable
+download aliases when appropriate, and deploys the static index.
 
 The workflow uses the `Release` GitHub environment and exchanges GitHub's OIDC
 token for a short-lived Azure token. No storage key, SAS, or client secret is
-stored in GitHub. **Actions > Publish Azure release > Run workflow** can
+stored in GitHub. **Actions > Publish download site > Run workflow** can
 backfill or retry an already-published tag; the job rejects drafts and applies
-the same immutability checks.
+the same validation and immutability checks. The publisher implementation is
+always checked out from the default branch, so older releases can be backfilled
+even when their tags predate the download-site scripts.
 
 ### Azure release layout and catalog contract
 
@@ -57,37 +59,41 @@ The container layout is intentionally append-oriented and CDN-friendly:
 
 ```text
 /
+├── index.html
+├── 404.html
 ├── versions.json
-├── latest.json
-├── latest-prerelease.json
-└── releases/
-   └── v0.8.0/
-       ├── release.json
-       ├── SHA256SUMS.txt
-       ├── LICENSE
-       ├── THIRD-PARTY-NOTICES.txt
-       └── winmatsch-v0.8.0-<rid>[.exe]
+├── latest/
+│  ├── index.html
+│  ├── latest.json
+│  ├── version.txt
+│  ├── SHA256SUMS.txt
+│  └── winmatsch-<rid>[.exe]
+└── v0.8.0/
+   ├── index.html
+   ├── SHA256SUMS.txt
+   ├── LICENSE
+   ├── THIRD-PARTY-NOTICES.txt
+   └── winmatsch-v0.8.0-<rid>[.exe]
 ```
 
-- `releases/<tag>/` is the stable, version-qualified download namespace.
-  Versioned files use a one-year immutable cache policy.
-- `release.json` is the complete release manifest (`schemaVersion: 1`):
-  release status and channel, source commit, release-notes URL, and every
-  artifact's relative download path, RID/OS/architecture where applicable,
-  byte size, content type, and SHA-256.
-- `versions.json` is the enumeration endpoint for a future downloads page. It
-  keeps compact summaries for every published version, newest publication
-  first, plus paths to the latest stable and prerelease manifests.
-- `latest.json` contains the full latest stable manifest.
-  `latest-prerelease.json` does the same for prereleases. Prereleases never
-  replace the stable pointer.
-- The mutable JSON files use a short revalidation cache policy. Updating
-  `versions.json` is protected by its Azure Blob ETag so concurrent or stale
-  writers fail instead of losing an entry.
+- `v<version>/` is the stable, version-qualified download namespace.
+  Versioned release files use a one-year immutable cache policy; the
+  client-side `index.html` shell remains short-lived.
+- `versions.json` is the enumeration endpoint and the browser's source of
+  truth. It is sorted by semantic-version precedence and includes each
+  artifact's RID, platform, architecture, byte size, URL, and SHA-256.
+- `latest/` mirrors only the highest stable semantic version under unversioned
+  names. Backfilling an older release or publishing a prerelease cannot move it
+  backward or replace it.
+- The mutable site and catalog files use a short revalidation cache policy.
+  Updating `versions.json` is protected by its Azure Blob ETag so concurrent or
+  stale writers fail instead of losing an entry.
 
-Re-running publication is idempotent only when the tag commit and every file
-hash are unchanged. Existing versioned blobs are never overwritten; a changed
-file at an already-published path fails the run.
+Re-running publication is idempotent only when every existing versioned release
+file and catalog entry are unchanged. Versioned release blobs are never
+overwritten; a changed file at an already-published path fails the run. The
+HTML shell can be refreshed independently. The complete URL and manifest
+contract is documented in [download-site.md](download-site.md).
 
 ## Release checklist
 

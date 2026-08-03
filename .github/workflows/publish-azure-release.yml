@@ -1,4 +1,4 @@
-name: Publish Azure release
+name: Publish download site
 
 on:
   release:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Published release tag to backfill or retry in Azure Storage
+        description: Published release tag to backfill or retry
         required: true
         type: string
 
@@ -14,12 +14,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: azure-storage-release-catalog
+  group: azure-download-site
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: Publish release and catalog
+    name: Publish release and index
     runs-on: ubuntu-latest
     environment: Release
     permissions:
@@ -28,12 +28,13 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out trusted publisher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Resolve release metadata and download assets
+      - name: Resolve published release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -46,20 +47,19 @@ jobs:
 
           release_json=$(gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --json tagName,isDraft,isPrerelease,createdAt,publishedAt)
+            --json tagName,isDraft,isPrerelease,publishedAt,url)
           if [[ "$(jq -r '.tagName' <<< "$release_json")" != "$RELEASE_TAG" ]]; then
             echo "::error::GitHub returned metadata for a different release tag."
             exit 1
           fi
           if [[ "$(jq -r '.isDraft' <<< "$release_json")" != "false" ]]; then
-            echo "::error::The release must be published before the catalog can be updated."
+            echo "::error::The release must be published before the site can be updated."
             exit 1
           fi
+
           tag_prerelease=false
-          release_channel=stable
           if [[ "${RELEASE_TAG#v}" == *-* ]]; then
             tag_prerelease=true
-            release_channel=prerelease
           fi
           github_prerelease=$(jq -r '.isPrerelease' <<< "$release_json")
           if [[ "$github_prerelease" != "$tag_prerelease" ]]; then
@@ -67,15 +67,16 @@ jobs:
             exit 1
           fi
 
-          source_commit=$(git rev-parse HEAD)
-          created_at=$(jq -r '.createdAt' <<< "$release_json")
           published_at=$(jq -r '.publishedAt // empty' <<< "$release_json")
+          release_url=$(jq -r '.url' <<< "$release_json")
+          if [[ -z "$published_at" ]]; then
+            echo "::error::Release '$RELEASE_TAG' has no publication timestamp."
+            exit 1
+          fi
           {
-            echo "SOURCE_COMMIT=$source_commit"
-            echo "RELEASE_CREATED_AT=$created_at"
             echo "RELEASE_PUBLISHED_AT=$published_at"
             echo "RELEASE_PRERELEASE=$github_prerelease"
-            echo "RELEASE_CHANNEL=$release_channel"
+            echo "RELEASE_URL=$release_url"
           } >> "$GITHUB_ENV"
 
           mkdir dist
@@ -83,7 +84,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --dir dist
 
-      - name: Verify release assets
+      - name: Verify release bundle
         shell: bash
         run: |
           set -euo pipefail
@@ -111,18 +112,26 @@ jobs:
 
           (
             cd dist
+            if ! awk '
+              NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-fA-F]+$/ { exit 1 }
+              END { if (NR == 0) exit 1 }
+            ' SHA256SUMS.txt; then
+              echo "::error::SHA256SUMS.txt contains a malformed checksum line."
+              exit 1
+            fi
             printf '%s\n' \
               "${expected_binaries[@]}" \
               "LICENSE" \
               "THIRD-PARTY-NOTICES.txt" \
               | sort > "$RUNNER_TEMP/expected-checksums.txt"
             awk '{print $2}' SHA256SUMS.txt \
+              | sed 's/^\*//' \
               | sort > "$RUNNER_TEMP/actual-checksums.txt"
             if ! diff -u "$RUNNER_TEMP/expected-checksums.txt" "$RUNNER_TEMP/actual-checksums.txt"; then
               echo "::error::SHA256SUMS.txt does not cover exactly the expected release files."
               exit 1
             fi
-            sha256sum -c SHA256SUMS.txt
+            sha256sum --check --strict SHA256SUMS.txt
           )
 
       - name: Validate Azure configuration
@@ -156,366 +165,22 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Read current release catalog
+      - name: Publish release and index
         shell: bash
         env:
           AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
           AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
         run: |
           set -euo pipefail
-          mkdir -p storage-metadata
-          exists=$(az storage blob exists \
-            --account-name "$AZURE_STORAGE_ACCOUNT" \
-            --container-name "$AZURE_STORAGE_CONTAINER" \
-            --name versions.json \
-            --auth-mode login \
-            --query exists \
-            --output tsv \
-            --only-show-errors)
-          if [[ "$exists" == "true" ]]; then
-            versions_etag=$(az storage blob show \
-              --account-name "$AZURE_STORAGE_ACCOUNT" \
-              --container-name "$AZURE_STORAGE_CONTAINER" \
-              --name versions.json \
-              --auth-mode login \
-              --query properties.etag \
-              --output tsv \
-              --only-show-errors)
-            az storage blob download \
-              --account-name "$AZURE_STORAGE_ACCOUNT" \
-              --container-name "$AZURE_STORAGE_CONTAINER" \
-              --name versions.json \
-              --file storage-metadata/previous-versions.json \
-              --auth-mode login \
-              --if-match "$versions_etag" \
-              --overwrite \
-              --output none \
-              --only-show-errors
-            echo "VERSIONS_ETAG=$versions_etag" >> "$GITHUB_ENV"
-          else
-            printf '%s\n' \
-              '{"schemaVersion":1,"product":"winmatsch","versions":[]}' \
-              > storage-metadata/previous-versions.json
-            echo "VERSIONS_ETAG=" >> "$GITHUB_ENV"
-          fi
-
-      - name: Build release metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p storage-metadata
-          version="${RELEASE_TAG#v}"
-
-          names=(
-            "winmatsch-$RELEASE_TAG-win-x64.exe"
-            "winmatsch-$RELEASE_TAG-win-arm64.exe"
-            "winmatsch-$RELEASE_TAG-linux-x64"
-            "winmatsch-$RELEASE_TAG-linux-arm64"
-            "winmatsch-$RELEASE_TAG-osx-x64"
-            "winmatsch-$RELEASE_TAG-osx-arm64"
-            "LICENSE"
-            "THIRD-PARTY-NOTICES.txt"
-            "SHA256SUMS.txt"
+          args=(
+            --version "$RELEASE_TAG"
+            --date "$RELEASE_PUBLISHED_AT"
+            --notes-url "$RELEASE_URL"
+            --dist dist
+            --account "$AZURE_STORAGE_ACCOUNT"
+            --container "$AZURE_STORAGE_CONTAINER"
           )
-          artifacts='[]'
-          for name in "${names[@]}"; do
-            file="dist/$name"
-            size=$(stat --printf='%s' "$file")
-            sha256=$(sha256sum "$file" | cut -d ' ' -f 1)
-            kind=binary
-            rid=
-            os=
-            architecture=
-            content_type=application/octet-stream
-            case "$name" in
-              "winmatsch-$RELEASE_TAG-win-x64.exe")
-                rid=win-x64; os=windows; architecture=x64 ;;
-              "winmatsch-$RELEASE_TAG-win-arm64.exe")
-                rid=win-arm64; os=windows; architecture=arm64 ;;
-              "winmatsch-$RELEASE_TAG-linux-x64")
-                rid=linux-x64; os=linux; architecture=x64 ;;
-              "winmatsch-$RELEASE_TAG-linux-arm64")
-                rid=linux-arm64; os=linux; architecture=arm64 ;;
-              "winmatsch-$RELEASE_TAG-osx-x64")
-                rid=osx-x64; os=macos; architecture=x64 ;;
-              "winmatsch-$RELEASE_TAG-osx-arm64")
-                rid=osx-arm64; os=macos; architecture=arm64 ;;
-              LICENSE)
-                kind=license; content_type='text/plain; charset=utf-8' ;;
-              THIRD-PARTY-NOTICES.txt)
-                kind=notices; content_type='text/plain; charset=utf-8' ;;
-              SHA256SUMS.txt)
-                kind=checksums; content_type='text/plain; charset=utf-8' ;;
-            esac
-            entry=$(jq -n \
-              --arg name "$name" \
-              --arg kind "$kind" \
-              --arg downloadPath "releases/$RELEASE_TAG/$name" \
-              --arg contentType "$content_type" \
-              --arg rid "$rid" \
-              --arg os "$os" \
-              --arg architecture "$architecture" \
-              --argjson size "$size" \
-              --arg sha256 "$sha256" \
-              '{
-                name: $name,
-                kind: $kind,
-                downloadPath: $downloadPath,
-                contentType: $contentType,
-                size: $size,
-                sha256: $sha256
-              } + if $rid == "" then {} else {
-                runtimeIdentifier: $rid,
-                os: $os,
-                architecture: $architecture
-              } end')
-            artifacts=$(jq -c \
-              --argjson entry "$entry" \
-              '. + [$entry]' <<< "$artifacts")
-          done
-
-          jq -n \
-            --arg product winmatsch \
-            --arg version "$version" \
-            --arg tag "$RELEASE_TAG" \
-            --arg channel "$RELEASE_CHANNEL" \
-            --arg createdAt "$RELEASE_CREATED_AT" \
-            --arg publishedAt "$RELEASE_PUBLISHED_AT" \
-            --arg repository "$GITHUB_REPOSITORY" \
-            --arg commit "$SOURCE_COMMIT" \
-            --arg releaseNotesUrl "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
-            --argjson prerelease "$RELEASE_PRERELEASE" \
-            --argjson artifacts "$artifacts" \
-            '{
-              schemaVersion: 1,
-              product: $product,
-              version: $version,
-              tag: $tag,
-              channel: $channel,
-              prerelease: $prerelease,
-              status: "published",
-              createdAt: $createdAt,
-              publishedAt: (if $publishedAt == "" then null else $publishedAt end),
-              source: {
-                repository: $repository,
-                commit: $commit
-              },
-              releaseNotesUrl: $releaseNotesUrl,
-              artifacts: $artifacts
-            }' > storage-metadata/release.json
-
-          jq -e '
-            .schemaVersion == 1 and
-            .product == "winmatsch" and
-            (.artifacts | length == 9) and
-            (all(.artifacts[]; (.sha256 | test("^[0-9a-f]{64}$"))))
-          ' storage-metadata/release.json > /dev/null
-
-          jq -e '
-            .schemaVersion == 1 and
-            .product == "winmatsch" and
-            (.versions | type == "array") and
-            (all(.versions[];
-              ((.tag | type) == "string") and
-              ((.version | type) == "string") and
-              ((.prerelease | type) == "boolean") and
-              ((.publishedAt | type) == "string") and
-              ((.commit | type) == "string") and
-              ((.manifestPath | type) == "string")
-            ))
-          ' storage-metadata/previous-versions.json > /dev/null
-
-          duplicate_tags=$(jq -r '
-            .versions
-            | group_by(.tag)[]
-            | select(length > 1)
-            | .[0].tag
-          ' storage-metadata/previous-versions.json)
-          if [[ -n "$duplicate_tags" ]]; then
-            echo "::error::versions.json contains duplicate tags: $duplicate_tags"
-            exit 1
-          fi
-
-          existing_commit=$(jq -r \
-            --arg tag "$RELEASE_TAG" \
-            '.versions[] | select(.tag == $tag) | .commit' \
-            storage-metadata/previous-versions.json)
-          if [[ -n "$existing_commit" && "$existing_commit" != "$SOURCE_COMMIT" ]]; then
-            echo "::error::Tag '$RELEASE_TAG' is already cataloged from a different commit."
-            exit 1
-          fi
-
-          summary=$(jq '{
-            version,
-            tag,
-            channel,
-            prerelease,
-            publishedAt,
-            commit: .source.commit,
-            manifestPath: ("releases/" + .tag + "/release.json")
-          }' storage-metadata/release.json)
-          jq \
-            --arg updatedAt "$RELEASE_PUBLISHED_AT" \
-            --argjson current "$summary" \
-            '
-              .schemaVersion = 1
-              | .product = "winmatsch"
-              | .versions = (
-                  [$current] +
-                  [.versions[] | select(.tag != $current.tag)]
-                  | sort_by(.publishedAt)
-                  | reverse
-                )
-              | .updatedAt = (.versions[0].publishedAt // $updatedAt)
-              | .latest = {
-                  stable: (
-                    [.versions[]
-                      | select(.prerelease == false)
-                      | .manifestPath][0] // null
-                  ),
-                  prerelease: (
-                    [.versions[]
-                      | select(.prerelease == true)
-                      | .manifestPath][0] // null
-                  )
-                }
-            ' storage-metadata/previous-versions.json \
-            > storage-metadata/versions.json
-
           if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
-            cp storage-metadata/release.json storage-metadata/latest-prerelease.json
-          else
-            cp storage-metadata/release.json storage-metadata/latest.json
+            args+=(--prerelease)
           fi
-
-      - name: Upload versioned release files
-        shell: bash
-        env:
-          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
-          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
-        run: |
-          set -euo pipefail
-          prefix="releases/$RELEASE_TAG"
-
-          upload_immutable() {
-            local source_file=$1
-            local blob_name=$2
-            local content_type=$3
-            local sha256
-            local exists
-            local remote_metadata
-            local remote_sha256
-            local remote_commit
-            sha256=$(sha256sum "$source_file" | cut -d ' ' -f 1)
-            exists=$(az storage blob exists \
-              --account-name "$AZURE_STORAGE_ACCOUNT" \
-              --container-name "$AZURE_STORAGE_CONTAINER" \
-              --name "$blob_name" \
-              --auth-mode login \
-              --query exists \
-              --output tsv \
-              --only-show-errors)
-            if [[ "$exists" == "true" ]]; then
-              remote_metadata=$(az storage blob show \
-                --account-name "$AZURE_STORAGE_ACCOUNT" \
-                --container-name "$AZURE_STORAGE_CONTAINER" \
-                --name "$blob_name" \
-                --auth-mode login \
-                --query '{sha256:metadata.sha256,sourcecommit:metadata.sourcecommit}' \
-                --output json \
-                --only-show-errors)
-              remote_sha256=$(jq -r '.sha256 // empty' <<< "$remote_metadata")
-              remote_commit=$(jq -r '.sourcecommit // empty' <<< "$remote_metadata")
-              if [[ "$remote_sha256" != "$sha256" || "$remote_commit" != "$SOURCE_COMMIT" ]]; then
-                echo "::error::Refusing to change immutable blob '$blob_name'."
-                exit 1
-              fi
-              return
-            fi
-
-            az storage blob upload \
-              --account-name "$AZURE_STORAGE_ACCOUNT" \
-              --container-name "$AZURE_STORAGE_CONTAINER" \
-              --name "$blob_name" \
-              --file "$source_file" \
-              --auth-mode login \
-              --overwrite false \
-              --if-none-match '*' \
-              --metadata "sha256=$sha256" "sourcecommit=$SOURCE_COMMIT" \
-              --content-type "$content_type" \
-              --content-cache-control "public, max-age=31536000, immutable" \
-              --output none \
-              --only-show-errors
-          }
-
-          names=(
-            "winmatsch-$RELEASE_TAG-win-x64.exe"
-            "winmatsch-$RELEASE_TAG-win-arm64.exe"
-            "winmatsch-$RELEASE_TAG-linux-x64"
-            "winmatsch-$RELEASE_TAG-linux-arm64"
-            "winmatsch-$RELEASE_TAG-osx-x64"
-            "winmatsch-$RELEASE_TAG-osx-arm64"
-            "LICENSE"
-            "THIRD-PARTY-NOTICES.txt"
-            "SHA256SUMS.txt"
-          )
-          for name in "${names[@]}"; do
-            content_type=application/octet-stream
-            case "$name" in
-              LICENSE|*.txt) content_type='text/plain; charset=utf-8' ;;
-            esac
-            upload_immutable "dist/$name" "$prefix/$name" "$content_type"
-          done
-          upload_immutable \
-            storage-metadata/release.json \
-            "$prefix/release.json" \
-            application/json
-
-      - name: Publish release catalog
-        shell: bash
-        env:
-          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
-          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
-        run: |
-          set -euo pipefail
-          channel="$RELEASE_CHANNEL"
-          pointer=latest.json
-          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
-            pointer=latest-prerelease.json
-          fi
-
-          etag_args=(--if-none-match '*')
-          if [[ -n "${VERSIONS_ETAG:-}" ]]; then
-            etag_args=(--if-match "$VERSIONS_ETAG")
-          fi
-          az storage blob upload \
-            --account-name "$AZURE_STORAGE_ACCOUNT" \
-            --container-name "$AZURE_STORAGE_CONTAINER" \
-            --name versions.json \
-            --file storage-metadata/versions.json \
-            --auth-mode login \
-            --overwrite true \
-            --content-type application/json \
-            --content-cache-control "public, max-age=60, must-revalidate" \
-            "${etag_args[@]}" \
-            --output none \
-            --only-show-errors
-
-          current_manifest="releases/$RELEASE_TAG/release.json"
-          latest_manifest=$(jq -r \
-            --arg channel "$channel" \
-            '.latest[$channel] // empty' \
-            storage-metadata/versions.json)
-          if [[ "$current_manifest" == "$latest_manifest" ]]; then
-            az storage blob upload \
-              --account-name "$AZURE_STORAGE_ACCOUNT" \
-              --container-name "$AZURE_STORAGE_CONTAINER" \
-              --name "$pointer" \
-              --file "storage-metadata/$pointer" \
-              --auth-mode login \
-              --overwrite true \
-              --content-type application/json \
-              --content-cache-control "public, max-age=60, must-revalidate" \
-              --output none \
-              --only-show-errors
-          fi
+          scripts/publish-download-site.sh "${args[@]}"
