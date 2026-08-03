@@ -41,7 +41,9 @@ jobs:
         run: dotnet restore
 
       - name: Build
-        run: dotnet build --no-restore --configuration Release -p:RunAnalyzersDuringBuild=${{ matrix.run_analyzers }}
+        env:
+          RunAnalyzersDuringBuild: ${{ matrix.run_analyzers }}
+        run: dotnet build --no-restore --configuration Release
 
       - name: Test
         run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFilePrefix=test" --results-directory TestResults
