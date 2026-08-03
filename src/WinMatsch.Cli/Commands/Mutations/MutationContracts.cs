@@ -242,16 +242,14 @@ public sealed class FileSystemRawManifestSetLoader : IRawManifestSetLoader
             loaded.Add((file, content, repositoryPath));
         }
 
-        bool preserveRepositoryPaths = loaded.All(static item =>
-            item.RepositoryPath?.StartsWith("manifests/", StringComparison.Ordinal) == true);
-        string? inferredDirectory = preserveRepositoryPaths
-            ? null
-            : InferVersionDirectory(loaded);
+        string? inferredDirectory = loaded.Any(static item => !IsCanonicalManifestPath(item.RepositoryPath))
+            ? InferVersionDirectory(loaded)
+            : null;
         var documents = ImmutableArray.CreateBuilder<RawManifestDocument>(files.Length);
         foreach ((string file, byte[] content, string? repositoryPath) in loaded)
         {
             documents.Add(new(
-                preserveRepositoryPaths
+                IsCanonicalManifestPath(repositoryPath)
                     ? repositoryPath!
                     : $"{inferredDirectory}/{Path.GetFileName(file)}",
                 content));
@@ -303,8 +301,11 @@ public sealed class FileSystemRawManifestSetLoader : IRawManifestSetLoader
         }
 
         throw new InvalidDataException(
-            "A manifest set outside the output repository must contain a version manifest so repository paths can be inferred.");
+            "A manifest set whose repository paths cannot be derived from the input path must contain a version manifest so canonical paths can be inferred.");
     }
+
+    private static bool IsCanonicalManifestPath(string? path)
+        => path?.StartsWith("manifests/", StringComparison.Ordinal) == true;
 
     private static void RejectLink(string path)
     {

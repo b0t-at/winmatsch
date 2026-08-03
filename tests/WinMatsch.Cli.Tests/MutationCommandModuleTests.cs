@@ -986,6 +986,57 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task File_loader_preserves_canonical_paths_in_mixed_input_tree()
+    {
+        string output = Directory.CreateTempSubdirectory("winmatsch-loader-output-").FullName;
+        string canonical = Directory.CreateDirectory(
+            Path.Combine(output, "manifests", "e", "Example", "App", "2.0.0")).FullName;
+        string flat = Directory.CreateDirectory(Path.Combine(output, "downloaded-manifests")).FullName;
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(canonical, "Example.App.installer.yaml"),
+                "PackageIdentifier: Example.App\n"
+                + "PackageVersion: 2.0.0\n"
+                + "Installers: []\n"
+                + "ManifestType: installer\n"
+                + "ManifestVersion: 1.9.0\n");
+            await File.WriteAllTextAsync(
+                Path.Combine(flat, "Example.App.locale.en-US.yaml"),
+                "PackageIdentifier: Example.App\n"
+                + "PackageVersion: 2.0.0\n"
+                + "PackageLocale: en-US\n"
+                + "ManifestType: defaultLocale\n"
+                + "ManifestVersion: 1.9.0\n");
+            await File.WriteAllTextAsync(
+                Path.Combine(flat, "Example.App.yaml"),
+                "PackageIdentifier: Example.App\n"
+                + "PackageVersion: 2.0.0\n"
+                + "DefaultLocale: en-US\n"
+                + "ManifestType: version\n"
+                + "ManifestVersion: 1.9.0\n");
+            var loader = new FileSystemRawManifestSetLoader();
+
+            ImmutableArray<RawManifestDocument> documents = await loader.LoadAsync(output, output);
+
+            Assert.All(
+                documents,
+                document => Assert.StartsWith(
+                    "manifests/e/Example/App/2.0.0/",
+                    document.RepositoryPath,
+                    StringComparison.Ordinal));
+            Assert.Contains(
+                documents,
+                document => document.RepositoryPath
+                    == "manifests/e/Example/App/2.0.0/Example.App.installer.yaml");
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Validation_failure_blocks_apply()
     {
         var workflow = new FakeMutationWorkflow
