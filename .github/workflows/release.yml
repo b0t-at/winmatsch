@@ -142,20 +142,20 @@ jobs:
           "$exe" completion bash > /dev/null
           "$exe" config path > /dev/null
 
-      - name: Package (zip)
-        if: startsWith(matrix.rid, 'win-')
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path "publish/${env:RID}/*" -DestinationPath "dist/winmatsch-${env:GITHUB_REF_NAME}-${env:RID}.zip"
-
-      - name: Package (tar.gz)
-        if: ${{ !startsWith(matrix.rid, 'win-') }}
+      - name: Prepare binary for release
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          tar -czf "dist/winmatsch-${GITHUB_REF_NAME}-${RID}.tar.gz" -C "publish/${RID}" .
+          case "$RID" in
+            win-*)
+              cp "publish/$RID/winmatsch.exe" "dist/winmatsch-${GITHUB_REF_NAME}-${RID}.exe"
+              ;;
+            *)
+              cp "publish/$RID/winmatsch" "dist/winmatsch-${GITHUB_REF_NAME}-${RID}"
+              chmod +x "dist/winmatsch-${GITHUB_REF_NAME}-${RID}"
+              ;;
+          esac
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -171,36 +171,39 @@ jobs:
     permissions:
       contents: write # Create the draft release and upload its assets.
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Verify archives and generate checksums
+      - name: Verify binaries and generate checksums
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
           mv artifacts/* dist/
+          cp LICENSE THIRD-PARTY-NOTICES.txt dist/
           cd dist
           expected=(
-            "winmatsch-$GITHUB_REF_NAME-win-x64.zip"
-            "winmatsch-$GITHUB_REF_NAME-win-arm64.zip"
-            "winmatsch-$GITHUB_REF_NAME-linux-x64.tar.gz"
-            "winmatsch-$GITHUB_REF_NAME-linux-arm64.tar.gz"
-            "winmatsch-$GITHUB_REF_NAME-osx-x64.tar.gz"
-            "winmatsch-$GITHUB_REF_NAME-osx-arm64.tar.gz"
+            "winmatsch-$GITHUB_REF_NAME-win-x64.exe"
+            "winmatsch-$GITHUB_REF_NAME-win-arm64.exe"
+            "winmatsch-$GITHUB_REF_NAME-linux-x64"
+            "winmatsch-$GITHUB_REF_NAME-linux-arm64"
+            "winmatsch-$GITHUB_REF_NAME-osx-x64"
+            "winmatsch-$GITHUB_REF_NAME-osx-arm64"
           )
           for f in "${expected[@]}"; do
             if [[ ! -f "$f" ]]; then
-              echo "::error::Expected release archive '$f' is missing."
+              echo "::error::Expected release binary '$f' is missing."
               exit 1
             fi
           done
-          for f in *.zip; do unzip -t "$f" > /dev/null; done
-          for f in *.tar.gz; do tar -tzf "$f" > /dev/null; done
-          sha256sum "${expected[@]}" > SHA256SUMS.txt
+          sha256sum "${expected[@]}" LICENSE THIRD-PARTY-NOTICES.txt > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
 
       - name: Create draft GitHub release

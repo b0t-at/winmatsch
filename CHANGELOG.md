@@ -7,6 +7,15 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Changed
+
+- Release assets are now published as raw, portable per-platform binaries
+  (e.g. `winmatsch-<tag>-win-x64.exe`, `winmatsch-<tag>-linux-x64`) instead
+  of `.zip`/`.tar.gz` archives, so binaries can be downloaded and run
+  directly with no extraction step. `LICENSE` and `THIRD-PARTY-NOTICES.txt`
+  are published once per release as shared assets (identical across all
+  platforms) rather than duplicated inside each archive.
+
 ## [0.8.0] - 2026-08-03
 
 Initial development toward a first release. Implemented so far:

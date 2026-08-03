@@ -48,7 +48,7 @@ Details: [security guide](docs/security.md).
 
 ## Supported platforms
 
-Release archives are published for six runtime identifiers:
+Release binaries are published for six runtime identifiers:
 
 | OS | Architectures |
 |---|---|
@@ -56,27 +56,28 @@ Release archives are published for six runtime identifiers:
 | Linux | `linux-x64`, `linux-arm64` |
 | macOS | `osx-x64`, `osx-arm64` |
 
-Each archive contains one self-contained, trimmed, single-file executable
-(no .NET runtime install required) plus `LICENSE` and
-`THIRD-PARTY-NOTICES.txt`.
+Each is a single, self-contained, trimmed executable (no .NET runtime
+install required, no installer, nothing to extract) — download it and run
+it directly. `LICENSE` and `THIRD-PARTY-NOTICES.txt` are published once per
+release as separate assets (identical for every platform).
 
 ## Install
 
-There is no published release yet (pre-1.0). Once a release exists, download
-the archive for your platform from the
+Download the binary for your platform from the
 [releases page](https://github.com/b0t-at/winmatsch/releases), verify it
-against `SHA256SUMS.txt`, and extract it:
+against `SHA256SUMS.txt`, and run it:
 
 ```bash
 # Linux / macOS
-tar -xzf winmatsch-v<version>-linux-x64.tar.gz
-./winmatsch --version
+curl -LO https://github.com/b0t-at/winmatsch/releases/download/v<version>/winmatsch-v<version>-linux-x64
+chmod +x winmatsch-v<version>-linux-x64
+./winmatsch-v<version>-linux-x64 --version
 ```
 
 ```powershell
 # Windows
-Expand-Archive winmatsch-v<version>-win-x64.zip -DestinationPath winmatsch
-.\winmatsch\winmatsch.exe --version
+Invoke-WebRequest https://github.com/b0t-at/winmatsch/releases/download/v<version>/winmatsch-v<version>-win-x64.exe -OutFile winmatsch.exe
+.\winmatsch.exe --version
 ```
 
 ### Build from source
