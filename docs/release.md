@@ -15,7 +15,7 @@
 
 ## What the release workflow does (`.github/workflows/release.yml`)
 
-Triggered by pushing a `v*` tag:
+The build path is triggered by pushing a `v*` tag:
 
 1. **Gate** (once, on Linux): validates the tag shape, fails hard if the CLI
    project is missing, then restores, builds Release, and runs the complete
@@ -38,6 +38,57 @@ Triggered by pushing a `v*` tag:
    (`sha256sum -c`), and creates a **draft** GitHub release with generated
    notes. Publishing the draft is a manual, human step.
 
+## Azure publication workflow (`.github/workflows/publish-azure-release.yml`)
+
+Publishing the GitHub release triggers the separate **Publish Azure release**
+workflow. It downloads and verifies the final published assets, writes the
+immutable `releases/<tag>/` directory, adds the release to the public catalog,
+and updates the matching latest pointer.
+
+The workflow uses the `Release` GitHub environment and exchanges GitHub's OIDC
+token for a short-lived Azure token. No storage key, SAS, or client secret is
+stored in GitHub. **Actions > Publish Azure release > Run workflow** can
+backfill or retry an already-published tag; the job rejects drafts and applies
+the same immutability checks.
+
+### Azure release layout and catalog contract
+
+The container layout is intentionally append-oriented and CDN-friendly:
+
+```text
+/
+├── versions.json
+├── latest.json
+├── latest-prerelease.json
+└── releases/
+   └── v0.8.0/
+       ├── release.json
+       ├── SHA256SUMS.txt
+       ├── LICENSE
+       ├── THIRD-PARTY-NOTICES.txt
+       └── winmatsch-v0.8.0-<rid>[.exe]
+```
+
+- `releases/<tag>/` is the stable, version-qualified download namespace.
+  Versioned files use a one-year immutable cache policy.
+- `release.json` is the complete release manifest (`schemaVersion: 1`):
+  release status and channel, source commit, release-notes URL, and every
+  artifact's relative download path, RID/OS/architecture where applicable,
+  byte size, content type, and SHA-256.
+- `versions.json` is the enumeration endpoint for a future downloads page. It
+  keeps compact summaries for every published version, newest publication
+  first, plus paths to the latest stable and prerelease manifests.
+- `latest.json` contains the full latest stable manifest.
+  `latest-prerelease.json` does the same for prereleases. Prereleases never
+  replace the stable pointer.
+- The mutable JSON files use a short revalidation cache policy. Updating
+  `versions.json` is protected by its Azure Blob ETag so concurrent or stale
+  writers fail instead of losing an entry.
+
+Re-running publication is idempotent only when the tag commit and every file
+hash are unchanged. Existing versioned blobs are never overwritten; a changed
+file at an already-published path fails the run.
+
 ## Release checklist
 
 1. **Green main.** CI (build + full tests on Windows/Linux/macOS + format
@@ -50,8 +101,8 @@ Triggered by pushing a `v*` tag:
    tagged build does not do; re-check the command reference against
    `--help`.
 5. **Tag.** `git tag v<version> && git push origin v<version>`.
-6. **Watch the workflow.** All eight jobs (gate, six publishes, release)
-   must succeed; any missing artifact fails the run by design.
+6. **Watch the tag workflow.** The gate, six publish jobs, and draft-release
+   job must succeed; any missing artifact fails the run by design.
 7. **Verify the draft.** Download at least one binary, check
    `SHA256SUMS.txt`, run `winmatsch --version`, `--help`, and
    `winmatsch analyze` against a local file.
@@ -59,7 +110,10 @@ Triggered by pushing a `v*` tag:
    test repository only (`WINMATSCH_E2E_TEST_REPOSITORY` /
    `WINMATSCH_E2E_LIVE_MUTATION=1` with the hard-allowlisted
    `b0t-at/winmatsch-e2e`); never against `microsoft/winget-pkgs`.
-9. **Publish the draft release.**
+9. **Publish the draft release.** This triggers the separate Azure publication
+   workflow; verify that its job updates the catalog successfully.
+   For a release that predates the Azure job, use **Run workflow** with its
+   published tag.
 10. **Self-submission (post-1.0 goal).** Once the project is stable enough
     to publish to WinGet, use winmatsch itself:
     `winmatsch new <Publisher>.winmatsch --version <version> --urls <release binary URL> --submit`.
@@ -67,7 +121,8 @@ Triggered by pushing a `v*` tag:
 ## Rollback and recovery
 
 - **Before publishing the draft:** delete the draft release and the tag
-  (`git push origin :refs/tags/v<version>`), fix, re-tag.
+  (`git push origin :refs/tags/v<version>`), fix, re-tag. Azure Storage is not
+  changed until the GitHub release is published.
 - **After publishing:** do not delete published artifacts users may have
   downloaded. Ship a fixed `v<version+1>` instead, and mark the broken
   release as such in its notes.
