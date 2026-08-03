@@ -2077,18 +2077,14 @@ public sealed class LocalWorkflowEngine
 
     private static PackageManifests CloneWithVersion(PackageManifests source, PackageVersion version)
     {
-        IReadOnlyDictionary<string, string> files = PackageManifestIO.SerializeFiles(source);
         InstallerManifest installer = ManifestYamlReader.ReadInstaller(
-            files.Single(static pair => pair.Key.EndsWith(".installer.yaml", StringComparison.Ordinal)).Value);
+            ManifestYamlWriter.Serialize(source.Installer));
         DefaultLocaleManifest defaultLocale = ManifestYamlReader.ReadDefaultLocale(
-            files.Single(static pair =>
-                pair.Key.Contains(".locale.", StringComparison.Ordinal)
-                && ManifestYamlReader.TryDetectType(pair.Value) == ManifestType.DefaultLocale).Value);
+            ManifestYamlWriter.Serialize(source.DefaultLocale));
         VersionManifest versionManifest = ManifestYamlReader.ReadVersion(
-            files.Single(static pair => ManifestYamlReader.TryDetectType(pair.Value) == ManifestType.Version).Value);
-        List<LocaleManifest> locales = files
-            .Where(static pair => ManifestYamlReader.TryDetectType(pair.Value) == ManifestType.Locale)
-            .Select(static pair => ManifestYamlReader.ReadLocale(pair.Value))
+            ManifestYamlWriter.Serialize(source.Version));
+        List<LocaleManifest> locales = source.Locales
+            .Select(static locale => ManifestYamlReader.ReadLocale(ManifestYamlWriter.Serialize(locale)))
             .ToList();
         versionManifest.PackageVersion = version;
         installer.PackageVersion = version;

@@ -124,8 +124,11 @@ public sealed class WorkflowProductionCompositionTests
         }
     }
 
-    [Fact]
-    public async Task Production_local_engine_passes_previous_manifest_on_update()
+    [Theory]
+    [InlineData("1.4.0")]
+    [InlineData("1.9.0")]
+    [InlineData("1.10.0")]
+    public async Task Production_local_engine_passes_previous_manifest_on_update(string sourceManifestVersion)
     {
         byte[] executable = await File.ReadAllBytesAsync(
             Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
@@ -142,6 +145,7 @@ public sealed class WorkflowProductionCompositionTests
         try
         {
             WritePrevious(output);
+            RewriteManifestVersion(output, sourceManifestVersion);
             WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
             {
                 OutputDirectory = output,
@@ -166,6 +170,12 @@ public sealed class WorkflowProductionCompositionTests
             Assert.Contains(
                 result.Plan.Rules.Executions,
                 static execution => execution.RuleId == Rules.RuleIds.PreserveOnUpdate);
+            Assert.All(
+                result.Plan.AfterDocuments,
+                static document => Assert.Contains(
+                    "ManifestVersion: 1.12.0",
+                    Encoding.UTF8.GetString(document.Content.AsSpan()),
+                    StringComparison.Ordinal));
             Assert.NotEmpty(result.Plan.Rules.Changes);
             Assert.False(result.Applied);
         }
@@ -1318,6 +1328,19 @@ public sealed class WorkflowProductionCompositionTests
         foreach ((string fileName, string content) in PackageManifestIO.SerializeFiles(manifests))
         {
             File.WriteAllText(Path.Combine(directory, fileName), content);
+        }
+    }
+
+    private static void RewriteManifestVersion(string output, string version)
+    {
+        foreach (string path in Directory.EnumerateFiles(output, "*.yaml", SearchOption.AllDirectories))
+        {
+            File.WriteAllText(
+                path,
+                File.ReadAllText(path).Replace(
+                    ManifestVersion.Default.Value,
+                    version,
+                    StringComparison.Ordinal));
         }
     }
 
