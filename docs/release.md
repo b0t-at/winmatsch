@@ -3,7 +3,7 @@
 ## Version and tag policy
 
 - The project follows semantic versioning and is currently **pre-1.0**
-  (`VersionPrefix` `0.1.0` in `Directory.Build.props`).
+  (`VersionPrefix` `0.8.0` in `Directory.Build.props`).
 - Releases are cut from tags of the form `v<major>.<minor>.<patch>`
   (optionally `-<prerelease>`), e.g. `v0.2.0`. The release workflow rejects
   malformed tags.
@@ -28,14 +28,14 @@ Triggered by pushing a `v*` tag:
    the binary on hosts whose architecture matches
    (`--version` must equal the tag version exactly, ignoring the `+<sha>`
    suffix; `--help`, `analyze --help`, `completion bash`, `config path`),
-   then packages `zip` (Windows) or
-   `tar.gz` (Linux/macOS) with deterministic names
-   `winmatsch-<tag>-<rid>.<ext>`.
-3. **Release** (once): downloads all six archives, **fails if any expected
-   archive is missing**, test-extracts every archive, generates
-   `SHA256SUMS.txt`, verifies it (`sha256sum -c`), and creates a **draft**
-   GitHub release with generated notes. Publishing the draft is a manual,
-   human step.
+   then copies the raw executable to a deterministic release name
+   `winmatsch-<tag>-<rid>` (`.exe` on Windows) — no zip/tar.gz wrapping.
+3. **Release** (once): downloads all six binaries, **fails if any expected
+   binary is missing**, adds the shared `LICENSE` and
+   `THIRD-PARTY-NOTICES.txt` (published once, not per-platform, since they
+   are identical across RIDs), generates `SHA256SUMS.txt`, verifies it
+   (`sha256sum -c`), and creates a **draft** GitHub release with generated
+   notes. Publishing the draft is a manual, human step.
 
 ## Release checklist
 
@@ -51,7 +51,7 @@ Triggered by pushing a `v*` tag:
 5. **Tag.** `git tag v<version> && git push origin v<version>`.
 6. **Watch the workflow.** All eight jobs (gate, six publishes, release)
    must succeed; any missing artifact fails the run by design.
-7. **Verify the draft.** Download at least one archive, check
+7. **Verify the draft.** Download at least one binary, check
    `SHA256SUMS.txt`, run `winmatsch --version`, `--help`, and
    `winmatsch analyze` against a local file.
 8. **Optional live E2E.** Opt-in live verification against the dedicated
@@ -61,7 +61,7 @@ Triggered by pushing a `v*` tag:
 9. **Publish the draft release.**
 10. **Self-submission (post-1.0 goal).** Once the project is stable enough
     to publish to WinGet, use winmatsch itself:
-    `winmatsch new <Publisher>.winmatsch --version <version> --urls <release zip> --submit`.
+    `winmatsch new <Publisher>.winmatsch --version <version> --urls <release binary URL> --submit`.
 
 ## Rollback and recovery
 
@@ -71,7 +71,7 @@ Triggered by pushing a `v*` tag:
   downloaded. Ship a fixed `v<version+1>` instead, and mark the broken
   release as such in its notes.
 - **Partial workflow failure:** the release job refuses to create a draft
-  unless all six archives exist and verify, so a half-failed matrix cannot
+  unless all six binaries exist and verify, so a half-failed matrix cannot
   produce an incomplete release; re-run the failed jobs.
 
 ## v1.0 checklist (not yet shipped)
