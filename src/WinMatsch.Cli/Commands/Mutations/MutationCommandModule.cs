@@ -137,6 +137,8 @@ public sealed class MutationCommandModule : ICommandModule
     {
         var package = PackageArgument();
         var previousVersion = VersionArgument();
+        previousVersion.Description =
+            "Source package version; defaults to the latest version in winget-pkgs.";
         var options = new MutationOptions(
             includeRelease: true,
             includeMetadata: false,
@@ -155,7 +157,9 @@ public sealed class MutationCommandModule : ICommandModule
             {
                 OutputDirectory = GetOutputDirectory(context),
                 PackageIdentifier = ParseIdentifier(context.ParseResult.GetValue(package)),
-                PreviousVersion = ParseVersion(context.ParseResult.GetValue(previousVersion)),
+                PreviousVersion = ParseOptionalVersion(
+                        context.ParseResult.GetValue(previousVersion))
+                    ?? ParseOptionalVersion(context.ParseResult.GetValue(options.Replace)),
                 PackageVersion = context.ParseResult.GetValue(options.Version),
                 Release = ParseRelease(context.ParseResult, options),
                 UrlOverrides = ParseUrlOverrides(context.ParseResult, options),
@@ -1314,6 +1318,7 @@ public sealed class MutationCommandModule : ICommandModule
 
         string? explicitVersion = result.GetValue(options.Replace);
         if (!string.IsNullOrWhiteSpace(explicitVersion)
+            && update.PreviousVersion is not null
             && !string.Equals(
                 ParseVersion(explicitVersion).Value,
                 update.PreviousVersion.Value,
@@ -1357,7 +1362,7 @@ public sealed class MutationCommandModule : ICommandModule
                  && context.ParseResult.GetResult(options.Replace) is not null)
         {
             previousVersion = localRequest is UpdateOperationRequest update
-                ? update.PreviousVersion
+                ? update.PreviousVersion ?? ResolveUpdateSourceVersion(plan)
                 : throw new CliUsageException(
                     "--replace without an explicit version requires the update command.");
         }
@@ -1579,6 +1584,19 @@ public sealed class MutationCommandModule : ICommandModule
 
     private static PackageVersion ParseVersion(string? value)
         => new(Require(value, "package version", "the version argument or --version"));
+
+    private static PackageVersion? ParseOptionalVersion(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : new PackageVersion(value);
+
+    private static PackageVersion ResolveUpdateSourceVersion(LocalOperationPlan plan)
+    {
+        WorkflowAuditEntry? source = plan.Audit.FirstOrDefault(static entry =>
+            entry.Code == "UPDATE_SOURCE_VERSION");
+        return source is not null
+            ? new PackageVersion(source.Message)
+            : throw new CliOperationException(
+                "The resolved update source version is missing from the local plan.");
+    }
 
     private static Uri ParseHttpUri(string value, string option)
     {

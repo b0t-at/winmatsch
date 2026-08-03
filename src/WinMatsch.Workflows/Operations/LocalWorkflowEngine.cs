@@ -213,12 +213,22 @@ public sealed class LocalWorkflowEngine
             cancellationToken);
     }
 
-    public Task<WorkflowOperationResult> UpdateAsync(
+    public async Task<WorkflowOperationResult> UpdateAsync(
         UpdateOperationRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return ExecuteSnapshotOperationAsync(
+        request = await ResolveUpdateSourceAsync(request, cancellationToken).ConfigureAwait(false);
+        if (request.PreviousVersion is null)
+        {
+            return InvalidResult(
+                "update",
+                request,
+                $"Package '{request.PackageIdentifier.Value}' has no source versions in the output "
+                + "directory or configured manifest repository.");
+        }
+
+        return await ExecuteSnapshotOperationAsync(
             "update",
             request,
             request.PackageIdentifier,
@@ -227,7 +237,27 @@ public sealed class LocalWorkflowEngine
                 request,
                 recoveredOverride,
                 cancellationToken),
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<UpdateOperationRequest> ResolveUpdateSourceAsync(
+        UpdateOperationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.PreviousVersion is not null)
+        {
+            return request;
+        }
+
+        ImmutableArray<PackageSnapshot> versions = await _manifests.ListVersionsAsync(
+            request.OutputDirectory,
+            request.PackageIdentifier,
+            cancellationToken).ConfigureAwait(false);
+        PackageSnapshot? latest = versions.MaxBy(static snapshot => snapshot.PackageVersion);
+        return latest is null
+            ? request
+            : request with { PreviousVersion = latest.PackageVersion };
     }
 
     private async Task<WorkflowOperationResult> UpdateCoreAsync(
@@ -238,11 +268,15 @@ public sealed class LocalWorkflowEngine
         PackageSnapshot? previous = await _manifests.LoadAsync(
             request.OutputDirectory,
             request.PackageIdentifier,
-            request.PreviousVersion,
+            request.PreviousVersion!,
             cancellationToken).ConfigureAwait(false);
         if (previous is null)
         {
-            return MissingResult("update", request, request.PackageIdentifier, request.PreviousVersion);
+            return MissingResult(
+                "update",
+                request,
+                request.PackageIdentifier,
+                request.PreviousVersion!);
         }
 
         return await CreateOrUpdateAsync(
@@ -972,6 +1006,14 @@ public sealed class LocalWorkflowEngine
         ImmutableArray<WorkflowAuditEntry> audit =
         [
             new("VERSION", $"Resolved package version {newVersion.Value}.", versionResolution.Source?.ToString()),
+            .. previous is null
+                ? []
+                : new[]
+                {
+                    new WorkflowAuditEntry(
+                        "UPDATE_SOURCE_VERSION",
+                        previous.PackageVersion.Value),
+                },
             .. enrichedAssets.Select(static asset => new WorkflowAuditEntry(
                 "RELEASE_ASSET",
                 asset.DownloadUri.AbsoluteUri,

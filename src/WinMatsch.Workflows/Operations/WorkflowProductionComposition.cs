@@ -13,7 +13,8 @@ public static class WorkflowProductionComposition
         InstallerDownloader downloader,
         IWorkflowReleaseSource? releaseSource = null,
         IWorkflowClock? clock = null,
-        OverridePackStoreOptions? overridePackStoreOptions = null)
+        OverridePackStoreOptions? overridePackStoreOptions = null,
+        IManifestSnapshotSource? fallbackManifestSource = null)
     {
         ArgumentNullException.ThrowIfNull(downloader);
         var originalSubmissions = new FileOriginalSubmissionStore();
@@ -21,8 +22,14 @@ public static class WorkflowProductionComposition
         var preflight = new PreflightGateWorkflowAdapter(
             new PreflightGate(network),
             network);
+        IManifestSnapshotSource manifests = new LocalManifestSnapshotSource(originalSubmissions);
+        if (fallbackManifestSource is not null)
+        {
+            manifests = new FallbackManifestSnapshotSource(manifests, fallbackManifestSource);
+        }
+
         return new(
-            new LocalManifestSnapshotSource(originalSubmissions),
+            manifests,
             new RulePipelineWorkflowRunner(ProductionRuleComposer.Compose),
             preflight,
             new AtomicWorkflowFileTransaction(originalSubmissions),
