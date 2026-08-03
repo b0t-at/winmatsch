@@ -2,18 +2,21 @@
 
   <PropertyGroup>
     <Description>Cross-platform validation and preflight gates for complete WinGet manifest submissions.</Description>
-    <!-- JsonSchema.Net 8.0.5 declares IsAotCompatible for net7+; keep its call surface under trim/AOT analyzers. -->
+    <!-- Keep the reflection-free schema evaluator and the remaining call surface under trim/AOT analyzers. -->
     <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL3000;IL3002;IL3050</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="JsonSchema.Net" />
     <PackageReference Include="YamlDotNet" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\WinMatsch.Core\WinMatsch.Core.csproj" />
     <ProjectReference Include="..\WinMatsch.Downloads\WinMatsch.Downloads.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WinMatsch.Validation.Tests" />
   </ItemGroup>
 
   <ItemGroup>

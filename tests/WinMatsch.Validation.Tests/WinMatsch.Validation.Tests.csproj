@@ -20,6 +20,8 @@
     <None Include="..\..\Directory.Packages.props"
           Link="Directory.Packages.props"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\JsonSchemaTestSuite\**\*"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

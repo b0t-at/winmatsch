@@ -62,6 +62,72 @@ public sealed class ManifestSchemaValidatorTests
     }
 
     [Fact]
+    public void Schema_errors_preserve_nested_instance_json_pointers()
+    {
+        const string yaml = """
+            PackageIdentifier: 1
+            PackageVersion: 1.0.0
+            DefaultLocale: en-US
+            ManifestType: version
+            ManifestVersion: 1.12.0
+
+            """;
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Version);
+
+        ValidationFinding finding = Assert.Single(
+            report.Findings,
+            static finding => finding.Code == "VLD1003");
+        Assert.Equal("manifest.yaml/PackageIdentifier", finding.Path);
+        Assert.Contains("Schema keyword 'type' failed:", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void One_of_failures_cannot_disappear_from_the_public_report()
+    {
+        string yaml = CreateMinimalInstallerYaml(
+            """
+            Markets:
+              AllowedMarkets:
+                - US
+              ExcludedMarkets:
+                - DE
+            """);
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Installer);
+
+        Assert.Contains(
+            report.Findings,
+            static finding => finding.Code == "VLD1003"
+                && finding.Path == "manifest.yaml/Markets"
+                && finding.Message.Contains("Schema keyword 'oneOf' failed:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Not_failures_cannot_disappear_from_the_public_report()
+    {
+        string yaml = CreateMinimalInstallerYaml(
+            """
+            InstallerSuccessCodes:
+              - 0
+            """);
+
+        ValidationReport report = ManifestSchemaValidator.Validate(
+            new ManifestDocument("manifest.yaml", yaml),
+            ManifestType.Installer);
+
+        Assert.Contains(
+            report.Findings,
+            static finding => finding.Code == "VLD1003"
+                && finding.Path == "manifest.yaml/InstallerSuccessCodes/0"
+                && finding.Message.Contains("Schema keyword 'not' failed:", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Schema_reports_exact_property_casing()
     {
         string yaml = ManifestYamlWriter.Serialize(TestPackageFactory.CreateManifests().Version)
@@ -219,6 +285,23 @@ public sealed class ManifestSchemaValidatorTests
         ValidationFinding finding = Assert.Single(report.Findings);
         Assert.Equal("VLD1001", finding.Code);
         Assert.Contains("incompatible with node type", finding.Message, StringComparison.Ordinal);
+    }
+
+    private static string CreateMinimalInstallerYaml(string additionalProperties)
+    {
+        string hash = new('A', 64);
+        return $"""
+            PackageIdentifier: Example.App
+            PackageVersion: 1.0.0
+            {additionalProperties}
+            Installers:
+              - Architecture: x64
+                InstallerUrl: https://example.test/app.exe
+                InstallerSha256: {hash}
+            ManifestType: installer
+            ManifestVersion: 1.12.0
+
+            """;
     }
 
     [Theory]
