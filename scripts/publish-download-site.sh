@@ -4,6 +4,7 @@
 # Layout produced in the selected container (see docs/download-site.md):
 #   /index.html /404.html /versions.json          short-TTL entry points
 #   /v<version>/...                               immutable canonical release
+#   /<version>/index.html                          human-page alias
 #   /latest/...                                   stable unversioned mirror
 #
 # The script stages everything locally first, verifies checksums, then
@@ -239,12 +240,14 @@ log "Manifest updated: this=$VER latest=${LATEST:-<none>}"
 
 log "Staging site layout in $STAGING"
 VDIR="$STAGING/v$VER"
-mkdir -p "$VDIR"
+ALIAS_DIR="$STAGING/$VER"
+mkdir -p "$VDIR" "$ALIAS_DIR"
 for rid in "${RIDS[@]}"; do
     cp "$DIST/$(binary_name "$rid")" "$VDIR/"
 done
 cp "$SUMS" "$DIST/LICENSE" "$DIST/THIRD-PARTY-NOTICES.txt" "$VDIR/"
 cp "$SITE_INDEX" "$VDIR/index.html"
+cp "$SITE_INDEX" "$ALIAS_DIR/index.html"
 cp "$SITE_INDEX" "$STAGING/index.html"
 cp "$SITE_INDEX" "$STAGING/404.html"
 
@@ -320,7 +323,7 @@ upload_list() {
         find "v$VER" -type f ! -name index.html | LC_ALL=C sort
         printf '%s\n' versions.json
         [ "$REFRESH_LATEST" -eq 1 ] && find latest -type f | LC_ALL=C sort
-        printf '%s\n' index.html 404.html "v$VER/index.html"
+        printf '%s\n' index.html 404.html "v$VER/index.html" "$VER/index.html"
     })
 }
 
@@ -402,6 +405,7 @@ fi
 upload_mutable index.html
 upload_mutable 404.html
 upload_mutable "v$VER/index.html"
+upload_mutable "$VER/index.html"
 log "Upload complete"
 
 # ------------------------------------------------------------------ purge

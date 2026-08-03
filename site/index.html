@@ -319,7 +319,7 @@
             if (p.charAt(p.length - 1) !== "/") { p += "/"; } /* heal missing trailing slash (404 doc) */
             if (p === "/") { return { kind: "home" }; }
             if (/^\/latest\/$/i.test(p)) { return { kind: "latest" }; }
-            var m = p.match(/^\/v([^\/]+)\/$/i);
+            var m = p.match(/^\/v?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)\/$/i);
             if (m) { return { kind: "version", version: m[1] }; }
             return { kind: "unknown", path: pathname };
         }

@@ -18,6 +18,7 @@ or a page rendered client-side from a JSON manifest.
 | `/latest/latest.json` | Newest release metadata incl. stable URLs | short (300 s) |
 | `/latest/SHA256SUMS.txt` | Checksums rewritten for the unversioned names | short (300 s) |
 | `/v<version>/` | Human page for one release (e.g. `/v0.9.0/`) | short (300 s) |
+| `/<version>/` | Alias for the same human release page (e.g. `/0.9.0/`) | short (300 s) |
 | `/v<version>/winmatsch-v<version>-<rid>[.exe]` | Canonical immutable binary, exact release-asset name | immutable (1 y) |
 | `/v<version>/SHA256SUMS.txt`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` | Release documents | immutable (1 y) |
 
@@ -43,9 +44,9 @@ curl -fsSL https://<host>/latest/version.txt
   `/404.html`, `/latest/index.html` and every `/v<version>/index.html`.
   The hosting layer serves `index.html` for each directory request, and the
   page routes client-side on `location.pathname`: root → version browser,
-  `/latest/` → stable channel page, `/v<version>/` → that release. As the
-  error document the same file also heals slash-less or unknown paths by
-  rendering the right view or a version list.
+  `/latest/` → stable channel page, and both `/v<version>/` and
+  `/<version>/` → that release. Canonical links and artifact URLs retain the
+  explicit `/v<version>/` form.
 - **One manifest.** `/versions.json` is the single source of truth; the
   page fetches it at runtime, so publishing a release only writes blobs —
   no HTML changes, no Front Door configuration changes.
@@ -146,13 +147,45 @@ The checked-in
 configured account and container. Its manual input can safely backfill an
 already-published tag.
 
-## Front Door / storage notes
+## Recommended Front Door Standard/Premium configuration
 
-- With the configured named container, point Front Door at the blob endpoint,
-  mount `/winmatsch` as the route's origin path, and configure equivalent
-  index/error routing for `/`, `/latest/`, and `/v<version>/`. The public
-  origin must not include the container segment because the page and manifest
-  intentionally use root-relative URLs.
+- **Origin:** `<account>.blob.core.windows.net`, HTTPS `443`, with the same
+  value as the origin host header and certificate-name validation enabled.
+  Use origin path `/winmatsch`.
+- **Health probe:** `HEAD /winmatsch/index.html` over HTTPS.
+- **Route:** pattern `/*`, forwarding protocol **HTTPS only**, caching and
+  compression enabled, query strings ignored, cache behavior **Honor origin**.
+  The publisher already sends five-minute cache headers for mutable pages and
+  one-year immutable headers for versioned release files.
+- **HTTPS:** enable the built-in HTTP-to-HTTPS redirect with status `308`.
+- **Rule `download-pages`:** match **Request path** with operator **RegEx**,
+  transform **Lowercase**, and these OR-ed values (the Front Door request-path
+  condition omits the leading slash):
+
+  ```text
+  ^/?$
+  ^latest/?$
+  ^v?[0-9]+\.[0-9]+\.[0-9]+/?$
+  ^v?[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+/?$
+  ```
+
+  Apply **URL rewrite** with source pattern `/`, destination `/index.html`,
+  and **Preserve unmatched path = No**. This serves the SPA shell for `/`,
+  `/latest`, `/latest/`, `/v0.9.0[/]`, and `/0.9.0[/]` while binaries,
+  `versions.json`, checksums, and licenses continue to map directly to blobs.
+- **Origin access:** prefer Front Door Premium with Private Link if the
+  container should remain private. Otherwise the container needs anonymous
+  blob-read access so Front Door can fetch it.
+- **Security headers:** add a conditionless response-header rule for
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `X-Frame-Options: DENY`, and, once the final custom domain is fixed,
+  `Strict-Transport-Security: max-age=31536000; includeSubDomains`.
+
+The public URL must not include the `winmatsch` container segment because the
+page and manifest intentionally use root-relative links.
+
+## Storage alternatives and operations
+
 - Azure Storage's native static website endpoint is an alternative, but it
   always serves from the reserved `$web` container. To use that endpoint,
   configure `AZURE_STORAGE_CONTAINER=$web`, then set index document =
@@ -163,10 +196,6 @@ already-published tag.
   requirement.
 - Enable compression for text content types; binaries are already
   incompressible enough to skip.
-- A Front Door rule can 308-redirect `/latest` → `/latest/` and `/v<x>` →
-  `/v<x>/`. The native static website endpoint can fall back to the configured
-  `404.html`; a named-container Front Door route needs the equivalent error
-  rewrite.
 - The checked-in workflow deliberately does not purge Front Door so the OIDC
   identity needs only container-scoped data-plane RBAC. Purge can be enabled
   later by passing all three `--afd-*` flags and granting the additional
@@ -194,4 +223,6 @@ python3 -m http.server 8080 --directory /tmp/site
 ```
 
 `python3 -m http.server` serves `index.html` for directories just like
-the static website does, so `/`, `/latest/` and `/v0.1.0/` all render.
+the static website does, so `/`, `/latest/`, `/v0.1.0/`, and `/0.1.0/` all
+render. The deployed named-container origin still needs the Front Door rewrite
+above because the Blob endpoint itself has no directory-index behavior.
