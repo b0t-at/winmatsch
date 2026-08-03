@@ -1,0 +1,312 @@
+name: Publish download site
+
+on:
+  release:
+    types: [published, deleted]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published tag to backfill; leave empty to sync only
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # The reconciler's versions.json ETag guard assumes all site writers share this lock.
+  group: azure-download-site
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish release and index
+    if: github.event.action == 'published' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    runs-on: ubuntu-latest
+    environment: Release
+    permissions:
+      contents: read
+      id-token: write # Exchange GitHub's OIDC token for a short-lived Azure token.
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+    steps:
+      - name: Check out trusted publisher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Resolve published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$ ]]; then
+            echo "::error::Tag '$RELEASE_TAG' is not a valid release tag."
+            exit 1
+          fi
+
+          release_json=$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,publishedAt,url)
+          if [[ "$(jq -r '.tagName' <<< "$release_json")" != "$RELEASE_TAG" ]]; then
+            echo "::error::GitHub returned metadata for a different release tag."
+            exit 1
+          fi
+          if [[ "$(jq -r '.isDraft' <<< "$release_json")" != "false" ]]; then
+            echo "::error::The release must be published before the site can be updated."
+            exit 1
+          fi
+
+          tag_prerelease=false
+          if [[ "${RELEASE_TAG#v}" == *-* ]]; then
+            tag_prerelease=true
+          fi
+          github_prerelease=$(jq -r '.isPrerelease' <<< "$release_json")
+          if [[ "$github_prerelease" != "$tag_prerelease" ]]; then
+            echo "::error::GitHub prerelease state does not match tag '$RELEASE_TAG'."
+            exit 1
+          fi
+
+          published_at=$(jq -r '.publishedAt // empty' <<< "$release_json")
+          release_url=$(jq -r '.url' <<< "$release_json")
+          if [[ -z "$published_at" ]]; then
+            echo "::error::Release '$RELEASE_TAG' has no publication timestamp."
+            exit 1
+          fi
+          {
+            echo "RELEASE_PUBLISHED_AT=$published_at"
+            echo "RELEASE_PRERELEASE=$github_prerelease"
+            echo "RELEASE_URL=$release_url"
+          } >> "$GITHUB_ENV"
+
+          mkdir dist
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir dist
+
+      - name: Verify release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_binaries=(
+            "winmatsch-$RELEASE_TAG-win-x64.exe"
+            "winmatsch-$RELEASE_TAG-win-arm64.exe"
+            "winmatsch-$RELEASE_TAG-linux-x64"
+            "winmatsch-$RELEASE_TAG-linux-arm64"
+            "winmatsch-$RELEASE_TAG-osx-x64"
+            "winmatsch-$RELEASE_TAG-osx-arm64"
+          )
+          expected_assets=(
+            "${expected_binaries[@]}"
+            "LICENSE"
+            "THIRD-PARTY-NOTICES.txt"
+            "SHA256SUMS.txt"
+          )
+          printf '%s\n' "${expected_assets[@]}" | sort > "$RUNNER_TEMP/expected-assets.txt"
+          find dist -mindepth 1 -maxdepth 1 -type f -printf '%f\n' \
+            | sort > "$RUNNER_TEMP/actual-assets.txt"
+          if ! diff -u "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/actual-assets.txt"; then
+            echo "::error::The GitHub release assets do not match the expected release bundle."
+            exit 1
+          fi
+
+          (
+            cd dist
+            if ! awk '
+              NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-fA-F]+$/ { exit 1 }
+              END { if (NR == 0) exit 1 }
+            ' SHA256SUMS.txt; then
+              echo "::error::SHA256SUMS.txt contains a malformed checksum line."
+              exit 1
+            fi
+            printf '%s\n' \
+              "${expected_binaries[@]}" \
+              "LICENSE" \
+              "THIRD-PARTY-NOTICES.txt" \
+              | sort > "$RUNNER_TEMP/expected-checksums.txt"
+            awk '{print $2}' SHA256SUMS.txt \
+              | sed 's/^\*//' \
+              | sort > "$RUNNER_TEMP/actual-checksums.txt"
+            if ! diff -u "$RUNNER_TEMP/expected-checksums.txt" "$RUNNER_TEMP/actual-checksums.txt"; then
+              echo "::error::SHA256SUMS.txt does not cover exactly the expected release files."
+              exit 1
+            fi
+            sha256sum --check --strict SHA256SUMS.txt
+          )
+
+      - name: Validate Azure configuration
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+          AZURE_AFD_RESOURCE_GROUP: ${{ secrets.AZURE_AFD_RESOURCE_GROUP }}
+          AZURE_AFD_PROFILE: ${{ secrets.AZURE_AFD_PROFILE }}
+          AZURE_AFD_ENDPOINT: ${{ secrets.AZURE_AFD_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          required=(
+            AZURE_CLIENT_ID
+            AZURE_TENANT_ID
+            AZURE_SUBSCRIPTION_ID
+            AZURE_STORAGE_ACCOUNT
+            AZURE_STORAGE_CONTAINER
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Required repository secret '$name' is not configured."
+              exit 1
+            fi
+          done
+          afd=(AZURE_AFD_RESOURCE_GROUP AZURE_AFD_PROFILE AZURE_AFD_ENDPOINT)
+          afd_set=0
+          for name in "${afd[@]}"; do
+            if [[ -n "${!name:-}" ]]; then
+              afd_set=$((afd_set + 1))
+            fi
+          done
+          if (( afd_set > 0 && afd_set < ${#afd[@]} )); then
+            echo "::error::Front Door purge needs all of ${afd[*]} (or none to skip purging)."
+            exit 1
+          fi
+          if (( afd_set == 0 )); then
+            echo "::warning::Front Door purge secrets not configured; edge caches serve stale pages for up to five minutes after publish."
+          fi
+          if [[ "${AZURE_AFD_ENDPOINT:-}" == *.* ]]; then
+            echo "::error::AZURE_AFD_ENDPOINT must be the endpoint resource name (e.g. 'WinMatsch'), not the hostname '<name>-<hash>.z0X.azurefd.net'."
+            exit 1
+          fi
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Publish release and index
+        shell: bash
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+          AZURE_AFD_RESOURCE_GROUP: ${{ secrets.AZURE_AFD_RESOURCE_GROUP }}
+          AZURE_AFD_PROFILE: ${{ secrets.AZURE_AFD_PROFILE }}
+          AZURE_AFD_ENDPOINT: ${{ secrets.AZURE_AFD_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          args=(
+            --version "$RELEASE_TAG"
+            --date "$RELEASE_PUBLISHED_AT"
+            --notes-url "$RELEASE_URL"
+            --dist dist
+            --account "$AZURE_STORAGE_ACCOUNT"
+            --container "$AZURE_STORAGE_CONTAINER"
+          )
+          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          if [[ -n "$AZURE_AFD_RESOURCE_GROUP" && -n "$AZURE_AFD_PROFILE" && -n "$AZURE_AFD_ENDPOINT" ]]; then
+            args+=(
+              --afd-resource-group "$AZURE_AFD_RESOURCE_GROUP"
+              --afd-profile "$AZURE_AFD_PROFILE"
+              --afd-endpoint "$AZURE_AFD_ENDPOINT"
+            )
+          fi
+          scripts/publish-download-site.sh "${args[@]}"
+
+  reconcile:
+    name: Sync Azure mirror with GitHub releases
+    needs: publish
+    if: ${{ always() && (github.event.action == 'deleted' || needs.publish.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.tag == '')) }}
+    runs-on: ubuntu-latest
+    environment: Release
+    permissions:
+      contents: read
+      id-token: write # Exchange GitHub's OIDC token for a short-lived Azure token.
+    steps:
+      - name: Check out trusted publisher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Validate Azure configuration
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+          AZURE_AFD_RESOURCE_GROUP: ${{ secrets.AZURE_AFD_RESOURCE_GROUP }}
+          AZURE_AFD_PROFILE: ${{ secrets.AZURE_AFD_PROFILE }}
+          AZURE_AFD_ENDPOINT: ${{ secrets.AZURE_AFD_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          required=(
+            AZURE_CLIENT_ID
+            AZURE_TENANT_ID
+            AZURE_SUBSCRIPTION_ID
+            AZURE_STORAGE_ACCOUNT
+            AZURE_STORAGE_CONTAINER
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Required repository secret '$name' is not configured."
+              exit 1
+            fi
+          done
+          afd=(AZURE_AFD_RESOURCE_GROUP AZURE_AFD_PROFILE AZURE_AFD_ENDPOINT)
+          afd_set=0
+          for name in "${afd[@]}"; do
+            if [[ -n "${!name:-}" ]]; then
+              afd_set=$((afd_set + 1))
+            fi
+          done
+          if (( afd_set > 0 && afd_set < ${#afd[@]} )); then
+            echo "::error::Front Door purge needs all of ${afd[*]} (or none to skip purging)."
+            exit 1
+          fi
+          if [[ "${AZURE_AFD_ENDPOINT:-}" == *.* ]]; then
+            echo "::error::AZURE_AFD_ENDPOINT must be the endpoint resource name, not a hostname."
+            exit 1
+          fi
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Reconcile Azure mirror with GitHub releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELETED_RELEASE_TAG: ${{ github.event.action == 'deleted' && github.event.release.tag_name || '' }}
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+          AZURE_AFD_RESOURCE_GROUP: ${{ secrets.AZURE_AFD_RESOURCE_GROUP }}
+          AZURE_AFD_PROFILE: ${{ secrets.AZURE_AFD_PROFILE }}
+          AZURE_AFD_ENDPOINT: ${{ secrets.AZURE_AFD_ENDPOINT }}
+        run: |
+          args=(
+            --repository "$GITHUB_REPOSITORY"
+            --account "$AZURE_STORAGE_ACCOUNT"
+            --container "$AZURE_STORAGE_CONTAINER"
+          )
+          if [[ -n "$DELETED_RELEASE_TAG" ]]; then
+            args+=(--exclude-tag "$DELETED_RELEASE_TAG")
+          fi
+          if [[ -n "$AZURE_AFD_RESOURCE_GROUP" && -n "$AZURE_AFD_PROFILE" && -n "$AZURE_AFD_ENDPOINT" ]]; then
+            args+=(
+              --afd-resource-group "$AZURE_AFD_RESOURCE_GROUP"
+              --afd-profile "$AZURE_AFD_PROFILE"
+              --afd-endpoint "$AZURE_AFD_ENDPOINT"
+            )
+          fi
+          bash scripts/reconcile-download-site.sh "${args[@]}"

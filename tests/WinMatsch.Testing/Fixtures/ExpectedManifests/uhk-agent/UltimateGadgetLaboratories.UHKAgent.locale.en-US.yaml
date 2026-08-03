@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+# Created with winmatsch synthetic regression fixture
+
+PackageIdentifier: UltimateGadgetLaboratories.UHKAgent
+PackageVersion: 5.0.0
+PackageLocale: en-US
+Publisher: WinMatsch synthetic fixture
+PackageName: UHK Agent
+License: MIT
+ShortDescription: Synthetic regression fixture for uhk-agent.
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            run_analyzers: true
+          - os: windows-latest
+            run_analyzers: false
+          - os: macos-latest
+            run_analyzers: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        env:
+          RunAnalyzersDuringBuild: ${{ matrix.run_analyzers }}
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFilePrefix=test" --results-directory TestResults
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ matrix.os }}
+          path: TestResults/
+          if-no-files-found: ignore
+
+  windows-compiled-corpus:
+    name: Windows compiled installer corpus
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Acquire pinned compilers and build corpus
+        shell: pwsh
+        env:
+          WINMATSCH_COMPILED_CORPUS_OUTPUT: ${{ runner.temp }}\winmatsch-compiled-corpus
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:WINMATSCH_COMPILED_CORPUS_OUTPUT | Out-Null
+          & pwsh -NoProfile -File tests\WinMatsch.Testing\Tools\Build-WindowsInstallerCorpus.ps1 `
+            -OutputDirectory $env:WINMATSCH_COMPILED_CORPUS_OUTPUT `
+            -AcquireTools 2>&1 |
+            Tee-Object -FilePath "$env:WINMATSCH_COMPILED_CORPUS_OUTPUT\corpus-hashes.txt"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Run compiled corpus tests
+        env:
+          WINMATSCH_E2E_COMPILE_WINDOWS_FIXTURES: "1"
+        run: >
+          dotnet test tests\WinMatsch.E2E.Tests\WinMatsch.E2E.Tests.csproj
+          --configuration Release
+          --filter "FullyQualifiedName~WindowsCompiledCorpusTests"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=windows-compiled-corpus.trx"
+          --results-directory TestResults
+
+      - name: Upload compiled corpus failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-compiled-corpus-failure
+          path: |
+            TestResults/windows-compiled-corpus.trx
+            ${{ runner.temp }}\winmatsch-compiled-corpus\*.txt
+          if-no-files-found: ignore
+
+  format:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit workflow security
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          version: 1.29.0
+          inputs: .github/workflows
+          persona: auditor
+          min-severity: low
+          online-audits: false
+          advanced-security: false
+          annotations: true
+
+      - name: Test release management scripts
+        run: python3 -m unittest discover -s tests/scripts -p "test_*.py" -v
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Verify formatting
+        run: dotnet format --verify-no-changes

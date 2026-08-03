@@ -1,0 +1,80 @@
+namespace WinMatsch.Downloads;
+
+/// <summary>
+/// Settings controlling how <see cref="InstallerDownloader"/> performs downloads.
+/// The defaults are tuned for fetching installers referenced by WinGet manifests.
+/// </summary>
+public sealed class DownloaderOptions
+{
+    /// <summary>
+    /// Permits plain-http URLs. Off by default: manifests should only reference https installers,
+    /// so an http URL is treated as an error unless explicitly allowed.
+    /// </summary>
+    public bool AllowInsecureDownloads { get; set; }
+
+    /// <summary>
+    /// The User-Agent header sent with every request. Defaults to the user agent winget itself uses
+    /// ("Microsoft-Delivery-Optimization/10.1") so that servers which vary their payload by client
+    /// return exactly the bytes winget will later download, keeping the manifest hash valid.
+    /// </summary>
+    public string UserAgent { get; set; } = "Microsoft-Delivery-Optimization/10.1";
+
+    /// <summary>
+    /// The maximum number of retries after a transient failure, in addition to the initial attempt.
+    /// </summary>
+    public int MaxRetryAttempts { get; set; } = 3;
+
+    /// <summary>
+    /// The base delay for exponential backoff: the wait before retry <c>n</c> (zero-based) is this value times 2^<c>n</c>.
+    /// </summary>
+    public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// The timeout for a single request attempt, covering both headers and the full payload stream.
+    /// Generous by default because installers can be huge.
+    /// </summary>
+    public TimeSpan Timeout { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// The maximum time to wait for a connection (including TLS) to be established. Applies only
+    /// to the default handler; a custom handler configures its own connect behavior.
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> disables the limit.
+    /// </summary>
+    public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The maximum time to wait for response headers, or for the next payload bytes while
+    /// streaming, before the attempt counts as stalled and is retried as a transient failure.
+    /// Catches dead connections long before <see cref="Timeout"/> would.
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/> disables stall detection.
+    /// </summary>
+    public TimeSpan StallTimeout { get; set; } = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Optional persistent cache directory. A null or empty value disables caching so callers retain
+    /// full control over persistence.
+    /// </summary>
+    public string? CacheDirectory { get; set; }
+
+    /// <summary>The maximum age of a cache entry when the origin did not provide a shorter freshness lifetime.</summary>
+    public TimeSpan CacheTtl { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>The maximum number of payloads retained in the persistent cache.</summary>
+    public int CacheMaxEntries { get; set; } = 64;
+
+    /// <summary>The maximum aggregate payload size retained in the persistent cache.</summary>
+    public long CacheMaxBytes { get; set; } = 5L * 1024 * 1024 * 1024;
+
+    /// <summary>The maximum time to wait for another process to release the persistent cache lock.</summary>
+    public TimeSpan CacheProcessLockTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>The minimum age of an owned cache temp file before maintenance may remove it.</summary>
+    public TimeSpan CacheAbandonedTemporaryFileAge { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// The clock used for HTTP age and freshness calculations. Override in deterministic hosts or tests.
+    /// </summary>
+    public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
+
+    internal DownloadDestinationHooks? DestinationHooks { get; set; }
+}

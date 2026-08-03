@@ -1,0 +1,41 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <!--
+    Dependency policy (see CONTRIBUTING.md "Dependencies"):
+      * Every shipped package must be permissively licensed (MIT/BSD/Apache-2.0/MPL-2.0),
+        trim- and AOT-analyzable, and listed in THIRD-PARTY-NOTICES.txt with its exact version.
+      * Prefer the latest stable version. A deliberate hold-back must carry a comment here
+        naming the concrete blocker and how to re-evaluate it.
+      * The LicenseNoticeTests drift-guard fails the build when a pin here is missing
+        from THIRD-PARTY-NOTICES.txt.
+  -->
+  <ItemGroup>
+    <!-- Core -->
+    <PackageVersion Include="YamlDotNet" Version="18.1.0" />
+
+    <!-- Analysis -->
+    <PackageVersion Include="OpenMcdf" Version="3.2.0" />
+    <!--
+      SharpCompress 1.0.0 is unlisted and deprecated by its publisher as an accidental build.
+      0.50.3 was manually reviewed despite the normal three-day patch cooldown: changes from
+      0.50.1 are limited to GZip seek rewind and RAR5 async-corruption fixes with no public API
+      changes. Future automatic updates remain subject to the cooldown.
+    -->
+    <PackageVersion Include="SharpCompress" Version="0.50.3" />
+
+    <!-- Cli -->
+    <PackageVersion Include="Spectre.Console" Version="0.57.2" />
+    <PackageVersion Include="System.CommandLine" Version="2.0.10" />
+
+    <!-- Tests -->
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+
+</Project>

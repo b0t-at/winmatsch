@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Created with winmatsch synthetic regression fixture
+
+PackageIdentifier: bufbuild.buf
+PackageVersion: 1.64.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: buf/bin/buf.exe
+  PortableCommandAlias: buf
+- RelativeFilePath: buf/bin/protoc-gen-buf-breaking.exe
+  PortableCommandAlias: protoc-gen-buf-breaking
+- RelativeFilePath: buf/bin/protoc-gen-buf-lint.exe
+  PortableCommandAlias: protoc-gen-buf-lint
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-x86_64.zip
+  InstallerSha256: A08FC86D9BA755B003EE0033C7D4340687F8B6EB963527273A12597D996D5EC5
+- Architecture: arm64
+  InstallerUrl: https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Windows-arm64.zip
+  InstallerSha256: 1A2F907588643E88FD1E87371A166E93CFA3C71F4BA3AF1BEB23753A443C1757
+ManifestType: installer
+ManifestVersion: 1.12.0

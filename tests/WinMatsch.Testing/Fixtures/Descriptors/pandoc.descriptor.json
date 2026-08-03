@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 2,
+  "id": "pandoc",
+  "package": {
+    "identifier": "JohnMacFarlane.Pandoc",
+    "version": "3.6.2"
+  },
+  "regression": {
+    "summary": "A shared MSI is intentionally represented by user and machine entries distinguished by scope and ALLUSERS.",
+    "ruleIds": [
+      "SCOPE-1",
+      "DUP-2"
+    ],
+    "expectedRuleExecutions": [
+      "SCOPE-1"
+    ],
+    "nonExecutableRuleReasons": {
+      "DUP-2": "Intentional duplicate preservation is resolved by the workflow duplicate comparator before Rules execution."
+    },
+    "expectedBehavior": "Preserve two x64 entries with per-installer scope and ALLUSERS=1/2 switches."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 210752,
+    "outcome": "merged",
+    "headCommit": "f16bd19fe5e17b1add1ec0f7b3cae7e730249e9f",
+    "mergeCommit": "12ddb20aa9083e18386e1c83e048014ce7e0662c",
+    "observedAt": "2025-01-15T01:59:26Z",
+    "manifestPath": "manifests/j/JohnMacFarlane/Pandoc/3.6.2/JohnMacFarlane.Pandoc.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/f16bd19fe5e17b1add1ec0f7b3cae7e730249e9f/manifests/j/JohnMacFarlane/Pandoc/3.6.2/JohnMacFarlane.Pandoc.installer.yaml",
+    "manifestSha256": "84FA4A514C4AAB2A51A1E3016B3617123F5047696E6E37A1CA9CF31D257D68C1"
+  },
+  "assets": [
+    {
+      "fileName": "pandoc-3.6.2-windows-x86_64.msi",
+      "url": "https://github.com/jgm/pandoc/releases/download/3.6.2/pandoc-3.6.2-windows-x86_64.msi",
+      "sha256": "E9A8036CC298AE3D92105D5909C805A0A069CC988E7938703C4041B3E24A13AA",
+      "syntheticSha256": "643E4C0ECFDAE4409C78721D013D8D1F220EF8596E82DD7C3BB9EDC3221BB017",
+      "synthetic": {
+        "kind": "wix",
+        "architecture": "x64"
+      }
+    }
+  ],
+  "scenario": {
+    "operation": "update",
+    "previousVersion": "3.6.1",
+    "previousInstallers": [
+      {
+        "assetFileName": "pandoc-3.6.2-windows-x86_64.msi",
+        "architecture": "x64",
+        "installerType": "wix",
+        "scope": "user",
+        "customSwitch": "ALLUSERS=2"
+      },
+      {
+        "assetFileName": "pandoc-3.6.2-windows-x86_64.msi",
+        "architecture": "x64",
+        "installerType": "wix",
+        "scope": "machine",
+        "customSwitch": "ALLUSERS=1"
+      }
+    ],
+    "locale": {
+      "packageName": "Pandoc"
+    }
+  },
+  "expectedManifestDirectory": "pandoc"
+}

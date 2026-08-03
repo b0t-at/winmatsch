@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 2,
+  "id": "surrealdb",
+  "package": {
+    "identifier": "SurrealDB.SurrealDB",
+    "version": "2.3.0"
+  },
+  "regression": {
+    "summary": "A learned x64/x86 compatibility pair intentionally reuses one amd64 asset.",
+    "ruleIds": [
+      "DUP-2",
+      "ARCH-4",
+      "DEP-1"
+    ],
+    "expectedRuleExecutions": [
+      "DEP-1"
+    ],
+    "nonExecutableRuleReasons": {
+      "DUP-2": "Intentional compatibility duplicates are resolved by workflow mapping before Rules execution.",
+      "ARCH-4": "PE architecture analysis is owned by Analysis and workflow mapping."
+    },
+    "expectedBehavior": "Preserve x64 and x86 entries with architecture-matched VC runtime dependencies."
+  },
+  "provenance": {
+    "sourceRepository": "microsoft/winget-pkgs",
+    "pullRequest": 253118,
+    "outcome": "merged",
+    "headCommit": "9f15ce3641d9864abb8672d4b49193bc438a6e99",
+    "mergeCommit": "2ec64469400a2910e854926f41f21521edaa4533",
+    "observedAt": "2025-05-02T16:22:53Z",
+    "manifestPath": "manifests/s/SurrealDB/SurrealDB/2.3.0/SurrealDB.SurrealDB.installer.yaml",
+    "manifestUrl": "https://raw.githubusercontent.com/microsoft/winget-pkgs/9f15ce3641d9864abb8672d4b49193bc438a6e99/manifests/s/SurrealDB/SurrealDB/2.3.0/SurrealDB.SurrealDB.installer.yaml",
+    "manifestSha256": "A5E628B371A2CE688BAA47EB59AEFC95DBB35A6C3DD146743E60C0A7CEB1209C"
+  },
+  "assets": [
+    {
+      "fileName": "surreal-v2.3.0.windows-amd64.exe",
+      "url": "https://github.com/surrealdb/surrealdb/releases/download/v2.3.0/surreal-v2.3.0.windows-amd64.exe",
+      "sha256": "D41A16F5FBCB00E0C79F28C6B5F019538D3760F2BCADBE3BA31F69E7F8E257A8",
+      "syntheticSha256": "089BC43D79D5CFB6677269CE2412A89593A3059817C1B06EEDF980C1CEF7C296",
+      "synthetic": {
+        "kind": "portable",
+        "architecture": "x64",
+        "imports": [
+          "VCRUNTIME140.dll"
+        ]
+      }
+    }
+  ],
+  "scenario": {
+    "operation": "update",
+    "previousVersion": "2.2.0",
+    "previousInstallers": [
+      {
+        "assetFileName": "surreal-v2.3.0.windows-amd64.exe",
+        "architecture": "x64",
+        "installerType": "portable",
+        "packageDependencies": [
+          "Microsoft.VCRedist.2015\u002B.x64"
+        ]
+      },
+      {
+        "assetFileName": "surreal-v2.3.0.windows-amd64.exe",
+        "architecture": "x86",
+        "installerType": "portable",
+        "packageDependencies": [
+          "Microsoft.VCRedist.2015\u002B.x86"
+        ]
+      }
+    ],
+    "locale": {
+      "packageName": "SurrealDB"
+    }
+  },
+  "expectedManifestDirectory": "surrealdb"
+}

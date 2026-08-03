@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <meta name="description" content="Download winmatsch — automated WinGet manifest updates. Prebuilt binaries for Windows, Linux and macOS.">
+    <title>winmatsch downloads</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232563eb'/%3E%3Ctext x='8' y='12' font-size='10' font-family='monospace' fill='white' text-anchor='middle'%3Ew%3C/text%3E%3C/svg%3E">
+    <style>
+        :root {
+            --bg: #ffffff;
+            --fg: #1f2328;
+            --muted: #59636e;
+            --border: #d1d9e0;
+            --card: #f6f8fa;
+            --accent: #2563eb;
+            --accent-fg: #ffffff;
+            --ok: #1a7f37;
+            --warn-bg: #fff8c5;
+            --warn-border: #d4a72c;
+            --code-bg: #eff2f5;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0d1117;
+                --fg: #e6edf3;
+                --muted: #9198a1;
+                --border: #3d444d;
+                --card: #151b23;
+                --accent: #3b82f6;
+                --accent-fg: #ffffff;
+                --ok: #3fb950;
+                --warn-bg: #3a3000;
+                --warn-border: #9e6a03;
+                --code-bg: #1c2128;
+            }
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--fg);
+            font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        code, pre, .mono {
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+            font-size: 0.9em;
+        }
+        header, main, footer { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+        header {
+            display: flex; align-items: baseline; gap: 14px;
+            padding-top: 28px; padding-bottom: 8px;
+        }
+        header .brand { font-size: 1.35rem; font-weight: 700; color: var(--fg); }
+        header .brand:hover { text-decoration: none; color: var(--accent); }
+        header nav { margin-left: auto; display: flex; gap: 16px; font-size: 0.95rem; }
+        main { padding-bottom: 40px; }
+        footer {
+            border-top: 1px solid var(--border);
+            padding-top: 14px; padding-bottom: 30px;
+            color: var(--muted); font-size: 0.85rem;
+            display: flex; flex-wrap: wrap; gap: 6px 18px;
+        }
+        h1 { font-size: 1.7rem; margin: 18px 0 4px; }
+        h2 { font-size: 1.15rem; margin: 30px 0 10px; }
+        .sub { color: var(--muted); margin: 0 0 22px; }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 18px 20px;
+            margin: 14px 0;
+        }
+        .badge {
+            display: inline-block; padding: 1px 9px; border-radius: 999px;
+            font-size: 0.75rem; font-weight: 600; vertical-align: 2px;
+            border: 1px solid var(--border); color: var(--muted);
+        }
+        .badge.latest { color: var(--ok); border-color: var(--ok); }
+        .badge.pre { color: var(--warn-border); border-color: var(--warn-border); }
+        .banner {
+            background: var(--warn-bg); border: 1px solid var(--warn-border);
+            border-radius: 8px; padding: 10px 14px; margin: 14px 0; font-size: 0.95rem;
+        }
+        .btn {
+            display: inline-block; padding: 9px 18px; border-radius: 8px;
+            background: var(--accent); color: var(--accent-fg) !important;
+            font-weight: 600; border: none; cursor: pointer;
+        }
+        .btn:hover { text-decoration: none; filter: brightness(1.1); }
+        .btn.small { padding: 4px 12px; font-size: 0.85rem; font-weight: 500; }
+        .btn.ghost {
+            background: transparent; color: var(--accent) !important;
+            border: 1px solid var(--border);
+        }
+        table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+        th, td {
+            text-align: left; padding: 8px 10px;
+            border-bottom: 1px solid var(--border); vertical-align: middle;
+        }
+        th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+        tr:last-child td { border-bottom: none; }
+        td.num { white-space: nowrap; }
+        .os-group { margin: 4px 0 2px; font-weight: 600; }
+        .arch-chip {
+            display: inline-block; min-width: 52px; text-align: center;
+            padding: 1px 8px; border-radius: 6px; font-size: 0.8rem;
+            background: var(--code-bg); border: 1px solid var(--border);
+        }
+        .hash {
+            color: var(--muted); cursor: pointer; border-bottom: 1px dashed var(--muted);
+        }
+        pre.snippet {
+            background: var(--code-bg); border: 1px solid var(--border);
+            border-radius: 8px; padding: 12px 14px; overflow-x: auto;
+            position: relative; margin: 8px 0 16px;
+        }
+        pre.snippet button.copy {
+            position: absolute; top: 8px; right: 8px;
+            background: var(--card); color: var(--muted);
+            border: 1px solid var(--border); border-radius: 6px;
+            padding: 2px 10px; font-size: 0.75rem; cursor: pointer;
+        }
+        pre.snippet button.copy:hover { color: var(--fg); }
+        .muted { color: var(--muted); }
+        .small { font-size: 0.85rem; }
+        .detected {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+        }
+        .spin {
+            display: inline-block; width: 18px; height: 18px;
+            border: 2px solid var(--border); border-top-color: var(--accent);
+            border-radius: 50%; animation: spin 0.8s linear infinite;
+            vertical-align: middle; margin-right: 8px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @media (max-width: 640px) {
+            .hide-sm { display: none; }
+            header nav { gap: 10px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <a class="brand" href="/">winmatsch</a>
+        <span class="muted hide-sm">downloads</span>
+        <nav>
+            <a href="/latest/">latest</a>
+            <a href="https://github.com/b0t-at/winmatsch" rel="noopener">GitHub</a>
+            <a href="https://github.com/b0t-at/winmatsch#readme" rel="noopener">Docs</a>
+        </nav>
+    </header>
+    <main id="app">
+        <p><span class="spin"></span>Loading release information…</p>
+    </main>
+    <footer>
+        <span>Static download site — no server, no tracking.</span>
+        <span>Machine-readable: <a href="/versions.json" class="mono">/versions.json</a></span>
+        <span id="foot-updated"></span>
+    </footer>
+    <script>
+    "use strict";
+    (function () {
+        var MANIFEST_URL = "/versions.json";
+        var REPO_URL = "https://github.com/b0t-at/winmatsch";
+        var OS_ORDER = ["windows", "linux", "macos"];
+        var OS_LABEL = { windows: "Windows", linux: "Linux", macos: "macOS" };
+        var app = document.getElementById("app");
+
+        /* ---------- utilities ---------- */
+
+        function esc(s) {
+            return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+                return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+            });
+        }
+
+        function fmtBytes(n) {
+            if (typeof n !== "number" || !isFinite(n) || n <= 0) { return "–"; }
+            var units = ["B", "KiB", "MiB", "GiB"];
+            var i = 0;
+            while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+            return (i === 0 ? n : n.toFixed(1)) + " " + units[i];
+        }
+
+        function fmtDate(iso) {
+            if (!iso) { return ""; }
+            var d = new Date(iso);
+            if (isNaN(d.getTime())) { return esc(iso); }
+            return d.toISOString().slice(0, 10);
+        }
+
+        function normVer(v) {
+            return String(v == null ? "" : v).trim().replace(/^v/i, "");
+        }
+
+        /* ---------- manifest helpers ---------- */
+
+        function findVersion(manifest, ver) {
+            var want = normVer(ver).toLowerCase();
+            var list = manifest.versions || [];
+            for (var i = 0; i < list.length; i++) {
+                if (normVer(list[i].version).toLowerCase() === want) { return list[i]; }
+            }
+            return null;
+        }
+
+        function latestEntry(manifest) {
+            if (manifest.latest) {
+                var e = findVersion(manifest, manifest.latest);
+                if (e) { return e; }
+            }
+            var list = manifest.versions || [];
+            for (var i = 0; i < list.length; i++) {
+                if (!list[i].prerelease) { return list[i]; }
+            }
+            return null;
+        }
+
+        function versionDir(entry) {
+            return entry.path || ("/v" + normVer(entry.version) + "/");
+        }
+
+        function stableName(artifact) {
+            var ext = artifact.os === "windows" ? ".exe" : "";
+            return "winmatsch-" + artifact.rid + ext;
+        }
+
+        function groupByOs(artifacts) {
+            var groups = {};
+            (artifacts || []).forEach(function (a) {
+                var os = a.os || "other";
+                (groups[os] = groups[os] || []).push(a);
+            });
+            Object.keys(groups).forEach(function (os) {
+                groups[os].sort(function (a, b) {
+                    return String(a.arch).localeCompare(String(b.arch)) * -1; /* x64 before arm64 */
+                });
+            });
+            return groups;
+        }
+
+        /* ---------- platform detection (best effort, suggest only) ---------- */
+
+        function detectAppleSiliconViaWebGL() {
+            try {
+                var canvas = document.createElement("canvas");
+                var gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+                if (!gl) { return null; }
+                var ext = gl.getExtension("WEBGL_debug_renderer_info");
+                var renderer = ext
+                    ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)
+                    : gl.getParameter(gl.RENDERER);
+                if (/apple m\d|apple gpu/i.test(renderer)) { return true; }
+                if (/amd|intel|nvidia|radeon|iris/i.test(renderer)) { return false; }
+            } catch (e) { /* ignore */ }
+            return null;
+        }
+
+        function detectPlatform() {
+            var ua = navigator.userAgent || "";
+            var out = { os: null, arch: null, guessed: false };
+
+            var uadPlatform = navigator.userAgentData && navigator.userAgentData.platform;
+            var plat = (uadPlatform || navigator.platform || "").toLowerCase();
+            if (/win/.test(plat) || /windows/i.test(ua)) { out.os = "windows"; }
+            else if (/mac/.test(plat) || /mac os x/i.test(ua)) { out.os = "macos"; }
+            else if (/linux/.test(plat) || /linux/i.test(ua)) { out.os = "linux"; }
+
+            function fromUaString() {
+                if (/arm64|aarch64/i.test(ua)) { out.arch = "arm64"; }
+                else if (/x86_64|x64|amd64|win64|wow64/i.test(ua)) { out.arch = "x64"; }
+                if (!out.arch && out.os) {
+                    /* Sensible defaults: modern Macs are arm64, everything else mostly x64. */
+                    out.arch = out.os === "macos" && detectAppleSiliconViaWebGL() !== false ? "arm64" : "x64";
+                    out.guessed = true;
+                }
+                return out;
+            }
+
+            if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+                return navigator.userAgentData
+                    .getHighEntropyValues(["architecture", "bitness"])
+                    .then(function (h) {
+                        if (h.architecture === "arm") { out.arch = "arm64"; }
+                        else if (h.architecture === "x86" && h.bitness === "64") { out.arch = "x64"; }
+                        return out.arch ? out : fromUaString();
+                    })
+                    .catch(function () { return fromUaString(); });
+            }
+            return Promise.resolve(fromUaString());
+        }
+
+        function matchArtifact(artifacts, detected) {
+            if (!detected || !detected.os || !detected.arch) { return null; }
+            var osKey = detected.os === "macos" ? "osx" : detected.os === "windows" ? "win" : "linux";
+            var rid = osKey + "-" + detected.arch;
+            return (artifacts || []).filter(function (a) { return a.rid === rid; })[0] || null;
+        }
+
+        function artifactForOs(artifacts, os, detected) {
+            if (detected && detected.os === os) {
+                var detectedArtifact = matchArtifact(artifacts, detected);
+                if (detectedArtifact) { return detectedArtifact; }
+            }
+            var matches = (artifacts || []).filter(function (a) { return a.os === os; });
+            return matches.filter(function (a) { return a.arch === "x64"; })[0] || matches[0] || null;
+        }
+
+        /* ---------- routing ---------- */
+
+        function parseRoute(pathname) {
+            var p;
+            try { p = decodeURIComponent(pathname); } catch (e) { p = pathname; }
+            p = p.replace(/\/index\.html$/i, "/").replace(/^\/404\.html$/i, "/");
+            if (p.charAt(p.length - 1) !== "/") { p += "/"; } /* heal missing trailing slash (404 doc) */
+            if (p === "/") { return { kind: "home" }; }
+            if (/^\/latest\/$/i.test(p)) { return { kind: "latest" }; }
+            var m = p.match(/^\/v?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)\/$/i);
+            if (m) { return { kind: "version", version: m[1] }; }
+            return { kind: "unknown", path: pathname };
+        }
+
+        /* ---------- rendering ---------- */
+
+        function copyButtonsBind(root) {
+            root.querySelectorAll("[data-copy]").forEach(function (el) {
+                el.addEventListener("click", function () {
+                    var text = el.getAttribute("data-copy");
+                    var done = function () {
+                        var prev = el.textContent;
+                        el.textContent = "copied";
+                        setTimeout(function () { el.textContent = prev; }, 1200);
+                    };
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(text).then(done, done);
+                    } else { done(); }
+                });
+            });
+        }
+
+        function snippetHtml(id, lines) {
+            var text = lines.join("\n");
+            return '<pre class="snippet" id="' + esc(id) + '">' +
+                '<button class="copy" data-copy="' + esc(text) + '">copy</button>' +
+                '<code>' + esc(text) + '</code></pre>';
+        }
+
+        function artifactTable(entry, opts) {
+            var dir = opts.stable ? "/latest/" : versionDir(entry);
+            var groups = groupByOs(entry.artifacts);
+            var html = "";
+            OS_ORDER.concat(Object.keys(groups).filter(function (os) {
+                return OS_ORDER.indexOf(os) === -1;
+            })).forEach(function (os) {
+                var list = groups[os];
+                if (!list || !list.length) { return; }
+                html += '<div class="os-group">' + esc(OS_LABEL[os] || os) + "</div>";
+                html += "<table><thead><tr><th>Arch</th><th>File</th>" +
+                    '<th class="hide-sm">Size</th><th class="hide-sm">SHA-256</th><th></th></tr></thead><tbody>';
+                list.forEach(function (a) {
+                    var name = opts.stable ? stableName(a) : a.name;
+                    var url = dir + encodeURIComponent(name);
+                    var suggested = opts.suggested && opts.suggested.rid === a.rid;
+                    html += "<tr" + (suggested ? ' style="outline: 2px solid var(--accent); outline-offset: -2px;"' : "") + ">" +
+                        '<td><span class="arch-chip">' + esc(a.arch) + "</span></td>" +
+                        '<td class="mono"><a href="' + esc(url) + '">' + esc(name) + "</a>" +
+                        (suggested ? ' <span class="badge latest">suggested</span>' : "") + "</td>" +
+                        '<td class="num hide-sm">' + fmtBytes(a.sizeBytes) + "</td>" +
+                        '<td class="hide-sm">' + (a.sha256
+                            ? '<span class="mono hash" title="Click to copy full SHA-256" data-copy="' + esc(a.sha256) + '">' +
+                              esc(String(a.sha256).slice(0, 12)) + "…</span>"
+                            : '<span class="muted">–</span>') + "</td>" +
+                        '<td><a class="btn small' + (suggested ? "" : " ghost") + '" href="' + esc(url) + '">Download</a></td>' +
+                        "</tr>";
+                });
+                html += "</tbody></table>";
+            });
+            var extras = [
+                ["SHA256SUMS.txt", "checksums"],
+                ["LICENSE", "license"],
+                ["THIRD-PARTY-NOTICES.txt", "third-party notices"]
+            ].map(function (pair) {
+                return '<a class="mono" href="' + esc(dir + pair[0]) + '">' + esc(pair[0]) + "</a>";
+            }).join(" &nbsp;·&nbsp; ");
+            html += '<p class="small muted">Also in this folder: ' + extras + "</p>";
+            return html;
+        }
+
+        function detectedCard(entry, detected, opts) {
+            var artifact = matchArtifact(entry.artifacts, detected);
+            if (!artifact) { return ""; }
+            var dir = opts.stable ? "/latest/" : versionDir(entry);
+            var name = opts.stable ? stableName(artifact) : artifact.name;
+            var label = OS_LABEL[detected.os] + " " + detected.arch + (detected.guessed ? " (best guess)" : "");
+            return '<div class="card"><div class="detected">' +
+                "<div><strong>Detected: " + esc(label) + "</strong><br>" +
+                '<span class="small muted mono">' + esc(name) + " · " + fmtBytes(artifact.sizeBytes) + "</span></div>" +
+                '<a class="btn" href="' + esc(dir + encodeURIComponent(name)) + '">Download for ' +
+                esc(OS_LABEL[detected.os] + " " + detected.arch) + "</a>" +
+                '<span class="small muted">Wrong platform? Every build is listed below.</span>' +
+                "</div></div>";
+        }
+
+        function verifySection(entry, detected, opts) {
+            var origin = location.origin;
+            var dir = origin + (opts.stable ? "/latest/" : versionDir(entry));
+            var linux = artifactForOs(entry.artifacts, "linux", detected);
+            var macos = artifactForOs(entry.artifacts, "macos", detected);
+            var win = artifactForOs(entry.artifacts, "windows", detected);
+            var html = "<h2>Verify &amp; run</h2>";
+            if (linux) {
+                var lName = opts.stable ? stableName(linux) : linux.name;
+                html += '<div class="os-group">Linux</div>' + snippetHtml("snippet-linux", [
+                    "curl -fLO " + dir + lName,
+                    "curl -fsSL " + dir + "SHA256SUMS.txt | sha256sum -c --ignore-missing",
+                    "chmod +x " + lName + " && ./" + lName + " --version"
+                ]);
+            }
+            if (macos) {
+                var mName = opts.stable ? stableName(macos) : macos.name;
+                html += '<div class="os-group">macOS</div>' + snippetHtml("snippet-macos", [
+                    "curl -fLO " + dir + mName,
+                    'curl -fsSL ' + dir + 'SHA256SUMS.txt | grep -F "  ' + mName + '" | shasum -a 256 -c -',
+                    "xattr -d com.apple.quarantine " + mName + " 2>/dev/null || true",
+                    "chmod +x " + mName + " && ./" + mName + " --version"
+                ]);
+            }
+            if (win) {
+                var wName = opts.stable ? stableName(win) : win.name;
+                var wOutput = "winmatsch.exe";
+                html += '<div class="os-group">Windows (PowerShell)</div>' + snippetHtml("snippet-win", [
+                    "Invoke-WebRequest " + dir + wName + " -OutFile " + wOutput,
+                    "(Get-FileHash .\\" + wOutput + ").Hash  # compare with SHA256SUMS.txt",
+                    ".\\" + wOutput + " --version"
+                ]);
+            }
+            return html;
+        }
+
+        function versionBadges(manifest, entry) {
+            var html = "";
+            var latest = latestEntry(manifest);
+            if (latest && normVer(latest.version) === normVer(entry.version)) {
+                html += ' <span class="badge latest">latest</span>';
+            }
+            if (entry.prerelease) { html += ' <span class="badge pre">pre-release</span>'; }
+            return html;
+        }
+
+        function notLatestBanner(manifest, entry) {
+            var latest = latestEntry(manifest);
+            if (!latest || normVer(latest.version) === normVer(entry.version)) { return ""; }
+            return '<div class="banner">You are viewing an older release. The latest version is ' +
+                '<a href="' + esc(versionDir(latest)) + '"><strong>v' + esc(normVer(latest.version)) + "</strong></a>" +
+                ' — or always grab <a href="/latest/">/latest/</a>.</div>';
+        }
+
+        function renderVersionPage(manifest, entry, detected, opts) {
+            opts = opts || {};
+            var title = "winmatsch v" + normVer(entry.version);
+            document.title = title + (opts.stable ? " (latest)" : "") + " · downloads";
+            var html = "<h1>" + esc(title) + versionBadges(manifest, entry) + "</h1>" +
+                '<p class="sub">Released ' + fmtDate(entry.date) +
+                (entry.notes ? ' · <a href="' + esc(entry.notes) + '" rel="noopener">release notes</a>' : "") +
+                ' · <a href="' + esc(REPO_URL) + '" rel="noopener">source</a></p>';
+            if (opts.stable) {
+                html += '<div class="card small">This is the <strong>stable channel</strong>: the URLs below never change and always ' +
+                    "serve the newest release (currently v" + esc(normVer(entry.version)) + "). Scripts can pin " +
+                    '<a class="mono" href="/latest/version.txt">/latest/version.txt</a> or ' +
+                    '<a class="mono" href="/latest/latest.json">/latest/latest.json</a>. Immutable per-version files live under ' +
+                    '<a class="mono" href="' + esc(versionDir(entry)) + '">' + esc(versionDir(entry)) + "</a>.</div>";
+            } else {
+                html += notLatestBanner(manifest, entry);
+            }
+            html += detectedCard(entry, detected, opts);
+            html += "<h2>All downloads</h2>" + artifactTable(entry, {
+                stable: opts.stable,
+                suggested: matchArtifact(entry.artifacts, detected)
+            });
+            html += verifySection(entry, detected, opts);
+            app.innerHTML = html;
+            copyButtonsBind(app);
+        }
+
+        function renderHome(manifest, detected) {
+            document.title = "winmatsch downloads";
+            var latest = latestEntry(manifest);
+            var versions = manifest.versions || [];
+            var html = "<h1>winmatsch</h1>" +
+                '<p class="sub">Automated WinGet package manifest updates — one static binary, no runtime required.</p>';
+            if (latest) {
+                html += '<div class="card"><h2 style="margin-top:0">Latest release: v' + esc(normVer(latest.version)) +
+                    versionBadges(manifest, latest) + "</h2>" +
+                    '<p class="small muted" style="margin:2px 0 10px">Released ' + fmtDate(latest.date) +
+                    ' · <a href="' + esc(versionDir(latest)) + '">browse files</a>' +
+                    ' · <a href="/latest/">stable /latest/ URLs</a></p>';
+                var suggested = matchArtifact(latest.artifacts, detected);
+                if (suggested && detected.os) {
+                    html += '<p><a class="btn" href="/latest/' + esc(encodeURIComponent(stableName(suggested))) + '">Download for ' +
+                        esc(OS_LABEL[detected.os] + " " + detected.arch) + "</a> " +
+                        '<span class="small muted">detected ' + (detected.guessed ? "(best guess) " : "") +
+                        '— or pick another build below.</span></p>';
+                }
+                html += "</div>";
+                html += "<h2>Quick install</h2>";
+                var quickLinux = artifactForOs(latest.artifacts, "linux", detected);
+                var quickMacos = artifactForOs(latest.artifacts, "macos", detected);
+                var quickWindows = artifactForOs(latest.artifacts, "windows", detected);
+                if (quickLinux) {
+                    var quickLinuxName = stableName(quickLinux);
+                    html += '<div class="os-group">Linux</div>' + snippetHtml("qi-linux", [
+                        "curl -fLO " + location.origin + "/latest/" + quickLinuxName,
+                        "chmod +x " + quickLinuxName + " && ./" + quickLinuxName + " --version"
+                    ]);
+                }
+                if (quickMacos) {
+                    var quickMacosName = stableName(quickMacos);
+                    html += '<div class="os-group">macOS</div>' + snippetHtml("qi-macos", [
+                        "curl -fLO " + location.origin + "/latest/" + quickMacosName,
+                        "xattr -d com.apple.quarantine " + quickMacosName + " 2>/dev/null || true",
+                        "chmod +x " + quickMacosName + " && ./" + quickMacosName + " --version"
+                    ]);
+                }
+                if (quickWindows) {
+                    var quickWindowsName = stableName(quickWindows);
+                    html += '<div class="os-group">Windows (PowerShell)</div>' + snippetHtml("qi-win", [
+                        "Invoke-WebRequest " + location.origin + "/latest/" + quickWindowsName + " -OutFile winmatsch.exe",
+                        ".\\winmatsch.exe --version"
+                    ]);
+                }
+                html += '<p class="small muted">Architecture selection is a best guess — see every build on the ' +
+                    '<a href="/latest/">latest</a> page.</p>';
+            } else {
+                html += '<div class="banner">' + (versions.length
+                    ? "No stable release has been published yet. Pre-releases are listed below."
+                    : "No releases have been published yet.") + "</div>";
+            }
+            if (versions.length) {
+                html += "<h2>All versions</h2><table><thead><tr>" +
+                    '<th>Version</th><th>Released</th><th class="hide-sm">Channel</th><th></th></tr></thead><tbody>';
+                versions.forEach(function (v) {
+                    html += "<tr><td><a class=\"mono\" href=\"" + esc(versionDir(v)) + "\">v" + esc(normVer(v.version)) + "</a>" +
+                        versionBadges(manifest, v) + "</td>" +
+                        "<td class=\"num\">" + fmtDate(v.date) + "</td>" +
+                        '<td class="hide-sm">' + (v.prerelease ? "pre-release" : "stable") + "</td>" +
+                        '<td><a class="btn small ghost" href="' + esc(versionDir(v)) + '">Downloads</a>' +
+                        (v.notes ? ' &nbsp;<a class="small" href="' + esc(v.notes) + '" rel="noopener">notes</a>' : "") +
+                        "</td></tr>";
+                });
+                html += "</tbody></table>";
+            }
+            app.innerHTML = html;
+            copyButtonsBind(app);
+        }
+
+        function renderNotFound(manifest, path) {
+            document.title = "Not found · winmatsch downloads";
+            var html = "<h1>404 — nothing here</h1>" +
+                '<p class="sub">No file or release page at <code>' + esc(path) + "</code>.</p>" +
+                '<p><a class="btn" href="/">Browse all versions</a> &nbsp; <a class="btn ghost" href="/latest/">Go to latest</a></p>';
+            var versions = (manifest && manifest.versions) || [];
+            if (versions.length) {
+                html += "<h2>Available versions</h2><ul>";
+                versions.forEach(function (v) {
+                    html += '<li><a class="mono" href="' + esc(versionDir(v)) + '">v' + esc(normVer(v.version)) + "</a></li>";
+                });
+                html += "</ul>";
+            }
+            app.innerHTML = html;
+        }
+
+        function renderManifestError(err) {
+            app.innerHTML = "<h1>winmatsch downloads</h1>" +
+                '<div class="banner">Could not load <code>/versions.json</code> (' + esc(err && err.message) + "). " +
+                "If this site was just deployed, the first release may not have been published yet.</div>" +
+                '<p>Releases are also available on <a href="' + esc(REPO_URL) + '/releases" rel="noopener">GitHub</a>.</p>';
+        }
+
+        /* ---------- boot ---------- */
+
+        function boot() {
+            var route = parseRoute(location.pathname);
+            var manifestP = fetch(MANIFEST_URL, { cache: "no-cache" }).then(function (resp) {
+                if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+                return resp.json();
+            });
+            Promise.all([manifestP, detectPlatform()]).then(function (r) {
+                var manifest = r[0];
+                var detected = r[1];
+                var updated = document.getElementById("foot-updated");
+                if (updated && manifest.updated) { updated.textContent = "Manifest updated " + fmtDate(manifest.updated); }
+                if (route.kind === "home") { renderHome(manifest, detected); return; }
+                if (route.kind === "latest") {
+                    var latest = latestEntry(manifest);
+                    if (latest) { renderVersionPage(manifest, latest, detected, { stable: true }); }
+                    else { renderNotFound(manifest, "/latest/"); }
+                    return;
+                }
+                if (route.kind === "version") {
+                    var entry = findVersion(manifest, route.version);
+                    if (entry) { renderVersionPage(manifest, entry, detected, { stable: false }); }
+                    else { renderNotFound(manifest, "/v" + route.version + "/"); }
+                    return;
+                }
+                renderNotFound(manifest, route.path);
+            }).catch(function (err) {
+                renderManifestError(err);
+            });
+        }
+
+        boot();
+    }());
+    </script>
+</body>
+</html>

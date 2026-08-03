@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Cross-platform validation and preflight gates for complete WinGet manifest submissions.</Description>
+    <!-- Keep the reflection-free schema evaluator and the remaining call surface under trim/AOT analyzers. -->
+    <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL3000;IL3002;IL3050</WarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinMatsch.Core\WinMatsch.Core.csproj" />
+    <ProjectReference Include="..\WinMatsch.Downloads\WinMatsch.Downloads.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WinMatsch.Validation.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\schemas\manifest.*.json"
+                      LogicalName="WinMatsch.Validation.Schemas.%(Filename)%(Extension)" />
+    <None Include="..\..\THIRD-PARTY-NOTICES.txt"
+          Link="THIRD-PARTY-NOTICES.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\LICENSE"
+          Link="LICENSE"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

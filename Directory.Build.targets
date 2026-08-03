@@ -1,0 +1,10 @@
+<Project>
+
+  <!-- Imported after each project body, so $(IsTestProject) is already set. -->
+  <PropertyGroup Condition="'$(IsTestProject)' == 'true'">
+    <!-- CA1707: underscores in test method names are the established xUnit convention. -->
+    <!-- xUnit1051: cancellation propagation is a separate cross-suite refactor, not test correctness. -->
+    <NoWarn>$(NoWarn);CA1707;xUnit1051</NoWarn>
+  </PropertyGroup>
+
+</Project>

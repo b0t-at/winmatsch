@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Created with winmatsch synthetic regression fixture
+
+PackageIdentifier: TeamSonarr.Sonarr
+PackageVersion: 4.0.15.2941
+InstallerType: inno
+Installers:
+- Architecture: x86
+  InstallerUrl: https://github.com/Sonarr/Sonarr/releases/download/v4.0.15.2941/Sonarr.main.4.0.15.2941.win-x86-installer.exe
+  InstallerSha256: 38575A0255E75FA7D3A11506F08D692558A755B9828913645BCFF7FE37191C58
+- Architecture: x64
+  InstallerUrl: https://github.com/Sonarr/Sonarr/releases/download/v4.0.15.2941/Sonarr.main.4.0.15.2941.win-x64-installer.exe
+  InstallerSha256: 6A064CEA6972E8496FF356CBDA53D22C932D1AD238B2FB999E3C6328D5A28C34
+ManifestType: installer
+ManifestVersion: 1.12.0

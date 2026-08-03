@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>AOT-friendly GitHub GraphQL and REST client for WinGet repository and pull-request workflows.</Description>
+    <!-- Required by the LibraryImport source generator used for the OS keyring adapters. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinMatsch.Core\WinMatsch.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WinMatsch.GitHub.Tests" />
+  </ItemGroup>
+
+</Project>
