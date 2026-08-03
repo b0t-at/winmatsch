@@ -4,7 +4,6 @@
 # Layout produced in the selected container (see docs/download-site.md):
 #   /index.html /404.html /versions.json          short-TTL entry points
 #   /v<version>/...                               immutable canonical release
-#   /<version>/index.html                          human-page alias
 #   /latest/...                                   stable unversioned mirror
 #
 # The script stages everything locally first, verifies checksums, then
@@ -240,14 +239,12 @@ log "Manifest updated: this=$VER latest=${LATEST:-<none>}"
 
 log "Staging site layout in $STAGING"
 VDIR="$STAGING/v$VER"
-ALIAS_DIR="$STAGING/$VER"
-mkdir -p "$VDIR" "$ALIAS_DIR"
+mkdir -p "$VDIR"
 for rid in "${RIDS[@]}"; do
     cp "$DIST/$(binary_name "$rid")" "$VDIR/"
 done
 cp "$SUMS" "$DIST/LICENSE" "$DIST/THIRD-PARTY-NOTICES.txt" "$VDIR/"
 cp "$SITE_INDEX" "$VDIR/index.html"
-cp "$SITE_INDEX" "$ALIAS_DIR/index.html"
 cp "$SITE_INDEX" "$STAGING/index.html"
 cp "$SITE_INDEX" "$STAGING/404.html"
 
@@ -323,7 +320,7 @@ upload_list() {
         find "v$VER" -type f ! -name index.html | LC_ALL=C sort
         printf '%s\n' versions.json
         [ "$REFRESH_LATEST" -eq 1 ] && find latest -type f | LC_ALL=C sort
-        printf '%s\n' index.html 404.html "v$VER/index.html" "$VER/index.html"
+        printf '%s\n' index.html 404.html "v$VER/index.html"
     })
 }
 
@@ -334,6 +331,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
         IFS='|' read -r type cache _ <<<"$(headers_for "$path")"
         printf '%-52s %-32s %s\n' "/$path" "$type" "$cache" >&2
     done < <(upload_list)
+    log "Would remove legacy alias blob '/$VER/index.html' if present."
     log "No changes were made to Azure."
     exit 0
 fi
@@ -405,7 +403,19 @@ fi
 upload_mutable index.html
 upload_mutable 404.html
 upload_mutable "v$VER/index.html"
-upload_mutable "$VER/index.html"
+
+# Bare version page URLs are handled by Front Door. Remove the one-file alias
+# layout produced by older publisher versions so storage has one version tree.
+LEGACY_ALIAS="$VER/index.html"
+legacy_alias_exists="$(az storage blob exists "${AZ_AUTH[@]}" \
+    --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+    --name "$LEGACY_ALIAS" --query exists --output tsv)"
+if [ "$legacy_alias_exists" = "true" ]; then
+    log "Removing legacy alias blob '/$LEGACY_ALIAS'"
+    az storage blob delete "${AZ_AUTH[@]}" \
+        --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+        --name "$LEGACY_ALIAS" --delete-snapshots include --output none
+fi
 log "Upload complete"
 
 # ------------------------------------------------------------------ purge

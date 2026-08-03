@@ -68,8 +68,6 @@ The container layout is intentionally append-oriented and CDN-friendly:
 │  ├── version.txt
 │  ├── SHA256SUMS.txt
 │  └── winmatsch-<rid>[.exe]
-├── 0.8.0/
-│  └── index.html
 └── v0.8.0/
    ├── index.html
    ├── SHA256SUMS.txt
@@ -80,9 +78,9 @@ The container layout is intentionally append-oriented and CDN-friendly:
 
 - `v<version>/` is the stable, version-qualified download namespace.
   Versioned release files use a one-year immutable cache policy; the
-  client-side `index.html` shell remains short-lived. `/<version>/` contains
-  the equivalent human-page alias; downloads remain canonical under
-  `/v<version>/`.
+  client-side `index.html` shell remains short-lived. Front Door also serves
+  `/<version>/` as a human-page alias without creating a second storage tree;
+  downloads remain canonical under `/v<version>/`.
 - `versions.json` is the enumeration endpoint and the browser's source of
   truth. It is sorted by semantic-version precedence and includes each
   artifact's RID, platform, architecture, byte size, URL, and SHA-256.

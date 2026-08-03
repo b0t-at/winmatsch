@@ -18,7 +18,7 @@ or a page rendered client-side from a JSON manifest.
 | `/latest/latest.json` | Newest release metadata incl. stable URLs | short (300 s) |
 | `/latest/SHA256SUMS.txt` | Checksums rewritten for the unversioned names | short (300 s) |
 | `/v<version>/` | Human page for one release (e.g. `/v0.9.0/`) | short (300 s) |
-| `/<version>/` | Alias for the same human release page (e.g. `/0.9.0/`) | short (300 s) |
+| `/<version>/` | Front Door alias for the same human release page (e.g. `/0.9.0/`); no duplicate storage folder | short (300 s) |
 | `/v<version>/winmatsch-v<version>-<rid>[.exe]` | Canonical immutable binary, exact release-asset name | immutable (1 y) |
 | `/v<version>/SHA256SUMS.txt`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` | Release documents | immutable (1 y) |
 
@@ -120,7 +120,8 @@ The script (bash + python3 + az; no jq required):
    immutable `/v<version>/` first, the ETag-guarded `versions.json`, then
    `/latest/` (only when this release *is* the newest stable) and the entry
    pages,
-4. optionally purges the Front Door cache for `/`, `/index.html`,
+4. removes a deprecated physical `/<version>/index.html` alias if one exists,
+5. optionally purges the Front Door cache for `/`, `/index.html`,
    `/404.html`, `/versions.json` and `/latest/*`.
 
 Useful flags: `--dry-run` (stage + print the upload plan, no az calls),
@@ -223,6 +224,6 @@ python3 -m http.server 8080 --directory /tmp/site
 ```
 
 `python3 -m http.server` serves `index.html` for directories just like
-the static website does, so `/`, `/latest/`, `/v0.1.0/`, and `/0.1.0/` all
-render. The deployed named-container origin still needs the Front Door rewrite
-above because the Blob endpoint itself has no directory-index behavior.
+the static website does, so `/`, `/latest/`, and `/v0.1.0/` render. The bare
+`/0.1.0/` alias exists only at Front Door; no duplicate version directory is
+staged or stored.
