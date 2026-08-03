@@ -56,6 +56,28 @@ public sealed class RepositoryManifestSnapshotSourceTests
         Assert.Equal(0, fallback.ListCalls);
     }
 
+    [Fact]
+    public async Task Loaded_remote_snapshot_is_reused_for_plan_revalidation()
+    {
+        PackageVersionResult latest = PackageVersion("1.10");
+        var diagnostics = new FakeRepositoryDiagnosticService(latest);
+        var source = new RepositoryManifestSnapshotSource(
+            diagnostics,
+            new RepositoryCoordinates("microsoft", "winget-pkgs"));
+
+        _ = await source.ListVersionsAsync(
+            ".",
+            latest.Identifier,
+            CancellationToken.None);
+        _ = await source.LoadAsync(
+            ".",
+            latest.Identifier,
+            latest.Version,
+            CancellationToken.None);
+
+        Assert.Equal(1, diagnostics.GetCalls);
+    }
+
     private static PackageVersionResult PackageVersion(string versionValue)
     {
         var repository = new RepositoryCoordinates("microsoft", "winget-pkgs");

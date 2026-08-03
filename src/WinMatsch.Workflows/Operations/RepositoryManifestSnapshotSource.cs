@@ -6,25 +6,44 @@ using WinMatsch.Workflows.Diagnostics;
 
 namespace WinMatsch.Workflows.Operations;
 
-public sealed class RepositoryManifestSnapshotSource(
-    IRepositoryDiagnosticService diagnostics,
-    RepositoryCoordinates repository) : IManifestSnapshotSource
+public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
 {
+    private readonly IRepositoryDiagnosticService _diagnostics;
+    private readonly RepositoryCoordinates _repository;
+    private readonly Dictionary<(PackageIdentifier, PackageVersion), PackageSnapshot> _snapshots =
+        [];
+
+    public RepositoryManifestSnapshotSource(
+        IRepositoryDiagnosticService diagnostics,
+        RepositoryCoordinates repository)
+    {
+        _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
+        _repository = repository ?? throw new ArgumentNullException(nameof(repository));
+    }
+
     public async Task<PackageSnapshot?> LoadAsync(
         string outputDirectory,
         PackageIdentifier packageIdentifier,
         PackageVersion packageVersion,
         CancellationToken cancellationToken)
     {
+        if (_snapshots.TryGetValue((packageIdentifier, packageVersion), out PackageSnapshot? cached))
+        {
+            return cached;
+        }
+
         try
         {
-            PackageVersionResult result = await diagnostics.GetPackageVersionAsync(
-                repository,
+            PackageVersionResult result = await _diagnostics.GetPackageVersionAsync(
+                _repository,
                 packageIdentifier,
                 packageVersion,
                 normalize: false,
                 cancellationToken).ConfigureAwait(false);
-            return await CreateSnapshotAsync(result, cancellationToken).ConfigureAwait(false);
+            PackageSnapshot snapshot = await CreateSnapshotAsync(result, cancellationToken)
+                .ConfigureAwait(false);
+            _snapshots[(packageIdentifier, packageVersion)] = snapshot;
+            return snapshot;
         }
         catch (DiagnosticNotFoundException)
         {
@@ -39,8 +58,8 @@ public sealed class RepositoryManifestSnapshotSource(
     {
         try
         {
-            PackageVersionsResult versions = await diagnostics.ListVersionsAsync(
-                repository,
+            PackageVersionsResult versions = await _diagnostics.ListVersionsAsync(
+                _repository,
                 packageIdentifier,
                 skip: 0,
                 limit: 1,

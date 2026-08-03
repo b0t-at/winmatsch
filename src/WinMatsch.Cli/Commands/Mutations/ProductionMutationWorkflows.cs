@@ -85,13 +85,13 @@ internal sealed class ProductionMutationWorkflow(
             request,
             cancellationToken).ConfigureAwait(false);
         IWorkflowReleaseSource? releases = CreateReleaseSource(request, gitHub, gitHubOptions);
-        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
-            downloader,
-            releases,
-            overridePackStoreOptions: OverrideStoreOptions(configuration),
-            fallbackManifestSource: CreateRepositoryManifestSource(request, gitHub));
         try
         {
+            LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+                downloader,
+                releases,
+                overridePackStoreOptions: OverrideStoreOptions(configuration),
+                fallbackManifestSource: CreateRepositoryManifestSource(request, gitHub));
             if (!usePrepared)
             {
                 if (request is UpdateOperationRequest update)
@@ -164,14 +164,21 @@ internal sealed class ProductionMutationWorkflow(
             : WithExecutionMode(_preparedRequest, WorkflowExecutionMode.Apply);
         using var downloader = new InstallerDownloader(
             DownloaderOptions(configuration, prepared is SubmitOperationRequest));
-        using IGitHubRepositoryClient? gitHub = await CreateGitHubClientAsync(
+        using IGitHubRepositoryClient? releaseGitHub = await CreateGitHubClientAsync(
             prepared,
             cancellationToken).ConfigureAwait(false);
+        using IGitHubRepositoryClient? manifestGitHub =
+            RequiresReleaseDiscovery(prepared)
+                ? await CreateManifestGitHubClientAsync(prepared, cancellationToken)
+                    .ConfigureAwait(false)
+                : null;
         LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
             downloader,
-            CreateReleaseSource(prepared, gitHub, gitHubOptions),
+            CreateReleaseSource(prepared, releaseGitHub, gitHubOptions),
             overridePackStoreOptions: OverrideStoreOptions(configuration),
-            fallbackManifestSource: CreateRepositoryManifestSource(prepared, gitHub));
+            fallbackManifestSource: CreateRepositoryManifestSource(
+                prepared,
+                manifestGitHub ?? releaseGitHub));
         WorkflowOperationResult result = await engine.ApplyVerifiedPlanAsync(
             prepared,
             expectedPlanFingerprint,
@@ -258,19 +265,27 @@ internal sealed class ProductionMutationWorkflow(
             _ => null,
         };
         bool requiresReleaseDiscovery = release is not null && !release.ReleaseUrls.IsEmpty;
-        if (request is not UpdateOperationRequest && !requiresReleaseDiscovery)
+        if (!requiresReleaseDiscovery)
         {
-            return null;
+            return await CreateManifestGitHubClientAsync(request, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        if (requiresReleaseDiscovery)
+        _ = ParseGitHubRepository(release!.ReleaseUrls[0], gitHubOptions);
+        ResolvedToken required = await tokens.RequireAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return new Hosting.RedactingGitHubRepositoryClient(
+            new GitHubRepositoryClient(required.Token.RevealValue(), gitHubOptions));
+    }
+
+    private async Task<IGitHubRepositoryClient?> CreateManifestGitHubClientAsync(
+        WorkflowOperationRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request is not UpdateOperationRequest)
         {
-            _ = ParseGitHubRepository(release!.ReleaseUrls[0], gitHubOptions);
-            ResolvedToken required = await tokens.RequireAsync(cancellationToken)
-                .ConfigureAwait(false);
-            return new Hosting.RedactingGitHubRepositoryClient(
-                new GitHubRepositoryClient(required.Token.RevealValue(), gitHubOptions));
+            return null;
         }
 
         ResolvedToken? optional;
@@ -291,6 +306,14 @@ internal sealed class ProductionMutationWorkflow(
                 gitHubOptions,
                 optional?.Token.RevealValue()));
     }
+
+    private static bool RequiresReleaseDiscovery(WorkflowOperationRequest request)
+        => request switch
+        {
+            NewOperationRequest value => !value.Release.ReleaseUrls.IsEmpty,
+            UpdateOperationRequest value => !value.Release.ReleaseUrls.IsEmpty,
+            _ => false,
+        };
 
     private RepositoryManifestSnapshotSource? CreateRepositoryManifestSource(
         WorkflowOperationRequest request,
