@@ -300,7 +300,7 @@ public static class ManifestYamlDirectory
             fullRoot,
             fullDirectory);
         var entries = new List<string>();
-        foreach (string entry in Directory.EnumerateFileSystemEntries(lease.EnumerationPath))
+        foreach (string entry in lease.EnumerateFileSystemEntries())
         {
             if (entries.Count == MaxDirectoryEntries)
             {

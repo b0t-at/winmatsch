@@ -318,17 +318,7 @@ internal static partial class SafeManifestFile
                 handle = child;
             }
 
-            string descriptorRoot = OperatingSystem.IsLinux() ? "/proc/self/fd" : "/dev/fd";
-            string enumerationPath = Path.Combine(
-                descriptorRoot,
-                handle.DangerousGetHandle().ToInt32().ToString(System.Globalization.CultureInfo.InvariantCulture));
-            if (!Directory.Exists(enumerationPath))
-            {
-                throw new InvalidDataException(
-                    $"The operating system cannot enumerate pinned manifest directory '{path}'.");
-            }
-
-            var lease = new SafeManifestDirectoryLease([handle], enumerationPath);
+            var lease = new SafeManifestDirectoryLease([handle], path, unixDirectoryHandle: handle);
             handle = null;
             return lease;
         }
@@ -375,7 +365,7 @@ internal static partial class SafeManifestFile
         string path,
         int error)
         => new(
-            $"Unable to open {description} '{path}' without symbolic-link traversal "
+            $"Unable to open {description} '{path}' without traversing a symbolic link or reparse point "
             + $"(OS error {error}).");
 
     private static int UnixDirectoryFlags()
@@ -486,6 +476,18 @@ internal static partial class SafeManifestFile
 
     [DllImport("libc", EntryPoint = "openat", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int OpenAt(int directory, string path, int flags);
+
+    [DllImport("libc", EntryPoint = "dup", SetLastError = true)]
+    internal static extern int DuplicateFileDescriptor(int descriptor);
+
+    [DllImport("libc", EntryPoint = "fdopendir", SetLastError = true)]
+    internal static extern nint OpenDirectoryStream(int descriptor);
+
+    [DllImport("libc", EntryPoint = "readdir", SetLastError = true)]
+    internal static extern nint ReadDirectoryEntry(nint directoryStream);
+
+    [DllImport("libc", EntryPoint = "closedir", SetLastError = true)]
+    internal static extern int CloseDirectoryStream(nint directoryStream);
 #pragma warning restore SYSLIB1054
 }
 
@@ -542,10 +544,21 @@ internal sealed class SafeManifestFileLease(
 
 internal sealed class SafeManifestDirectoryLease(
     IReadOnlyList<SafeFileHandle> handles,
-    string enumerationPath)
+    string enumerationPath,
+    SafeFileHandle? unixDirectoryHandle = null)
     : IDisposable
 {
     public string EnumerationPath { get; } = enumerationPath;
+
+    public IEnumerable<string> EnumerateFileSystemEntries()
+    {
+        if (unixDirectoryHandle is null)
+        {
+            return Directory.EnumerateFileSystemEntries(EnumerationPath);
+        }
+
+        return EnumerateUnixEntries(unixDirectoryHandle, EnumerationPath);
+    }
 
     public void Dispose()
     {
@@ -554,4 +567,69 @@ internal sealed class SafeManifestDirectoryLease(
             handle.Dispose();
         }
     }
+
+    private static IEnumerable<string> EnumerateUnixEntries(
+        SafeFileHandle directoryHandle,
+        string directoryPath)
+    {
+        int duplicate = SafeManifestFile.DuplicateFileDescriptor(
+            directoryHandle.DangerousGetHandle().ToInt32());
+        if (duplicate < 0)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            throw new IOException(
+                $"Unable to duplicate pinned manifest directory '{directoryPath}' (OS error {error}).");
+        }
+
+        nint stream = SafeManifestFile.OpenDirectoryStream(duplicate);
+        if (stream == 0)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            _ = Close(duplicate);
+            throw new IOException(
+                $"Unable to enumerate pinned manifest directory '{directoryPath}' (OS error {error}).");
+        }
+
+        try
+        {
+            while (true)
+            {
+                Marshal.SetLastPInvokeError(0);
+                nint entry = SafeManifestFile.ReadDirectoryEntry(stream);
+                if (entry == 0)
+                {
+                    int error = Marshal.GetLastPInvokeError();
+                    if (error != 0)
+                    {
+                        throw new IOException(
+                            $"Unable to read pinned manifest directory '{directoryPath}' (OS error {error}).");
+                    }
+
+                    yield break;
+                }
+
+                int nameOffset = OperatingSystem.IsMacOS()
+                    ? 21
+                    : OperatingSystem.IsFreeBSD()
+                        ? 24
+                        : 19;
+                string name = Marshal.PtrToStringUTF8(entry + nameOffset)
+                    ?? throw new IOException(
+                        $"Pinned manifest directory '{directoryPath}' contains an invalid entry name.");
+                if (name is not "." and not "..")
+                {
+                    yield return Path.Combine(directoryPath, name);
+                }
+            }
+        }
+        finally
+        {
+            _ = SafeManifestFile.CloseDirectoryStream(stream);
+        }
+    }
+
+#pragma warning disable SYSLIB1054 // Source-generated interop would require unsafe blocks project-wide.
+    [DllImport("libc", EntryPoint = "close", SetLastError = true)]
+    private static extern int Close(int descriptor);
+#pragma warning restore SYSLIB1054
 }

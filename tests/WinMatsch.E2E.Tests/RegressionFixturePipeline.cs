@@ -375,6 +375,7 @@ internal static class RegressionFixturePipeline
             {
                 ZipArchiveEntry entry = archive.CreateEntry(path);
                 entry.LastWriteTime = new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
+                entry.ExternalAttributes = 0;
                 using Stream destination = entry.Open();
                 destination.Write(DependencyFixtures.BuildPe(
                     ToMachine(architecture),
@@ -382,7 +383,9 @@ internal static class RegressionFixturePipeline
             }
         }
 
-        return stream.ToArray();
+        byte[] bytes = stream.ToArray();
+        MsixFixtures.NormalizeZipMetadata(bytes);
+        return bytes;
     }
 
     private static Installer CreatePreviousInstaller(

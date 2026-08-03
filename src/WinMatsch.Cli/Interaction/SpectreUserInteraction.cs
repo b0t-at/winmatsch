@@ -116,6 +116,7 @@ public sealed class SpectreUserInteraction : IUserInteraction
             {
                 ProgressTask task = progress.AddTask(Markup.Escape(description), maxValue: 1);
                 task.IsIndeterminate = true;
+                progress.Refresh();
                 result = await operation(cancellationToken).ConfigureAwait(false);
                 task.IsIndeterminate = false;
                 task.Value = 1;

@@ -453,7 +453,8 @@ internal sealed class GitHubHttpTransport
                 if (uriText.Length > 2 &&
                     uriText[0] == '<' &&
                     uriText[^1] == '>' &&
-                    Uri.TryCreate(uriText[1..^1], UriKind.Absolute, out Uri? next))
+                    Uri.TryCreate(uriText[1..^1], UriKind.Absolute, out Uri? next) &&
+                    next.Scheme is "http" or "https")
                 {
                     return next;
                 }

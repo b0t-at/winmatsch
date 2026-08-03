@@ -1330,6 +1330,85 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public void Output_root_canonicalization_does_not_follow_a_user_controlled_unix_symlink()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string token = Guid.NewGuid().ToString("N");
+        string target = Path.Combine(Path.GetTempPath(), $"winmatsch-output-target-{token}");
+        string alias = Path.Combine(Path.GetTempPath(), $"winmatsch-output-alias-{token}");
+        Directory.CreateDirectory(target);
+        Directory.CreateSymbolicLink(alias, target);
+        try
+        {
+            string requested = Path.Combine(alias, "nested", "output");
+
+            string canonical = SecurePath.CanonicalizeOutputRoot(requested);
+
+            Assert.Equal(Path.GetFullPath(requested), canonical);
+            Assert.Throws<InvalidDataException>(() => SecurePath.ValidateOutputRoot(canonical));
+        }
+        finally
+        {
+            if (Directory.Exists(alias))
+            {
+                Directory.Delete(alias);
+            }
+
+            Directory.Delete(target, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Output_root_canonicalization_resolves_the_known_macos_var_alias()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        string requested = Path.Combine("/var", "folders", $"winmatsch-{Guid.NewGuid():N}");
+
+        string canonical = SecurePath.CanonicalizeOutputRoot(requested);
+
+        Assert.StartsWith("/private/var/folders/", canonical, StringComparison.Ordinal);
+        SecurePath.ValidateOutputRoot(canonical);
+    }
+
+    [Fact]
+    public async Task Atomic_transaction_accepts_the_known_macos_var_alias()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        string root = Path.Combine("/var", "tmp", $"winmatsch-{Guid.NewGuid():N}");
+        try
+        {
+            var transaction = new AtomicWorkflowFileTransaction();
+
+            await transaction.ApplyAsync(
+                root,
+                "Example.MacAlias",
+                [new(PlannedChangeKind.Add, "proof.yaml", "ok"u8)],
+                CancellationToken.None);
+
+            Assert.Equal("ok", await File.ReadAllTextAsync(Path.Combine(root, "proof.yaml")));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task Cancellation_before_transaction_keeps_destination_unchanged()
     {
         using var temporary = new TemporaryDirectory();

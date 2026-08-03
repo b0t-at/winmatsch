@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 
@@ -66,12 +67,45 @@ internal static class MsixFixtures
 
                 ZipArchiveEntry entry = archive.CreateEntry(name);
                 entry.LastWriteTime = new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
+                entry.ExternalAttributes = 0;
                 using Stream entryStream = entry.Open();
                 entryStream.Write(content);
             }
         }
 
+        NormalizeZipMetadata(stream.GetBuffer().AsSpan(0, checked((int)stream.Length)));
         stream.Position = 0;
         return stream;
+    }
+
+    internal static void NormalizeZipMetadata(Span<byte> bytes)
+    {
+        ReadOnlySpan<byte> endSignature = [0x50, 0x4B, 0x05, 0x06];
+        int searchStart = Math.Max(0, bytes.Length - (ushort.MaxValue + 22));
+        int relativeEndOffset = bytes.Slice(searchStart).LastIndexOf(endSignature);
+        if (relativeEndOffset < 0)
+        {
+            throw new InvalidDataException("Synthetic ZIP has no end-of-central-directory record.");
+        }
+
+        int endOffset = searchStart + relativeEndOffset;
+        ushort entryCount = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(endOffset + 10, 2));
+        int centralOffset = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(endOffset + 16, 4)));
+        for (int index = 0; index < entryCount; index++)
+        {
+            Span<byte> header = bytes.Slice(centralOffset);
+            if (header.Length < 46
+                || BinaryPrimitives.ReadUInt32LittleEndian(header) != 0x02014B50)
+            {
+                throw new InvalidDataException("Synthetic ZIP has an invalid central-directory entry.");
+            }
+
+            header[5] = 0;
+            header.Slice(38, 4).Clear();
+            int fileNameLength = BinaryPrimitives.ReadUInt16LittleEndian(header.Slice(28, 2));
+            int extraLength = BinaryPrimitives.ReadUInt16LittleEndian(header.Slice(30, 2));
+            int commentLength = BinaryPrimitives.ReadUInt16LittleEndian(header.Slice(32, 2));
+            centralOffset = checked(centralOffset + 46 + fileNameLength + extraLength + commentLength);
+        }
     }
 }

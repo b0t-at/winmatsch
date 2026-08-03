@@ -65,7 +65,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
 
         bool isInstaller = ContainsInstallerKeyword(version.OriginalFilename)
             || ContainsInstallerKeyword(version.FileDescription)
-            || (!HasVersionEvidence(version) && ContainsInstallerKeyword(Path.GetFileName(fileName)));
+            || (!HasVersionEvidence(version) && ContainsInstallerKeyword(GetFileName(fileName)));
         bool isSelfExtractorStub = IsSelfExtractorStub(version);
 
         InstallerAnalysis fallback = new()
@@ -121,7 +121,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
     {
         IReadOnlyList<AnalysisDiagnostic> diagnostics = probed.Diagnostics;
         if (probed.Format == DetectedInstallerFormat.Nullsoft
-            && UrlArchitectureDetector.Detect(Path.GetFileName(fileName)) == Architecture.Arm64
+            && UrlArchitectureDetector.Detect(GetFileName(fileName)) == Architecture.Arm64
             && probed.Installers.All(static installer => installer.Architecture == Architecture.X64))
         {
             foreach (Installer installer in probed.Installers)
@@ -160,7 +160,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
         string fileName,
         string diagnosticCode)
     {
-        Architecture? hint = UrlArchitectureDetector.Detect(Path.GetFileName(fileName));
+        Architecture? hint = UrlArchitectureDetector.Detect(GetFileName(fileName));
         bool hasOnlyMissingOrStubEvidence = analysis.Installers.All(
             static installer => installer.Architecture is null or Architecture.X86);
         bool hasManualWrapperConflict = analysis.Diagnostics.Any(static diagnostic => diagnostic.RequiresManualAnalysis)
@@ -209,6 +209,9 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
             || version.FileVersion is not null
             || version.OriginalFilename is not null
             || version.FileDescription is not null;
+
+    private static string GetFileName(string path)
+        => Path.GetFileName(path.Replace('\\', '/'));
 
     private static bool ContainsInstallerKeyword(string? value)
     {

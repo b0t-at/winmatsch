@@ -974,8 +974,8 @@ public sealed class DownloadCache
             || Path.IsPathRooted(value)
             || !string.Equals(Path.GetFileName(value), value, StringComparison.Ordinal)
             || value is "." or ".."
-            || value.Contains(Path.DirectorySeparatorChar)
-            || value.Contains(Path.AltDirectorySeparatorChar))
+            || value.Contains('/')
+            || value.Contains('\\'))
         {
             throw new InvalidDataException($"The {field} must be a safe leaf name.");
         }

@@ -808,7 +808,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        string root = Path.GetFullPath(outputDirectory);
+        string root = SecurePath.CanonicalizeOutputRoot(outputDirectory);
         if (!Directory.Exists(root))
         {
             return null;
@@ -830,7 +830,7 @@ public sealed class LocalManifestSnapshotSource : IManifestSnapshotSource
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        string root = Path.GetFullPath(outputDirectory);
+        string root = SecurePath.CanonicalizeOutputRoot(outputDirectory);
         if (!Directory.Exists(root))
         {
             return ImmutableArray<PackageSnapshot>.Empty;
@@ -949,7 +949,7 @@ public sealed class AtomicWorkflowFileTransaction :
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(operationLockKey);
-        string root = Path.GetFullPath(outputDirectory);
+        string root = SecurePath.CanonicalizeOutputRoot(outputDirectory);
         if (!Directory.Exists(root))
         {
             return EmptyRecoveryLease.Instance;
@@ -998,7 +998,7 @@ public sealed class AtomicWorkflowFileTransaction :
             return;
         }
 
-        string root = Path.GetFullPath(outputDirectory);
+        string root = SecurePath.CanonicalizeOutputRoot(outputDirectory);
         string rootIdentity = Directory.Exists(root)
             ? DirectoryPin.GetIdentity(root)
             : Path.GetFullPath(root);
@@ -2203,6 +2203,39 @@ internal static class DirectoryPin
 
 internal static class SecurePath
 {
+    public static string CanonicalizeOutputRoot(string root)
+    {
+        string fullRoot = Path.GetFullPath(root);
+        if (!OperatingSystem.IsMacOS())
+        {
+            return fullRoot;
+        }
+
+        foreach (string alias in new[] { "/var", "/tmp", "/etc" })
+        {
+            if (!string.Equals(fullRoot, alias, StringComparison.Ordinal)
+                && !fullRoot.StartsWith(alias + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string expectedTarget = "/private" + alias;
+            string actualTarget = ResolveUnixPath(alias);
+            if (!string.Equals(actualTarget, expectedTarget, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"The macOS system path alias '{alias}' resolves to unexpected target '{actualTarget}'.");
+            }
+
+            string relative = Path.GetRelativePath(alias, fullRoot);
+            return relative == "."
+                ? actualTarget
+                : Path.GetFullPath(Path.Combine(actualTarget, relative));
+        }
+
+        return fullRoot;
+    }
+
     public static string? ResolveExactExistingDirectory(string root, string repositoryPath)
     {
         string normalized = WorkflowPath.NormalizeRepositoryPath(repositoryPath);
@@ -2258,6 +2291,35 @@ internal static class SecurePath
             }
         }
     }
+
+    private static string ResolveUnixPath(string path)
+    {
+        nint resolved = RealPath(path, 0);
+        if (resolved == 0)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            throw new IOException(
+                $"Unable to resolve output path '{path}' without symbolic-link ambiguity (OS error {error}).");
+        }
+
+        try
+        {
+            return Marshal.PtrToStringUTF8(resolved)
+                ?? throw new IOException($"The operating system returned an invalid canonical path for '{path}'.");
+        }
+        finally
+        {
+            Free(resolved);
+        }
+    }
+
+#pragma warning disable SYSLIB1054 // Source-generated interop would require unsafe blocks project-wide.
+    [DllImport("libc", EntryPoint = "realpath", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern nint RealPath(string path, nint resolvedPath);
+
+    [DllImport("libc", EntryPoint = "free")]
+    private static extern void Free(nint pointer);
+#pragma warning restore SYSLIB1054
 
     public static string Resolve(string root, string repositoryPath, bool requireExistingLeaf)
     {
