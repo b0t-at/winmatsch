@@ -279,6 +279,15 @@ public sealed class LocalWorkflowEngine
                 request.PreviousVersion!);
         }
 
+        if (previous.IsRemote && request.ReplacePreviousVersion)
+        {
+            return InvalidResult(
+                "update",
+                request,
+                "--replace requires the source version to exist under --output; "
+                + "a repository fallback is read-only.");
+        }
+
         return await CreateOrUpdateAsync(
             request,
             previous,
@@ -728,6 +737,15 @@ public sealed class LocalWorkflowEngine
         }
 
         PackageVersion newVersion = versionResolution.Version;
+        if (previous?.IsRemote == true && previous.PackageVersion.Equals(newVersion))
+        {
+            return InvalidResult(
+                "update",
+                operationRequest,
+                "Updating a package version in place requires that version to exist under "
+                + "--output; a repository fallback is read-only.");
+        }
+
         PackageSnapshot? existing = await _manifests.LoadAsync(
             operationRequest.OutputDirectory,
             identifier,

@@ -78,6 +78,37 @@ public sealed class RepositoryManifestSnapshotSourceTests
         Assert.Equal(1, diagnostics.GetCalls);
     }
 
+    [Fact]
+    public async Task Explicit_source_does_not_fetch_target_or_relist_versions()
+    {
+        PackageVersionResult sourceVersion = PackageVersion("1.10");
+        var diagnostics = new FakeRepositoryDiagnosticService(sourceVersion);
+        var source = new RepositoryManifestSnapshotSource(
+            diagnostics,
+            new RepositoryCoordinates("microsoft", "winget-pkgs"),
+            sourceVersion.Version);
+
+        PackageSnapshot? target = await source.LoadAsync(
+            ".",
+            sourceVersion.Identifier,
+            new PackageVersion("1.11"),
+            CancellationToken.None);
+        ImmutableArray<PackageSnapshot> first = await source.ListVersionsAsync(
+            ".",
+            sourceVersion.Identifier,
+            CancellationToken.None);
+        ImmutableArray<PackageSnapshot> second = await source.ListVersionsAsync(
+            ".",
+            sourceVersion.Identifier,
+            CancellationToken.None);
+
+        Assert.Null(target);
+        Assert.Single(first);
+        Assert.Single(second);
+        Assert.Equal(0, diagnostics.ListCalls);
+        Assert.Equal(1, diagnostics.GetCalls);
+    }
+
     private static PackageVersionResult PackageVersion(string versionValue)
     {
         var repository = new RepositoryCoordinates("microsoft", "winget-pkgs");

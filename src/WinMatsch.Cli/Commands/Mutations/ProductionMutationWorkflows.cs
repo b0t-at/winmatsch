@@ -90,6 +90,7 @@ internal sealed class ProductionMutationWorkflow(
             LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
                 downloader,
                 releases,
+                clock: null,
                 overridePackStoreOptions: OverrideStoreOptions(configuration),
                 fallbackManifestSource: CreateRepositoryManifestSource(request, gitHub));
             if (!usePrepared)
@@ -175,6 +176,7 @@ internal sealed class ProductionMutationWorkflow(
         LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
             downloader,
             CreateReleaseSource(prepared, releaseGitHub, gitHubOptions),
+            clock: null,
             overridePackStoreOptions: OverrideStoreOptions(configuration),
             fallbackManifestSource: CreateRepositoryManifestSource(
                 prepared,
@@ -321,7 +323,8 @@ internal sealed class ProductionMutationWorkflow(
         => request is UpdateOperationRequest && gitHub is not null
             ? new RepositoryManifestSnapshotSource(
                 new RepositoryDiagnosticService(gitHub),
-                configuration.Repository)
+                configuration.Repository,
+                ((UpdateOperationRequest)request).PreviousVersion)
             : null;
 
     private static RepositoryCoordinates ParseGitHubRepository(

@@ -545,6 +545,55 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Remote_source_rejects_replace_without_local_baseline()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageSnapshot remote = Snapshot(CreatePackage("1.0.0", "A")) with
+        {
+            IsRemote = true,
+        };
+        var transaction = new RecordingTransaction();
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(remote),
+            transaction);
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("2.0.0", "B")) with
+            {
+                PackageVersion = "2.0.0",
+                ReplacePreviousVersion = true,
+            });
+
+        Assert.Equal(WorkflowResultCode.InvalidRequest, result.Code);
+        Assert.Contains("read-only", result.Plan.Validation.ToText(), StringComparison.Ordinal);
+        Assert.Equal(0, transaction.Calls);
+    }
+
+    [Fact]
+    public async Task Remote_source_rejects_same_version_update_without_local_baseline()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageSnapshot remote = Snapshot(CreatePackage("1.0.0", "A")) with
+        {
+            IsRemote = true,
+        };
+        var transaction = new RecordingTransaction();
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(remote),
+            transaction);
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.0.0", "B")) with
+            {
+                AllowStableUrlContentChange = true,
+            });
+
+        Assert.Equal(WorkflowResultCode.InvalidRequest, result.Code);
+        Assert.Contains("read-only", result.Plan.Validation.ToText(), StringComparison.Ordinal);
+        Assert.Equal(0, transaction.Calls);
+    }
+
+    [Fact]
     public async Task Update_preserves_explicit_empty_installer_collections_for_a_no_op()
     {
         using var temporary = new TemporaryDirectory();

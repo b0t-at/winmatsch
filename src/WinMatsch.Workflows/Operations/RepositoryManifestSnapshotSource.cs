@@ -12,13 +12,18 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
     private readonly RepositoryCoordinates _repository;
     private readonly Dictionary<(PackageIdentifier, PackageVersion), PackageSnapshot> _snapshots =
         [];
+    private readonly HashSet<(PackageIdentifier, PackageVersion)> _missing = [];
+    private PackageVersion? _sourceVersion;
+    private ImmutableArray<PackageSnapshot>? _versions;
 
     public RepositoryManifestSnapshotSource(
         IRepositoryDiagnosticService diagnostics,
-        RepositoryCoordinates repository)
+        RepositoryCoordinates repository,
+        PackageVersion? sourceVersion = null)
     {
         _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
         _repository = repository ?? throw new ArgumentNullException(nameof(repository));
+        _sourceVersion = sourceVersion;
     }
 
     public async Task<PackageSnapshot?> LoadAsync(
@@ -27,11 +32,22 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
         PackageVersion packageVersion,
         CancellationToken cancellationToken)
     {
+        if (_sourceVersion is not null && !_sourceVersion.Equals(packageVersion))
+        {
+            return null;
+        }
+
         if (_snapshots.TryGetValue((packageIdentifier, packageVersion), out PackageSnapshot? cached))
         {
             return cached;
         }
 
+        if (_missing.Contains((packageIdentifier, packageVersion)))
+        {
+            return null;
+        }
+
+        _sourceVersion ??= packageVersion;
         try
         {
             PackageVersionResult result = await _diagnostics.GetPackageVersionAsync(
@@ -47,6 +63,7 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
         }
         catch (DiagnosticNotFoundException)
         {
+            _missing.Add((packageIdentifier, packageVersion));
             return null;
         }
     }
@@ -56,8 +73,24 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
         PackageIdentifier packageIdentifier,
         CancellationToken cancellationToken)
     {
+        if (_versions is { } cached)
+        {
+            return cached;
+        }
+
         try
         {
+            if (_sourceVersion is not null)
+            {
+                PackageSnapshot? source = await LoadAsync(
+                    outputDirectory,
+                    packageIdentifier,
+                    _sourceVersion,
+                    cancellationToken).ConfigureAwait(false);
+                _versions = source is null ? [] : [source];
+                return _versions.Value;
+            }
+
             PackageVersionsResult versions = await _diagnostics.ListVersionsAsync(
                 _repository,
                 packageIdentifier,
@@ -66,18 +99,22 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
                 cancellationToken).ConfigureAwait(false);
             if (versions.Versions.Count == 0)
             {
+                _versions = [];
                 return [];
             }
 
+            _sourceVersion = versions.Versions[0];
             PackageSnapshot? latest = await LoadAsync(
                 outputDirectory,
                 packageIdentifier,
                 versions.Versions[0],
                 cancellationToken).ConfigureAwait(false);
-            return latest is null ? [] : [latest];
+            _versions = latest is null ? [] : [latest];
+            return _versions.Value;
         }
         catch (DiagnosticNotFoundException)
         {
+            _versions = [];
             return [];
         }
     }
@@ -116,6 +153,7 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
                     result.Identifier,
                     result.Version),
                 Manifests = manifests,
+                IsRemote = true,
                 Documents =
                 [
                     .. result.Files.Select(static file => new RawManifestDocument(

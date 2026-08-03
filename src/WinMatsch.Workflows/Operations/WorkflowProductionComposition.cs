@@ -13,8 +13,20 @@ public static class WorkflowProductionComposition
         InstallerDownloader downloader,
         IWorkflowReleaseSource? releaseSource = null,
         IWorkflowClock? clock = null,
-        OverridePackStoreOptions? overridePackStoreOptions = null,
-        IManifestSnapshotSource? fallbackManifestSource = null)
+        OverridePackStoreOptions? overridePackStoreOptions = null)
+        => CreateLocalEngine(
+            downloader,
+            releaseSource,
+            clock,
+            overridePackStoreOptions,
+            fallbackManifestSource: null);
+
+    public static LocalWorkflowEngine CreateLocalEngine(
+        InstallerDownloader downloader,
+        IWorkflowReleaseSource? releaseSource,
+        IWorkflowClock? clock,
+        OverridePackStoreOptions? overridePackStoreOptions,
+        IManifestSnapshotSource? fallbackManifestSource)
     {
         ArgumentNullException.ThrowIfNull(downloader);
         var originalSubmissions = new FileOriginalSubmissionStore();
