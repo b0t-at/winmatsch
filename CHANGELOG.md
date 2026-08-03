@@ -7,6 +7,23 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-08-03
+
+### Changed
+
+- The Azure release workflow now purges the Front Door cache after each
+  publish when the `AZURE_AFD_RESOURCE_GROUP`, `AZURE_AFD_PROFILE` and
+  `AZURE_AFD_ENDPOINT` secrets are configured, so new releases show up on
+  the download site immediately instead of after the five-minute edge TTL.
+  The purge covers the rewrite-rule page URLs (`/latest`, `/v<version>`,
+  `/<version>`) in addition to the mutable blobs. See
+  `docs/download-site.md` for the least-privilege purge role.
+- Dependabot no longer proposes JsonSchema.Net major updates: the 9.x
+  binaries carry the OSMFEULA maintenance-fee EULA and remain declined
+  under the dependency policy in `Directory.Packages.props` (PR #8).
+  Issue #9 tracks replacing the validator with a self-built Draft-07
+  subset implementation.
+
 ## [0.8.1] - 2026-08-03
 
 ### Added

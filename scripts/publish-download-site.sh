@@ -324,6 +324,15 @@ upload_list() {
     })
 }
 
+# Front Door caches by request URL. The URL-rewrite rules serve index.html
+# for "/", "/latest[/]" and "/[v]<version>[/]", so those page URLs are cached
+# separately from /index.html and must be purged individually.
+AFD_PURGE_PATHS=(
+    "/" "/index.html" "/404.html" "/versions.json"
+    "/latest" "/latest/" "/latest/*"
+    "/v$VER" "/v$VER/" "/v$VER/index.html" "/$VER" "/$VER/"
+)
+
 if [ "$DRY_RUN" -eq 1 ]; then
     log "Dry run — upload plan (staged in $STAGING):"
     printf '%-52s %-32s %s\n' "PATH" "CONTENT-TYPE" "CACHE-CONTROL" >&2
@@ -332,6 +341,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
         printf '%-52s %-32s %s\n' "/$path" "$type" "$cache" >&2
     done < <(upload_list)
     log "Would remove legacy alias blob '/$VER/index.html' if present."
+    if [ -n "$AFD_PROFILE" ] && [ -n "$AFD_ENDPOINT" ] && [ -n "$AFD_RG" ]; then
+        log "Would purge Front Door ($AFD_PROFILE/$AFD_ENDPOINT): ${AFD_PURGE_PATHS[*]}"
+    fi
     log "No changes were made to Azure."
     exit 0
 fi
@@ -422,12 +434,12 @@ log "Upload complete"
 
 if [ -n "$AFD_PROFILE" ] && [ -n "$AFD_ENDPOINT" ] && [ -n "$AFD_RG" ]; then
     log "Purging Front Door cache ($AFD_PROFILE/$AFD_ENDPOINT)"
-    az afd endpoint purge \
+    az afd endpoint purge --only-show-errors \
         --resource-group "$AFD_RG" --profile-name "$AFD_PROFILE" \
         --endpoint-name "$AFD_ENDPOINT" \
-        --content-paths "/" "/index.html" "/404.html" "/versions.json" "/latest/*" \
+        --content-paths "${AFD_PURGE_PATHS[@]}" \
         >/dev/null
-    log "Purge requested"
+    log "Purge complete"
 elif [ -n "$AFD_PROFILE$AFD_ENDPOINT$AFD_RG" ]; then
     warn "Front Door purge skipped: need all of --afd-resource-group, --afd-profile, --afd-endpoint"
 else
