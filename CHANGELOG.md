@@ -7,6 +7,8 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-08-04
+
 ### Fixed
 
 - Multilingual NSIS installers no longer claim their first language table as
