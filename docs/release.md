@@ -3,7 +3,7 @@
 ## Version and tag policy
 
 - The project follows semantic versioning and is currently **pre-1.0**
-  (`VersionPrefix` `0.8.7` in `Directory.Build.props`).
+  (`VersionPrefix` `0.8.8` in `Directory.Build.props`).
 - Releases are cut from tags of the form `v<major>.<minor>.<patch>`
   (optionally `-<prerelease>`), e.g. `v0.2.0`. The release workflow rejects
   malformed tags.
