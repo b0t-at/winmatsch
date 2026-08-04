@@ -193,6 +193,8 @@ public sealed class GitHubMutationOperationsTests
         var handler = new ScriptedHttpMessageHandler();
         handler.Add(request =>
         {
+            Assert.Contains("mutation($input:", request.Body, StringComparison.Ordinal);
+            Assert.DoesNotContain("rateLimit", request.Body, StringComparison.Ordinal);
             Assert.Contains("\"clientMutationId\":\"commit-1\"", request.Body, StringComparison.Ordinal);
             Assert.Contains("\"repositoryNameWithOwner\":\"upstream/repo\"", request.Body, StringComparison.Ordinal);
             Assert.Contains("\"contents\":\"VGVzdA==\"", request.Body, StringComparison.Ordinal);
@@ -206,12 +208,6 @@ public sealed class GitHubMutationOperationsTests
                         "url": "https://github.invalid/upstream/repo/commit/{{OtherSha}}"
                       },
                       "clientMutationId": "commit-1"
-                    },
-                    "rateLimit": {
-                      "limit": 5000,
-                      "remaining": 4990,
-                      "used": 10,
-                      "resetAt": "2026-01-01T01:00:00Z"
                     }
                   }
                 }

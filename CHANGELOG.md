@@ -26,6 +26,8 @@ minor versions may contain breaking changes).
 
 - GitHub submission no longer requires `read:user` or `user:email`; a token
   with repository access can resolve the authenticated fork owner.
+- Server-side commit creation no longer requests the query-only GraphQL
+  `rateLimit` field from the mutation root.
 
 ## [0.8.5] - 2026-08-04
 

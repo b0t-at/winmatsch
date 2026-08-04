@@ -45,7 +45,6 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             commit { oid url }
             clientMutationId
           }
-          rateLimit { limit remaining used resetAt }
         }
         """;
 
@@ -1328,8 +1327,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 GitHubJsonContext.Default.GraphQlCommitRequestDto,
                 GitHubJsonContext.Default.GraphQlCommitResponseDto,
                 cancellationToken).ConfigureAwait(false);
-            ObserveGraphQlRateLimit(response.Data?.RateLimit);
-            ThrowIfGraphQlErrors(response.Errors, response.Data?.RateLimit);
+            ThrowIfGraphQlErrors(response.Errors, rateLimit: null);
             GraphQlCommitDataDto data = response.Data ??
                 throw InvalidGraphQlResponse("commit mutation data");
             GraphQlCreatedCommitDto commit = data.CreateCommitOnBranch?.Commit ??
