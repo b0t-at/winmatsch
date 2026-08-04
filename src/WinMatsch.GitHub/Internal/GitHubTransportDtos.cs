@@ -677,8 +677,6 @@ internal sealed class GraphQlCommitResponseDto
 internal sealed class GraphQlCommitDataDto
 {
     public GraphQlCreateCommitPayloadDto? CreateCommitOnBranch { get; set; }
-
-    public GraphQlRateLimitDto? RateLimit { get; set; }
 }
 
 internal sealed class GraphQlCreateCommitPayloadDto
