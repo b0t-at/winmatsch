@@ -37,7 +37,14 @@ public sealed record SubmissionJournalDocumentIdentity(
 public sealed record SubmissionJournalArtifactIdentity(
     string InstallerUrlSha256,
     string ContentSha256,
-    long SizeInBytes);
+    long SizeInBytes)
+{
+    public const int CurrentFormatVersion = 1;
+
+    public int FormatVersion { get; init; }
+
+    public string? ApprovedFinalUrlSha256 { get; init; }
+}
 
 public sealed record SubmissionJournalExistingVersion(
     string PackageVersion,
@@ -171,14 +178,23 @@ public sealed record SubmissionJournalRecoveryResult(
     public string? RepositoryFileSystemIdentity { get; init; }
 }
 
-public sealed class VerifiedSubmissionRecoveryRequest
+public sealed class VerifiedSubmissionRecoveryRequest : IAsyncDisposable
 {
-    internal VerifiedSubmissionRecoveryRequest(GitHubSubmissionRequest request)
+    private IAsyncDisposable? _artifactLease;
+
+    internal VerifiedSubmissionRecoveryRequest(
+        GitHubSubmissionRequest request,
+        IAsyncDisposable? artifactLease = null)
     {
         Request = request ?? throw new ArgumentNullException(nameof(request));
+        _artifactLease = artifactLease;
     }
 
     internal GitHubSubmissionRequest Request { get; }
+
+    public ValueTask DisposeAsync()
+        => Interlocked.Exchange(ref _artifactLease, null)?.DisposeAsync()
+            ?? ValueTask.CompletedTask;
 }
 
 public sealed record SubmissionJournalOptions

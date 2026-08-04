@@ -19,6 +19,9 @@ namespace WinMatsch.Workflows.Tests.Operations;
 
 public sealed class WorkflowProductionCompositionTests
 {
+    private const string NestedZipInstallerUrl =
+        "https://example.test/RoslynPad-windows-x64.zip";
+
     [Fact]
     public async Task Direct_release_source_deduplicates_identical_installer_urls()
     {
@@ -407,7 +410,11 @@ public sealed class WorkflowProductionCompositionTests
         string journalState = CreateDirectory();
         string overrideState = CreateDirectory();
         string remoteLocks = CreateDirectory();
-        string artifactState = CreateDirectory();
+        string artifactRoot = CreateDirectory();
+        const string approvedFinalUrl =
+            "https://cdn.example.test/releases/RoslynPad.zip?sig=approved&expires=1";
+        const string refreshedFinalUrl =
+            "https://cdn.example.test/releases/RoslynPad.zip?sig=refreshed&expires=2";
         const string sourceArtifactPath = "RoslynPad-windows-x64.zip";
         Assert.False(Path.IsPathFullyQualified(sourceArtifactPath));
         Assert.Equal(string.Empty, Path.GetDirectoryName(sourceArtifactPath));
@@ -416,7 +423,8 @@ public sealed class WorkflowProductionCompositionTests
             GitHubSubmissionRequest request = RawNestedZipSubmissionRequest(
                 output,
                 sourceArtifactPath,
-                archive);
+                archive,
+                approvedFinalUrl);
             var journals = new FileSubmissionJournalStore(new SubmissionJournalOptions
             {
                 RootDirectory = journalState,
@@ -429,44 +437,56 @@ public sealed class WorkflowProductionCompositionTests
             SubmissionJournalEntry entry = await journals.ActivateAsync(
                 handle,
                 TestContext.Current.CancellationToken);
+            SubmissionJournalArtifactIdentity artifactIdentity = Assert.Single(
+                entry.LocalPlan.InstallerArtifacts);
+            Assert.Equal(
+                SubmissionJournalArtifactIdentity.CurrentFormatVersion,
+                artifactIdentity.FormatVersion);
+            Assert.Equal(
+                DownloadRedirectIdentity.ComputeSha256(approvedFinalUrl),
+                artifactIdentity.ApprovedFinalUrlSha256);
             var client = new FakeGitHubClient();
-            using var downloader = new InstallerDownloader(new StubHttpMessageHandler(_ =>
-                new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new ByteArrayContent(archive),
-                }));
-            var artifactNetwork = new DurableInstallerPreflightNetwork(
-                downloader,
-                artifactState,
-                BoundedWorkflowScratchCleanup.Instance);
-            VerifiedSubmissionRecoveryRequest recovery =
-                await SubmissionJournalMaterializer.MaterializeVerifiedAsync(
-                    entry,
-                    client,
-                    artifactNetwork,
+            using var downloader = new InstallerDownloader(new StubHttpMessageHandler(request =>
+                RedirectingArchiveResponse(request, archive, refreshedFinalUrl)));
+            string recoveredPath;
+            await using (VerifiedSubmissionRecoveryRequest recovery =
+                         await SubmissionJournalMaterializer.MaterializeVerifiedAsync(
+                             entry,
+                             client,
+                             downloader,
+                             artifactRoot,
+                             BoundedSubmissionArtifactDirectoryCleanup.Instance,
+                             TestContext.Current.CancellationToken))
+            {
+                DownloadResult recoveredArtifact = Assert.Single(
+                    recovery.Request.LocalPlan.Preflight.InstallerArtifacts).Download;
+                recoveredPath = recoveredArtifact.FilePath;
+                Assert.False(string.IsNullOrWhiteSpace(recoveredPath));
+                Assert.True(Path.IsPathFullyQualified(recoveredPath));
+                Assert.NotEqual(sourceArtifactPath, recoveredPath);
+                Assert.True(File.Exists(recoveredPath));
+                Assert.False(recoveredArtifact.MayBeStored);
+                GitHubLifecycleWorkflow workflow =
+                    WorkflowProductionComposition.CreateGitHubLifecycle(
+                        client,
+                        downloader,
+                        lockOptions: new RemoteOperationLockOptions
+                        {
+                            RootDirectory = remoteLocks,
+                        });
+
+                GitHubLifecycleResult result = await workflow.ExecuteJournaledAsync(
+                    recovery,
+                    new FakeSubmissionProgressSink(),
                     TestContext.Current.CancellationToken);
-            DownloadResult recoveredArtifact = Assert.Single(
-                recovery.Request.LocalPlan.Preflight.InstallerArtifacts).Download;
-            Assert.False(string.IsNullOrWhiteSpace(recoveredArtifact.FilePath));
-            Assert.True(Path.IsPathFullyQualified(recoveredArtifact.FilePath));
-            Assert.NotEqual(sourceArtifactPath, recoveredArtifact.FilePath);
-            Assert.True(File.Exists(recoveredArtifact.FilePath));
-            GitHubLifecycleWorkflow workflow =
-                WorkflowProductionComposition.CreateGitHubLifecycle(
-                    client,
-                    downloader,
-                    lockOptions: new RemoteOperationLockOptions
-                    {
-                        RootDirectory = remoteLocks,
-                    });
 
-            GitHubLifecycleResult result = await workflow.ExecuteJournaledAsync(
-                recovery,
-                new FakeSubmissionProgressSink(),
-                TestContext.Current.CancellationToken);
+                Assert.True(File.Exists(recoveredPath));
+                Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+                Assert.Equal(["branch", "commit", "pull-request"], client.Mutations);
+            }
 
-            Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
-            Assert.Equal(["branch", "commit", "pull-request"], client.Mutations);
+            Assert.False(File.Exists(recoveredPath));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(artifactRoot));
         }
         finally
         {
@@ -474,19 +494,22 @@ public sealed class WorkflowProductionCompositionTests
             Directory.Delete(journalState, recursive: true);
             Directory.Delete(overrideState, recursive: true);
             Directory.Delete(remoteLocks, recursive: true);
-            Directory.Delete(artifactState, recursive: true);
+            Directory.Delete(artifactRoot, recursive: true);
         }
     }
 
     [Fact]
-    public async Task Journaled_artifact_reacquisition_rejects_changed_bytes_before_remote_mutation()
+    public async Task Journaled_artifact_reacquisition_cleans_rejected_and_failed_downloads()
     {
         byte[] plannedArchive = CreateZipArchive("RoslynPad.exe", "planned canary"u8);
         byte[] changedArchive = CreateZipArchive("RoslynPad.exe", "changed canary"u8);
         string output = CreateDirectory();
         string journalState = CreateDirectory();
         string overrideState = CreateDirectory();
-        string artifactState = CreateDirectory();
+        string artifactRoot = CreateDirectory();
+        string cache = CreateDirectory();
+        string cacheSentinel = Path.Combine(cache, "shared-cache-sentinel");
+        await File.WriteAllTextAsync(cacheSentinel, "keep");
         try
         {
             GitHubSubmissionRequest request = RawNestedZipSubmissionRequest(
@@ -510,11 +533,7 @@ public sealed class WorkflowProductionCompositionTests
                 new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new ByteArrayContent(changedArchive),
-                }));
-            var artifactNetwork = new DurableInstallerPreflightNetwork(
-                downloader,
-                artifactState,
-                BoundedWorkflowScratchCleanup.Instance);
+                }), new DownloaderOptions { CacheDirectory = cache });
 
             await Assert.ThrowsAsync<InvalidOperationException>(() =>
                 SubmissionJournalMaterializer.MaterializeVerifiedAsync(
@@ -525,9 +544,26 @@ public sealed class WorkflowProductionCompositionTests
                 SubmissionJournalMaterializer.MaterializeVerifiedAsync(
                     entry,
                     client,
-                    artifactNetwork,
+                    downloader,
+                    artifactRoot,
+                    BoundedSubmissionArtifactDirectoryCleanup.Instance,
                     TestContext.Current.CancellationToken));
 
+            Assert.Empty(Directory.EnumerateFileSystemEntries(artifactRoot));
+            Assert.True(File.Exists(cacheSentinel));
+            using var failingDownloader = new InstallerDownloader(new StubHttpMessageHandler(_ =>
+                new HttpResponseMessage(HttpStatusCode.NotFound)));
+            await Assert.ThrowsAsync<IOException>(() =>
+                SubmissionJournalMaterializer.MaterializeVerifiedAsync(
+                    entry,
+                    client,
+                    failingDownloader,
+                    artifactRoot,
+                    BoundedSubmissionArtifactDirectoryCleanup.Instance,
+                    TestContext.Current.CancellationToken));
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(artifactRoot));
+            Assert.True(File.Exists(cacheSentinel));
             Assert.Empty(client.Mutations);
             SubmissionJournalEntry retained = Assert.IsType<SubmissionJournalEntry>(
                 await journals.GetAsync(handle.Id, TestContext.Current.CancellationToken));
@@ -538,7 +574,90 @@ public sealed class WorkflowProductionCompositionTests
             Directory.Delete(output, recursive: true);
             Directory.Delete(journalState, recursive: true);
             Directory.Delete(overrideState, recursive: true);
-            Directory.Delete(artifactState, recursive: true);
+            Directory.Delete(artifactRoot, recursive: true);
+            Directory.Delete(cache, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Journaled_artifact_reacquisition_blocks_redirect_drift_and_legacy_identity()
+    {
+        byte[] archive = CreateZipArchive("RoslynPad.exe", "redirect canary"u8);
+        string output = CreateDirectory();
+        string journalState = CreateDirectory();
+        string overrideState = CreateDirectory();
+        string artifactRoot = CreateDirectory();
+        const string approvedFinalUrl =
+            "https://cdn.example.test/releases/RoslynPad.zip?sig=approved";
+        const string changedFinalUrl =
+            "https://cdn2.example.test/releases/RoslynPad.zip?sig=approved";
+        try
+        {
+            GitHubSubmissionRequest request = RawNestedZipSubmissionRequest(
+                output,
+                "RoslynPad-windows-x64.zip",
+                archive,
+                approvedFinalUrl);
+            var journals = new FileSubmissionJournalStore(new SubmissionJournalOptions
+            {
+                RootDirectory = journalState,
+                OverrideStoreDirectory = overrideState,
+            });
+            SubmissionJournalHandle handle = await journals.PrepareAsync(
+                request,
+                TestContext.Current.CancellationToken);
+            WriteCommittedChanges(request.LocalPlan);
+            SubmissionJournalEntry entry = await journals.ActivateAsync(
+                handle,
+                TestContext.Current.CancellationToken);
+            var client = new FakeGitHubClient();
+            using var downloader = new InstallerDownloader(new StubHttpMessageHandler(request =>
+                RedirectingArchiveResponse(request, archive, changedFinalUrl)));
+
+            await Assert.ThrowsAsync<SubmissionJournalConflictException>(() =>
+                SubmissionJournalMaterializer.MaterializeVerifiedAsync(
+                    entry,
+                    client,
+                    downloader,
+                    artifactRoot,
+                    BoundedSubmissionArtifactDirectoryCleanup.Instance,
+                    TestContext.Current.CancellationToken));
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(artifactRoot));
+            SubmissionJournalArtifactIdentity identity = Assert.Single(
+                entry.LocalPlan.InstallerArtifacts);
+            SubmissionJournalEntry legacy = entry with
+            {
+                LocalPlan = entry.LocalPlan with
+                {
+                    InstallerArtifacts =
+                    [
+                        identity with
+                        {
+                            FormatVersion = 0,
+                            ApprovedFinalUrlSha256 = null,
+                        },
+                    ],
+                },
+            };
+            await Assert.ThrowsAsync<SubmissionJournalConflictException>(() =>
+                SubmissionJournalMaterializer.MaterializeVerifiedAsync(
+                    legacy,
+                    client,
+                    downloader,
+                    artifactRoot,
+                    BoundedSubmissionArtifactDirectoryCleanup.Instance,
+                    TestContext.Current.CancellationToken));
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(artifactRoot));
+            Assert.Empty(client.Mutations);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+            Directory.Delete(journalState, recursive: true);
+            Directory.Delete(overrideState, recursive: true);
+            Directory.Delete(artifactRoot, recursive: true);
         }
     }
 
@@ -1654,11 +1773,11 @@ public sealed class WorkflowProductionCompositionTests
     private static GitHubSubmissionRequest RawNestedZipSubmissionRequest(
         string output,
         string sourceArtifactPath,
-        byte[] archive)
+        byte[] archive,
+        string? approvedFinalUrl = null)
     {
         var identifier = new PackageIdentifier("RoslynPad.RoslynPad");
         var version = new PackageVersion("22.1");
-        const string installerUrl = "https://example.test/RoslynPad-windows-x64.zip";
         var manifests = new PackageManifests
         {
             Version = new VersionManifest
@@ -1687,7 +1806,7 @@ public sealed class WorkflowProductionCompositionTests
                     new Installer
                     {
                         Architecture = Architecture.X64,
-                        InstallerUrl = installerUrl,
+                        InstallerUrl = NestedZipInstallerUrl,
                         InstallerSha256 = new Sha256Hash(
                             Convert.ToHexString(SHA256.HashData(archive))),
                     },
@@ -1727,15 +1846,15 @@ public sealed class WorkflowProductionCompositionTests
             FileName = sourceArtifactPath,
             Sha256 = new Sha256Hash(Convert.ToHexString(SHA256.HashData(archive))),
             SizeInBytes = archive.LongLength,
-            InitialUrl = installerUrl,
-            FinalUrl = installerUrl,
+            InitialUrl = NestedZipInstallerUrl,
+            FinalUrl = approvedFinalUrl ?? NestedZipInstallerUrl,
         };
         var preflight = new WorkflowPreflightRequest
         {
             BeforeDocuments = [],
             AfterDocuments = documents,
             Changes = changes,
-            InstallerArtifacts = [new InstallerArtifact(installerUrl, download)],
+            InstallerArtifacts = [new InstallerArtifact(NestedZipInstallerUrl, download)],
             Options = new PreflightOptions
             {
                 NetworkMode = NetworkValidationMode.Online,
@@ -1768,6 +1887,30 @@ public sealed class WorkflowProductionCompositionTests
             IdempotencyKey = "raw-submit:RoslynPad.RoslynPad:22.1",
             CreatedWith = "winmatsch regression test",
         };
+    }
+
+    private static HttpResponseMessage RedirectingArchiveResponse(
+        HttpRequestMessage request,
+        byte[] archive,
+        string finalUrl)
+    {
+        if (string.Equals(
+                request.RequestUri?.AbsoluteUri,
+                NestedZipInstallerUrl,
+                StringComparison.Ordinal))
+        {
+            return new(HttpStatusCode.Found)
+            {
+                Headers = { Location = new Uri(finalUrl) },
+            };
+        }
+
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(archive),
+        };
+        response.Headers.CacheControl = new() { NoStore = true };
+        return response;
     }
 
     private static byte[] CreateZipArchive(string path, ReadOnlySpan<byte> content)

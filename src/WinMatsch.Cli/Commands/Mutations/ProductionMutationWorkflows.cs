@@ -896,7 +896,7 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
                     "downloads")
                 : null,
         });
-        VerifiedSubmissionRecoveryRequest recovery =
+        await using VerifiedSubmissionRecoveryRequest recovery =
             await SubmissionJournalMaterializer.MaterializeVerifiedAsync(
             entry,
             gitHub,

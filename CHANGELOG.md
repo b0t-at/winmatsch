@@ -9,10 +9,11 @@ minor versions may contain breaking changes).
 
 ### Fixed
 
-- Journaled raw submissions now reacquire installer bytes into verified absolute
-  paths before remote preflight, preventing nested ZIP validation from opening an
-  empty recovery placeholder while retaining hash, size, and mutation-recovery
-  guarantees.
+- Journaled raw submissions now reacquire installer bytes into isolated,
+  lifetime-owned files before remote preflight and retain a query-free hash of
+  the approved redirect target. This prevents nested ZIP validation from opening
+  an empty recovery placeholder, blocks redirect drift and legacy artifact
+  journals that lack that identity, and cleans rejected bytes deterministically.
 
 ## [0.8.8] - 2026-08-04
 

@@ -25,27 +25,62 @@ public static class SubmissionJournalMaterializer
         IGitHubRepositoryClient gitHub,
         InstallerDownloader downloader,
         CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(downloader);
-        return await MaterializeVerifiedAsync(
+        => await MaterializeVerifiedAsync(
             entry,
             gitHub,
-            new DurableInstallerPreflightNetwork(downloader),
+            downloader,
+            artifactRootDirectory: null,
+            cleanup: null,
             cancellationToken).ConfigureAwait(false);
-    }
 
     internal static async Task<VerifiedSubmissionRecoveryRequest> MaterializeVerifiedAsync(
         SubmissionJournalEntry entry,
         IGitHubRepositoryClient gitHub,
-        IPreflightNetwork artifactNetwork,
+        InstallerDownloader downloader,
+        string? artifactRootDirectory,
+        ISubmissionArtifactDirectoryCleanup? cleanup,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(artifactNetwork);
-        return new(await MaterializeAsync(
-            entry,
-            gitHub,
-            artifactNetwork,
-            cancellationToken).ConfigureAwait(false));
+        ArgumentNullException.ThrowIfNull(downloader);
+        SubmissionArtifactLease lease = SubmissionArtifactLease.Create(
+            artifactRootDirectory,
+            cleanup);
+        try
+        {
+            GitHubSubmissionRequest request = await MaterializeAsync(
+                entry,
+                gitHub,
+                downloader,
+                lease.DirectoryPath,
+                cancellationToken).ConfigureAwait(false);
+            return new(request, lease);
+        }
+        catch (Exception primaryException)
+        {
+            try
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception cleanupException)
+            {
+                var aggregate = new AggregateException(primaryException, cleanupException);
+                if (primaryException is OperationCanceledException
+                    && cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(
+                        "Journaled artifact reacquisition was cancelled and its isolated "
+                        + "directory cleanup also failed.",
+                        aggregate,
+                        cancellationToken);
+                }
+
+                throw new IOException(
+                    "Journaled artifact reacquisition and isolated directory cleanup both failed.",
+                    aggregate);
+            }
+
+            throw;
+        }
     }
 
     public static async Task<GitHubSubmissionRequest> MaterializeAsync(
@@ -55,27 +90,15 @@ public static class SubmissionJournalMaterializer
         => await MaterializeAsync(
             entry,
             gitHub,
-            artifactNetwork: null,
+            artifactDownloader: null,
+            artifactDirectory: null,
             cancellationToken).ConfigureAwait(false);
-
-    public static async Task<GitHubSubmissionRequest> MaterializeAsync(
-        SubmissionJournalEntry entry,
-        IGitHubRepositoryClient gitHub,
-        InstallerDownloader downloader,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(downloader);
-        return await MaterializeAsync(
-            entry,
-            gitHub,
-            new DurableInstallerPreflightNetwork(downloader),
-            cancellationToken).ConfigureAwait(false);
-    }
 
     private static async Task<GitHubSubmissionRequest> MaterializeAsync(
         SubmissionJournalEntry entry,
         IGitHubRepositoryClient gitHub,
-        IPreflightNetwork? artifactNetwork,
+        InstallerDownloader? artifactDownloader,
+        string? artifactDirectory,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(entry);
@@ -99,7 +122,8 @@ public static class SubmissionJournalMaterializer
         ImmutableArray<InstallerArtifact> artifacts = await MaterializeArtifactsAsync(
             after,
             entry.LocalPlan.InstallerArtifacts,
-            artifactNetwork,
+            artifactDownloader,
+            artifactDirectory,
             cancellationToken).ConfigureAwait(false);
         var preflight = new WorkflowPreflightRequest
         {
@@ -266,7 +290,8 @@ public static class SubmissionJournalMaterializer
     private static async Task<ImmutableArray<InstallerArtifact>> MaterializeArtifactsAsync(
         ImmutableArray<RawManifestDocument> after,
         ImmutableArray<SubmissionJournalArtifactIdentity> identities,
-        IPreflightNetwork? artifactNetwork,
+        InstallerDownloader? artifactDownloader,
+        string? artifactDirectory,
         CancellationToken cancellationToken)
     {
         if (identities.IsEmpty)
@@ -274,10 +299,28 @@ public static class SubmissionJournalMaterializer
             return [];
         }
 
-        if (artifactNetwork is null)
+        if (artifactDownloader is null || string.IsNullOrWhiteSpace(artifactDirectory))
         {
             throw new InvalidOperationException(
                 "Journaled installer artifacts must be reacquired before materialization.");
+        }
+
+        foreach (SubmissionJournalArtifactIdentity identity in identities)
+        {
+            if (identity.FormatVersion == 0)
+            {
+                throw new SubmissionJournalConflictException(
+                    "This pending submission predates journaled redirect-target identity. "
+                    + "Automatic artifact recovery is blocked; inspect the journal and re-plan "
+                    + "only after proving that no remote mutation occurred.");
+            }
+
+            if (identity.FormatVersion != SubmissionJournalArtifactIdentity.CurrentFormatVersion
+                || string.IsNullOrWhiteSpace(identity.ApprovedFinalUrlSha256))
+            {
+                throw new SubmissionJournalTamperedException(
+                    "The journaled installer redirect identity is unsupported or incomplete.");
+            }
         }
 
         var installers = new Dictionary<string, (string Url, string Sha256)>(StringComparer.Ordinal);
@@ -316,21 +359,13 @@ public static class SubmissionJournalMaterializer
                     "The current local installer manifest no longer matches journaled artifact evidence.");
             }
 
-            var expected = new DownloadResult
-            {
-                FilePath = UnmaterializedArtifactPath(),
-                FileName = "journaled-installer.bin",
-                Sha256 = new Sha256Hash(identity.ContentSha256),
-                SizeInBytes = identity.SizeInBytes,
-                InitialUrl = installer.Url,
-                FinalUrl = installer.Url,
-            };
-            DownloadRevalidationResult revalidated;
+            DownloadResult download;
             try
             {
-                revalidated = await artifactNetwork.RevalidateAsync(
-                    expected,
-                    cancellationToken).ConfigureAwait(false);
+                download = await artifactDownloader.DownloadFreshAsync(
+                    installer.Url,
+                    artifactDirectory,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
             }
             catch (DownloadException exception)
             {
@@ -342,12 +377,25 @@ public static class SubmissionJournalMaterializer
                     exception);
             }
 
-            DownloadResult download = revalidated.Result;
-            if (revalidated.Status != DownloadRevalidationStatus.Unchanged
-                || download.ContentIdentity != expected.ContentIdentity)
+            var expectedIdentity = new DownloadContentIdentity(
+                new Sha256Hash(identity.ContentSha256),
+                identity.SizeInBytes);
+            if (download.ContentIdentity != expectedIdentity)
             {
                 throw new SubmissionJournalConflictException(
                     "The current installer bytes no longer match the journaled artifact identity.");
+            }
+
+            string actualFinalUrlIdentity =
+                DownloadRedirectIdentity.ComputeSha256(download.FinalUrl);
+            if (!string.Equals(
+                    actualFinalUrlIdentity,
+                    identity.ApprovedFinalUrlSha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new SubmissionJournalConflictException(
+                    "The installer redirect host or path no longer matches the journaled "
+                    + "approved target.");
             }
 
             if (string.IsNullOrWhiteSpace(download.FilePath)
@@ -364,13 +412,6 @@ public static class SubmissionJournalMaterializer
 
         return artifacts.ToImmutable();
     }
-
-    private static string UnmaterializedArtifactPath()
-        => Path.Combine(
-            Path.GetTempPath(),
-            "winmatsch-journal-artifacts",
-            Guid.NewGuid().ToString("N"),
-            "pending.bin");
 
     private static byte[] ReadVerifiedLocalFile(
         string root,
