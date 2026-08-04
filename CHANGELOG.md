@@ -7,13 +7,16 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-08-04
+
 ### Fixed
 
-- Journaled raw submissions now reacquire installer bytes into isolated,
-  lifetime-owned files before remote preflight and retain a query-free hash of
-  the approved redirect target. This prevents nested ZIP validation from opening
-  an empty recovery placeholder, blocks redirect drift and legacy artifact
-  journals that lack that identity, and cleans rejected bytes deterministically.
+- Journaled raw submissions now reacquire approved installer bytes into an
+  async-disposable, lifetime-owned lease before remote preflight. Recovery
+  journals use query-free canonical redirect identity schema v1 and retain the
+  verified hash and size; recovery rejects legacy journals or any redirect,
+  hash, or size drift and cleans every failure path, preventing nested ZIP
+  validation from reopening an empty placeholder.
 
 ## [0.8.8] - 2026-08-04
 
@@ -174,7 +177,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.8...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.9...main
+[0.8.9]: https://github.com/b0t-at/winmatsch/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/b0t-at/winmatsch/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/b0t-at/winmatsch/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/b0t-at/winmatsch/compare/v0.8.5...v0.8.6
