@@ -4,7 +4,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using WinMatsch.Core;
+using WinMatsch.Downloads;
 using WinMatsch.Rules.OverridePacks;
+using WinMatsch.Validation;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
 using Xunit;
@@ -749,6 +751,54 @@ public sealed class FileSubmissionJournalStoreTests
     }
 
     [Fact]
+    public async Task Legacy_artifact_journal_is_readable_but_has_no_redirect_identity()
+    {
+        using var repository = new TemporaryDirectory();
+        using var state = new TemporaryDirectory();
+        var store = new FileSubmissionJournalStore(
+            new SubmissionJournalOptions { RootDirectory = state.Path });
+        const string finalUrl =
+            "https://cdn.example.test/releases/setup.exe?sig=TOPSECRET&expires=1";
+        GitHubSubmissionRequest request = RequestWithArtifact(repository.Path, finalUrl);
+        SubmissionJournalHandle handle = await store.PrepareAsync(request, default);
+        WriteCommittedFile(request.LocalPlan);
+        string path = System.IO.Path.Combine(state.Path, $"{handle.Id}.intent");
+        SubmissionJournalEnvelope envelope = JsonSerializer.Deserialize(
+            await File.ReadAllBytesAsync(path),
+            SubmissionJournalJsonContext.Default.SubmissionJournalEnvelope)!;
+        byte[] payload = Convert.FromBase64String(envelope.Payload);
+        string currentJson = Encoding.UTF8.GetString(payload);
+        Assert.DoesNotContain("TOPSECRET", currentJson, StringComparison.Ordinal);
+        JsonObject legacy = JsonNode.Parse(payload)!.AsObject();
+        JsonObject artifact = legacy["entry"]!["localPlan"]!["installerArtifacts"]![0]!
+            .AsObject();
+        Assert.Equal(
+            SubmissionJournalArtifactIdentity.CurrentFormatVersion,
+            artifact["formatVersion"]!.GetValue<int>());
+        Assert.Equal(
+            DownloadRedirectIdentity.ComputeSha256(finalUrl),
+            artifact["approvedFinalUrlSha256"]!.GetValue<string>());
+        _ = artifact.Remove("formatVersion");
+        _ = artifact.Remove("approvedFinalUrlSha256");
+        byte[] legacyPayload = Encoding.UTF8.GetBytes(legacy.ToJsonString());
+        var legacyEnvelope = new SubmissionJournalEnvelope(
+            Convert.ToBase64String(legacyPayload),
+            Convert.ToHexString(SHA256.HashData(legacyPayload)));
+        await File.WriteAllBytesAsync(
+            path,
+            JsonSerializer.SerializeToUtf8Bytes(
+                legacyEnvelope,
+                SubmissionJournalJsonContext.Default.SubmissionJournalEnvelope));
+
+        SubmissionJournalEntry entry = await store.ActivateAsync(handle, default);
+
+        SubmissionJournalArtifactIdentity identity = Assert.Single(
+            entry.LocalPlan.InstallerArtifacts);
+        Assert.Equal(0, identity.FormatVersion);
+        Assert.Null(identity.ApprovedFinalUrlSha256);
+    }
+
+    [Fact]
     public async Task Learned_override_must_be_active_before_journal_promotion()
     {
         using var repository = new TemporaryDirectory();
@@ -874,6 +924,35 @@ public sealed class FileSubmissionJournalStoreTests
         {
             LocalPlan = plan,
             Policy = new GitHubSubmissionPolicy { MinimumReleaseFreshness = TimeSpan.Zero },
+        };
+    }
+
+    private static GitHubSubmissionRequest RequestWithArtifact(
+        string root,
+        string finalUrl)
+    {
+        GitHubSubmissionRequest source = Request(root);
+        var download = new DownloadResult
+        {
+            FilePath = "setup.exe",
+            FileName = "setup.exe",
+            Sha256 = new Sha256Hash(new string('A', 64)),
+            SizeInBytes = 1,
+            InitialUrl = "https://example.test/setup.exe",
+            FinalUrl = finalUrl,
+        };
+        return source with
+        {
+            LocalPlan = source.LocalPlan with
+            {
+                Preflight = source.LocalPlan.Preflight with
+                {
+                    InstallerArtifacts =
+                    [
+                        new InstallerArtifact(download.InitialUrl, download),
+                    ],
+                },
+            },
         };
     }
 

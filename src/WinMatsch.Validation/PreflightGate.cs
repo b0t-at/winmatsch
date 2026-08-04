@@ -225,14 +225,13 @@ public sealed class PreflightGate
                         "Installer content changed during immediate pre-commit revalidation.",
                         expected.Url));
                 }
-                else if (!EquivalentRedirectTargets(
+                else if (!DownloadRedirectIdentity.AreEquivalent(
                              result.Result.FinalUrl,
                              artifact.Download.FinalUrl))
                 {
                     findings.Add(Error(
                         "VLD6011",
-                        $"Installer redirect target changed from '{artifact.Download.FinalUrl}' "
-                        + $"to '{result.Result.FinalUrl}' during immediate revalidation.",
+                        "Installer redirect host or path changed during immediate revalidation.",
                         expected.Url));
                 }
                 else if (result.Result.Sha256 != expected.Sha256)
@@ -281,21 +280,6 @@ public sealed class PreflightGate
             }
         }
 
-    }
-
-    private static bool EquivalentRedirectTargets(string left, string right)
-    {
-        if (string.Equals(left, right, StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        return Uri.TryCreate(left, UriKind.Absolute, out Uri? leftUri)
-            && Uri.TryCreate(right, UriKind.Absolute, out Uri? rightUri)
-            && leftUri.Scheme.Equals(rightUri.Scheme, StringComparison.OrdinalIgnoreCase)
-            && leftUri.Host.Equals(rightUri.Host, StringComparison.OrdinalIgnoreCase)
-            && leftUri.Port == rightUri.Port
-            && string.Equals(leftUri.AbsolutePath, rightUri.AbsolutePath, StringComparison.Ordinal);
     }
 
     private static bool HasBlockingFindings(

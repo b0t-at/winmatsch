@@ -26,6 +26,39 @@ public sealed class InstallerDownloaderTests : IDisposable
     }
 
     [Fact]
+    public void Redirect_identity_omits_credentials_query_and_fragment()
+    {
+        string identity = DownloadRedirectIdentity.Canonicalize(
+            "https://user:password@CDN.Example.com/releases/setup.exe"
+            + "?sig=TOPSECRET&expires=1#fragment");
+
+        Assert.Equal("https://cdn.example.com:443/releases/setup.exe", identity);
+        Assert.DoesNotContain("user", identity, StringComparison.Ordinal);
+        Assert.DoesNotContain("password", identity, StringComparison.Ordinal);
+        Assert.DoesNotContain("TOPSECRET", identity, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Redirect_identity_allows_query_refresh_but_not_host_or_path_drift()
+    {
+        const string approved =
+            "https://cdn.example.com/releases/setup.exe?sig=first&expires=1";
+        const string refreshed =
+            "https://CDN.example.com/releases/setup.exe?sig=second&expires=2";
+
+        Assert.True(DownloadRedirectIdentity.AreEquivalent(approved, refreshed));
+        Assert.Equal(
+            DownloadRedirectIdentity.ComputeSha256(approved),
+            DownloadRedirectIdentity.ComputeSha256(refreshed));
+        Assert.False(DownloadRedirectIdentity.AreEquivalent(
+            approved,
+            "https://cdn2.example.com/releases/setup.exe?sig=first"));
+        Assert.False(DownloadRedirectIdentity.AreEquivalent(
+            approved,
+            "https://cdn.example.com/releases/other.exe?sig=first"));
+    }
+
+    [Fact]
     public async Task DownloadAsync_ComputesStreamedHashSizeAndMetadata()
     {
         byte[] payload = CreatePayload(300_000);

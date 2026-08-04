@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using System.Text.RegularExpressions;
 using WinMatsch.Core;
+using WinMatsch.Downloads;
 using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Workflows.Operations;
 
@@ -570,7 +571,12 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
                     new SubmissionJournalArtifactIdentity(
                         HashText(artifact.InstallerUrl),
                         artifact.Download.Sha256.Value,
-                        artifact.Download.SizeInBytes)),
+                        artifact.Download.SizeInBytes)
+                    {
+                        FormatVersion = SubmissionJournalArtifactIdentity.CurrentFormatVersion,
+                        ApprovedFinalUrlSha256 =
+                            DownloadRedirectIdentity.ComputeSha256(artifact.Download.FinalUrl),
+                    }),
             ],
             ExistingVersions =
             [
@@ -970,7 +976,28 @@ public sealed partial class FileSubmissionJournalStore : ISubmissionJournalStore
             throw new SubmissionJournalTamperedException(
                 $"Submission journal '{Path.GetFileName(path)}' has inconsistent required identity fields.");
         }
+
+        foreach (SubmissionJournalArtifactIdentity artifact in entry.LocalPlan.InstallerArtifacts)
+        {
+            bool valid = artifact.FormatVersion switch
+            {
+                0 => artifact.ApprovedFinalUrlSha256 is null,
+                SubmissionJournalArtifactIdentity.CurrentFormatVersion =>
+                    IsSha256(artifact.ApprovedFinalUrlSha256),
+                _ => false,
+            };
+            if (!valid)
+            {
+                throw new SubmissionJournalTamperedException(
+                    $"Submission journal '{Path.GetFileName(path)}' has unsupported or invalid "
+                    + "installer redirect identity metadata.");
+            }
+        }
     }
+
+    private static bool IsSha256(string? value)
+        => value is { Length: 64 }
+            && value.All(static character => Uri.IsHexDigit(character));
 
     private static SubmissionJournalEntry ValidateRemoteFingerprint(
         string path,

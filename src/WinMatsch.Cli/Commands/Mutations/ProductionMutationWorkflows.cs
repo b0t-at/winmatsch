@@ -896,10 +896,11 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
                     "downloads")
                 : null,
         });
-        VerifiedSubmissionRecoveryRequest recovery =
+        await using VerifiedSubmissionRecoveryRequest recovery =
             await SubmissionJournalMaterializer.MaterializeVerifiedAsync(
             entry,
             gitHub,
+            downloader,
             cancellationToken).ConfigureAwait(false);
         GitHubLifecycleWorkflow workflow =
             WorkflowProductionComposition.CreateGitHubLifecycle(gitHub, downloader);
