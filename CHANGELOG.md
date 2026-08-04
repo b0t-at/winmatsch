@@ -7,6 +7,13 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- Journaled raw submissions now reacquire installer bytes into verified absolute
+  paths before remote preflight, preventing nested ZIP validation from opening an
+  empty recovery placeholder while retaining hash, size, and mutation-recovery
+  guarantees.
+
 ## [0.8.8] - 2026-08-04
 
 ### Fixed

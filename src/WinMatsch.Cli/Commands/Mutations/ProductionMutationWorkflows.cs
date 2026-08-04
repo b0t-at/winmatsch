@@ -900,6 +900,7 @@ internal sealed class ProductionSubmissionWorkflow : IJournaledSubmissionWorkflo
             await SubmissionJournalMaterializer.MaterializeVerifiedAsync(
             entry,
             gitHub,
+            downloader,
             cancellationToken).ConfigureAwait(false);
         GitHubLifecycleWorkflow workflow =
             WorkflowProductionComposition.CreateGitHubLifecycle(gitHub, downloader);
