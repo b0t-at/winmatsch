@@ -12,7 +12,7 @@ Usage: reconcile-download-site.sh --account NAME [options]
 Options:
   --repository OWNER/REPO  GitHub repository (default: $GITHUB_REPOSITORY)
   --container NAME         Blob container (default: $web)
-    --exclude-tag TAG        Treat a just-deleted release tag as absent
+  --exclude-tag TAG        Treat a just-deleted release tag as absent
   --archive-prefix PREFIX  Archive namespace (default: archive)
   --archive-tier TIER      Azure destination tier (default: Archive)
   --afd-resource-group RG --afd-profile NAME --afd-endpoint NAME
@@ -78,7 +78,12 @@ PYTHON="$(command -v python3 || command -v python)" || die "python3 not found"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST_TOOL="$SCRIPT_DIR/manage-release-versions.py"
-[ -f "$MANIFEST_TOOL" ] || die "missing $MANIFEST_TOOL"
+PUBLISH_SCRIPT="$SCRIPT_DIR/publish-download-site.sh"
+DOWNLOAD_SCRIPT="$SCRIPT_DIR/download-release-bundle.sh"
+WAIT_FOR_MANIFEST="$SCRIPT_DIR/wait-for-front-door-manifest.sh"
+for required_script in "$MANIFEST_TOOL" "$PUBLISH_SCRIPT" "$DOWNLOAD_SCRIPT" "$WAIT_FOR_MANIFEST"; do
+    [ -f "$required_script" ] || die "missing $required_script"
+done
 
 STAGING="$(mktemp -d)"
 cleanup() { rm -rf "$STAGING"; }
@@ -92,6 +97,8 @@ STATE_JSON="$STAGING/reconcile-state.json"
 STORAGE_NAMES="$STAGING/storage-names.txt"
 STORAGE_TAGS="$STAGING/storage-tags.txt"
 DELETE_RECORDS="$STAGING/delete-records.tsv"
+PUBLISH_TAGS=()
+EDGE_READY_SECS=""
 : >"$DELETE_RECORDS"
 
 # --------------------------------------------------------------- GitHub state
@@ -120,19 +127,64 @@ fi
 # This optimistic transaction is serialized by the workflow's
 # azure-download-site concurrency group; the ETag still fails closed if an
 # operator or another writer changes the catalog outside that workflow.
-log "Reading the live Azure catalog and version prefixes"
-MANIFEST_ETAG="$(az storage blob show "${AZ_AUTH[@]}" \
-    --account-name "$ACCOUNT" --container-name "$CONTAINER" \
-    --name versions.json --query properties.etag --output tsv)"
-[ -n "$MANIFEST_ETAG" ] || die "live versions.json has no ETag"
-az storage blob download "${AZ_AUTH[@]}" \
-    --account-name "$ACCOUNT" --container-name "$CONTAINER" \
-    --name versions.json --file "$CURRENT_MANIFEST" --no-progress \
-    --if-match "$MANIFEST_ETAG" --overwrite --output none
-az storage blob list "${AZ_AUTH[@]}" \
-    --account-name "$ACCOUNT" --container-name "$CONTAINER" \
-    --num-results '*' --query '[].name' --output tsv >"$STORAGE_NAMES"
-awk -F/ 'NF >= 2 { print $1 }' "$STORAGE_NAMES" | LC_ALL=C sort -u >"$STORAGE_TAGS"
+read_azure_state() {
+    log "Reading the live Azure catalog and version prefixes"
+    MANIFEST_ETAG="$(az storage blob show "${AZ_AUTH[@]}" \
+        --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+        --name versions.json --query properties.etag --output tsv)"
+    [ -n "$MANIFEST_ETAG" ] || die "live versions.json has no ETag"
+    az storage blob download "${AZ_AUTH[@]}" \
+        --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+        --name versions.json --file "$CURRENT_MANIFEST" --no-progress \
+        --if-match "$MANIFEST_ETAG" --overwrite --output none
+    az storage blob list "${AZ_AUTH[@]}" \
+        --account-name "$ACCOUNT" --container-name "$CONTAINER" \
+        --num-results '*' --query '[].name' --output tsv >"$STORAGE_NAMES"
+    awk -F/ 'NF >= 2 { print $1 }' "$STORAGE_NAMES" | LC_ALL=C sort -u >"$STORAGE_TAGS"
+}
+
+publish_missing_release() {
+    local tag="$1" release_json published_at prerelease release_url dist
+    local -a args
+
+    release_json="$(jq -cer --arg tag "$tag" '.[] | select(.tagName == $tag)' "$RELEASES_JSON")"
+    published_at="$(jq -er '.publishedAt' <<<"$release_json")"
+    prerelease="$(jq -r '.isPrerelease' <<<"$release_json")"
+    release_url="$(jq -er '.url' <<<"$release_json")"
+    dist="$STAGING/backfill/$tag"
+
+    log "Backfilling missing published release $tag"
+    bash "$DOWNLOAD_SCRIPT" --repository "$REPOSITORY" --tag "$tag" --out "$dist"
+    args=(
+        --version "$tag"
+        --date "$published_at"
+        --notes-url "$release_url"
+        --dist "$dist"
+        --account "$ACCOUNT"
+        --container "$CONTAINER"
+    )
+    [ "$prerelease" = "true" ] && args+=(--prerelease)
+    bash "$PUBLISH_SCRIPT" "${args[@]}"
+}
+
+read_azure_state
+mapfile -t PUBLISH_TAGS < <(
+    "$PYTHON" "$MANIFEST_TOOL" missing-releases \
+        --manifest-in "$CURRENT_MANIFEST" \
+        --github-releases "$RELEASES_JSON" \
+        --storage-tags "$STORAGE_TAGS"
+)
+if [ "${#PUBLISH_TAGS[@]}" -gt 0 ]; then
+    log "Published GitHub releases missing from Azure: ${PUBLISH_TAGS[*]}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "Dry run: would backfill ${PUBLISH_TAGS[*]}"
+        exit 0
+    fi
+    for tag in "${PUBLISH_TAGS[@]}"; do
+        publish_missing_release "$tag"
+    done
+    read_azure_state
+fi
 
 UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 "$PYTHON" "$MANIFEST_TOOL" reconcile-manifest \
@@ -362,6 +414,14 @@ if [ -n "$AFD_RG" ] && [ -n "$AFD_PROFILE" ] && [ -n "$AFD_ENDPOINT" ]; then
         --endpoint-name "$AFD_ENDPOINT" --content-paths "${AFD_PATHS[@]}" \
         --no-wait --output none
     log "Purge accepted; Front Door will finish it asynchronously"
+    AFD_HOST="$(az afd endpoint show --only-show-errors \
+        --resource-group "$AFD_RG" --profile-name "$AFD_PROFILE" \
+        --endpoint-name "$AFD_ENDPOINT" \
+        --query hostName --output tsv)"
+    [ -n "$AFD_HOST" ] || die "Front Door endpoint did not report a hostname"
+    EDGE_READY_SECS="$(bash "$WAIT_FOR_MANIFEST" \
+        --host "$AFD_HOST" --expected "$UPDATED_MANIFEST")"
+    log "Front Door serves the reconciled manifest (${EDGE_READY_SECS}s)"
 elif [ -n "$AFD_RG$AFD_PROFILE$AFD_ENDPOINT" ]; then
     warn "Front Door purge skipped: need all three --afd-* options"
 fi
@@ -373,10 +433,20 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         printf '| GitHub releases | %s published |\n' "$GITHUB_RELEASE_COUNT"
         printf '| GitHub latest | `%s` |\n' "${LATEST_TAG:-none}"
         printf '| Azure live latest | `%s` |\n' "${DESIRED_LATEST:-none}"
+        if [ "${#PUBLISH_TAGS[@]}" -gt 0 ]; then
+            printf '| Backfilled | `%s` |\n' "$(IFS=', '; printf '%s' "${PUBLISH_TAGS[*]}")"
+        else
+            printf '| Backfilled | none |\n'
+        fi
         if [ "${#ARCHIVE_TAGS[@]}" -gt 0 ]; then
             printf '| Archived | `%s` |\n' "$(IFS=', '; printf '%s' "${ARCHIVE_TAGS[*]}")"
         else
             printf '| Archived | none |\n'
+        fi
+        if [ -n "$EDGE_READY_SECS" ]; then
+            printf '| Front Door | `/versions.json` matched after %ss |\n' "$EDGE_READY_SECS"
+        else
+            printf '| Front Door | purge not configured |\n'
         fi
         printf '| Archive destination | `%s/%s/` (%s tier) |\n\n' \
             "$CONTAINER" "$ARCHIVE_PREFIX" "$ARCHIVE_TIER"

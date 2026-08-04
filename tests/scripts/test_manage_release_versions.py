@@ -77,6 +77,23 @@ class ManageReleaseVersionsTests(unittest.TestCase):
                     )
                 )
 
+    def test_missing_releases_include_catalog_and_storage_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest = root / "manifest.json"
+            releases = root / "releases.json"
+            storage_tags = root / "storage-tags.txt"
+            self._write_json(manifest, self._manifest(["1.1.0", "1.0.0"], latest="1.1.0"))
+            self._write_json(
+                releases,
+                [self._release("1.2.0"), self._release("1.1.0"), self._release("1.0.0")],
+            )
+            storage_tags.write_text("v1.0.0\nv1.2.0\n", encoding="utf-8")
+
+            missing = MANAGER.find_missing_release_tags(manifest, releases, storage_tags)
+
+            self.assertEqual(["v1.2.0", "v1.1.0"], missing)
+
     def test_reconcile_archives_every_live_version_when_github_is_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -113,6 +113,22 @@ def load_releases(path: Path) -> dict[str, dict]:
     return releases
 
 
+def find_missing_release_tags(
+    manifest_path: Path, releases_path: Path, storage_tags_path: Path
+) -> list[str]:
+    manifest = load_manifest(manifest_path)
+    releases = load_releases(releases_path)
+    catalog_tags = {canonical_tag(entry["version"]) for entry in manifest["versions"]}
+    storage_tags = set(read_tags(storage_tags_path))
+    deployed_tags = catalog_tags & storage_tags
+    return sorted(set(releases) - deployed_tags, key=parse_semver, reverse=True)
+
+
+def print_missing_releases(args: argparse.Namespace) -> None:
+    for tag in find_missing_release_tags(args.manifest_in, args.github_releases, args.storage_tags):
+        print(tag)
+
+
 def reconcile_manifest(args: argparse.Namespace) -> None:
     manifest = load_manifest(args.manifest_in)
     releases = load_releases(args.github_releases)
@@ -261,6 +277,14 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--manifest-out", required=True, type=Path)
     reconcile.add_argument("--state-out", required=True, type=Path)
     reconcile.set_defaults(handler=reconcile_manifest)
+
+    missing = subparsers.add_parser(
+        "missing-releases", help="list published GitHub releases not fully deployed to Azure"
+    )
+    missing.add_argument("--manifest-in", required=True, type=Path)
+    missing.add_argument("--github-releases", required=True, type=Path)
+    missing.add_argument("--storage-tags", required=True, type=Path)
+    missing.set_defaults(handler=print_missing_releases)
 
     latest = subparsers.add_parser("stage-latest", help="stage the stable latest mirror")
     latest.add_argument("--manifest", required=True, type=Path)

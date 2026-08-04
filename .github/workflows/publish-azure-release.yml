@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Published tag to backfill; leave empty to sync only
+        description: Published tag to backfill; leave empty to repair and sync all
         required: false
         type: string
 
@@ -81,10 +81,10 @@ jobs:
             echo "RELEASE_URL=$release_url"
           } >> "$GITHUB_ENV"
 
-          mkdir dist
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --dir dist
+          bash scripts/download-release-bundle.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --out dist
 
       - name: Verify release bundle
         shell: bash

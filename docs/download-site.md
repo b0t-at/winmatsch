@@ -183,16 +183,17 @@ both `release: published` and `release: deleted`. Publication validates and
 uploads the GitHub release before synchronization; deletion runs only the
 synchronizer. Both paths log in through the `Release` environment's Entra OIDC
 federation. The manual input can safely backfill an already-published tag, or
-be left empty to run synchronization only.
+be left empty to repair any published releases missing from Azure and then
+synchronize the complete mirror.
 
 When the `Release` environment additionally defines the secrets
 `AZURE_AFD_RESOURCE_GROUP`, `AZURE_AFD_PROFILE` and `AZURE_AFD_ENDPOINT`
 (all three, or none), the workflow passes the matching `--afd-*` flags so
 every publish requests a Front Door purge without waiting for Azure's
-long-running-operation acknowledgement. For a new stable release, the
-publisher instead checks the endpoint's `/latest/version.txt` every 10 seconds
-until it serves the new version, with a 12-minute timeout. `AZURE_AFD_ENDPOINT`
-is the endpoint *resource name* (e.g.
+long-running-operation acknowledgement. The publisher and synchronizer instead
+check the endpoint's `/versions.json` every 10 seconds until its JSON matches
+the uploaded manifest, with a 12-minute timeout. `AZURE_AFD_ENDPOINT` is the
+endpoint *resource name* (e.g.
 `WinMatsch`), not the `<name>-<hash>.z0X.azurefd.net` hostname — validation
 rejects values containing a dot. Without the trio the workflow only warns:
 edge PoPs then keep serving cached pages until the five-minute origin TTL

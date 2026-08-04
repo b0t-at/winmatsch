@@ -57,8 +57,9 @@ The workflow uses the `Release` GitHub environment and exchanges GitHub's OIDC
 token for a short-lived Azure token. No storage key, SAS, or client secret is
 stored in GitHub. **Actions > Publish download site > Run workflow** can
 backfill or retry an already-published tag, or run with an empty tag to perform
-only synchronization. The publication job rejects drafts and applies the same
-validation, immutability, and synchronization checks. The publisher
+repair and synchronization across all published releases. The publication job
+rejects drafts and applies the same validation, immutability, and
+synchronization checks. The publisher
 implementation is always checked out from the default branch, so older
 releases can be backfilled even when their tags predate the download-site
 scripts.
