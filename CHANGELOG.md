@@ -7,6 +7,14 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-08-04
+
+### Fixed
+
+- GitHub `createCommitOnBranch` mutations no longer select the query-only
+  `rateLimit` field from the mutation root; transport header-based rate-limit
+  tracking remains in place.
+
 ## [0.8.7] - 2026-08-04
 
 ### Fixed
@@ -26,8 +34,6 @@ minor versions may contain breaking changes).
 
 - GitHub submission no longer requires `read:user` or `user:email`; a token
   with repository access can resolve the authenticated fork owner.
-- Server-side commit creation no longer requests the query-only GraphQL
-  `rateLimit` field from the mutation root.
 
 ## [0.8.5] - 2026-08-04
 
@@ -160,7 +166,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.7...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.8...main
+[0.8.8]: https://github.com/b0t-at/winmatsch/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/b0t-at/winmatsch/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/b0t-at/winmatsch/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/b0t-at/winmatsch/compare/v0.8.4...v0.8.5
