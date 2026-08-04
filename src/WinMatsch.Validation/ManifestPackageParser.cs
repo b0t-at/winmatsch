@@ -189,41 +189,37 @@ internal static class ManifestPackageParser
         const string prefix = "# yaml-language-server: $schema=";
         string expected = $"{prefix}https://aka.ms/winget-manifest.{type.ToYaml()}."
             + $"{ManifestSchemaValidator.SchemaVersion}.schema.json";
-        int newline = document.Content.IndexOf('\n');
-        string actual = (newline >= 0 ? document.Content[..newline] : document.Content)
-            .TrimEnd('\r');
-        if (!string.Equals(actual, expected, StringComparison.Ordinal))
+        string? invalidHeader = null;
+        using var reader = new StringReader(document.Content);
+        while (reader.ReadLine() is { } line)
         {
-            string message;
-            if (actual.StartsWith(prefix, StringComparison.Ordinal))
+            if (string.Equals(line, expected, StringComparison.Ordinal))
             {
-                message = $"The first-line schema header '{actual}' must be exactly '{expected}'.";
-            }
-            else
-            {
-                int misplacedStart = document.Content.IndexOf(
-                    $"\n{prefix}",
-                    StringComparison.Ordinal);
-                if (misplacedStart >= 0)
-                {
-                    misplacedStart++;
-                    int misplacedEnd = document.Content.IndexOf('\n', misplacedStart);
-                    string misplaced = document.Content[
-                        misplacedStart..(misplacedEnd >= 0 ? misplacedEnd : document.Content.Length)]
-                        .TrimEnd('\r');
-                    message = $"Schema header '{misplaced}' must appear as the exact first line '{expected}'.";
-                }
-                else
-                {
-                    message = $"The first line must be the exact schema header '{expected}'.";
-                }
+                return;
             }
 
-            findings.Add(Error(
-                "VLD2104",
-                message,
-                document.RepositoryPath));
+            string trimmed = line.TrimStart();
+            if (trimmed.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                invalidHeader = line;
+                break;
+            }
+
+            if (trimmed.Length == 0 || trimmed.StartsWith('#'))
+            {
+                continue;
+            }
+
+            break;
         }
+
+        string message = invalidHeader is null
+            ? $"The exact schema header '{expected}' must appear in the leading comment block before manifest content."
+            : $"Schema header '{invalidHeader}' must be exactly '{expected}'.";
+        findings.Add(Error(
+            "VLD2104",
+            message,
+            document.RepositoryPath));
     }
 
     private static void RequireManifest<T>(

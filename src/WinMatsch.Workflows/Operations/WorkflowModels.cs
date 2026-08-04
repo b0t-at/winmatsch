@@ -382,6 +382,8 @@ public sealed record SubmitOperationRequest : WorkflowOperationRequest
 
     public string? ArtifactDirectory { get; init; }
 
+    public ImmutableArray<InstallerArtifact> InstallerArtifacts { get; init; } = [];
+
     public WorkflowReleaseProvenance? ReleaseProvenance { get; init; }
 }
 

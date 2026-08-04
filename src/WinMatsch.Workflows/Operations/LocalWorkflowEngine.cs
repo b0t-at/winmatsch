@@ -419,10 +419,10 @@ public sealed class LocalWorkflowEngine
         using var artifactDirectory = new ArtifactDirectoryLease(
             request.ExecutionMode,
             request.ArtifactDirectory);
-        ImmutableArray<InstallerArtifact> installerArtifacts = [];
+        var acquired = ImmutableArray.CreateBuilder<InstallerArtifact>();
+        acquired.AddRange(request.InstallerArtifacts);
         if (_artifacts is not null)
         {
-            var acquired = ImmutableArray.CreateBuilder<InstallerArtifact>();
             int assetId = 0;
             foreach (string installerUrl in (candidate.Installer.Installers ?? [])
                          .Select(static installer => installer.InstallerUrl)
@@ -431,6 +431,14 @@ public sealed class LocalWorkflowEngine
                          .Distinct(StringComparer.Ordinal)
                          .Order(StringComparer.Ordinal))
             {
+                if (acquired.Any(artifact => string.Equals(
+                        artifact.InstallerUrl,
+                        installerUrl,
+                        StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
                 var uri = new Uri(installerUrl, UriKind.Absolute);
                 ArtifactSnapshot artifact = await _artifacts.AcquireAsync(
                     new DiscoveredAsset
@@ -451,10 +459,9 @@ public sealed class LocalWorkflowEngine
                     cancellationToken).ConfigureAwait(false);
                 acquired.Add(new InstallerArtifact(installerUrl, artifact.Download));
             }
-
-            installerArtifacts = acquired.ToImmutable();
         }
 
+        ImmutableArray<InstallerArtifact> installerArtifacts = acquired.ToImmutable();
         ImmutableArray<WorkflowFileChange> changes = Diff(
             before?.Documents ?? [],
             after,

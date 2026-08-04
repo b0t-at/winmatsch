@@ -182,6 +182,39 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Submit_reuses_supplied_installer_artifacts()
+    {
+        using var temporary = new TemporaryDirectory();
+        DownloadResult download = Download("A", temporary.Path);
+        await File.WriteAllBytesAsync(download.FilePath, new byte[42]);
+        var processor = new WritingArtifactProcessor();
+        var preflight = new CapturingPreflight();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new PassThroughRuleRunner(),
+            preflight,
+            new RecordingTransaction(),
+            artifacts: processor,
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.SubmitAsync(new SubmitOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            Documents = Documents(CreatePackage("1.0.0", "A"), "custom tool"),
+            InstallerArtifacts =
+            [
+                new InstallerArtifact("https://example.test/app-x64.exe", download),
+            ],
+        });
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.Null(processor.UsedDirectory);
+        InstallerArtifact artifact = Assert.Single(result.Plan.Preflight.InstallerArtifacts);
+        Assert.Equal(download.FilePath, artifact.Download.FilePath);
+        Assert.True(File.Exists(artifact.Download.FilePath));
+    }
+
+    [Fact]
     public async Task New_locale_changes_one_file_and_preserves_unrelated_bytes()
     {
         using var temporary = new TemporaryDirectory();
