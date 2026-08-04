@@ -7,6 +7,21 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-08-04
+
+### Fixed
+
+- Submit validation accepts the exact WinGet schema directive after leading
+  generator comments used by WingetCreate, Komac, and other repository tools.
+- Verified submissions retain prefetched installer artifacts through final
+  archive and hash validation instead of referring to deleted planning files.
+- Duplicate pull-request discovery uses changed-file snapshots at the GitHub
+  identity actually observed, so unrelated active pull requests can move
+  without aborting the entire submission while candidate identity remains
+  pinned and reverified.
+
+## [0.8.6] - 2026-08-04
+
 ### Fixed
 
 - GitHub submission no longer requires `read:user` or `user:email`; a token
@@ -143,7 +158,9 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.5...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.7...main
+[0.8.7]: https://github.com/b0t-at/winmatsch/compare/v0.8.6...v0.8.7
+[0.8.6]: https://github.com/b0t-at/winmatsch/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/b0t-at/winmatsch/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/b0t-at/winmatsch/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/b0t-at/winmatsch/compare/v0.8.2...v0.8.3
