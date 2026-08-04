@@ -17,6 +17,7 @@ public sealed class GitHubReadOperationsTests
             Assert.Equal("https://github.invalid/graphql", request.Uri.AbsoluteUri);
             Assert.Equal("Bearer synthetic-token", request.Authorization);
             Assert.Equal("winmatsch-tests", request.UserAgent);
+            Assert.DoesNotContain("email", request.Body, StringComparison.OrdinalIgnoreCase);
             return GitHubClientTestSupport.Json(
                 """
                 {

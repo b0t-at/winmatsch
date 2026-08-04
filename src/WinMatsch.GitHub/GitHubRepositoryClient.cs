@@ -21,7 +21,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     private const string ViewerQuery =
         """
         query {
-          viewer { login name email avatarUrl }
+                    viewer { login name avatarUrl }
           rateLimit { limit remaining used resetAt }
         }
         """;
@@ -147,7 +147,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             return new GitHubUser(
                 viewer.Login,
                 viewer.Name,
-                viewer.Email,
+                null,
                 ParseAbsoluteUri(viewer.AvatarUrl, "viewer avatar URL"));
         }
         catch (GitHubApiException exception) when (IsGraphQlUnavailable(exception))

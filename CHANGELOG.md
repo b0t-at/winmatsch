@@ -7,6 +7,11 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub submission no longer requires `read:user` or `user:email`; a token
+  with repository access can resolve the authenticated fork owner.
+
 ## [0.8.5] - 2026-08-04
 
 ### Fixed
