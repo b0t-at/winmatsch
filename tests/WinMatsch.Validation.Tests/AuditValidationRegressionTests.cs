@@ -41,7 +41,7 @@ public sealed class AuditValidationRegressionTests : IDisposable
     }
 
     [Fact]
-    public async Task Schema_header_is_only_accepted_as_the_exact_first_line()
+    public async Task Schema_header_is_accepted_after_leading_generator_comments()
     {
         PreflightRequest valid = TestPackageFactory.CreateRequest();
         ManifestDocument first = valid.Documents[0];
@@ -54,10 +54,30 @@ public sealed class AuditValidationRegressionTests : IDisposable
         ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
             .ValidateAsync(Copy(valid, documents));
 
+        Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD2104");
+    }
+
+    [Fact]
+    public async Task Schema_header_after_manifest_content_is_rejected()
+    {
+        PreflightRequest valid = TestPackageFactory.CreateRequest();
+        ManifestDocument first = valid.Documents[0];
+        int newline = first.Content.IndexOf('\n');
+        string header = first.Content[..newline];
+        string body = first.Content[(newline + 1)..];
+        ManifestDocument[] documents =
+        [
+            first with { Content = $"{body}\n{header}\n" },
+            .. valid.Documents.Skip(1),
+        ];
+
+        ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+            .ValidateAsync(Copy(valid, documents));
+
         ValidationFinding finding = Assert.Single(
             report.Findings,
             static finding => finding.Code == "VLD2104");
-        Assert.Contains("first line", finding.Message, StringComparison.Ordinal);
+        Assert.Contains("before manifest content", finding.Message, StringComparison.Ordinal);
     }
 
     [Fact]

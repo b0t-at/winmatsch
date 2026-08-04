@@ -459,6 +459,8 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
     private readonly ConcurrentDictionary<EvidenceCacheKey, PullRequestManifestEvidence> _cache = [];
     private readonly ConcurrentDictionary<ChangedFilesCacheKey, ChangedFilesCacheEntry>
         _changedFilesCache = [];
+    private readonly ConcurrentDictionary<PullRequestSnapshotKey, PullRequestInfo>
+        _pullRequestSnapshots = [];
 
     public async Task<IReadOnlyList<PullRequestInfo>> GetCandidatesAsync(
         GitHubSubmissionPlan plan,
@@ -481,21 +483,32 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         var candidates = new List<PullRequestInfo>();
         bool canVerifyEveryOpenPullRequest =
             openPullRequests.Count <= PullRequestManifestEvidenceLimits.MaximumCandidates;
-        await EnsureChangedFilesAsync(
+        IReadOnlyDictionary<long, PullRequestInfo> currentPullRequests =
+            await EnsureChangedFilesAsync(
             plan.Request.UpstreamRepository,
             openPullRequests,
             cancellationToken).ConfigureAwait(false);
         foreach (PullRequestInfo pullRequest in openPullRequests.OrderBy(static item => item.Number))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            PullRequestInfo current = currentPullRequests[pullRequest.Number];
+            if (current.State != PullRequestState.Open
+                || !string.Equals(
+                    current.BaseBranch,
+                    pullRequest.BaseBranch,
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             IReadOnlyList<PullRequestChangedFile> changedFiles =
-                GetCachedChangedFiles(plan.Request.UpstreamRepository, pullRequest);
+                GetCachedChangedFiles(plan.Request.UpstreamRepository, current);
 
             bool hasTargetPath = changedFiles.Any(file =>
                 plannedPaths.Contains(file.Path)
                 || (file.PreviousPath is not null && plannedPaths.Contains(file.PreviousPath)));
             bool hasCanonicalTitleHint = GitHubSubmissionFormatter.IsCanonicalTitleFor(
-                pullRequest.Title,
+                current.Title,
                 plan.Request.LocalPlan.PackageIdentifier,
                 plan.Request.LocalPlan.PackageVersion);
             if (!canVerifyEveryOpenPullRequest
@@ -524,9 +537,12 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(pullRequest);
         cancellationToken.ThrowIfCancellationRequested();
+        PullRequestInfo snapshot = ResolvePullRequestSnapshot(
+            plan.Request.UpstreamRepository,
+            pullRequest);
         PullRequestInfo current = await ReadCurrentPullRequestAsync(
             plan,
-            pullRequest,
+            snapshot,
             cancellationToken).ConfigureAwait(false);
         string fingerprint = CreatePlanFingerprint(plan);
         var key = new EvidenceCacheKey(
@@ -562,12 +578,20 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        await EnsureChangedFilesAsync(
+        IReadOnlyDictionary<long, PullRequestInfo> currentPullRequests =
+            await EnsureChangedFilesAsync(
             plan.Request.UpstreamRepository,
             [pullRequest],
             cancellationToken).ConfigureAwait(false);
+        PullRequestInfo changedFilesIdentity = currentPullRequests[pullRequest.Number];
+        if (!HasSamePullRequestIdentity(changedFilesIdentity, pullRequest))
+        {
+            throw new PullRequestEvidenceLimitException(
+                $"Pull request #{pullRequest.Number} head or base identity changed while gathering manifest evidence.");
+        }
+
         IReadOnlyList<PullRequestChangedFile> changedFiles =
-            GetCachedChangedFiles(plan.Request.UpstreamRepository, pullRequest);
+            GetCachedChangedFiles(plan.Request.UpstreamRepository, changedFilesIdentity);
         string targetPrefix = plan.PackageVersionDirectory + "/";
         WorkflowFileChange[] plannedChanges =
         [
@@ -705,6 +729,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
             expected.Number,
             cancellationToken).ConfigureAwait(false);
         if (current.State != PullRequestState.Open
+            || !string.Equals(current.NodeId, expected.NodeId, StringComparison.Ordinal)
             || expected.HeadRepository is null
             || expected.BaseSha is null
             || current.HeadRepository is null
@@ -726,26 +751,30 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         CancellationToken cancellationToken)
         => _ = await ReadCurrentPullRequestAsync(plan, expected, cancellationToken).ConfigureAwait(false);
 
-    private async Task EnsureChangedFilesAsync(
+    private async Task<IReadOnlyDictionary<long, PullRequestInfo>> EnsureChangedFilesAsync(
         RepositoryCoordinates repository,
         IReadOnlyList<PullRequestInfo> pullRequests,
         CancellationToken cancellationToken)
     {
+        var currentByNumber = pullRequests
+            .DistinctBy(static pullRequest => pullRequest.Number)
+            .ToDictionary(
+                static pullRequest => pullRequest.Number,
+                pullRequest => ResolvePullRequestSnapshot(repository, pullRequest));
         PullRequestInfo[] missing =
         [
-            .. pullRequests
-                .DistinctBy(static pullRequest => pullRequest.Number)
+            .. currentByNumber.Values
                 .Where(pullRequest => !HasCurrentChangedFiles(repository, pullRequest)),
         ];
         if (missing.Length == 0)
         {
-            return;
+            return currentByNumber;
         }
 
-        IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> fetched;
+        IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot> fetched;
         try
         {
-            fetched = await _gitHub.GetPullRequestChangedFilesBatchAsync(
+            fetched = await _gitHub.GetPullRequestChangedFilesSnapshotsBatchAsync(
                 repository,
                 missing,
                 cancellationToken).ConfigureAwait(false);
@@ -770,23 +799,37 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                 "Pull request changed-file evidence returned an incomplete batch.");
         }
 
-        foreach (PullRequestInfo pullRequest in missing)
+        var originalByNumber = pullRequests
+            .DistinctBy(static pullRequest => pullRequest.Number)
+            .ToDictionary(static pullRequest => pullRequest.Number);
+        foreach (PullRequestInfo expected in missing)
         {
             if (!fetched.TryGetValue(
-                    pullRequest.Number,
-                    out IReadOnlyList<PullRequestChangedFile>? changedFiles))
+                    expected.Number,
+                    out PullRequestChangedFilesSnapshot? fetchedSnapshot)
+                || fetchedSnapshot.PullRequest.Number != expected.Number
+                || !string.Equals(
+                    fetchedSnapshot.PullRequest.NodeId,
+                    expected.NodeId,
+                    StringComparison.Ordinal))
             {
                 throw new PullRequestEvidenceLimitException(
-                    $"Pull request #{pullRequest.Number} changed-file evidence is missing.");
+                    $"Pull request #{expected.Number} changed-file evidence is missing or has a different node identity.");
             }
 
-            PullRequestChangedFile[] snapshot = [.. changedFiles];
-            ValidateChangedFiles(pullRequest.Number, snapshot);
-            var key = CreateChangedFilesCacheKey(repository, pullRequest);
+            PullRequestInfo current = fetchedSnapshot.PullRequest;
+            PullRequestChangedFile[] snapshot = [.. fetchedSnapshot.Files];
+            ValidateChangedFiles(current.Number, snapshot);
+            var key = CreateChangedFilesCacheKey(repository, current);
             _changedFilesCache[key] = new(
-                pullRequest.NodeId,
-                pullRequest.BaseSha,
+                current.NodeId,
+                current.BaseSha,
                 snapshot);
+            _pullRequestSnapshots[CreatePullRequestSnapshotKey(repository, expected)] = current;
+            _pullRequestSnapshots[
+                CreatePullRequestSnapshotKey(repository, originalByNumber[expected.Number])] =
+                current;
+            currentByNumber[expected.Number] = current;
             foreach (ChangedFilesCacheKey stale in _changedFilesCache.Keys.Where(candidate =>
                          string.Equals(
                              candidate.Repository,
@@ -815,6 +858,8 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                 _cache.TryRemove(stale, out _);
             }
         }
+
+        return currentByNumber;
     }
 
     private bool HasCurrentChangedFiles(
@@ -861,6 +906,37 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         RepositoryCoordinates repository,
         PullRequestInfo pullRequest)
         => new(repository.ToString(), pullRequest.Number, pullRequest.HeadSha);
+
+    private PullRequestInfo ResolvePullRequestSnapshot(
+        RepositoryCoordinates repository,
+        PullRequestInfo pullRequest)
+        => _pullRequestSnapshots.TryGetValue(
+            CreatePullRequestSnapshotKey(repository, pullRequest),
+            out PullRequestInfo? snapshot)
+                ? snapshot
+                : pullRequest;
+
+    private static PullRequestSnapshotKey CreatePullRequestSnapshotKey(
+        RepositoryCoordinates repository,
+        PullRequestInfo pullRequest)
+        => new(
+            repository.ToString(),
+            pullRequest.Number,
+            pullRequest.NodeId,
+            pullRequest.HeadRepository?.ToString(),
+            pullRequest.HeadSha,
+            pullRequest.BaseBranch,
+            pullRequest.BaseSha);
+
+    private static bool HasSamePullRequestIdentity(
+        PullRequestInfo left,
+        PullRequestInfo right)
+        => left.Number == right.Number
+            && string.Equals(left.NodeId, right.NodeId, StringComparison.Ordinal)
+            && left.HeadRepository == right.HeadRepository
+            && string.Equals(left.HeadSha, right.HeadSha, StringComparison.Ordinal)
+            && string.Equals(left.BaseBranch, right.BaseBranch, StringComparison.Ordinal)
+            && string.Equals(left.BaseSha, right.BaseSha, StringComparison.Ordinal);
 
     private static string CreatePlanFingerprint(GitHubSubmissionPlan plan)
     {
@@ -919,6 +995,15 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         string Repository,
         long PullRequestNumber,
         string HeadSha);
+
+    private readonly record struct PullRequestSnapshotKey(
+        string Repository,
+        long PullRequestNumber,
+        string NodeId,
+        string? HeadRepository,
+        string HeadSha,
+        string BaseBranch,
+        string? BaseSha);
 
     private sealed record ChangedFilesCacheEntry(
         string NodeId,

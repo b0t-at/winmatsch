@@ -179,6 +179,10 @@ public sealed record PullRequestChangedFile(
     string? PreviousPath = null,
     PullRequestFileStatus Status = PullRequestFileStatus.Modified);
 
+public sealed record PullRequestChangedFilesSnapshot(
+    PullRequestInfo PullRequest,
+    IReadOnlyList<PullRequestChangedFile> Files);
+
 public sealed record CreatePullRequestRequest(
     string Title,
     string? Body,

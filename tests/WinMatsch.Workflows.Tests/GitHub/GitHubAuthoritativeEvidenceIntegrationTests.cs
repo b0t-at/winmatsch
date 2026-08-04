@@ -111,6 +111,42 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
     }
 
     [Fact]
+    public async Task Candidate_evidence_uses_the_head_observed_with_changed_files()
+    {
+        WorkflowFileChange change = GitHubLifecycleTestSupport.Plan().FileChanges[0];
+        const string movedHead = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        string movedPullRequestJson = PullRequestJson(movedHead);
+        var steps = new Queue<Func<HttpRequestMessage, HttpResponseMessage>>(
+        [
+            _ => Json($"[{PullRequestJson()}]"),
+            _ => Json(GraphQlFilesJson(change.RepositoryPath, headSha: movedHead)),
+            _ => Json(movedPullRequestJson),
+            _ => Json(movedPullRequestJson),
+        ]);
+        (GitHubRepositoryClient client, List<ObservedRequest> requests) = CreateClient(steps);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+        PullRequestInfo discovered = Assert.Single(await client.SearchPullRequestsAsync(
+            _upstream,
+            new PullRequestSearch(BaseBranch: "main") { MaximumResults = 1 }));
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+
+        PullRequestInfo candidate = Assert.Single(await provider.GetCandidatesAsync(
+            plan,
+            [discovered],
+            CancellationToken.None));
+        PullRequestManifestEvidence evidence = await provider.GetEvidenceAsync(
+            plan,
+            candidate,
+            CancellationToken.None);
+
+        Assert.True(evidence.HasManifestPath);
+        Assert.False(evidence.HasMatchingContent);
+        Assert.Empty(steps);
+        Assert.Equal(4, requests.Count);
+    }
+
+    [Fact]
     public async Task Authoritative_evidence_rejects_changed_file_pagination_loop()
     {
         WorkflowFileChange change = GitHubLifecycleTestSupport.Plan().FileChanges[0];
@@ -225,6 +261,8 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
             _upstream,
             new PullRequestSearch(BaseBranch: "main"),
             CancellationToken.None);
+        const string racedHead = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        heads["PR_200"] = racedHead;
         Assert.Empty(await provider.GetCandidatesAsync(
             plan,
             discovered,
@@ -237,7 +275,7 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
             plan,
             discovered,
             CancellationToken.None));
-        const string movedHead = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        const string movedHead = "ffffffffffffffffffffffffffffffffffffffff";
         heads["PR_200"] = movedHead;
         discovered = await client.SearchPullRequestsAsync(
             _upstream,
@@ -305,7 +343,7 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
         return response;
     }
 
-    private static string PullRequestJson()
+    private static string PullRequestJson(string headSha = HeadSha)
         => $$"""
         {
           "number": 7,
@@ -316,7 +354,7 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
           "draft": false,
           "head": {
             "ref": "update",
-            "sha": "{{HeadSha}}",
+            "sha": "{{headSha}}",
             "repo": {
               "node_id": "R_head",
               "full_name": "{{_headRepository}}",
@@ -385,14 +423,27 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
         }
         """;
 
-    private static string GraphQlFilesJson(string path, bool hasNextPage = false)
+    private static string GraphQlFilesJson(
+        string path,
+        bool hasNextPage = false,
+        string headSha = HeadSha)
         => $$"""
         {
           "data": {
             "nodes": [{
               "id": "PR_7",
               "number": 7,
-              "headRefOid": "{{HeadSha}}",
+              "title": "Hand-authored manifest update",
+              "state": "OPEN",
+              "isDraft": false,
+              "headRefName": "update",
+              "headRefOid": "{{headSha}}",
+              "baseRefName": "main",
+              "baseRefOid": "{{BaseSha}}",
+              "url": "https://ghe.invalid/upstream/repo/pull/7",
+              "createdAt": "2026-01-01T00:00:00Z",
+              "updatedAt": "2026-01-02T00:00:00Z",
+              "headRepository": { "nameWithOwner": "{{_headRepository}}" },
               "files": {
                 "nodes": [{
                   "path": "{{path}}",
@@ -422,7 +473,19 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
                 {
                   "id": "{{pullRequest.NodeId}}",
                   "number": {{pullRequest.Number}},
+                  "title": "{{pullRequest.Title}}",
+                  "state": "OPEN",
+                  "isDraft": false,
+                  "headRefName": "{{pullRequest.HeadBranch}}",
                   "headRefOid": "{{pullRequest.HeadSha}}",
+                  "baseRefName": "{{pullRequest.BaseBranch}}",
+                  "baseRefOid": "{{pullRequest.BaseSha}}",
+                  "url": "{{pullRequest.WebUri}}",
+                  "createdAt": "{{pullRequest.CreatedAt:O}}",
+                  "updatedAt": "{{pullRequest.UpdatedAt:O}}",
+                  "headRepository": {
+                    "nameWithOwner": "{{pullRequest.HeadRepository}}"
+                  },
                   "files": {
                     "nodes": [{
                       "path": "unrelated/{{pullRequest.Number}}.txt",

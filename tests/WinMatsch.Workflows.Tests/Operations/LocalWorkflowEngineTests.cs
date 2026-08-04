@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.IO.Compression;
 using WinMatsch.Analysis;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
@@ -179,6 +180,109 @@ public sealed class LocalWorkflowEngineTests
         Assert.Equal(
             documents.Select(static document => Convert.ToHexString(document.Content.AsSpan())),
             preflight.Last!.AfterDocuments.Select(static document => Convert.ToHexString(document.Content.AsSpan())));
+    }
+
+    [Fact]
+    public async Task Submit_reuses_supplied_installer_artifacts()
+    {
+        using var temporary = new TemporaryDirectory();
+        DownloadResult download = Download("A", temporary.Path);
+        await File.WriteAllBytesAsync(download.FilePath, new byte[42]);
+        var processor = new WritingArtifactProcessor();
+        var preflight = new CapturingPreflight();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new PassThroughRuleRunner(),
+            preflight,
+            new RecordingTransaction(),
+            artifacts: processor,
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.SubmitAsync(new SubmitOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            Documents = Documents(CreatePackage("1.0.0", "A"), "custom tool"),
+            InstallerArtifacts =
+            [
+                new InstallerArtifact("https://example.test/app-x64.exe", download),
+            ],
+        });
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.Null(processor.UsedDirectory);
+        InstallerArtifact artifact = Assert.Single(result.Plan.Preflight.InstallerArtifacts);
+        Assert.Equal(download.FilePath, artifact.Download.FilePath);
+        Assert.True(File.Exists(artifact.Download.FilePath));
+    }
+
+    [Fact]
+    public async Task Verified_submit_keeps_supplied_zip_available_for_final_preflight()
+    {
+        using var temporary = new TemporaryDirectory();
+        string artifactPath = Path.Combine(temporary.Path, "artifact.zip");
+        using (ZipArchive archive = ZipFile.Open(artifactPath, ZipArchiveMode.Create))
+        {
+            ZipArchiveEntry entry = archive.CreateEntry("tool.exe");
+            await using Stream stream = entry.Open();
+            await stream.WriteAsync("portable"u8.ToArray());
+        }
+
+        byte[] artifactBytes = await File.ReadAllBytesAsync(artifactPath);
+        var artifactHash = new Sha256Hash(Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(artifactBytes)));
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        Installer installer = Assert.Single(package.Installer.Installers!);
+        installer.InstallerType = InstallerType.Zip;
+        installer.NestedInstallerType = InstallerType.Portable;
+        installer.NestedInstallerFiles =
+        [
+            new NestedInstallerFile
+            {
+                RelativeFilePath = "tool.exe",
+                PortableCommandAlias = "example",
+            },
+        ];
+        installer.InstallerSha256 = artifactHash;
+        var download = new DownloadResult
+        {
+            FilePath = artifactPath,
+            FileName = "artifact.zip",
+            Sha256 = artifactHash,
+            SizeInBytes = artifactBytes.Length,
+            RetrievedAt = new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero),
+            InitialUrl = installer.InstallerUrl!,
+            FinalUrl = installer.InstallerUrl!,
+        };
+        var transaction = new RecordingTransaction();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new PassThroughRuleRunner(),
+            new PreflightGateWorkflowAdapter(
+                new PreflightGate(new StablePreflightNetwork(download))),
+            transaction,
+            artifacts: new WritingArtifactProcessor(),
+            clock: new FixedClock());
+        var request = new SubmitOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            Documents = Documents(package, "custom tool"),
+            InstallerArtifacts =
+            [
+                new InstallerArtifact(installer.InstallerUrl!, download),
+            ],
+        };
+        WorkflowOperationResult planned = await engine.SubmitAsync(request);
+
+        WorkflowOperationResult result = await engine.ApplyVerifiedPlanAsync(
+            request,
+            planned.Plan.Fingerprint);
+
+        Assert.True(result.Applied, result.Plan.Validation.ToText());
+        Assert.DoesNotContain(
+            result.Plan.Validation.Findings,
+            static finding => finding.Code == "VLD3012");
+        Assert.True(File.Exists(artifactPath));
+        Assert.Equal(1, transaction.Calls);
     }
 
     [Fact]

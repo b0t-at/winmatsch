@@ -174,6 +174,28 @@ public interface IGitHubRepositoryClient : IDisposable
         return result;
     }
 
+    public async Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
+        GetPullRequestChangedFilesSnapshotsBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(pullRequests);
+        IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> files =
+            await GetPullRequestChangedFilesBatchAsync(
+                repository,
+                pullRequests,
+                cancellationToken).ConfigureAwait(false);
+        var pullRequestsByNumber = pullRequests.ToDictionary(
+            static pullRequest => pullRequest.Number);
+        return files.ToDictionary(
+            static pair => pair.Key,
+            pair => new PullRequestChangedFilesSnapshot(
+                pullRequestsByNumber[pair.Key],
+                pair.Value));
+    }
+
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,
         long number,

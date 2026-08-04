@@ -235,6 +235,31 @@ public sealed class GitHubPullRequestTests
     }
 
     [Fact]
+    public async Task Pull_request_changed_file_snapshot_refreshes_a_moved_head()
+    {
+        PullRequestInfo expected = Assert.Single(CreatePullRequests(1));
+        PullRequestInfo observed = expected with
+        {
+            HeadSha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            UpdatedAt = expected.UpdatedAt.AddMinutes(1),
+        };
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(GraphQlFilesJson([observed])));
+
+        IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot> snapshots =
+            await GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesSnapshotsBatchAsync(
+                    _repository,
+                    [expected],
+                    TestContext.Current.CancellationToken);
+
+        PullRequestChangedFilesSnapshot snapshot = Assert.Single(snapshots).Value;
+        Assert.Equal(expected.NodeId, snapshot.PullRequest.NodeId);
+        Assert.Equal(observed.HeadSha, snapshot.PullRequest.HeadSha);
+        Assert.Single(snapshot.Files);
+    }
+
+    [Fact]
     public async Task Pull_request_changed_files_batch_completes_truncated_graphql_files_via_rest()
     {
         PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
@@ -249,6 +274,14 @@ public sealed class GitHubPullRequestTests
             ]));
         handler.Add(_ => GitHubClientTestSupport.Json(
             """[{"filename":"second.yaml","status":"added"}]"""));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GitHubClientTestSupport.PullRequestJson(
+                pullRequest.Number,
+                pullRequest.Title,
+                headOwner: pullRequest.HeadOwner,
+                headBranch: pullRequest.HeadBranch,
+                headSha: pullRequest.HeadSha,
+                baseSha: pullRequest.BaseSha!)));
 
         IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> files =
             await GitHubClientTestSupport.CreateClient(handler)
@@ -258,7 +291,7 @@ public sealed class GitHubPullRequestTests
                     TestContext.Current.CancellationToken);
 
         Assert.Equal(["first.yaml", "second.yaml"], files[pullRequest.Number].Select(static file => file.Path));
-        Assert.Equal(3, handler.Requests.Count);
+        Assert.Equal(4, handler.Requests.Count);
     }
 
     [Fact]
@@ -276,6 +309,14 @@ public sealed class GitHubPullRequestTests
               "previous_filename":"manifests/source.yaml"
             }]
             """));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GitHubClientTestSupport.PullRequestJson(
+                pullRequest.Number,
+                pullRequest.Title,
+                headOwner: pullRequest.HeadOwner,
+                headBranch: pullRequest.HeadBranch,
+                headSha: pullRequest.HeadSha,
+                baseSha: pullRequest.BaseSha!)));
 
         IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> files =
             await GitHubClientTestSupport.CreateClient(handler)
@@ -288,7 +329,7 @@ public sealed class GitHubPullRequestTests
         Assert.Equal("manifests/copied.yaml", file.Path);
         Assert.Equal("manifests/source.yaml", file.PreviousPath);
         Assert.Equal(PullRequestFileStatus.Copied, file.Status);
-        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal(3, handler.Requests.Count);
     }
 
     [Fact]
@@ -825,7 +866,17 @@ public sealed class GitHubPullRequestTests
                 {
                   "id":"{{pullRequest.NodeId}}",
                   "number":{{pullRequest.Number}},
+                  "title":"{{pullRequest.Title}}",
+                  "state":"{{(pullRequest.State == PullRequestState.Open ? "OPEN" : "CLOSED")}}",
+                  "isDraft":{{pullRequest.IsDraft.ToString().ToLowerInvariant()}},
+                  "headRefName":"{{pullRequest.HeadBranch}}",
                   "headRefOid":"{{pullRequest.HeadSha}}",
+                  "baseRefName":"{{pullRequest.BaseBranch}}",
+                  "baseRefOid":"{{pullRequest.BaseSha}}",
+                  "url":"{{pullRequest.WebUri}}",
+                  "createdAt":"{{pullRequest.CreatedAt:O}}",
+                  "updatedAt":"{{pullRequest.UpdatedAt:O}}",
+                  "headRepository":{"nameWithOwner":"{{pullRequest.HeadRepository}}"},
                   "files":{
                     "nodes":[{"path":"manifests/example.yaml","changeType":"{{changeType}}"}],
                     "pageInfo":{"hasNextPage":{{hasNextPage.ToString().ToLowerInvariant()}}}

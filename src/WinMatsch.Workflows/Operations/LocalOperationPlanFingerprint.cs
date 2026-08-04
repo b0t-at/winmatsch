@@ -178,6 +178,7 @@ public static class LocalOperationPlanFingerprint
             case SubmitOperationRequest value:
                 writer.Add("normalize", value.Normalize ? "true" : "false");
                 writer.Add("artifact-directory", value.ArtifactDirectory);
+                AddInstallerArtifacts(writer, value.InstallerArtifacts);
                 writer.Add(
                     "release-provenance-repository",
                     value.ReleaseProvenance?.Repository.ToString());

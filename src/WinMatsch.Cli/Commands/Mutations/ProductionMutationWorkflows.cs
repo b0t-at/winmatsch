@@ -395,12 +395,21 @@ internal sealed class ProductionMutationWorkflow(
 
         _artifactDirectory ??= Directory.CreateTempSubdirectory(
             "winmatsch-submit-artifacts-").FullName;
-        _ = await downloader.DownloadManyAsync(
+        IReadOnlyList<DownloadResult> downloads = await downloader.DownloadManyAsync(
             urls,
             _artifactDirectory,
             configuration.ConcurrentDownloads,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        return submit with { ArtifactDirectory = _artifactDirectory };
+        return submit with
+        {
+            ArtifactDirectory = _artifactDirectory,
+            InstallerArtifacts =
+            [
+                .. urls.Zip(
+                    downloads,
+                    static (url, download) => new InstallerArtifact(url, download)),
+            ],
+        };
     }
 
     private static ImmutableArray<string> ExtractInstallerUrls(
