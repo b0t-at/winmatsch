@@ -360,7 +360,8 @@ if [ -n "$AFD_RG" ] && [ -n "$AFD_PROFILE" ] && [ -n "$AFD_ENDPOINT" ]; then
     az afd endpoint purge --only-show-errors \
         --resource-group "$AFD_RG" --profile-name "$AFD_PROFILE" \
         --endpoint-name "$AFD_ENDPOINT" --content-paths "${AFD_PATHS[@]}" \
-        >/dev/null
+        --no-wait --output none
+    log "Purge accepted; Front Door will finish it asynchronously"
 elif [ -n "$AFD_RG$AFD_PROFILE$AFD_ENDPOINT" ]; then
     warn "Front Door purge skipped: need all three --afd-* options"
 fi

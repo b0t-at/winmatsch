@@ -188,13 +188,16 @@ be left empty to run synchronization only.
 When the `Release` environment additionally defines the secrets
 `AZURE_AFD_RESOURCE_GROUP`, `AZURE_AFD_PROFILE` and `AZURE_AFD_ENDPOINT`
 (all three, or none), the workflow passes the matching `--afd-*` flags so
-every publish ends with a Front Door purge and new releases appear at the
-edge immediately. `AZURE_AFD_ENDPOINT` is the endpoint *resource name* (e.g.
+every publish requests a Front Door purge without waiting for Azure's
+long-running-operation acknowledgement. For a new stable release, the
+publisher instead checks the endpoint's `/latest/version.txt` every 10 seconds
+until it serves the new version, with a 12-minute timeout. `AZURE_AFD_ENDPOINT`
+is the endpoint *resource name* (e.g.
 `WinMatsch`), not the `<name>-<hash>.z0X.azurefd.net` hostname — validation
 rejects values containing a dot. Without the trio the workflow only warns:
 edge PoPs then keep serving cached pages until the five-minute origin TTL
-expires. A failed purge fails the workflow run — rerun it after fixing RBAC;
-republishing the same version is idempotent.
+expires. A rejected purge request or propagation timeout fails the workflow
+run — rerun it after fixing RBAC; republishing the same version is idempotent.
 
 ## Recommended Front Door Standard/Premium configuration
 
