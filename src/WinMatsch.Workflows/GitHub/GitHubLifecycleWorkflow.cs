@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Net;
+using System.Text.Json;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
 using WinMatsch.Validation;
@@ -1249,6 +1250,26 @@ public sealed class GitHubLifecycleWorkflow
             associationExcludedPullRequestNumbers.Add(additionallyExcluded);
         }
 
+        if (additionallyExcludedPullRequestNumber is null)
+        {
+            IReadOnlyList<PullRequestInfo> narrowedCandidates =
+                await SearchNarrowedPullRequestCandidatesAsync(
+                    plan,
+                    expectedBaseBranch,
+                    cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<PullRequestInfo> narrowedAssociated =
+                await FindAssociatedPullRequestsFromCandidatesAsync(
+                    plan,
+                    expectedBaseBranch,
+                    associationExcludedPullRequestNumbers,
+                    narrowedCandidates,
+                    cancellationToken).ConfigureAwait(false);
+            if (narrowedAssociated.Count > 0)
+            {
+                return narrowedAssociated;
+            }
+        }
+
         IReadOnlyList<PullRequestInfo> candidates;
         try
         {
@@ -1258,7 +1279,9 @@ public sealed class GitHubLifecycleWorkflow
                     PullRequestState.Open,
                     BaseBranch: expectedBaseBranch)
                 {
-                    MaximumResults = PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                    MaximumResults =
+                        PullRequestManifestEvidenceLimits.MaximumOpenPullRequests
+                        + associationExcludedPullRequestNumbers.Count,
                 },
                 cancellationToken).ConfigureAwait(false);
         }
@@ -1269,6 +1292,71 @@ public sealed class GitHubLifecycleWorkflow
                 + exception.Message);
         }
 
+        return await FindAssociatedPullRequestsFromCandidatesAsync(
+            plan,
+            expectedBaseBranch,
+            associationExcludedPullRequestNumbers,
+            candidates,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<PullRequestInfo>> SearchNarrowedPullRequestCandidatesAsync(
+        GitHubSubmissionPlan plan,
+        string expectedBaseBranch,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _gitHub.SearchPullRequestsByTextAsync(
+                plan.Request.UpstreamRepository,
+                new(
+                    [
+                        plan.Request.LocalPlan.PackageIdentifier.Value,
+                        plan.Request.LocalPlan.PackageVersion.Value,
+                    ],
+                    PullRequestState.Open,
+                    expectedBaseBranch)
+                {
+                    MaximumResults = PullRequestManifestEvidenceLimits.MaximumCandidates,
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (NotSupportedException)
+        {
+            return [];
+        }
+        catch (GitHubApiException exception) when (
+            exception.ErrorKind != GitHubApiErrorKind.RateLimited)
+        {
+            // Search is only an optimization. The exhaustive evidence pass below is the
+            // authoritative fallback for index lag, incomplete results, and transport errors.
+            return [];
+        }
+        catch (HttpRequestException exception) when (exception is not GitHubApiException)
+        {
+            return [];
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return [];
+        }
+    }
+
+    private async Task<IReadOnlyList<PullRequestInfo>> FindAssociatedPullRequestsFromCandidatesAsync(
+        GitHubSubmissionPlan plan,
+        string expectedBaseBranch,
+        HashSet<long> associationExcludedPullRequestNumbers,
+        IReadOnlyList<PullRequestInfo> candidates,
+        CancellationToken cancellationToken)
+    {
         PullRequestInfo[] associationCandidates =
         [
             .. candidates.Where(pullRequest =>
@@ -1279,6 +1367,18 @@ public sealed class GitHubLifecycleWorkflow
                     expectedBaseBranch,
                     StringComparison.Ordinal)),
         ];
+        if (associationCandidates.Length == 0)
+        {
+            return [];
+        }
+
+        if (associationCandidates.Length > PullRequestManifestEvidenceLimits.MaximumOpenPullRequests)
+        {
+            throw new PullRequestEvidenceLimitException(
+                "Open pull-request discovery exceeds the safe evidence limit of " +
+                $"{PullRequestManifestEvidenceLimits.MaximumOpenPullRequests}.");
+        }
+
         var associated = new List<PullRequestInfo>();
         IReadOnlyList<PullRequestInfo> evidenceCandidates =
             await _pullRequestEvidence.GetCandidatesAsync(

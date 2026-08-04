@@ -484,6 +484,8 @@ public sealed class GitHubReadOperationsTests
             UserAgent = "winmatsch-tests",
             RetryBaseDelay = TimeSpan.Zero,
             MaxRetryDelay = TimeSpan.Zero,
+            SecondaryRateLimitBaseDelay = TimeSpan.Zero,
+            MaxSecondaryRateLimitDelay = TimeSpan.Zero,
             MaxTransientRetries = 2,
         };
         GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(

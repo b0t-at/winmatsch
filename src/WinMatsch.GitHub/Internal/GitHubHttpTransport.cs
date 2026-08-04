@@ -180,7 +180,11 @@ internal sealed class GitHubHttpTransport
             }
             catch (HttpRequestException) when (allowRetry && attempt < _options.MaxTransientRetries)
             {
-                await DelayAsync(attempt, null, cancellationToken).ConfigureAwait(false);
+                await DelayAsync(
+                    attempt,
+                    null,
+                    secondaryRateLimited: false,
+                    cancellationToken).ConfigureAwait(false);
                 continue;
             }
             catch (OperationCanceledException) when (
@@ -188,7 +192,11 @@ internal sealed class GitHubHttpTransport
                 !cancellationToken.IsCancellationRequested &&
                 attempt < _options.MaxTransientRetries)
             {
-                await DelayAsync(attempt, null, cancellationToken).ConfigureAwait(false);
+                await DelayAsync(
+                    attempt,
+                    null,
+                    secondaryRateLimited: false,
+                    cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -197,21 +205,84 @@ internal sealed class GitHubHttpTransport
                 ObserveResponseHeaders(response);
                 if (!response.IsSuccessStatusCode)
                 {
-                    if (allowRetry &&
-                        attempt < _options.MaxTransientRetries &&
-                        IsTransient(response))
+                    bool headerRateLimited = IsRateLimited(response, "");
+                    if (allowRetry
+                        && attempt < _options.MaxTransientRetries
+                        && IsTransient(response, ""))
                     {
                         RetryConditionHeaderValue? retryAfter = GetServerRetryAfter(response);
                         response.Dispose();
                         await DelayAsync(
                                 attempt,
                                 retryAfter,
+                                headerRateLimited,
                                 cancellationToken)
                             .ConfigureAwait(false);
                         continue;
                     }
 
-                    GitHubApiErrorKind errorKind = IsRateLimited(response)
+                    string errorBody;
+                    try
+                    {
+                        errorBody = await response.Content
+                            .ReadAsStringAsync(cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (
+                        exception is HttpRequestException or IOException)
+                    {
+                        if (allowRetry
+                            && attempt < _options.MaxTransientRetries
+                            && response.StatusCode == HttpStatusCode.Forbidden)
+                        {
+                            response.Dispose();
+                            await DelayAsync(
+                                attempt,
+                                GetServerRetryAfter(response),
+                                secondaryRateLimited: true,
+                                cancellationToken).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        throw CreateUnreadableErrorResponseException(response, exception);
+                    }
+                    catch (OperationCanceledException exception) when (
+                        !cancellationToken.IsCancellationRequested)
+                    {
+                        if (allowRetry
+                            && attempt < _options.MaxTransientRetries
+                            && response.StatusCode == HttpStatusCode.Forbidden)
+                        {
+                            response.Dispose();
+                            await DelayAsync(
+                                attempt,
+                                GetServerRetryAfter(response),
+                                secondaryRateLimited: true,
+                                cancellationToken).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        throw CreateUnreadableErrorResponseException(response, exception);
+                    }
+
+                    bool secondaryRateLimited =
+                        IsSecondaryRateLimitResponse(response, errorBody);
+                    if (allowRetry &&
+                        attempt < _options.MaxTransientRetries &&
+                        IsTransient(response, errorBody))
+                    {
+                        RetryConditionHeaderValue? retryAfter = GetServerRetryAfter(response);
+                        response.Dispose();
+                        await DelayAsync(
+                                attempt,
+                                retryAfter,
+                                secondaryRateLimited,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        continue;
+                    }
+
+                    GitHubApiErrorKind errorKind = IsRateLimited(response, errorBody)
                         ? GitHubApiErrorKind.RateLimited
                         : IsGraphQlEndpoint(uri) &&
                             response.StatusCode is HttpStatusCode.NotFound
@@ -222,7 +293,8 @@ internal sealed class GitHubHttpTransport
                     throw await CreateExceptionAsync(
                         response,
                         errorKind,
-                        cancellationToken).ConfigureAwait(false);
+                        cancellationToken,
+                        errorBody).ConfigureAwait(false);
                 }
 
                 await using Stream stream = await response.Content
@@ -271,16 +343,22 @@ internal sealed class GitHubHttpTransport
     private async Task DelayAsync(
         int attempt,
         RetryConditionHeaderValue? retryAfter,
+        bool secondaryRateLimited,
         CancellationToken cancellationToken)
     {
         TimeSpan delay = retryAfter?.Delta ??
             (retryAfter?.Date is DateTimeOffset date
                 ? date - DateTimeOffset.UtcNow
-                : _options.RetryBaseDelay * Math.Pow(2, attempt));
+                : (secondaryRateLimited
+                    ? _options.SecondaryRateLimitBaseDelay
+                    : _options.RetryBaseDelay) * Math.Pow(2, attempt));
+        TimeSpan maximumDelay = secondaryRateLimited
+            ? _options.MaxSecondaryRateLimitDelay
+            : _options.MaxRetryDelay;
         delay = TimeSpan.FromMilliseconds(Math.Clamp(
             delay.TotalMilliseconds,
             0,
-            _options.MaxRetryDelay.TotalMilliseconds));
+            maximumDelay.TotalMilliseconds));
         if (delay > TimeSpan.Zero)
         {
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
@@ -337,7 +415,7 @@ internal sealed class GitHubHttpTransport
         return true;
     }
 
-    private static bool IsTransient(HttpResponseMessage response)
+    private static bool IsTransient(HttpResponseMessage response, string responseBody)
         => response.StatusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests ||
             (int)response.StatusCode >= 500 ||
             (response.StatusCode == HttpStatusCode.Forbidden &&
@@ -345,16 +423,46 @@ internal sealed class GitHubHttpTransport
               string.Equals(
                   TryGetHeader(response.Headers, "X-RateLimit-Remaining"),
                   "0",
-                  StringComparison.Ordinal)));
+                  StringComparison.Ordinal) ||
+              IsSecondaryRateLimitBody(responseBody)));
 
-    private static bool IsRateLimited(HttpResponseMessage response)
+    private static bool IsRateLimited(HttpResponseMessage response, string responseBody)
         => response.StatusCode == HttpStatusCode.TooManyRequests
             || (response.StatusCode == HttpStatusCode.Forbidden
-                && (response.Headers.RetryAfter is not null
-                   || string.Equals(
-                       TryGetHeader(response.Headers, "X-RateLimit-Remaining"),
-                       "0",
-                       StringComparison.Ordinal)));
+               && (response.Headers.RetryAfter is not null
+                  || string.Equals(
+                      TryGetHeader(response.Headers, "X-RateLimit-Remaining"),
+                      "0",
+                      StringComparison.Ordinal)
+                  || IsSecondaryRateLimitBody(responseBody)));
+
+    private static bool IsSecondaryRateLimitBody(string responseBody)
+    {
+        RestErrorDto? error;
+        try
+        {
+            error = JsonSerializer.Deserialize(
+               responseBody,
+               GitHubJsonContext.Default.RestErrorDto);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        return error?.Message?.Contains(
+            "secondary rate limit",
+            StringComparison.OrdinalIgnoreCase) == true
+            || error?.Message?.Contains(
+               "abuse detection",
+               StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static bool IsSecondaryRateLimitResponse(
+        HttpResponseMessage response,
+        string responseBody)
+        => (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests)
+            && IsSecondaryRateLimitBody(responseBody);
 
     private static RetryConditionHeaderValue? GetServerRetryAfter(HttpResponseMessage response)
     {
@@ -364,6 +472,10 @@ internal sealed class GitHubHttpTransport
         }
 
         if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests &&
+            string.Equals(
+                TryGetHeader(response.Headers, "X-RateLimit-Remaining"),
+                "0",
+                StringComparison.Ordinal) &&
             TryGetLongHeader(response.Headers, "X-RateLimit-Reset", out long reset))
         {
             try
@@ -382,9 +494,11 @@ internal sealed class GitHubHttpTransport
     private static async Task<GitHubApiException> CreateExceptionAsync(
         HttpResponseMessage response,
         GitHubApiErrorKind errorKind,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? responseBody = null)
     {
-        string body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        string body = responseBody
+            ?? await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         RestErrorDto? error = null;
         try
         {
@@ -411,6 +525,27 @@ internal sealed class GitHubHttpTransport
             GetRequestId(response),
             details,
             errorKind: errorKind,
+            rateLimit: rateLimit,
+            retryAfter: GetResponseRetryAfter(response));
+    }
+
+    private static GitHubApiException CreateUnreadableErrorResponseException(
+        HttpResponseMessage response,
+        Exception inner)
+    {
+        bool conservativelyRateLimited =
+            response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests;
+        RateLimitInfo? rateLimit = TryGetRateLimit(response, out RateLimitInfo parsedRateLimit)
+            ? parsedRateLimit
+            : null;
+        return new GitHubApiException(
+            $"GitHub returned HTTP {(int)response.StatusCode}, but its error response could not be read.",
+            response.StatusCode,
+            GetRequestId(response),
+            inner: inner,
+            errorKind: conservativelyRateLimited
+                ? GitHubApiErrorKind.RateLimited
+                : GitHubApiErrorKind.Unknown,
             rateLimit: rateLimit,
             retryAfter: GetResponseRetryAfter(response));
     }

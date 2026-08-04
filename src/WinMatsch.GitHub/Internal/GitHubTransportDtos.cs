@@ -280,6 +280,30 @@ internal sealed class RestPullRequestDto
     public DateTimeOffset UpdatedAt { get; set; }
 }
 
+internal sealed class RestIssueSearchResponseDto
+{
+    [JsonPropertyName("total_count")]
+    public int TotalCount { get; set; }
+
+    [JsonPropertyName("incomplete_results")]
+    public bool IncompleteResults { get; set; }
+
+    public List<RestIssueSearchItemDto>? Items { get; set; }
+}
+
+internal sealed class RestIssueSearchItemDto
+{
+    public long Number { get; set; }
+
+    [JsonPropertyName("pull_request")]
+    public RestIssueSearchPullRequestDto? PullRequest { get; set; }
+}
+
+internal sealed class RestIssueSearchPullRequestDto
+{
+    public string? Url { get; set; }
+}
+
 internal sealed class RestPullRequestRefDto
 {
     public string Label { get; set; } = "";
@@ -585,6 +609,8 @@ internal sealed class GraphQlPullRequestFileNodeDto
 
 internal sealed class GraphQlPullRequestFileConnectionDto
 {
+    public int TotalCount { get; set; }
+
     public List<GraphQlPullRequestChangedFileDto?>? Nodes { get; set; }
 
     public GraphQlPageInfoDto? PageInfo { get; set; }

@@ -185,6 +185,12 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public List<PullRequestSearch> PullRequestSearches { get; } = [];
 
+    public int TextSearchCalls { get; private set; }
+
+    public List<PullRequestTextSearch> PullRequestTextSearches { get; } = [];
+
+    public Exception? PullRequestTextSearchFailure { get; set; }
+
     public int ContentCalls { get; private set; }
 
     public List<(RepositoryCoordinates Repository, string Path, string Reference)> ContentRequests { get; } = [];
@@ -206,6 +212,8 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     public int FailNextPullRequestContentCalls { get; set; }
 
     public Action<FakeGitHubClient, int>? OnSearch { get; set; }
+
+    public Action<FakeGitHubClient, int>? OnTextSearch { get; set; }
 
     public Action<FakeGitHubClient, long>? OnGetPullRequest { get; set; }
 
@@ -647,6 +655,48 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
             return Task.FromException<IReadOnlyList<PullRequestInfo>>(
                 new GitHubApiException(
                     $"GitHub pagination exceeded the safe result limit of {maximum}."));
+        }
+
+        return Task.FromResult<IReadOnlyList<PullRequestInfo>>(matches);
+    }
+
+    public Task<IReadOnlyList<PullRequestInfo>> SearchPullRequestsByTextAsync(
+        RepositoryCoordinates repository,
+        PullRequestTextSearch search,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        TextSearchCalls++;
+        PullRequestTextSearches.Add(search);
+        OnTextSearch?.Invoke(this, TextSearchCalls);
+        if (PullRequestTextSearchFailure is not null)
+        {
+            return Task.FromException<IReadOnlyList<PullRequestInfo>>(
+                PullRequestTextSearchFailure);
+        }
+
+        IEnumerable<PullRequestInfo> result = _pullRequests;
+        if (search.State != PullRequestState.All)
+        {
+            result = result.Where(pr => pr.State == search.State);
+        }
+
+        if (search.BaseBranch is not null)
+        {
+            result = result.Where(pr => pr.BaseBranch == search.BaseBranch);
+        }
+
+        result = result.Where(pullRequest =>
+            search.Terms.All(term =>
+                pullRequest.Title.Contains(term, StringComparison.OrdinalIgnoreCase)
+                || pullRequest.Body?.Contains(term, StringComparison.OrdinalIgnoreCase) == true));
+        PullRequestInfo[] matches = [.. result];
+        if (matches.Length > search.MaximumResults)
+        {
+            return Task.FromException<IReadOnlyList<PullRequestInfo>>(
+                new GitHubApiException(
+                    "GitHub pull-request text search exceeded the safe candidate limit of " +
+                    $"{search.MaximumResults}."));
         }
 
         return Task.FromResult<IReadOnlyList<PullRequestInfo>>(matches);

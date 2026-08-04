@@ -130,6 +130,16 @@ public interface IGitHubRepositoryClient : IDisposable
         PullRequestSearch search,
         CancellationToken cancellationToken = default);
 
+    public Task<IReadOnlyList<PullRequestInfo>> SearchPullRequestsByTextAsync(
+        RepositoryCoordinates repository,
+        PullRequestTextSearch search,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromException<IReadOnlyList<PullRequestInfo>>(
+            new NotSupportedException(
+                "This GitHub client does not support server-side pull-request text search."));
+    }
+
     public Task<PullRequestInfo> CreatePullRequestAsync(
         RepositoryCoordinates repository,
         CreatePullRequestRequest request,

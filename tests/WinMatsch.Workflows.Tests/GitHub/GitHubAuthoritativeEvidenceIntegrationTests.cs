@@ -445,6 +445,7 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
               "updatedAt": "2026-01-02T00:00:00Z",
               "headRepository": { "nameWithOwner": "{{_headRepository}}" },
               "files": {
+                "totalCount": 1,
                 "nodes": [{
                   "path": "{{path}}",
                   "changeType": "MODIFIED"
@@ -487,6 +488,7 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
                     "nameWithOwner": "{{pullRequest.HeadRepository}}"
                   },
                   "files": {
+                    "totalCount": 1,
                     "nodes": [{
                       "path": "unrelated/{{pullRequest.Number}}.txt",
                       "changeType": "MODIFIED"

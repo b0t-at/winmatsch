@@ -9,6 +9,166 @@ public sealed class GitHubPullRequestTests
     private static readonly RepositoryCoordinates _repository = new("upstream", "repo");
 
     [Fact]
+    public async Task Pull_request_text_search_is_server_scoped_and_hydrates_current_identity()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(request =>
+        {
+            Assert.Equal("/api/search/issues", request.Uri.AbsolutePath);
+            string query = Uri.UnescapeDataString(request.Uri.Query);
+            Assert.Contains("\"Contoso.App\"", query, StringComparison.Ordinal);
+            Assert.Contains("\"2.0.0\"", query, StringComparison.Ordinal);
+            Assert.Contains("repo:upstream/repo", query, StringComparison.Ordinal);
+            Assert.Contains("is:pr", query, StringComparison.Ordinal);
+            Assert.Contains("is:open", query, StringComparison.Ordinal);
+            Assert.Contains("base:\"main\"", query, StringComparison.Ordinal);
+            Assert.Contains("in:title,body", query, StringComparison.Ordinal);
+            return GitHubClientTestSupport.Json(
+                """
+                {
+                  "total_count": 1,
+                  "incomplete_results": false,
+                  "items": [
+                    {
+                      "number": 7,
+                      "pull_request": {
+                        "url": "https://github.invalid/api/repos/upstream/repo/pulls/7"
+                      }
+                    }
+                  ]
+                }
+                """,
+                headers:
+                [
+                    ("X-RateLimit-Limit", "30"),
+                    ("X-RateLimit-Remaining", "29"),
+                    ("X-RateLimit-Used", "1"),
+                    ("X-RateLimit-Reset", "1767229200"),
+                    ("X-RateLimit-Resource", "search"),
+                ]);
+        });
+        handler.Add(request =>
+        {
+            Assert.EndsWith("/repos/upstream/repo/pulls/7", request.Uri.AbsolutePath, StringComparison.Ordinal);
+            return GitHubClientTestSupport.Json(
+                GitHubClientTestSupport.PullRequestJson(
+                    7,
+                    "Update version: Contoso.App version 2.0.0"));
+        });
+        GitHubRepositoryClient client = GitHubClientTestSupport.CreateClient(handler);
+
+        PullRequestInfo pullRequest = Assert.Single(await client.SearchPullRequestsByTextAsync(
+            _repository,
+            new(["Contoso.App", "2.0.0"], BaseBranch: "main"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(7, pullRequest.Number);
+        Assert.Equal("search", client.LastRateLimit?.Resource);
+    }
+
+    [Fact]
+    public async Task Incomplete_pull_request_text_search_fails_closed_before_hydration()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "total_count": 1,
+              "incomplete_results": true,
+              "items": []
+            }
+            """));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler).SearchPullRequestsByTextAsync(
+                _repository,
+                new(["Contoso.App", "2.0.0"]),
+                TestContext.Current.CancellationToken));
+
+        Assert.Contains("incomplete", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_text_search_candidate_overflow_fails_closed()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """
+            {
+              "total_count": 65,
+              "incomplete_results": false,
+              "items": []
+            }
+            """));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler).SearchPullRequestsByTextAsync(
+                _repository,
+                new(["Contoso.App", "2.0.0"]) { MaximumResults = 64 },
+                TestContext.Current.CancellationToken));
+
+        Assert.Contains("candidate limit", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Pull_request_text_search_retries_and_classifies_headerless_secondary_limits()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            handler.Add(_ => GitHubClientTestSupport.Json(
+                """{"message":"You have exceeded a secondary rate limit."}""",
+                HttpStatusCode.Forbidden,
+                ("X-RateLimit-Limit", "30"),
+                ("X-RateLimit-Remaining", "29"),
+                ("X-RateLimit-Used", "1"),
+                ("X-RateLimit-Reset", "0"),
+                ("X-RateLimit-Resource", "search")));
+        }
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler).SearchPullRequestsByTextAsync(
+                _repository,
+                new(["Contoso.App", "2.0.0"]),
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(GitHubApiErrorKind.RateLimited, exception.ErrorKind);
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Headerless_secondary_limit_uses_dedicated_cancellable_cooldown()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """{"message":"You have exceeded a secondary rate limit."}""",
+            HttpStatusCode.Forbidden));
+        var options = new GitHubClientOptions
+        {
+            ApiBaseUri = new Uri("https://github.invalid/api/"),
+            GraphQlUri = new Uri("https://github.invalid/graphql"),
+            UserAgent = "winmatsch-tests",
+            MaxTransientRetries = 1,
+            RetryBaseDelay = TimeSpan.Zero,
+            MaxRetryDelay = TimeSpan.Zero,
+            SecondaryRateLimitBaseDelay = TimeSpan.FromMinutes(1),
+            MaxSecondaryRateLimitDelay = TimeSpan.FromMinutes(1),
+        };
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => GitHubClientTestSupport.CreateClient(handler, options)
+                .SearchPullRequestsByTextAsync(
+                    _repository,
+                    new(["Contoso.App", "2.0.0"]),
+                    cancellation.Token));
+
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
     public async Task Pull_request_search_paginates_and_matches_exact_title_token()
     {
         var handler = new ScriptedHttpMessageHandler();
@@ -169,7 +329,7 @@ public sealed class GitHubPullRequestTests
     public async Task Pull_request_changed_file_pagination_fails_closed_at_the_limit()
     {
         var handler = new ScriptedHttpMessageHandler();
-        for (int page = 1; page <= 10; page++)
+        for (int page = 1; page <= 30; page++)
         {
             int nextPage = page + 1;
             handler.Add(_ => GitHubClientTestSupport.Json(
@@ -184,7 +344,38 @@ public sealed class GitHubPullRequestTests
             .CreateClient(handler)
             .GetPullRequestChangedFilesAsync(_repository, 7, TestContext.Current.CancellationToken));
 
-        Assert.Equal(10, handler.Requests.Count);
+        Assert.Equal(30, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Rest_only_changed_files_reject_exact_github_ceiling_without_total()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        for (int page = 1; page <= 30; page++)
+        {
+            string files = string.Join(
+                ',',
+                Enumerable.Range((page - 1) * 100, 100)
+                    .Select(index => $$"""{"filename":"manifests/large/{{index:D4}}.yaml","status":"modified"}"""));
+            (string Name, string Value)[] headers = page < 30
+                ?
+                [
+                    ("Link",
+                        $"<https://github.invalid/api/pulls/7/files?page={page + 1}>; rel=\"next\""),
+                ]
+                : [];
+            handler.Add(_ => GitHubClientTestSupport.Json($"[{files}]", headers: headers));
+        }
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesAsync(
+                    _repository,
+                    7,
+                    TestContext.Current.CancellationToken));
+
+        Assert.Contains("without an authoritative total count", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(30, handler.Requests.Count);
     }
 
     [Fact]
@@ -265,7 +456,7 @@ public sealed class GitHubPullRequestTests
         PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
         var handler = new ScriptedHttpMessageHandler();
         handler.Add(_ => GitHubClientTestSupport.Json(
-            GraphQlFilesJson([pullRequest], hasNextPage: true)));
+            GraphQlFilesJson([pullRequest], hasNextPage: true, totalCount: 2)));
         handler.Add(_ => GitHubClientTestSupport.Json(
             """[{"filename":"first.yaml","status":"modified"}]""",
             headers:
@@ -292,6 +483,96 @@ public sealed class GitHubPullRequestTests
 
         Assert.Equal(["first.yaml", "second.yaml"], files[pullRequest.Number].Select(static file => file.Path));
         Assert.Equal(4, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_batch_supports_large_sync_pull_requests()
+    {
+        const int changedFileCount = 2_278;
+        PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlFilesJson(
+                [pullRequest],
+                hasNextPage: true,
+                totalCount: changedFileCount)));
+        int remaining = changedFileCount;
+        for (int page = 1; remaining > 0; page++)
+        {
+            int pageFileCount = Math.Min(100, remaining);
+            remaining -= pageFileCount;
+            string pageFiles = string.Join(
+                ',',
+                Enumerable.Range((page - 1) * 100, pageFileCount)
+                    .Select(index => $$"""{"filename":"manifests/large/{{index:D4}}.yaml","status":"modified"}"""));
+            (string Name, string Value)[] headers = remaining > 0
+                ?
+                [
+                    ("Link",
+                        $"<https://github.invalid/api/pulls/1/files?page={page + 1}>; rel=\"next\""),
+                ]
+                : [];
+            handler.Add(_ => GitHubClientTestSupport.Json($"[{pageFiles}]", headers: headers));
+        }
+
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GitHubClientTestSupport.PullRequestJson(
+                pullRequest.Number,
+                pullRequest.Title,
+                headOwner: pullRequest.HeadOwner,
+                headBranch: pullRequest.HeadBranch,
+                headSha: pullRequest.HeadSha,
+                baseSha: pullRequest.BaseSha!)));
+
+        IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> files =
+            await GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    [pullRequest],
+                    TestContext.Current.CancellationToken);
+
+        Assert.Equal(changedFileCount, files[pullRequest.Number].Count);
+        Assert.Equal(25, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_batch_rejects_silently_truncated_rest_results()
+    {
+        PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlFilesJson([pullRequest], hasNextPage: true, totalCount: 2)));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            """[{"filename":"first.yaml","status":"modified"}]"""));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    [pullRequest],
+                    TestContext.Current.CancellationToken));
+
+        Assert.Contains("1 of 2", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Pull_request_changed_files_batch_rejects_counts_above_github_ceiling()
+    {
+        PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlFilesJson([pullRequest], hasNextPage: true, totalCount: 3_001)));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    [pullRequest],
+                    TestContext.Current.CancellationToken));
+
+        Assert.Contains("3000", exception.Message, StringComparison.Ordinal);
+        Assert.Single(handler.Requests);
     }
 
     [Fact]
@@ -857,7 +1138,8 @@ public sealed class GitHubPullRequestTests
     private static string GraphQlFilesJson(
         IEnumerable<PullRequestInfo> pullRequests,
         bool hasNextPage = false,
-        string changeType = "MODIFIED")
+        string changeType = "MODIFIED",
+        int totalCount = 1)
     {
         string nodes = string.Join(
             ',',
@@ -878,6 +1160,7 @@ public sealed class GitHubPullRequestTests
                   "updatedAt":"{{pullRequest.UpdatedAt:O}}",
                   "headRepository":{"nameWithOwner":"{{pullRequest.HeadRepository}}"},
                   "files":{
+                    "totalCount":{{totalCount}},
                     "nodes":[{"path":"manifests/example.yaml","changeType":"{{changeType}}"}],
                     "pageInfo":{"hasNextPage":{{hasNextPage.ToString().ToLowerInvariant()}}}
                   }

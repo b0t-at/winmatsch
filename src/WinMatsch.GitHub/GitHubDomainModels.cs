@@ -143,6 +143,14 @@ public sealed record PullRequestSearch(
     public int? MaximumResults { get; init; }
 }
 
+public sealed record PullRequestTextSearch(
+    IReadOnlyList<string> Terms,
+    PullRequestState State = PullRequestState.Open,
+    string? BaseBranch = null)
+{
+    public int MaximumResults { get; init; } = 64;
+}
+
 public sealed record PullRequestInfo(
     long Number,
     string NodeId,

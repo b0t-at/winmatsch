@@ -7,6 +7,16 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub submission now uses a bounded, repository-scoped pull-request text
+  search before an exhaustive, fail-closed evidence pass that supports up to
+  5,000 open pull requests. Large upstreams no longer fail at the former
+  1,000-result pagination limit, and unrelated sync pull requests can use
+  GitHub's documented 3,000-file ceiling with authoritative total-count
+  reconciliation. Changed-file, merge-base, and pinned identity verification
+  remain authoritative when search is stale or unavailable.
+
 ## [0.8.9] - 2026-08-04
 
 ### Fixed

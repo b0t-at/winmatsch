@@ -31,6 +31,8 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
 
     public CompareResult Comparison { get; set; } = new("identical", 0, 0, 0, []);
 
+    public string MergeBaseSha { get; set; } = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     /// <summary>Manifest file lists keyed by repository-relative directory.</summary>
     public Dictionary<string, IReadOnlyList<ManifestFile>> ManifestFiles { get; } = new(StringComparer.Ordinal);
 
@@ -100,6 +102,13 @@ internal sealed class FakeMaintenanceGitHubClient : IGitHubRepositoryClient
         string head,
         CancellationToken cancellationToken = default)
         => Task.FromResult(Comparison);
+
+    public Task<string> GetMergeBaseAsync(
+        RepositoryCoordinates repository,
+        string baseReference,
+        string head,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(MergeBaseSha);
 
     public Task<UpstreamSyncResult> SyncForkAsync(
         RepositoryCoordinates fork,

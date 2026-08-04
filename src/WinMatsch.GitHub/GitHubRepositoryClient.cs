@@ -11,12 +11,15 @@ namespace WinMatsch.GitHub;
 /// <summary>A raw-HTTP, AOT-friendly GitHub GraphQL and REST client.</summary>
 public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
 {
-    private const int MaximumPullRequestFilePages = 10;
-    private const int MaximumPullRequestFiles = 1_000;
+    private const int MaximumPullRequestFilePages = 30;
+    private const int MaximumPullRequestFiles = 3_000;
     private const int MaximumPullRequestFileBatchSize = 50;
     private const int MaximumRestPullRequestFileFallbackPullRequests = 64;
     private const int MaximumRestPullRequestFileFallbackPages = 64;
     private const int MaximumTruncatedPullRequestFileFallbacks = 16;
+    private const int MaximumPullRequestTextSearchResults = 100;
+    private const int MaximumPullRequestTextSearchTerms = 5;
+    private const int MaximumPullRequestTextSearchTermLength = 128;
 
     private const string ViewerQuery =
         """
@@ -67,6 +70,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
               updatedAt
               headRepository { nameWithOwner }
               files(first: 100) {
+                totalCount
                 nodes { path changeType }
                 pageInfo { hasNextPage }
               }
@@ -846,6 +850,131 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         return filtered.ToArray();
     }
 
+    public async Task<IReadOnlyList<PullRequestInfo>> SearchPullRequestsByTextAsync(
+        RepositoryCoordinates repository,
+        PullRequestTextSearch search,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(search);
+        ArgumentNullException.ThrowIfNull(search.Terms);
+        if (search.Terms.Count is 0 or > MaximumPullRequestTextSearchTerms)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(search),
+                $"Pull-request text search requires between 1 and {MaximumPullRequestTextSearchTerms} terms.");
+        }
+
+        if (search.MaximumResults is <= 0 or > MaximumPullRequestTextSearchResults)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(search),
+                $"Pull-request text search supports between 1 and {MaximumPullRequestTextSearchResults} results.");
+        }
+
+        var searchQuery = new StringBuilder();
+        foreach (string term in search.Terms)
+        {
+            if (string.IsNullOrWhiteSpace(term) || term.Length > MaximumPullRequestTextSearchTermLength)
+            {
+                throw new ArgumentException(
+                    $"Pull-request text search terms must be non-empty and at most {MaximumPullRequestTextSearchTermLength} characters.",
+                    nameof(search));
+            }
+
+            searchQuery.Append(QuoteSearchValue(term));
+            searchQuery.Append(' ');
+        }
+
+        searchQuery.Append("in:title,body repo:");
+        searchQuery.Append(repository);
+        searchQuery.Append(" is:pr");
+        searchQuery.Append(search.State switch
+        {
+            PullRequestState.Open => " is:open",
+            PullRequestState.Closed => " is:closed",
+            PullRequestState.All => "",
+            _ => throw new ArgumentOutOfRangeException(nameof(search)),
+        });
+        if (!string.IsNullOrWhiteSpace(search.BaseBranch))
+        {
+            searchQuery.Append(" base:");
+            searchQuery.Append(QuoteSearchValue(search.BaseBranch));
+        }
+
+        string relativePath =
+            $"search/issues?per_page={search.MaximumResults.ToString(CultureInfo.InvariantCulture)}" +
+            $"&q={Escape(searchQuery.ToString())}";
+        RestIssueSearchResponseDto response = await _transport.GetAsync(
+            relativePath,
+            GitHubJsonContext.Default.RestIssueSearchResponseDto,
+            cancellationToken).ConfigureAwait(false);
+        if (response.IncompleteResults)
+        {
+            throw new GitHubApiException(
+                "GitHub pull-request text search returned incomplete results.");
+        }
+
+        if (response.TotalCount < 0 || response.Items is null)
+        {
+            throw new GitHubApiException(
+                "GitHub pull-request text search returned an invalid response.");
+        }
+
+        if (response.TotalCount > search.MaximumResults
+            || response.Items.Count > search.MaximumResults)
+        {
+            throw new GitHubApiException(
+                "GitHub pull-request text search exceeded the safe candidate limit of " +
+                $"{search.MaximumResults}.");
+        }
+
+        long[] numbers =
+        [
+            .. response.Items.Select(item =>
+            {
+                if (item.Number <= 0 || item.PullRequest is null)
+                {
+                    throw new GitHubApiException(
+                        "GitHub pull-request text search returned a non-pull-request result.");
+                }
+
+                return item.Number;
+            }),
+        ];
+        if (numbers.Distinct().Count() != numbers.Length)
+        {
+            throw new GitHubApiException(
+                "GitHub pull-request text search returned duplicate candidates.");
+        }
+
+        var pullRequests = new List<PullRequestInfo>(numbers.Length);
+        foreach (long number in numbers)
+        {
+            PullRequestInfo pullRequest = await GetPullRequestAsync(
+                repository,
+                number,
+                cancellationToken).ConfigureAwait(false);
+            if (search.State != PullRequestState.All && pullRequest.State != search.State)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(search.BaseBranch)
+                && !string.Equals(
+                    pullRequest.BaseBranch,
+                    search.BaseBranch,
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            pullRequests.Add(pullRequest);
+        }
+
+        return [.. pullRequests.OrderBy(static pullRequest => pullRequest.Number)];
+    }
+
     public Task<PullRequestInfo> CreatePullRequestAsync(
         RepositoryCoordinates repository,
         CreatePullRequestRequest request,
@@ -923,7 +1052,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         RepositoryCoordinates repository,
         long number,
         PaginationRequestBudget? requestBudget,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? expectedFileCount = null)
     {
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(number);
@@ -938,6 +1068,19 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             maximumResults: MaximumPullRequestFiles,
             maximumPages: MaximumPullRequestFilePages,
             requestBudget).ConfigureAwait(false);
+        if (expectedFileCount is null && files.Count == MaximumPullRequestFiles)
+        {
+            throw new GitHubApiException(
+                $"Pull request #{number} returned GitHub's maximum {MaximumPullRequestFiles} " +
+                "changed files without an authoritative total count.");
+        }
+
+        if (expectedFileCount is { } expected && files.Count != expected)
+        {
+            throw new GitHubApiException(
+                $"GitHub returned {files.Count} of {expected} changed files for pull request #{number}.");
+        }
+
         return files.Select(static file =>
             new PullRequestChangedFile(
                 file.Filename,
@@ -1027,7 +1170,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             CancellationToken cancellationToken)
     {
         var result = new Dictionary<long, PullRequestChangedFilesSnapshot>();
-        var restCompletions = new List<PullRequestChangedFilesSnapshot>();
+        var restCompletions = new List<PullRequestFilesCompletion>();
         foreach (PullRequestInfo[] batch in pullRequests.Chunk(MaximumPullRequestFileBatchSize))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -1070,10 +1213,18 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                     || string.IsNullOrWhiteSpace(node.Url)
                     || node.Files?.Nodes is null
                     || node.Files.PageInfo is null
+                    || node.Files.TotalCount < node.Files.Nodes.Count
                     || node.Files.Nodes.Any(static file => file is null))
                 {
                     throw InvalidGraphQlResponse(
                         "complete changed-file evidence at the requested pull-request identity");
+                }
+
+                if (node.Files.TotalCount > MaximumPullRequestFiles)
+                {
+                    throw new GitHubApiException(
+                        $"Pull request #{node.Number} has {node.Files.TotalCount} changed files, " +
+                        $"exceeding GitHub's safe response limit of {MaximumPullRequestFiles}.");
                 }
 
                 PullRequestInfo current = MapPullRequestFileSnapshot(node, expected);
@@ -1089,10 +1240,18 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                         PullRequestFileStatus.Renamed or PullRequestFileStatus.Copied);
                 if (requiresRestCompletion)
                 {
-                    restCompletions.Add(new(current, files));
+                    restCompletions.Add(new(
+                        new PullRequestChangedFilesSnapshot(current, files),
+                        node.Files.TotalCount));
                 }
                 else
                 {
+                    if (files.Length != node.Files.TotalCount)
+                    {
+                        throw InvalidGraphQlResponse(
+                            $"all {node.Files.TotalCount} changed files for pull request #{node.Number}");
+                    }
+
                     result.Add(current.Number, new(current, files));
                 }
             }
@@ -1111,14 +1270,17 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         }
 
         var requestBudget = new PaginationRequestBudget(MaximumRestPullRequestFileFallbackPages);
-        foreach (PullRequestChangedFilesSnapshot snapshot in restCompletions)
+        foreach (PullRequestFilesCompletion completion in restCompletions)
         {
+            PullRequestChangedFilesSnapshot snapshot = completion.Snapshot;
             IReadOnlyList<PullRequestChangedFile> files =
                 await GetPullRequestChangedFilesAsync(
                     repository,
                     snapshot.PullRequest.Number,
                     requestBudget,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    completion.ExpectedFileCount).ConfigureAwait(false);
+
             PullRequestInfo verified = await GetPullRequestAsync(
                 repository,
                 snapshot.PullRequest.Number,
@@ -1809,6 +1971,9 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         return false;
     }
 
+    private static string QuoteSearchValue(string value)
+        => $"\"{value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal)}\"";
+
     private static void ValidateCommitRequest(ServerCommitRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -2012,4 +2177,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         Lazy<Task<object>> Result);
 
     private sealed record ForkMutationResult(RepositoryInfo? Existing);
+
+    private sealed record PullRequestFilesCompletion(
+        PullRequestChangedFilesSnapshot Snapshot,
+        int ExpectedFileCount);
 }

@@ -68,6 +68,53 @@ public sealed class GitHubTransportSafetyTests
         Assert.Equal("Test", result.GetText());
     }
 
+    [Fact]
+    public async Task Rate_limit_status_retries_before_reading_an_unreadable_error_body()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Content = new ThrowingReadContent(),
+        });
+        handler.Add(_ => ContentResponse());
+        GitHubClientOptions options = CreateOptions(
+            maxRetryDelay: TimeSpan.Zero,
+            maxTransientRetries: 1);
+
+        RepositoryContent result = await GitHubClientTestSupport.CreateClient(handler, options)
+            .GetContentAsync(
+                _repository,
+                "manifest.yaml",
+                "main",
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal("Test", result.GetText());
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Unreadable_final_rate_limit_response_preserves_classification()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Content = new ThrowingReadContent(),
+        });
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(
+                    handler,
+                    CreateOptions(maxTransientRetries: 0))
+                .GetContentAsync(
+                    _repository,
+                    "manifest.yaml",
+                    "main",
+                    TestContext.Current.CancellationToken));
+
+        Assert.Equal(GitHubApiErrorKind.RateLimited, exception.ErrorKind);
+        Assert.Single(handler.Requests);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -377,6 +424,8 @@ public sealed class GitHubTransportSafetyTests
                 UserAgent = "winmatsch-tests",
                 MaxTransientRetries = 1,
                 RetryBaseDelay = retryBaseDelay,
+                SecondaryRateLimitBaseDelay = TimeSpan.Zero,
+                MaxSecondaryRateLimitDelay = TimeSpan.Zero,
             });
 
     private static GitHubClientOptions CreateOptions(
@@ -392,6 +441,8 @@ public sealed class GitHubTransportSafetyTests
             RetryBaseDelay = TimeSpan.Zero,
             MaxTransientRetries = maxTransientRetries,
             MaxRetryDelay = maxRetryDelay ?? TimeSpan.FromSeconds(30),
+            SecondaryRateLimitBaseDelay = TimeSpan.Zero,
+            MaxSecondaryRateLimitDelay = TimeSpan.Zero,
             MaxPaginationPages = maxPaginationPages,
             MaxPaginationItems = maxPaginationItems,
             ForkAvailabilityBaseDelay = TimeSpan.Zero,
@@ -419,6 +470,20 @@ public sealed class GitHubTransportSafetyTests
         {
             IsDisposed = true;
             base.Dispose(disposing);
+        }
+    }
+
+    private sealed class ThrowingReadContent : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(
+            Stream stream,
+            TransportContext? context)
+            => Task.FromException(new HttpRequestException("Synthetic body read failure."));
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
         }
     }
 }

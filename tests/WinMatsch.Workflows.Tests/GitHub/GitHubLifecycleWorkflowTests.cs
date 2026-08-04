@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Net;
 using System.Text.Json;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
@@ -922,6 +923,164 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
+    public async Task Large_upstream_without_duplicate_completes_all_association_checks()
+    {
+        const int openPullRequestCount = 1_201;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int number = 1; number <= openPullRequestCount; number++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(100 + number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.Equal(3, client.SearchCalls);
+        Assert.Equal(2, client.TextSearchCalls);
+        Assert.Equal(
+            [
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests + 1,
+            ],
+            client.PullRequestSearches.Select(static search => search.MaximumResults));
+        Assert.Contains(openPullRequestCount, client.PullRequestFileBatchSizes);
+    }
+
+    [Fact]
+    public async Task Large_upstream_duplicate_is_found_by_narrowed_search_before_mutation()
+    {
+        const int unrelatedPullRequestCount = 1_201;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int number = 1; number <= unrelatedPullRequestCount; number++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(100 + number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7));
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2002");
+        Assert.Equal(1, client.TextSearchCalls);
+        Assert.Equal(0, client.SearchCalls);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Large_upstream_pre_creation_recheck_detects_duplicate_race()
+    {
+        const int openPullRequestCount = 1_201;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+            OnSearch = static (fake, call) =>
+            {
+                if (call == 2)
+                {
+                    fake.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(8, author: "racer"));
+                }
+            },
+        };
+        for (int number = 1; number <= openPullRequestCount; number++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(100 + number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2008");
+        Assert.True(result.RemoteState.CommitCreated);
+        Assert.False(result.RemoteState.PullRequestCreated);
+        Assert.Equal(["branch", "commit"], client.Mutations);
+    }
+
+    [Fact]
+    public async Task Text_search_failure_falls_back_to_exhaustive_duplicate_evidence()
+    {
+        var client = new FakeGitHubClient
+        {
+            PullRequestTextSearchFailure = new GitHubApiException(
+                "GitHub pull-request text search returned incomplete results."),
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7));
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2002");
+        Assert.Equal(1, client.TextSearchCalls);
+        Assert.Equal(1, client.SearchCalls);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Text_search_io_failure_falls_back_to_exhaustive_duplicate_evidence()
+    {
+        var client = new FakeGitHubClient
+        {
+            PullRequestTextSearchFailure = new IOException("Synthetic response stream failure."),
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7));
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2002");
+        Assert.Equal(1, client.TextSearchCalls);
+        Assert.Equal(1, client.SearchCalls);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Text_search_rate_limit_stops_before_exhaustive_api_traffic()
+    {
+        var client = new FakeGitHubClient
+        {
+            PullRequestTextSearchFailure = new GitHubApiException(
+                "secondary rate limit",
+                HttpStatusCode.Forbidden,
+                null,
+                errorKind: GitHubApiErrorKind.RateLimited),
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.Equal(1, client.TextSearchCalls);
+        Assert.Equal(0, client.SearchCalls);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
     public async Task Open_pull_request_discovery_limit_fails_closed_before_evidence_or_mutation()
     {
         var client = new FakeGitHubClient
@@ -996,6 +1155,36 @@ public sealed class GitHubLifecycleWorkflowTests
 
         Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
         Assert.True(result.RemoteState.PullRequestCreated);
+    }
+
+    [Fact]
+    public async Task Post_creation_reconciliation_budgets_new_pr_above_open_limit()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int index = 0; index < PullRequestManifestEvidenceLimits.MaximumOpenPullRequests; index++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(10_000 + index) with
+            {
+                Title = $"Unrelated maintenance {index}",
+                Body = null,
+            });
+        }
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.Equal(
+            [
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests + 1,
+            ],
+            client.PullRequestSearches.Select(static search => search.MaximumResults));
     }
 
     [Fact]
