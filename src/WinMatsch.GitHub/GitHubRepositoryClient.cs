@@ -56,7 +56,17 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             ... on PullRequest {
               id
               number
+              title
+              state
+              isDraft
+              headRefName
               headRefOid
+              baseRefName
+              baseRefOid
+              url
+              createdAt
+              updatedAt
+              headRepository { nameWithOwner }
               files(first: 100) {
                 nodes { path changeType }
                 pageInfo { hasNextPage }
@@ -941,13 +951,26 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             RepositoryCoordinates repository,
             IReadOnlyList<PullRequestInfo> pullRequests,
             CancellationToken cancellationToken = default)
+        => (await GetPullRequestChangedFilesSnapshotsBatchAsync(
+                repository,
+                pullRequests,
+                cancellationToken).ConfigureAwait(false))
+            .ToDictionary(
+                static pair => pair.Key,
+                static pair => pair.Value.Files);
+
+    public async Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
+        GetPullRequestChangedFilesSnapshotsBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentNullException.ThrowIfNull(pullRequests);
         cancellationToken.ThrowIfCancellationRequested();
         if (pullRequests.Count == 0)
         {
-            return new Dictionary<long, IReadOnlyList<PullRequestChangedFile>>();
+            return new Dictionary<long, PullRequestChangedFilesSnapshot>();
         }
 
         if (pullRequests.Any(static pullRequest =>
@@ -982,22 +1005,30 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                     exception);
             }
 
-            return await GetPullRequestChangedFilesViaRestAsync(
+            IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>> files =
+                await GetPullRequestChangedFilesViaRestAsync(
                 repository,
                 pullRequests,
                 new PaginationRequestBudget(MaximumRestPullRequestFileFallbackPages),
                 cancellationToken).ConfigureAwait(false);
+            var pullRequestsByNumber = pullRequests.ToDictionary(
+                static pullRequest => pullRequest.Number);
+            return files.ToDictionary(
+                static pair => pair.Key,
+                pair => new PullRequestChangedFilesSnapshot(
+                    pullRequestsByNumber[pair.Key],
+                    pair.Value));
         }
     }
 
-    private async Task<IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>>>
+    private async Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
         GetPullRequestChangedFilesViaGraphQlAsync(
             RepositoryCoordinates repository,
             IReadOnlyList<PullRequestInfo> pullRequests,
             CancellationToken cancellationToken)
     {
-        var result = new Dictionary<long, IReadOnlyList<PullRequestChangedFile>>();
-        var restCompletions = new List<PullRequestInfo>();
+        var result = new Dictionary<long, PullRequestChangedFilesSnapshot>();
+        var restCompletions = new List<PullRequestChangedFilesSnapshot>();
         foreach (PullRequestInfo[] batch in pullRequests.Chunk(MaximumPullRequestFileBatchSize))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -1031,7 +1062,13 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 if (node is null
                     || !expectedByNode.Remove(node.Id, out PullRequestInfo? expected)
                     || node.Number != expected.Number
-                    || !string.Equals(node.HeadRefOid, expected.HeadSha, StringComparison.Ordinal)
+                    || string.IsNullOrWhiteSpace(node.Title)
+                    || string.IsNullOrWhiteSpace(node.State)
+                    || string.IsNullOrWhiteSpace(node.HeadRefName)
+                    || string.IsNullOrWhiteSpace(node.HeadRefOid)
+                    || string.IsNullOrWhiteSpace(node.BaseRefName)
+                    || string.IsNullOrWhiteSpace(node.BaseRefOid)
+                    || string.IsNullOrWhiteSpace(node.Url)
                     || node.Files?.Nodes is null
                     || node.Files.PageInfo is null
                     || node.Files.Nodes.Any(static file => file is null))
@@ -1040,6 +1077,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                         "complete changed-file evidence at the requested pull-request identity");
                 }
 
+                PullRequestInfo current = MapPullRequestFileSnapshot(node, expected);
                 PullRequestChangedFile[] files =
                 [
                     .. node.Files.Nodes.Select(static file =>
@@ -1052,11 +1090,11 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                         PullRequestFileStatus.Renamed or PullRequestFileStatus.Copied);
                 if (requiresRestCompletion)
                 {
-                    restCompletions.Add(expected);
+                    restCompletions.Add(new(current, files));
                 }
                 else
                 {
-                    result.Add(expected.Number, files);
+                    result.Add(current.Number, new(current, files));
                 }
             }
 
@@ -1074,15 +1112,27 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         }
 
         var requestBudget = new PaginationRequestBudget(MaximumRestPullRequestFileFallbackPages);
-        foreach (PullRequestInfo pullRequest in restCompletions)
+        foreach (PullRequestChangedFilesSnapshot snapshot in restCompletions)
         {
-            result.Add(
-                pullRequest.Number,
+            IReadOnlyList<PullRequestChangedFile> files =
                 await GetPullRequestChangedFilesAsync(
                     repository,
-                    pullRequest.Number,
+                    snapshot.PullRequest.Number,
                     requestBudget,
-                    cancellationToken).ConfigureAwait(false));
+                    cancellationToken).ConfigureAwait(false);
+            PullRequestInfo verified = await GetPullRequestAsync(
+                repository,
+                snapshot.PullRequest.Number,
+                cancellationToken).ConfigureAwait(false);
+            if (!HasSamePullRequestIdentity(snapshot.PullRequest, verified))
+            {
+                throw new GitHubApiException(
+                    $"Pull request #{snapshot.PullRequest.Number} changed identity while completing its changed-file snapshot.");
+            }
+
+            result.Add(
+                snapshot.PullRequest.Number,
+                snapshot with { Files = files });
         }
 
         return result;
@@ -1612,6 +1662,56 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             _ => throw new GitHubApiException($"GitHub returned unknown tree entry type '{type}'."),
         };
 
+    private static PullRequestInfo MapPullRequestFileSnapshot(
+        GraphQlPullRequestFileNodeDto pullRequest,
+        PullRequestInfo previous)
+    {
+        RepositoryCoordinates? headRepository = null;
+        if (pullRequest.HeadRepository is not null)
+        {
+            try
+            {
+                headRepository = RepositoryCoordinates.Parse(
+                    pullRequest.HeadRepository.NameWithOwner);
+            }
+            catch (FormatException exception)
+            {
+                throw new GitHubApiException(
+                    "GitHub GraphQL returned invalid pull-request head repository coordinates.",
+                    exception);
+            }
+        }
+
+        return new(
+            pullRequest.Number,
+            pullRequest.Id,
+            pullRequest.Title,
+            previous.Body,
+            ParseGraphQlPullRequestState(pullRequest.State),
+            pullRequest.IsDraft,
+            headRepository?.Owner ?? previous.HeadOwner,
+            pullRequest.HeadRefName,
+            pullRequest.HeadRefOid,
+            pullRequest.BaseRefName,
+            ParseAbsoluteUri(pullRequest.Url, "pull request URL"),
+            pullRequest.CreatedAt,
+            pullRequest.UpdatedAt)
+        {
+            HeadRepository = headRepository,
+            BaseSha = pullRequest.BaseRefOid,
+        };
+    }
+
+    private static bool HasSamePullRequestIdentity(
+        PullRequestInfo left,
+        PullRequestInfo right)
+        => left.Number == right.Number
+            && string.Equals(left.NodeId, right.NodeId, StringComparison.Ordinal)
+            && left.HeadRepository == right.HeadRepository
+            && string.Equals(left.HeadSha, right.HeadSha, StringComparison.Ordinal)
+            && string.Equals(left.BaseBranch, right.BaseBranch, StringComparison.Ordinal)
+            && string.Equals(left.BaseSha, right.BaseSha, StringComparison.Ordinal);
+
     private static PullRequestInfo MapPullRequest(RestPullRequestDto pullRequest)
     {
         string? headOwner = pullRequest.Head.Repo?.Owner.Login;
@@ -1679,6 +1779,15 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         {
             "open" => PullRequestState.Open,
             "closed" => PullRequestState.Closed,
+            _ => throw new GitHubApiException(
+                $"GitHub returned unknown pull request state '{state}'."),
+        };
+
+    private static PullRequestState ParseGraphQlPullRequestState(string state)
+        => state switch
+        {
+            "OPEN" => PullRequestState.Open,
+            "CLOSED" or "MERGED" => PullRequestState.Closed,
             _ => throw new GitHubApiException(
                 $"GitHub returned unknown pull request state '{state}'."),
         };

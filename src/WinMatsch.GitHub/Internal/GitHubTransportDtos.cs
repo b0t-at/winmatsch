@@ -558,7 +558,27 @@ internal sealed class GraphQlPullRequestFileNodeDto
 
     public long Number { get; set; }
 
+    public string Title { get; set; } = "";
+
+    public string State { get; set; } = "";
+
+    public bool IsDraft { get; set; }
+
+    public string HeadRefName { get; set; } = "";
+
     public string HeadRefOid { get; set; } = "";
+
+    public string BaseRefName { get; set; } = "";
+
+    public string BaseRefOid { get; set; } = "";
+
+    public string Url { get; set; } = "";
+
+    public DateTimeOffset CreatedAt { get; set; }
+
+    public DateTimeOffset UpdatedAt { get; set; }
+
+    public GraphQlRepositorySummaryDto? HeadRepository { get; set; }
 
     public GraphQlPullRequestFileConnectionDto? Files { get; set; }
 }

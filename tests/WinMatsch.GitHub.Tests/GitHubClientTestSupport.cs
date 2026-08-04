@@ -126,7 +126,9 @@ internal static class GitHubClientTestSupport
         string state = "open",
         string headOwner = "contributor",
         string headBranch = "update",
-        string baseBranch = "main")
+        string baseBranch = "main",
+        string headSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        string baseSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         => $$"""
         {
           "number": {{number}},
@@ -137,7 +139,7 @@ internal static class GitHubClientTestSupport
           "draft": false,
           "head": {
             "ref": "{{headBranch}}",
-            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha": "{{headSha}}",
             "repo": {
               "node_id": "R_head",
               "full_name": "{{headOwner}}/repo",
@@ -150,7 +152,7 @@ internal static class GitHubClientTestSupport
           },
           "base": {
             "ref": "{{baseBranch}}",
-            "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "sha": "{{baseSha}}",
             "repo": {
               "node_id": "R_base",
               "full_name": "upstream/repo",
