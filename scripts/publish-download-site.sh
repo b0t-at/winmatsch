@@ -36,7 +36,8 @@ Options:
   --skip-latest          Do not refresh the /latest/ mirror
   --dry-run              Stage and verify only; no az calls
   --afd-resource-group RG --afd-profile NAME --afd-endpoint NAME
-                         Purge Front Door cache after upload (all three needed)
+                         Purge Front Door cache after upload (all three needed);
+                         stable releases wait for /latest/version.txt at the edge
   -h, --help             Show this help
 EOF
 }
@@ -52,7 +53,7 @@ CONTAINER="${WINMATSCH_WEB_CONTAINER:-\$web}"
 DATE="" PRERELEASE=0 NOTES_URL="" MANIFEST_IN="" STAGING="" DRY_RUN=0 SKIP_LATEST=0
 AFD_RG="" AFD_PROFILE="" AFD_ENDPOINT=""
 COUNT_NEW=0 COUNT_EXISTING=0 COUNT_MUTABLE=0
-UPLOAD_SECS="" PURGE_SECS="" PLANNED_UPLOADS=""
+UPLOAD_SECS="" EDGE_READY_SECS="" PLANNED_UPLOADS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -345,7 +346,7 @@ write_summary() {
     SUM_ACCOUNT="$ACCOUNT" SUM_CONTAINER="$CONTAINER" \
     SUM_NEW="$COUNT_NEW" SUM_EXISTING="$COUNT_EXISTING" SUM_MUTABLE="$COUNT_MUTABLE" \
     SUM_PLANNED="$PLANNED_UPLOADS" SUM_UPLOAD_SECS="$UPLOAD_SECS" \
-    SUM_PURGE_SECS="$PURGE_SECS" SUM_PURGE_PATHS="${#AFD_PURGE_PATHS[@]}" \
+    SUM_EDGE_READY_SECS="$EDGE_READY_SECS" SUM_PURGE_PATHS="${#AFD_PURGE_PATHS[@]}" \
     SUM_AFD_PROFILE="$AFD_PROFILE" SUM_AFD_ENDPOINT="$AFD_ENDPOINT" \
     SUM_TOTAL_SECS="$SECONDS" \
         "$PYTHON" - "$ARTIFACTS_JSON" >>"$GITHUB_STEP_SUMMARY" <<'PY'
@@ -399,8 +400,13 @@ if env("SUM_AFD_PROFILE") and env("SUM_AFD_ENDPOINT"):
     paths = env("SUM_PURGE_PATHS", "0")
     if mode == "dry-run":
         lines.append(f"| Front Door purge | would purge {paths} paths on {target} |")
+    elif env("SUM_REFRESH_LATEST") == "1":
+        lines.append(
+            f"| Front Door refresh | {paths} paths on {target} · "
+            f"`/latest/version.txt` served **{ver}** after {dur(env('SUM_EDGE_READY_SECS'))} |"
+        )
     else:
-        lines.append(f"| Front Door purge | {paths} paths on {target} · {dur(env('SUM_PURGE_SECS'))} |")
+        lines.append(f"| Front Door purge | {paths} paths on {target} · requested asynchronously |")
 else:
     lines.append("| Front Door purge | skipped (not configured; edge TTL ≤ 5 min) |")
 
@@ -528,14 +534,56 @@ log "Upload complete (${UPLOAD_SECS}s)"
 
 if [ -n "$AFD_PROFILE" ] && [ -n "$AFD_ENDPOINT" ] && [ -n "$AFD_RG" ]; then
     log "Purging Front Door cache ($AFD_PROFILE/$AFD_ENDPOINT)"
-    purge_t0=$SECONDS
+    edge_t0=$SECONDS
     az afd endpoint purge --only-show-errors \
         --resource-group "$AFD_RG" --profile-name "$AFD_PROFILE" \
         --endpoint-name "$AFD_ENDPOINT" \
         --content-paths "${AFD_PURGE_PATHS[@]}" \
-        >/dev/null
-    PURGE_SECS=$((SECONDS - purge_t0))
-    log "Purge complete (${PURGE_SECS}s)"
+        --no-wait --output none
+    log "Purge accepted; Front Door will finish it asynchronously"
+
+    if [ "$REFRESH_LATEST" -eq 1 ]; then
+        command -v curl >/dev/null || die "curl not found (needed to verify the Front Door refresh)"
+        AFD_HOST="$(az afd endpoint show --only-show-errors \
+            --resource-group "$AFD_RG" --profile-name "$AFD_PROFILE" \
+            --endpoint-name "$AFD_ENDPOINT" \
+            --query hostName --output tsv)"
+        [ -n "$AFD_HOST" ] || die "Front Door endpoint did not report a hostname"
+
+        latest_url="https://$AFD_HOST/latest/version.txt"
+        deadline=$((SECONDS + 720))
+        last_result="not requested"
+        log "Waiting for $latest_url to serve $VER (10s interval, 12m timeout)"
+        while true; do
+            remaining=$((deadline - SECONDS))
+            if (( remaining <= 0 )); then
+                die "Front Door did not serve $VER from /latest/version.txt within 12 minutes (last result: $last_result)"
+            fi
+            curl_timeout=$((remaining < 10 ? remaining : 10))
+            if served_version="$(curl --fail --silent --show-error --max-time "$curl_timeout" \
+                "$latest_url" 2>"$STAGING/.latest-version-curl.err")"; then
+                served_version="${served_version//$'\r'/}"
+                served_version="${served_version//$'\n'/}"
+                if [ "$served_version" = "$VER" ]; then
+                    EDGE_READY_SECS=$((SECONDS - edge_t0))
+                    log "Front Door serves $VER (${EDGE_READY_SECS}s)"
+                    break
+                fi
+                last_result="served '${served_version:-<empty>}'"
+            else
+                last_result="$(tr '\n' ' ' <"$STAGING/.latest-version-curl.err")"
+                [ -n "$last_result" ] || last_result="request failed"
+            fi
+
+            remaining=$((deadline - SECONDS))
+            if (( remaining <= 0 )); then
+                die "Front Door did not serve $VER from /latest/version.txt within 12 minutes (last result: $last_result)"
+            fi
+            log "Front Door not updated yet ($last_result); retrying in 10s"
+            sleep_for=$((remaining < 10 ? remaining : 10))
+            sleep "$sleep_for"
+        done
+    fi
 elif [ -n "$AFD_PROFILE$AFD_ENDPOINT$AFD_RG" ]; then
     warn "Front Door purge skipped: need all of --afd-resource-group, --afd-profile, --afd-endpoint"
 else
