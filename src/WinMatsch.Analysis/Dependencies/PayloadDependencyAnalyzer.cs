@@ -1,4 +1,3 @@
-using System.IO.Compression;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using WinMatsch.Analysis.Inno;
@@ -236,13 +235,13 @@ public sealed partial class PayloadDependencyAnalyzer
                 isComplete: false);
         }
 
-        ZipArchiveBounds.Validate(
-            stream,
+        var archiveStream = new BudgetedArchiveStream(stream);
+        using var archive = new SupportedZipArchive(
+            archiveStream,
+            fileName,
             "The dependency-analysis archive",
             _options.MaximumArchiveEntries,
             _options.MaximumCentralDirectoryBytes);
-        var archiveStream = new BudgetedArchiveStream(stream);
-        using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
         if (archive.Entries.Count > _options.MaximumArchiveEntries)
         {
             throw new AnalysisResourceLimitException(
@@ -261,7 +260,7 @@ public sealed partial class PayloadDependencyAnalyzer
             _options.MaximumArchiveReadOperations,
             _options.MaximumTotalCompressedBytes);
 
-        foreach (ZipArchiveEntry entry in archive.Entries)
+        foreach (SupportedZipArchiveEntry entry in archive.Entries)
         {
             cancellationToken.ThrowIfCancellationRequested();
             string path = NormalizeAndValidatePath(entry.FullName);

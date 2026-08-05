@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Text;
+using WinMatsch.Analysis;
 using WinMatsch.Analysis.Dependencies;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
@@ -1797,6 +1798,15 @@ public sealed class LocalWorkflowEngine
                 version,
                 exception);
         }
+        catch (ZipAnalysisException exception)
+        {
+            return AnalysisFailureResult(
+                operation,
+                request,
+                identifier,
+                version,
+                exception);
+        }
     }
 
     private static WorkflowOperationResult OperationFailureResult(
@@ -1824,6 +1834,38 @@ public sealed class LocalWorkflowEngine
                             : "WF_OPERATION_FAILED",
                         ValidationSeverity.Error,
                         exception.Message),
+                ]),
+                RuleRunSummary.Empty,
+                [],
+                []),
+            Applied = false,
+            ErrorMessage = exception.Message,
+        };
+
+    private static WorkflowOperationResult AnalysisFailureResult(
+        string operation,
+        WorkflowOperationRequest request,
+        PackageIdentifier identifier,
+        PackageVersion version,
+        ZipAnalysisException exception)
+        => new()
+        {
+            Code = WorkflowResultCode.ValidationFailed,
+            Plan = Plan(
+                operation,
+                request,
+                identifier,
+                version,
+                [],
+                [],
+                [],
+                new ValidationReport(
+                [
+                    new(
+                        exception.Diagnostic.Code,
+                        ValidationSeverity.Error,
+                        exception.Diagnostic.Message,
+                        exception.EntryPath),
                 ]),
                 RuleRunSummary.Empty,
                 [],

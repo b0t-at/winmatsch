@@ -166,6 +166,8 @@ internal static class DependencyFixtures
         zip64.CopyTo(result, eocdOffset);
         archive.AsSpan(eocdOffset).CopyTo(result.AsSpan(eocdOffset + zip64.Length));
         int newEocdOffset = eocdOffset + zip64.Length;
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(newEocdOffset + 4), ushort.MaxValue);
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(newEocdOffset + 6), ushort.MaxValue);
         BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(newEocdOffset + 8), ushort.MaxValue);
         BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(newEocdOffset + 10), ushort.MaxValue);
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(newEocdOffset + 12), uint.MaxValue);

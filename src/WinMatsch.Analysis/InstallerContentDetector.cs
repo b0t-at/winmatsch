@@ -1,5 +1,3 @@
-using System.IO.Compression;
-
 namespace WinMatsch.Analysis;
 
 internal enum InstallerContentKind
@@ -60,10 +58,13 @@ internal static class InstallerContentDetector
         try
         {
             using IDisposable scope = AnalysisLimits.EnterArchive($"'{fileName}'");
-            using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+            using var archive = new SupportedZipArchive(
+                stream,
+                fileName,
+                $"'{fileName}'");
             AnalysisLimits.ValidateArchive(archive, $"'{fileName}'");
             bool hasPackageManifest = false;
-            foreach (ZipArchiveEntry entry in archive.Entries)
+            foreach (SupportedZipArchiveEntry entry in archive.Entries)
             {
                 string name = entry.FullName.Replace('\\', '/');
                 if (string.Equals(name, "AppxMetadata/AppxBundleManifest.xml", StringComparison.OrdinalIgnoreCase))

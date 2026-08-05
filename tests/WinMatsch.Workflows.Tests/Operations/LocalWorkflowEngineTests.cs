@@ -71,6 +71,32 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Unsupported_zip_feature_is_a_validation_failure_with_stable_diagnostic()
+    {
+        using var temporary = new TemporaryDirectory();
+        var processor = new FailingZipArtifactProcessor();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            artifacts: processor,
+            clock: new FixedClock());
+        NewOperationRequest request = NewRequest(temporary.Path, WorkflowExecutionMode.Plan) with
+        {
+            Assets = [Asset("2.0.0", "A") with { Content = null, Analysis = null }],
+        };
+
+        WorkflowOperationResult result = await engine.NewAsync(request);
+
+        Assert.Equal(WorkflowResultCode.ValidationFailed, result.Code);
+        ValidationFinding finding = Assert.Single(result.Plan.Validation.Findings);
+        Assert.Equal("ZIP004", finding.Code);
+        Assert.Equal("payload/app.exe", finding.Path);
+        Assert.Contains("method 93 (Zstandard)", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task New_apply_publishes_complete_valid_manifest_set()
     {
         using var temporary = new TemporaryDirectory();
@@ -2718,6 +2744,19 @@ public sealed class LocalWorkflowEngineTests
                 Analysis = analysis,
             };
         }
+    }
+
+    private sealed class FailingZipArtifactProcessor : IWorkflowArtifactProcessor
+    {
+        public Task<ArtifactSnapshot> AcquireAsync(
+            DiscoveredAsset asset,
+            string artifactDirectory,
+            CancellationToken cancellationToken)
+            => Task.FromException<ArtifactSnapshot>(new UnsupportedZipFeatureException(
+                asset.AssetName,
+                "payload/app.exe",
+                93,
+                "Zstandard"));
     }
 
     private sealed class RecordingContinuityArtifactProcessor : IWorkflowArtifactProcessor

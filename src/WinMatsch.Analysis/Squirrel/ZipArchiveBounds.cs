@@ -14,7 +14,7 @@ internal static class ZipArchiveBounds
     private const long DefaultMaxCentralDirectoryBytes = AnalysisLimits.MaxDependencyCentralDirectoryBytes;
 
     public static void Validate(Stream stream, string description)
-        => Validate(
+        => _ = Inspect(
             stream,
             description,
             DefaultMaxEntryCount,
@@ -25,6 +25,13 @@ internal static class ZipArchiveBounds
         string description,
         int maximumEntryCount,
         long maximumCentralDirectoryBytes)
+        => _ = Inspect(stream, description, maximumEntryCount, maximumCentralDirectoryBytes);
+
+    public static IReadOnlyList<ZipCentralDirectoryEntry> Inspect(
+        Stream stream,
+        string description,
+        int maximumEntryCount = DefaultMaxEntryCount,
+        long maximumCentralDirectoryBytes = DefaultMaxCentralDirectoryBytes)
     {
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumEntryCount);
@@ -60,29 +67,32 @@ internal static class ZipArchiveBounds
             }
 
             ReadOnlySpan<byte> eocd = tail.AsSpan(eocdIndex);
-            if (BinaryPrimitives.ReadUInt16LittleEndian(eocd[4..]) != 0
-                || BinaryPrimitives.ReadUInt16LittleEndian(eocd[6..]) != 0)
-            {
-                throw new InvalidDataException($"{description} uses a multi-disk ZIP, which is not supported.");
-            }
-
+            ushort diskNumber = BinaryPrimitives.ReadUInt16LittleEndian(eocd[4..]);
+            ushort directoryDiskNumber = BinaryPrimitives.ReadUInt16LittleEndian(eocd[6..]);
             ushort entriesOnDisk = BinaryPrimitives.ReadUInt16LittleEndian(eocd[8..]);
             ushort totalEntries = BinaryPrimitives.ReadUInt16LittleEndian(eocd[10..]);
-            if (entriesOnDisk != totalEntries)
-            {
-                throw Corrupt(description);
-            }
-
+            uint legacyDirectorySize = BinaryPrimitives.ReadUInt32LittleEndian(eocd[12..]);
+            uint legacyDirectoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(eocd[16..]);
             ulong entryCount = totalEntries;
-            ulong directorySize = BinaryPrimitives.ReadUInt32LittleEndian(eocd[12..]);
-            ulong directoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(eocd[16..]);
+            ulong directorySize = legacyDirectorySize;
+            ulong directoryOffset = legacyDirectoryOffset;
             long eocdOffset = stream.Length - tailLength + eocdIndex;
             ulong directoryEnd = (ulong)eocdOffset;
 
-            if (entryCount == ushort.MaxValue
-                || directorySize == uint.MaxValue
-                || directoryOffset == uint.MaxValue)
+            bool isZip64 = diskNumber == ushort.MaxValue
+                || directoryDiskNumber == ushort.MaxValue
+                || entriesOnDisk == ushort.MaxValue
+                || totalEntries == ushort.MaxValue
+                || legacyDirectorySize == uint.MaxValue
+                || legacyDirectoryOffset == uint.MaxValue;
+            if (isZip64)
             {
+                if (diskNumber is not 0 and not ushort.MaxValue
+                    || directoryDiskNumber is not 0 and not ushort.MaxValue)
+                {
+                    throw MultiDisk(description);
+                }
+
                 ReadZip64(
                     stream,
                     eocdOffset,
@@ -91,6 +101,25 @@ internal static class ZipArchiveBounds
                     out directorySize,
                     out directoryOffset,
                     out directoryEnd);
+                if (entriesOnDisk != ushort.MaxValue && entriesOnDisk != entryCount
+                    || totalEntries != ushort.MaxValue && totalEntries != entryCount
+                    || legacyDirectorySize != uint.MaxValue && legacyDirectorySize != directorySize
+                    || legacyDirectoryOffset != uint.MaxValue && legacyDirectoryOffset != directoryOffset)
+                {
+                    throw Corrupt(description);
+                }
+            }
+            else
+            {
+                if (diskNumber != 0 || directoryDiskNumber != 0)
+                {
+                    throw MultiDisk(description);
+                }
+
+                if (entriesOnDisk != totalEntries)
+                {
+                    throw Corrupt(description);
+                }
             }
 
             if (directoryOffset > directoryEnd
@@ -112,7 +141,7 @@ internal static class ZipArchiveBounds
                     $"{description} has a ZIP central directory larger than {maximumCentralDirectoryBytes} bytes.");
             }
 
-            ValidateCentralDirectory(
+            return ReadCentralDirectory(
                 stream,
                 description,
                 directoryOffset,
@@ -180,7 +209,7 @@ internal static class ZipArchiveBounds
         directoryEnd = recordOffset;
     }
 
-    private static void ValidateCentralDirectory(
+    private static List<ZipCentralDirectoryEntry> ReadCentralDirectory(
         Stream stream,
         string description,
         ulong directoryOffset,
@@ -197,6 +226,7 @@ internal static class ZipArchiveBounds
             throw Corrupt(description);
         }
 
+        var entries = new List<ZipCentralDirectoryEntry>(checked((int)entryCount));
         ulong position = directoryOffset;
         Span<byte> header = stackalloc byte[CentralDirectoryHeaderSize];
         Span<byte> optionalRecordHeader = stackalloc byte[8];
@@ -214,9 +244,10 @@ internal static class ZipArchiveBounds
                 throw Corrupt(description);
             }
 
-            ulong variableSize = (ulong)BinaryPrimitives.ReadUInt16LittleEndian(header[28..])
-                + BinaryPrimitives.ReadUInt16LittleEndian(header[30..])
-                + BinaryPrimitives.ReadUInt16LittleEndian(header[32..]);
+            ushort nameLength = BinaryPrimitives.ReadUInt16LittleEndian(header[28..]);
+            ushort extraLength = BinaryPrimitives.ReadUInt16LittleEndian(header[30..]);
+            ushort commentLength = BinaryPrimitives.ReadUInt16LittleEndian(header[32..]);
+            ulong variableSize = (ulong)nameLength + extraLength + commentLength;
             ulong recordSize = CentralDirectoryHeaderSize + variableSize;
             if (recordSize > directoryEnd - position)
             {
@@ -229,6 +260,26 @@ internal static class ZipArchiveBounds
                     $"{description} has an actual ZIP central directory larger than {maximumBytes} bytes.");
             }
 
+            byte[] centralName = new byte[nameLength];
+            stream.Position = checked((long)position + CentralDirectoryHeaderSize);
+            stream.ReadExactly(centralName);
+            ulong localHeaderOffset = ReadLocalHeaderOffset(
+                stream,
+                header,
+                checked((long)position + CentralDirectoryHeaderSize + nameLength),
+                extraLength,
+                description);
+            (ushort localFlags, ushort localMethod) = ReadLocalHeader(
+                stream,
+                localHeaderOffset,
+                directoryOffset,
+                centralName,
+                description);
+            entries.Add(new ZipCentralDirectoryEntry(
+                BinaryPrimitives.ReadUInt16LittleEndian(header[8..]),
+                BinaryPrimitives.ReadUInt16LittleEndian(header[10..]),
+                localFlags,
+                localMethod));
             position += recordSize;
         }
 
@@ -269,6 +320,107 @@ internal static class ZipArchiveBounds
             throw new InvalidDataException(
                 $"{description} has inconsistent declared and actual ZIP central-directory bounds.");
         }
+
+        return entries;
+    }
+
+    private static ulong ReadLocalHeaderOffset(
+        Stream stream,
+        ReadOnlySpan<byte> centralHeader,
+        long extraOffset,
+        ushort extraLength,
+        string description)
+    {
+        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(centralHeader[42..]);
+        if (offset != uint.MaxValue)
+        {
+            return offset;
+        }
+
+        byte[] extra = new byte[extraLength];
+        stream.Position = extraOffset;
+        stream.ReadExactly(extra);
+        int position = 0;
+        while (position <= extra.Length - 4)
+        {
+            ushort tag = BinaryPrimitives.ReadUInt16LittleEndian(extra.AsSpan(position));
+            ushort size = BinaryPrimitives.ReadUInt16LittleEndian(extra.AsSpan(position + 2));
+            position += 4;
+            if (size > extra.Length - position)
+            {
+                throw Corrupt(description);
+            }
+
+            if (tag == 0x0001)
+            {
+                ReadOnlySpan<byte> zip64 = extra.AsSpan(position, size);
+                int fieldOffset = 0;
+                if (BinaryPrimitives.ReadUInt32LittleEndian(centralHeader[24..]) == uint.MaxValue)
+                {
+                    fieldOffset += sizeof(ulong);
+                }
+
+                if (BinaryPrimitives.ReadUInt32LittleEndian(centralHeader[20..]) == uint.MaxValue)
+                {
+                    fieldOffset += sizeof(ulong);
+                }
+
+                if (fieldOffset > zip64.Length - sizeof(ulong))
+                {
+                    throw Corrupt(description);
+                }
+
+                return BinaryPrimitives.ReadUInt64LittleEndian(zip64[fieldOffset..]);
+            }
+
+            position += size;
+        }
+
+        throw Corrupt(description);
+    }
+
+    private static (ushort Flags, ushort Method) ReadLocalHeader(
+        Stream stream,
+        ulong offset,
+        ulong directoryOffset,
+        ReadOnlySpan<byte> centralName,
+        string description)
+    {
+        const uint LocalHeaderSignature = 0x04034B50;
+        const int LocalHeaderSize = 30;
+        if (offset > directoryOffset
+            || directoryOffset - offset < LocalHeaderSize
+            || offset > long.MaxValue)
+        {
+            throw Corrupt(description);
+        }
+
+        Span<byte> header = stackalloc byte[LocalHeaderSize];
+        stream.Position = (long)offset;
+        stream.ReadExactly(header);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(header) != LocalHeaderSignature)
+        {
+            throw Corrupt(description);
+        }
+
+        ushort nameLength = BinaryPrimitives.ReadUInt16LittleEndian(header[26..]);
+        ushort extraLength = BinaryPrimitives.ReadUInt16LittleEndian(header[28..]);
+        ulong dataOffset = offset + LocalHeaderSize + nameLength + extraLength;
+        if (dataOffset > directoryOffset || nameLength != centralName.Length)
+        {
+            throw Corrupt(description);
+        }
+
+        byte[] localName = new byte[nameLength];
+        stream.ReadExactly(localName);
+        if (!localName.AsSpan().SequenceEqual(centralName))
+        {
+            throw Corrupt(description);
+        }
+
+        return (
+            BinaryPrimitives.ReadUInt16LittleEndian(header[6..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(header[8..]));
     }
 
     private static int FindLast(ReadOnlySpan<byte> data, uint signature)
@@ -280,4 +432,13 @@ internal static class ZipArchiveBounds
 
     private static InvalidDataException Corrupt(string description)
         => new($"{description} is truncated or has an invalid ZIP directory.");
+
+    private static InvalidDataException MultiDisk(string description)
+        => new($"{description} uses a multi-disk ZIP, which is not supported.");
 }
+
+internal readonly record struct ZipCentralDirectoryEntry(
+    ushort GeneralPurposeBitFlags,
+    ushort CompressionMethod,
+    ushort LocalGeneralPurposeBitFlags,
+    ushort LocalCompressionMethod);

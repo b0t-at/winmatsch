@@ -22,13 +22,16 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
     {
         ArgumentNullException.ThrowIfNull(stream);
         using IDisposable scope = AnalysisLimits.EnterArchive($"'{fileName}'");
-        using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+        using var archive = new SupportedZipArchive(
+            stream,
+            fileName,
+            $"'{fileName}'");
         AnalysisLimits.ValidateArchive(archive, $"'{fileName}'");
 
         List<Candidate> candidates = [];
         List<string> rejectedCandidates = [];
         var filePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (ZipArchiveEntry entry in archive.Entries)
+        foreach (SupportedZipArchiveEntry entry in archive.Entries)
         {
             string path = NormalizeAndValidatePath(entry.FullName);
             if (path.EndsWith('/'))
@@ -133,7 +136,12 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
 
     private static List<ResolvedCandidate> ResolveCandidate(Candidate candidate)
     {
-        byte[] bytes = AnalysisLimits.ReadEntryBytes(candidate.Entry, $"Archive entry '{candidate.Path}'");
+        using Stream entryStream = candidate.Entry.Open();
+        byte[] bytes = AnalysisLimits.ReadBounded(
+            entryStream,
+            candidate.Entry.Length,
+            $"Archive entry '{candidate.Path}'",
+            AnalysisLimits.MaxEntryBytes);
         using var buffer = new MemoryStream(bytes, writable: false);
         InstallerAnalysis inner;
         try
@@ -343,7 +351,7 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         => ReferenceEquals(left, right)
             || (left is not null && right is not null && left.SequenceEqual(right));
 
-    private static bool HasExpectedMagic(ZipArchiveEntry entry, InstallerType type)
+    private static bool HasExpectedMagic(SupportedZipArchiveEntry entry, InstallerType type)
     {
         Span<byte> prefix = stackalloc byte[8];
         using Stream stream = entry.Open();
@@ -454,7 +462,7 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         return false;
     }
 
-    private sealed record Candidate(string Path, ZipArchiveEntry Entry, InstallerType DeclaredType);
+    private sealed record Candidate(string Path, SupportedZipArchiveEntry Entry, InstallerType DeclaredType);
 
     private sealed record ResolvedCandidate(
         string Path,

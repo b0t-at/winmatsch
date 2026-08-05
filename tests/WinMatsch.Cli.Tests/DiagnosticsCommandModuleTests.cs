@@ -83,6 +83,27 @@ public sealed class DiagnosticsCommandModuleTests
     }
 
     [Fact]
+    public async Task Analyze_maps_unsupported_zip_features_to_operation_failure()
+    {
+        var analyzer = new FakeInstallerDiagnosticService
+        {
+            Failure = new UnsupportedZipFeatureException(
+                "archive.zip",
+                "payload/app.exe",
+                93,
+                "Zstandard"),
+        };
+        CliHarness harness = CreateHarness(analyzer: analyzer);
+
+        CliRunResult result = await harness.RunAsync(["analyze", "archive.zip"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains("ZIP004", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("method 93 (Zstandard)", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unexpected error", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Analyze_redacts_every_remote_input_query_value()
     {
         var analyzer = new FakeInstallerDiagnosticService { IsRemote = true };

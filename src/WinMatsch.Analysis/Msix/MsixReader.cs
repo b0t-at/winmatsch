@@ -1,4 +1,3 @@
-using System.IO.Compression;
 using System.Security.Cryptography;
 using WinMatsch.Core;
 
@@ -11,16 +10,23 @@ internal static class MsixReader
     private const string SignatureEntryName = "AppxSignature.p7x";
 
     /// <summary>Reads a zip entry fully into memory.</summary>
-    public static byte[] ReadEntryBytes(ZipArchiveEntry entry)
-        => AnalysisLimits.ReadEntryBytes(entry, $"MSIX entry '{entry.FullName}'");
+    public static byte[] ReadEntryBytes(SupportedZipArchiveEntry entry)
+    {
+        using Stream source = entry.Open();
+        return AnalysisLimits.ReadBounded(
+            source,
+            entry.Length,
+            $"MSIX entry '{entry.FullName}'",
+            AnalysisLimits.MaxEntryBytes);
+    }
 
     /// <summary>
     /// The SHA-256 of the package's <c>AppxSignature.p7x</c> entry (the manifest's
     /// <c>SignatureSha256</c> value), or null when the package is unsigned.
     /// </summary>
-    public static Sha256Hash? ComputeSignatureHash(ZipArchive archive)
+    public static Sha256Hash? ComputeSignatureHash(SupportedZipArchive archive)
     {
-        ZipArchiveEntry? signature = archive.GetEntry(SignatureEntryName);
+        SupportedZipArchiveEntry? signature = archive.GetEntry(SignatureEntryName);
         return signature is null ? null : Sha256Hash.FromHashBytes(SHA256.HashData(ReadEntryBytes(signature)));
     }
 

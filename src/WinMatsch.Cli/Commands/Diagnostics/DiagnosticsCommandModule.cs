@@ -372,6 +372,7 @@ public sealed class DiagnosticsCommandModule : ICommandModule
     private static bool IsOperationalFailure(Exception exception)
         => exception is FormatException
             or IOException
+            or ZipAnalysisException
             or UnauthorizedAccessException
             or NotSupportedException
             or ArgumentException

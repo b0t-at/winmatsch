@@ -1246,6 +1246,53 @@ public sealed class MutationCommandModuleTests
     }
 
     [Fact]
+    public async Task Zip_analysis_failure_is_an_operation_failure()
+    {
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = _ => throw new UnsupportedZipFeatureException(
+                "archive.zip",
+                "payload/app.exe",
+                93,
+                "Zstandard"),
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(["update", "Example.App", "1.0"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains("Local mutation failed", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("ZIP004", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Verified_zip_analysis_failure_is_an_operation_failure()
+    {
+        int calls = 0;
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request =>
+            {
+                calls++;
+                return calls == 1
+                    ? FakeMutationWorkflow.Result(request)
+                    : throw new UnsupportedZipFeatureException(
+                        "archive.zip",
+                        "payload/app.exe",
+                        93,
+                        "Zstandard");
+            },
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        CliRunResult result = await harness.RunAsync(["update", "Example.App", "1.0"]);
+
+        Assert.Equal(ExitCodes.OperationFailed, result.ExitCode);
+        Assert.Contains("Verified local mutation failed", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("ZIP004", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Replace_version_must_match_update_source_before_any_mutation()
     {
         var workflow = new FakeMutationWorkflow();

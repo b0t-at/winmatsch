@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 using WinMatsch.Core;
@@ -164,6 +165,110 @@ public class ZipAnalyzerTests
         Installer installer = Assert.Single(analysis.Installers);
         Assert.Equal(InstallerType.Exe, installer.NestedInstallerType);
         Assert.Equal(Architecture.Arm64, installer.Architecture);
+    }
+
+    [Theory]
+    [InlineData(CompressionLevel.NoCompression)]
+    [InlineData(CompressionLevel.Optimal)]
+    public void Stored_and_deflate_candidates_remain_supported(CompressionLevel compressionLevel)
+    {
+        using MemoryStream zip = BuildZip(
+            compressionLevel,
+            ("app.exe", PeFixtures.BuildExe()));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
+
+        Assert.Equal(InstallerType.Portable, Assert.Single(analysis.Installers).NestedInstallerType);
+    }
+
+    [Fact]
+    public void Deflate64_candidate_is_analyzed_with_bounded_existing_decoder()
+    {
+        using MemoryStream deflate = BuildZip(
+            CompressionLevel.Optimal,
+            ("app.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
+        using MemoryStream deflate64 = RewriteZipFeature(deflate, compressionMethod: 9);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(deflate64, "deflate64.zip");
+
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(InstallerType.Portable, installer.NestedInstallerType);
+        Assert.Equal(Architecture.X64, installer.Architecture);
+    }
+
+    [Fact]
+    public void Encrypted_entry_reports_stable_archive_entry_and_method_diagnostic()
+    {
+        using MemoryStream plain = BuildZip(("payload/app.exe", PeFixtures.BuildExe()));
+        using MemoryStream encrypted = RewriteZipFeature(plain, setFlags: 1);
+
+        UnsupportedZipFeatureException exception = Assert.Throws<UnsupportedZipFeatureException>(
+            () => FileAnalyzer.Analyze(encrypted, "encrypted.zip"));
+
+        Assert.Equal("ZIP004", exception.Diagnostic.Code);
+        Assert.Equal("encrypted.zip", exception.ArchiveName);
+        Assert.Equal("payload/app.exe", exception.EntryPath);
+        Assert.Equal((ushort)8, exception.CompressionMethod);
+        Assert.Equal("Deflate", exception.CompressionMethodName);
+        Assert.Equal("traditional ZIP encryption", exception.UnsupportedFeature);
+        Assert.Contains("method 8 (Deflate)", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Newer_unsupported_method_reports_its_registered_name()
+    {
+        using MemoryStream deflate = BuildZip(("payload/app.exe", PeFixtures.BuildExe()));
+        using MemoryStream zstandard = RewriteZipFeature(deflate, compressionMethod: 93);
+
+        UnsupportedZipFeatureException exception = Assert.Throws<UnsupportedZipFeatureException>(
+            () => _analyzer.Analyze(zstandard, "zstandard.zip"));
+
+        Assert.Equal((ushort)93, exception.CompressionMethod);
+        Assert.Equal("Zstandard", exception.CompressionMethodName);
+        Assert.Contains("payload/app.exe", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unsupported_local_method_cannot_bypass_central_directory_allowlist()
+    {
+        using MemoryStream deflate = BuildZip(("payload/app.exe", PeFixtures.BuildExe()));
+        using MemoryStream mismatched = RewriteLocalHeader(deflate, compressionMethod: 93);
+
+        UnsupportedZipFeatureException exception = Assert.Throws<UnsupportedZipFeatureException>(
+            () => _analyzer.Analyze(mismatched, "mismatched.zip"));
+
+        Assert.Equal((ushort)93, exception.CompressionMethod);
+        Assert.Equal("Zstandard", exception.CompressionMethodName);
+        Assert.Equal("payload/app.exe", exception.EntryPath);
+    }
+
+    [Fact]
+    public void Encrypted_local_header_cannot_bypass_central_directory_validation()
+    {
+        using MemoryStream deflate = BuildZip(("payload/app.exe", PeFixtures.BuildExe()));
+        using MemoryStream mismatched = RewriteLocalHeader(deflate, setFlags: 1);
+
+        UnsupportedZipFeatureException exception = Assert.Throws<UnsupportedZipFeatureException>(
+            () => _analyzer.Analyze(mismatched, "mismatched.zip"));
+
+        Assert.Equal("traditional ZIP encryption", exception.UnsupportedFeature);
+        Assert.Equal("payload/app.exe", exception.EntryPath);
+    }
+
+    [Fact]
+    public void Malformed_deflate64_data_reports_stable_domain_diagnostic()
+    {
+        using MemoryStream deflate = BuildZip(("payload/app.exe", PeFixtures.BuildExe()));
+        using MemoryStream deflate64 = RewriteZipFeature(deflate, compressionMethod: 9);
+        using MemoryStream malformed = CorruptEntryData(deflate64);
+
+        InvalidZipEntryDataException exception = Assert.Throws<InvalidZipEntryDataException>(
+            () => _analyzer.Analyze(malformed, "malformed.zip"));
+
+        Assert.Equal("ZIP005", exception.Diagnostic.Code);
+        Assert.Equal("malformed.zip", exception.ArchiveName);
+        Assert.Equal("payload/app.exe", exception.EntryPath);
+        Assert.Contains("method 9 (Deflate64)", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -379,13 +484,18 @@ public class ZipAnalyzerTests
 
     /// <summary>Builds an in-memory zip; a null content marks a directory entry.</summary>
     private static MemoryStream BuildZip(params (string Name, byte[]? Content)[] entries)
+        => BuildZip(CompressionLevel.Optimal, entries);
+
+    private static MemoryStream BuildZip(
+        CompressionLevel compressionLevel,
+        params (string Name, byte[]? Content)[] entries)
     {
         var stream = new MemoryStream();
         using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
         {
             foreach ((string name, byte[]? content) in entries)
             {
-                ZipArchiveEntry entry = archive.CreateEntry(name);
+                ZipArchiveEntry entry = archive.CreateEntry(name, compressionLevel);
                 if (content is not null)
                 {
                     using Stream entryStream = entry.Open();
@@ -396,5 +506,64 @@ public class ZipAnalyzerTests
 
         stream.Position = 0;
         return stream;
+    }
+
+    private static MemoryStream RewriteZipFeature(
+        MemoryStream source,
+        ushort? compressionMethod = null,
+        ushort setFlags = 0)
+    {
+        byte[] bytes = source.ToArray();
+        Span<byte> data = bytes;
+        Assert.Equal(0x04034B50u, BinaryPrimitives.ReadUInt32LittleEndian(data));
+        int centralOffset = data.LastIndexOf("PK\x01\x02"u8);
+        Assert.True(centralOffset >= 0);
+
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            data[6..],
+            (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[6..]) | setFlags));
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            data[(centralOffset + 8)..],
+            (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 8)..]) | setFlags));
+        if (compressionMethod is { } method)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(data[8..], method);
+            BinaryPrimitives.WriteUInt16LittleEndian(data[(centralOffset + 10)..], method);
+        }
+
+        return new MemoryStream(bytes, writable: false);
+    }
+
+    private static MemoryStream RewriteLocalHeader(
+        MemoryStream source,
+        ushort? compressionMethod = null,
+        ushort setFlags = 0)
+    {
+        byte[] bytes = source.ToArray();
+        Span<byte> data = bytes;
+        Assert.Equal(0x04034B50u, BinaryPrimitives.ReadUInt32LittleEndian(data));
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            data[6..],
+            (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[6..]) | setFlags));
+        if (compressionMethod is { } method)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(data[8..], method);
+        }
+
+        return new MemoryStream(bytes, writable: false);
+    }
+
+    private static MemoryStream CorruptEntryData(MemoryStream source)
+    {
+        byte[] bytes = source.ToArray();
+        Span<byte> data = bytes;
+        int centralOffset = data.LastIndexOf("PK\x01\x02"u8);
+        Assert.True(centralOffset >= 0);
+        int compressedLength = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(data[(centralOffset + 20)..]));
+        int dataOffset = 30
+            + BinaryPrimitives.ReadUInt16LittleEndian(data[26..])
+            + BinaryPrimitives.ReadUInt16LittleEndian(data[28..]);
+        data.Slice(dataOffset, compressedLength).Fill(0xFF);
+        return new MemoryStream(bytes, writable: false);
     }
 }
