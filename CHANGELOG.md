@@ -12,6 +12,10 @@ minor versions may contain breaking changes).
 - Updates now preserve validated nested ZIP installer metadata and stop with a
   structural question when fresh analysis would otherwise remove accepted
   `NestedInstallerType`, `NestedInstallerFiles`, or archive-path semantics.
+- Updates with a partial set of GitHub release URLs now auto-complete uniquely
+  matching same-repository installer siblings from the target release before
+  asking `MAP_REMOVED`. Completed mappings retain explicit audit provenance and
+  pass through the normal download, analysis, hash, rule, and validation gates.
 
 ## [0.8.12] - 2026-08-05
 

@@ -53,10 +53,17 @@ internal interface IManifestSnapshotSourceDiagnosticSource
 
 public interface IWorkflowReleaseSource
 {
-    public Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
+    public Task<WorkflowReleaseAssets> DiscoverAsync(
         PackageIdentifier packageIdentifier,
         ReleaseRequest request,
         CancellationToken cancellationToken);
+}
+
+public sealed record WorkflowReleaseAssets(
+    ImmutableArray<DiscoveredAsset> Selected,
+    ImmutableArray<DiscoveredAsset> ContinuityCandidates)
+{
+    public static WorkflowReleaseAssets Empty { get; } = new([], []);
 }
 
 public interface IWorkflowReleaseMetadataSource

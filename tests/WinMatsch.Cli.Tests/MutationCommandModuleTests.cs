@@ -2400,7 +2400,7 @@ internal sealed class EmptySnapshotSource : IManifestSnapshotSource
 
 internal sealed class GoldenReleaseSource : IWorkflowReleaseSource
 {
-    public Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
+    public Task<WorkflowReleaseAssets> DiscoverAsync(
         PackageIdentifier packageIdentifier,
         ReleaseRequest request,
         CancellationToken cancellationToken)
@@ -2408,9 +2408,9 @@ internal sealed class GoldenReleaseSource : IWorkflowReleaseSource
         var identity = new DownloadContentIdentity(
             new Sha256Hash("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
             42);
-        return Task.FromResult<ImmutableArray<DiscoveredAsset>>(
+        return Task.FromResult(new WorkflowReleaseAssets(
         [
-            new()
+            new DiscoveredAsset
                 {
                     ReleaseId = 1,
                     ReleaseTag = "v2.0.0",
@@ -2446,7 +2446,7 @@ internal sealed class GoldenReleaseSource : IWorkflowReleaseSource
                         ],
                     },
                 },
-            ]);
+            ], []));
     }
 }
 

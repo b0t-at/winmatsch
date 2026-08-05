@@ -531,7 +531,7 @@ internal sealed class FixtureReleaseSource(
 
     public int DiscoveredCount { get; private set; }
 
-    public Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
+    public Task<WorkflowReleaseAssets> DiscoverAsync(
         PackageIdentifier packageIdentifier,
         ReleaseRequest request,
         CancellationToken cancellationToken)
@@ -560,7 +560,7 @@ internal sealed class FixtureReleaseSource(
             _descriptor.Provenance.ObservedAt);
         ImmutableArray<DiscoveredAsset> discovered = ReleaseAssetDiscovery.Discover([release]);
         DiscoveredCount = discovered.Length;
-        return Task.FromResult(discovered);
+        return Task.FromResult(new WorkflowReleaseAssets(discovered, []));
     }
 }
 

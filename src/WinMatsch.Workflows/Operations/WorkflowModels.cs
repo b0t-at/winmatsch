@@ -352,6 +352,14 @@ public sealed record UpdateOperationRequest : WorkflowOperationRequest
 
     public ImmutableArray<DiscoveredAsset> Assets { get; init; } = [];
 
+    /// <summary>Unacquired assets from the caller-selected GitHub release, eligible only for continuity completion.</summary>
+    public ImmutableArray<DiscoveredAsset> ReleaseAssetCandidates { get; init; } = [];
+
+    /// <summary>Continuity decisions already acquired and analyzed during production preparation.</summary>
+    public ImmutableArray<AssetMappingCompletion> ReleaseAssetCompletions { get; init; } = [];
+
+    public ImmutableArray<AssetMappingBinding> ReleaseAssetBindings { get; init; } = [];
+
     public ImmutableArray<UrlOverride> UrlOverrides { get; init; } = [];
 
     public bool ReplacePreviousVersion { get; init; }
@@ -363,6 +371,9 @@ public sealed record UpdateOperationRequest : WorkflowOperationRequest
     public bool AllowSharedContentAcrossUrls { get; init; }
 
     public string? ArtifactDirectory { get; init; }
+
+    /// <summary>The artifact directory is workflow-owned and must survive plan/apply verification.</summary>
+    public bool UsePreparedArtifactDirectory { get; init; }
 
     public ImmutableArray<InstallerArtifact> InstallerArtifacts { get; init; } = [];
 }

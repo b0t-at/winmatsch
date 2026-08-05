@@ -6,6 +6,34 @@ namespace WinMatsch.Workflows.Tests.Discovery;
 
 public sealed class ReleaseAssetDiscoveryTests
 {
+    [Theory]
+    [InlineData(
+        "https://github.com/acme/app/releases/download/v1/app.exe",
+        "app",
+        "v1")]
+    [InlineData(
+        "https://github.com/acme/releases/releases/download/v1/app.exe",
+        "releases",
+        "v1")]
+    [InlineData(
+        "https://github.com/acme/app/releases/latest/download/app.exe",
+        "app",
+        "latest")]
+    public void GitHub_release_asset_identity_handles_immutable_alias_and_repository_names(
+        string url,
+        string repository,
+        string tag)
+    {
+        Assert.True(
+            GitHubReleaseAssetIdentity.TryParse(
+                new Uri(url),
+                out GitHubReleaseAssetIdentity identity));
+        Assert.Equal("acme", identity.Repository.Owner);
+        Assert.Equal(repository, identity.Repository.Name);
+        Assert.Equal(tag, identity.ReleaseTag);
+        Assert.Equal("app.exe", identity.AssetName);
+    }
+
     [Fact]
     public void Enumerates_windows_assets_with_release_provenance_in_stable_order()
     {

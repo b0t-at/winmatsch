@@ -95,6 +95,18 @@ public static class ReleaseAssetDiscovery
     public static ImmutableArray<DiscoveredAsset> Discover(
         IEnumerable<GitHubRelease> releases,
         IReadOnlyDictionary<string, ReleaseAssetEvidence>? evidenceByUrl = null)
+        => DiscoverCore(releases, evidenceByUrl, windowsOnly: true);
+
+    /// <summary>Enumerates every non-draft release asset for bounded continuity matching.</summary>
+    public static ImmutableArray<DiscoveredAsset> DiscoverAll(
+        IEnumerable<GitHubRelease> releases,
+        IReadOnlyDictionary<string, ReleaseAssetEvidence>? evidenceByUrl = null)
+        => DiscoverCore(releases, evidenceByUrl, windowsOnly: false);
+
+    private static ImmutableArray<DiscoveredAsset> DiscoverCore(
+        IEnumerable<GitHubRelease> releases,
+        IReadOnlyDictionary<string, ReleaseAssetEvidence>? evidenceByUrl,
+        bool windowsOnly)
     {
         ArgumentNullException.ThrowIfNull(releases);
         evidenceByUrl ??= new Dictionary<string, ReleaseAssetEvidence>(StringComparer.Ordinal);
@@ -111,7 +123,7 @@ public static class ReleaseAssetDiscovery
                     WindowsAssetClassification classification = ClassifyWindowsAsset(pair.Asset, evidence);
                     return (pair.Release, pair.Asset, Evidence: evidence, Classification: classification);
                 })
-                .Where(static item => item.Classification.Include)
+                .Where(item => !windowsOnly || item.Classification.Include)
                 .Select(item => new DiscoveredAsset
                 {
                     ReleaseId = item.Release.Id,

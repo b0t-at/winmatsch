@@ -163,12 +163,33 @@ public static class LocalOperationPlanFingerprint
                 writer.Add("version", value.PackageVersion);
                 writer.Add("release", CreateComponent(value.Release));
                 writer.Add("assets", CreateComponent(value.Assets));
+                writer.Add(
+                    "release-asset-candidates",
+                    CreateComponent(value.ReleaseAssetCandidates));
+                foreach (AssetMappingBinding binding in value.ReleaseAssetBindings
+                             .OrderBy(static item => item.PreviousPosition))
+                {
+                    writer.Add("release-asset-binding-position", binding.PreviousPosition);
+                    writer.Add("release-asset-binding-url", binding.AssetUrl.AbsoluteUri);
+                }
+                foreach (AssetMappingCompletion completion in value.ReleaseAssetCompletions
+                             .OrderBy(static item => item.PreviousPosition))
+                {
+                    writer.Add("release-asset-completion-position", completion.PreviousPosition);
+                    writer.Add(
+                        "release-asset-completion-url",
+                        completion.Asset.DownloadUri.AbsoluteUri);
+                    writer.Add("release-asset-completion-provenance", completion.Provenance);
+                }
                 writer.Add("url-overrides", CreateComponent(value.UrlOverrides));
                 writer.Add("replace", value.ReplacePreviousVersion ? "true" : "false");
                 writer.Add("structural-rewrite", value.AllowStructuralRewrite ? "true" : "false");
                 writer.Add("stable-url-change", value.AllowStableUrlContentChange ? "true" : "false");
                 writer.Add("allow-shared-content", value.AllowSharedContentAcrossUrls ? "true" : "false");
                 writer.Add("artifact-directory", value.ArtifactDirectory);
+                writer.Add(
+                    "use-prepared-artifact-directory",
+                    value.UsePreparedArtifactDirectory ? "true" : "false");
                 AddInstallerArtifacts(writer, value.InstallerArtifacts);
                 break;
             case RemoveOperationRequest value:

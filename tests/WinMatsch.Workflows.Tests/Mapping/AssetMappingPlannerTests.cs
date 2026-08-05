@@ -288,6 +288,197 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
+    public void Release_asset_continuity_completes_unique_same_repository_siblings()
+    {
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            GitHubPrevious(0, "VCMI-Windows-x64.exe", Architecture.X64),
+            GitHubPrevious(1, "VCMI-Windows-x86.exe", Architecture.X86),
+            GitHubPrevious(2, "VCMI-Windows-arm64.exe", Architecture.Arm64),
+        ];
+        DiscoveredAsset selected = GitHubAsset("vcmi", "vcmi", "1.7.4", "VCMI-Windows-x64.exe");
+        ImmutableArray<DiscoveredAsset> candidates =
+        [
+            GitHubAsset("vcmi", "vcmi", "1.7.4", "VCMI-Windows-x86.exe"),
+            GitHubAsset("vcmi", "vcmi", "1.7.4", "VCMI-Windows-arm64.exe"),
+        ];
+
+        AssetMappingContinuityPlan continuity =
+            AssetMappingPlanner.CompleteReleaseAssetContinuity(
+                [selected],
+                candidates,
+                previous,
+                new PackageVersion("1.7.4"));
+
+        ImmutableArray<AssetMappingCompletion> completions = continuity.Completions;
+        Assert.Equal([1, 2], completions.Select(static item => item.PreviousPosition));
+        Assert.All(
+            completions,
+            static item => Assert.Equal("release-asset continuity", item.Provenance));
+    }
+
+    [Fact]
+    public void Ambiguous_release_asset_continuity_preserves_removed_question()
+    {
+        PreviousInstallerEntry previous = GitHubPrevious(
+            0,
+            "tool-1.0.0-x86.exe",
+            Architecture.X86) with
+        {
+            PackageVersion = new("1.0.0"),
+        };
+        DiscoveredAsset first = GitHubAsset(
+            "vcmi",
+            "vcmi",
+            "2.0.0",
+            "tool-2.0.0-x86.exe");
+        DiscoveredAsset second = GitHubAsset(
+            "vcmi",
+            "vcmi",
+            "2.0.0",
+            "tool-v2.0.0-x86.exe");
+
+        AssetMappingContinuityPlan continuity =
+            AssetMappingPlanner.CompleteReleaseAssetContinuity(
+                [],
+                [first, second],
+                [previous],
+                new PackageVersion("2.0.0"));
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([], [previous]));
+
+        Assert.Empty(continuity.Completions);
+        Assert.Contains(plan.UnresolvedQuestions, static question => question.Code == "MAP_REMOVED");
+    }
+
+    [Fact]
+    public void Missing_release_asset_continuity_preserves_removed_question()
+    {
+        PreviousInstallerEntry previous = GitHubPrevious(
+            0,
+            "tool-x86.exe",
+            Architecture.X86);
+
+        AssetMappingContinuityPlan continuity =
+            AssetMappingPlanner.CompleteReleaseAssetContinuity(
+                [],
+                [],
+                [previous],
+                new PackageVersion("2.0.0"));
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([], [previous]));
+
+        Assert.Empty(continuity.Completions);
+        Assert.Contains(plan.UnresolvedQuestions, static question => question.Code == "MAP_REMOVED");
+    }
+
+    [Fact]
+    public void Cross_repository_release_asset_is_not_adopted()
+    {
+        PreviousInstallerEntry previous = GitHubPrevious(
+            0,
+            "tool-x86.exe",
+            Architecture.X86);
+        DiscoveredAsset crossRepository = GitHubAsset(
+            "other",
+            "tool",
+            "2.0.0",
+            "tool-x86.exe");
+
+        AssetMappingContinuityPlan continuity =
+            AssetMappingPlanner.CompleteReleaseAssetContinuity(
+                [],
+                [crossRepository],
+                [previous],
+                new PackageVersion("2.0.0"));
+
+        Assert.Empty(continuity.Completions);
+    }
+
+    [Fact]
+    public void Completed_mappings_bind_structurally_similar_assets_to_positions()
+    {
+        PreviousInstallerEntry firstPrevious = Previous(
+            0,
+            "https://old.test/tool-one-x64.exe",
+            Architecture.X64,
+            InstallerType.Exe) with
+        {
+            InstallerLocale = new("en-US"),
+        };
+        PreviousInstallerEntry secondPrevious = Previous(
+            1,
+            "https://old.test/tool-second-long-x64.exe",
+            Architecture.X64,
+            InstallerType.Exe) with
+        {
+            InstallerLocale = new("fr-FR"),
+        };
+        DiscoveredAsset first = Asset("tool-one-x64.exe", InstallerType.Exe, Architecture.X64);
+        DiscoveredAsset second = Asset(
+            "tool-second-long-x64.exe",
+            InstallerType.Exe,
+            Architecture.X64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(
+            Request([first, second], [firstPrevious, secondPrevious]) with
+            {
+                AssetBindings =
+                [
+                    new(0, first.DownloadUri),
+                    new(1, second.DownloadUri),
+                ],
+            });
+
+        Assert.True(plan.CanApply, plan.DeterministicKey);
+        Assert.Equal(
+            [first.DownloadUri, second.DownloadUri],
+            plan.Decisions
+                .OrderBy(static decision => decision.PreviousPosition)
+                .Select(static decision => decision.Installer!.Url));
+    }
+
+    [Fact]
+    public void Selected_asset_covers_only_its_compatible_previous_url()
+    {
+        PreviousInstallerEntry firstPrevious = GitHubPrevious(
+            0,
+            "tool-en-x64.exe",
+            Architecture.X64) with
+        {
+            InstallerLocale = new("en-US"),
+        };
+        PreviousInstallerEntry secondPrevious = GitHubPrevious(
+            1,
+            "tool-fr-x64.exe",
+            Architecture.X64) with
+        {
+            InstallerLocale = new("fr-FR"),
+        };
+        DiscoveredAsset selected = GitHubAsset(
+            "vcmi",
+            "vcmi",
+            "1.7.4",
+            "tool-fr-x64.exe");
+        DiscoveredAsset candidate = GitHubAsset(
+            "vcmi",
+            "vcmi",
+            "1.7.4",
+            "tool-en-x64.exe");
+
+        AssetMappingContinuityPlan continuity =
+            AssetMappingPlanner.CompleteReleaseAssetContinuity(
+                [selected],
+                [candidate],
+                [firstPrevious, secondPrevious],
+                new PackageVersion("1.7.4"));
+
+        Assert.Equal(0, Assert.Single(continuity.Completions).PreviousPosition);
+        Assert.Equal(
+            [(0, candidate.DownloadUri), (1, selected.DownloadUri)],
+            continuity.Bindings.Select(
+                static binding => (binding.PreviousPosition, binding.AssetUrl)));
+    }
+
+    [Fact]
     public void Duplicate_nested_aliases_block_apply()
     {
         PreviousInstallerEntry previous = Previous(
@@ -1299,6 +1490,44 @@ public sealed class AssetMappingPlannerTests
             InstallerType = type,
             PackageVersion = new("1.0.0"),
         };
+
+    private static PreviousInstallerEntry GitHubPrevious(
+        int position,
+        string assetName,
+        Architecture architecture)
+        => Previous(
+            position,
+            $"https://github.com/vcmi/vcmi/releases/download/1.7.3/{assetName}",
+            architecture,
+            InstallerType.Exe) with
+        {
+            PackageVersion = new("1.7.3"),
+        };
+
+    private static DiscoveredAsset GitHubAsset(
+        string owner,
+        string repository,
+        string version,
+        string assetName)
+    {
+        Uri url = new(
+            $"https://github.com/{owner}/{repository}/releases/download/{version}/{assetName}");
+        return new()
+        {
+            ReleaseId = 42,
+            ReleaseTag = version,
+            ReleaseName = version,
+            ReleaseUri = new(
+                $"https://github.com/{owner}/{repository}/releases/tag/{version}"),
+            IsPrerelease = false,
+            AssetId = assetName.GetHashCode(StringComparison.Ordinal),
+            AssetName = assetName,
+            DownloadUri = url,
+            DeclaredContentType = "application/octet-stream",
+            DeclaredSize = 0,
+            AssetCreatedAt = DateTimeOffset.UnixEpoch,
+        };
+    }
 
     private static DiscoveredAsset Asset(
         string name,

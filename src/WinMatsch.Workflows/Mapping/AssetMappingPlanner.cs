@@ -12,6 +12,8 @@ namespace WinMatsch.Workflows.Mapping;
 /// <summary>Creates an ambiguity-safe mapping plan without mutating manifests or downloaded assets.</summary>
 public static class AssetMappingPlanner
 {
+    private const string ReleaseAssetContinuityProvenance = "release-asset continuity";
+
     public static AssetMappingPlan CreatePlan(AssetMappingRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -49,6 +51,22 @@ public static class AssetMappingPlanner
         var usedByPosition = new Dictionary<int, Candidate>();
         var positionsByPhysicalAsset = new Dictionary<string, List<PreviousInstallerEntry>>(StringComparer.Ordinal);
         var assignedCandidates = new HashSet<Candidate>();
+        Dictionary<int, string> boundUrlsByPosition = request.AssetBindings
+            .GroupBy(static binding => binding.PreviousPosition)
+            .Where(static group => group.Count() == 1)
+            .ToDictionary(
+                static group => group.Key,
+                static group => group.Single().AssetUrl.AbsoluteUri);
+        Dictionary<string, HashSet<int>> boundPositionsByUrl = request.AssetBindings
+            .GroupBy(
+                static binding => binding.AssetUrl.AbsoluteUri,
+                StringComparer.Ordinal)
+            .ToDictionary(
+                static group => group.Key,
+                static group => group
+                    .Select(static binding => binding.PreviousPosition)
+                    .ToHashSet(),
+                StringComparer.Ordinal);
         Dictionary<string, Candidate[]> preservedSharedGroups = BuildPreservedSharedGroups(request, candidates);
         HashSet<int> entryTargetedRetirements = BuildEntryTargetedRetirements(request, candidates);
         foreach (PreviousInstallerEntry previous in request.PreviousInstallers.OrderBy(static entry => entry.Position))
@@ -56,6 +74,14 @@ public static class AssetMappingPlanner
             Candidate[] availableCandidates = request.AllowStructuralRewrite
                 ? [.. candidates.Where(candidate => !assignedCandidates.Contains(candidate))]
                 : candidates;
+            availableCandidates =
+            [
+                .. availableCandidates.Where(candidate =>
+                    !boundPositionsByUrl.TryGetValue(
+                        candidate.Asset.DownloadUri.AbsoluteUri,
+                        out HashSet<int>? boundPositions)
+                    || boundPositions.Contains(previous.Position)),
+            ];
             Candidate[] exactByUrl = availableCandidates
                 .Where(candidate => UriEquals(candidate.Asset.DownloadUri, previous.Url))
                 .ToArray();
@@ -77,7 +103,21 @@ public static class AssetMappingPlanner
                         ? exactByUrl
                         : [];
             Candidate[] matches;
-            if (preservedSharedGroups.TryGetValue(
+            if (boundUrlsByPosition.TryGetValue(
+                    previous.Position,
+                    out string? boundUrl))
+            {
+                matches =
+                [
+                    .. availableCandidates
+                        .Where(candidate => string.Equals(
+                            candidate.Asset.DownloadUri.AbsoluteUri,
+                            boundUrl,
+                            StringComparison.Ordinal))
+                        .Where(candidate => IsCompatible(previous, candidate)),
+                ];
+            }
+            else if (preservedSharedGroups.TryGetValue(
                     previous.Url.AbsoluteUri,
                     out Candidate[]? sharedGroupCandidates))
             {
@@ -293,6 +333,210 @@ public static class AssetMappingPlanner
                     .ThenBy(static question => question.PreviousPosition)
                     .ThenBy(static question => question.AssetUrl, StringComparer.Ordinal),
             ]);
+    }
+
+    /// <summary>
+    /// Selects only unique, version-neutral name continuations from the same GitHub repository.
+    /// Returned assets still require the normal download, analysis, and mapping pipeline.
+    /// </summary>
+    public static AssetMappingContinuityPlan CompleteReleaseAssetContinuity(
+        ImmutableArray<DiscoveredAsset> selectedAssets,
+        ImmutableArray<DiscoveredAsset> continuityCandidates,
+        ImmutableArray<PreviousInstallerEntry> previousInstallers,
+        PackageVersion targetVersion)
+    {
+        ArgumentNullException.ThrowIfNull(targetVersion);
+        if (previousInstallers.IsEmpty)
+        {
+            return new([], []);
+        }
+
+        var available = continuityCandidates
+            .Where(candidate => selectedAssets.All(
+               selected => !UriEquals(selected.DownloadUri, candidate.DownloadUri)))
+            .OrderBy(static candidate => candidate.DownloadUri.AbsoluteUri, StringComparer.Ordinal)
+            .ToList();
+        var mappedCandidates = selectedAssets
+            .SelectMany(BuildContinuityCandidates)
+            .ToList();
+        var mappedAssetUsers = new Dictionary<string, string>(StringComparer.Ordinal);
+        var bindings = ImmutableArray.CreateBuilder<AssetMappingBinding>();
+        var completions = ImmutableArray.CreateBuilder<AssetMappingCompletion>();
+        PreviousInstallerEntry[] orderedPrevious =
+        [
+            .. previousInstallers.OrderBy(static item => item.Position),
+        ];
+        foreach (PreviousInstallerEntry previous in orderedPrevious)
+        {
+            DiscoveredAsset[] nameMatches =
+            [
+                .. selectedAssets
+                    .Where(asset => IsNameContinuation(previous, asset, targetVersion))
+                    .Where(asset => BuildContinuityCandidates(asset)
+                        .Any(candidate => IsCompatible(previous, candidate)))
+                    .Where(asset =>
+                        !mappedAssetUsers.TryGetValue(
+                            asset.DownloadUri.AbsoluteUri,
+                            out string? priorUrl)
+                        || string.Equals(
+                            priorUrl,
+                            previous.Url.AbsoluteUri,
+                            StringComparison.Ordinal)),
+            ];
+            if (nameMatches.Length != 1)
+            {
+                continue;
+            }
+
+            DiscoveredAsset selected = nameMatches[0];
+            mappedAssetUsers[selected.DownloadUri.AbsoluteUri] = previous.Url.AbsoluteUri;
+            bindings.Add(new(previous.Position, selected.DownloadUri));
+        }
+
+        HashSet<int> boundPositions =
+        [
+            .. bindings.Select(static binding => binding.PreviousPosition),
+        ];
+        foreach (PreviousInstallerEntry previous in orderedPrevious)
+        {
+            if (boundPositions.Contains(previous.Position))
+            {
+                continue;
+            }
+
+            string[] mappedAssets =
+            [
+               .. mappedCandidates
+                   .Where(candidate => IsCompatible(previous, candidate))
+                   .Select(static candidate => candidate.Asset.DownloadUri.AbsoluteUri)
+                   .Distinct(StringComparer.Ordinal)
+                   .Where(url => !mappedAssetUsers.TryGetValue(url, out string? priorUrl)
+                       || string.Equals(
+                           priorUrl,
+                           previous.Url.AbsoluteUri,
+                           StringComparison.Ordinal)),
+            ];
+            if (mappedAssets.Length > 0)
+            {
+                if (mappedAssets.Length == 1)
+                {
+                    mappedAssetUsers[mappedAssets[0]] = previous.Url.AbsoluteUri;
+                    bindings.Add(new(previous.Position, new Uri(mappedAssets[0])));
+                    boundPositions.Add(previous.Position);
+                }
+
+                continue;
+            }
+
+            var matchingAssets = available
+               .Where(candidate => IsNameContinuation(previous, candidate, targetVersion))
+               .Where(candidate => BuildContinuityCandidates(candidate)
+                   .Any(classified => IsCompatible(previous, classified)))
+               .ToArray();
+            if (matchingAssets.Length != 1)
+            {
+                continue;
+            }
+
+            DiscoveredAsset completed = matchingAssets[0];
+            completions.Add(new(
+               previous.Position,
+               completed,
+               ReleaseAssetContinuityProvenance));
+            bindings.Add(new(previous.Position, completed.DownloadUri));
+            boundPositions.Add(previous.Position);
+            available.Remove(completed);
+            mappedCandidates.AddRange(BuildContinuityCandidates(completed));
+            mappedAssetUsers[completed.DownloadUri.AbsoluteUri] = previous.Url.AbsoluteUri;
+        }
+
+        return new(
+            [.. bindings.OrderBy(static binding => binding.PreviousPosition)],
+            [.. completions.OrderBy(static completion => completion.PreviousPosition)]);
+    }
+
+    private static bool IsNameContinuation(
+        PreviousInstallerEntry previous,
+        DiscoveredAsset candidate,
+        PackageVersion targetVersion)
+        => GitHubReleaseAssetIdentity.TryParse(
+                previous.Url,
+                out GitHubReleaseAssetIdentity previousIdentity)
+            && GitHubReleaseAssetIdentity.TryParse(
+                candidate.DownloadUri,
+                out GitHubReleaseAssetIdentity candidateIdentity)
+            && previousIdentity.IsSameRepository(candidateIdentity)
+            && string.Equals(
+                NormalizeAssetName(previousIdentity.AssetName, previous.PackageVersion),
+                NormalizeAssetName(candidate.AssetName, targetVersion),
+                StringComparison.OrdinalIgnoreCase);
+
+    private static IEnumerable<Candidate> BuildContinuityCandidates(DiscoveredAsset asset)
+    {
+        AnalyzedInstallerShape?[] shapes = asset.Analysis is { InstallerShapes.IsEmpty: false } analysis
+            ? [.. analysis.InstallerShapes.Cast<AnalyzedInstallerShape?>()]
+            : [null];
+        foreach (AnalyzedInstallerShape? shape in shapes)
+        {
+            yield return BuildCandidateVariant(
+               asset,
+               shape,
+               urlOverride: null,
+               [],
+               [],
+               [],
+               []);
+        }
+    }
+
+    private static string NormalizeAssetName(string assetName, PackageVersion version)
+    {
+        string normalized = assetName;
+        string[] representations =
+        [
+            version.Value,
+            version.Value.Replace('.', '_'),
+            version.Value.Replace('.', '-'),
+        ];
+        foreach (string representation in representations
+                    .Concat(representations.Select(static value => $"v{value}"))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderByDescending(static value => value.Length))
+        {
+            normalized = ReplaceBoundedToken(normalized, representation, "{version}");
+        }
+
+        return normalized;
+    }
+
+    private static string ReplaceBoundedToken(string value, string token, string replacement)
+    {
+        var result = new System.Text.StringBuilder(value.Length);
+        int position = 0;
+        while (position < value.Length)
+        {
+            int index = value.IndexOf(token, position, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                result.Append(value, position, value.Length - position);
+                break;
+            }
+
+            int end = index + token.Length;
+            bool bounded = (index == 0 || !char.IsAsciiLetterOrDigit(value[index - 1]))
+               && (end == value.Length || !char.IsAsciiLetterOrDigit(value[end]));
+            if (!bounded)
+            {
+                result.Append(value, position, end - position);
+                position = end;
+                continue;
+            }
+
+            result.Append(value, position, index - position).Append(replacement);
+            position = end;
+        }
+
+        return result.ToString();
     }
 
     private static IEnumerable<Candidate> BuildCandidates(

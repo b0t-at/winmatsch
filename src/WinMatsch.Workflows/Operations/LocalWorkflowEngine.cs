@@ -25,6 +25,7 @@ public sealed class LocalWorkflowEngine
     private readonly IWorkflowClock _clock;
     private readonly IOverridePackStore? _overridePackStore;
     private readonly ILocalOperationLockProvider _planLocks;
+    private readonly string _trustedGitHubHost;
 
     public LocalWorkflowEngine(
         IManifestSnapshotSource manifests,
@@ -35,7 +36,8 @@ public sealed class LocalWorkflowEngine
         IWorkflowArtifactProcessor? artifacts = null,
         IWorkflowClock? clock = null,
         IOverridePackStore? overridePackStore = null,
-        ILocalOperationLockProvider? planLocks = null)
+        ILocalOperationLockProvider? planLocks = null,
+        string trustedGitHubHost = "github.com")
     {
         _manifests = manifests ?? throw new ArgumentNullException(nameof(manifests));
         _rules = rules ?? throw new ArgumentNullException(nameof(rules));
@@ -46,6 +48,9 @@ public sealed class LocalWorkflowEngine
         _clock = clock ?? new SystemWorkflowClock();
         _overridePackStore = overridePackStore;
         _planLocks = planLocks ?? new FileLocalOperationLockProvider();
+        _trustedGitHubHost = string.IsNullOrWhiteSpace(trustedGitHubHost)
+            ? throw new ArgumentException("A trusted GitHub web host is required.", nameof(trustedGitHubHost))
+            : trustedGitHubHost;
     }
 
     public async Task<WorkflowOperationResult> ApplyVerifiedPlanAsync(
@@ -261,6 +266,26 @@ public sealed class LocalWorkflowEngine
         return latest is null
             ? request
             : request with { PreviousVersion = latest.PackageVersion };
+    }
+
+    public async Task<ImmutableArray<PreviousInstallerEntry>> LoadPreviousInstallersAsync(
+        UpdateOperationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.PreviousVersion is null)
+        {
+            return [];
+        }
+
+        PackageSnapshot? previous = await _manifests.LoadAsync(
+            request.OutputDirectory,
+            request.PackageIdentifier,
+            request.PreviousVersion,
+            cancellationToken).ConfigureAwait(false);
+        return previous is null
+            ? []
+            : PreviousInstallerEntry.FromManifests(previous.Manifests);
     }
 
     private async Task<WorkflowOperationResult> UpdateCoreAsync(
@@ -612,16 +637,88 @@ public sealed class LocalWorkflowEngine
             identifier,
             cancellationToken).ConfigureAwait(false);
         ImmutableArray<DiscoveredAsset> assets = create?.Assets ?? update!.Assets;
+        ImmutableArray<DiscoveredAsset> continuityCandidates =
+            update?.ReleaseAssetCandidates ?? [];
+        ImmutableArray<AssetMappingCompletion> preparedCompletions =
+            update?.ReleaseAssetCompletions ?? [];
+        ImmutableArray<AssetMappingBinding> preparedBindings =
+            update?.ReleaseAssetBindings ?? [];
         ReleaseRequest release = create?.Release ?? update!.Release;
         if (assets.IsEmpty && _releases is not null)
         {
-            assets = await _releases.DiscoverAsync(identifier, release, cancellationToken).ConfigureAwait(false);
+            WorkflowReleaseAssets discovered = await _releases
+                .DiscoverAsync(identifier, release, cancellationToken)
+                .ConfigureAwait(false);
+            assets = discovered.Selected;
+            continuityCandidates = discovered.ContinuityCandidates;
         }
 
         if (assets.IsEmpty)
         {
             return InvalidResult(isUpdate ? "update" : "new", operationRequest, "No Windows release assets were supplied or discovered.");
         }
+
+        string? requestedVersion = create?.PackageVersion ?? update?.PackageVersion;
+        ImmutableArray<PreviousInstallerEntry> previousInstallers = previous is null
+            ? []
+            : PreviousInstallerEntry.FromManifests(previous.Manifests);
+        ImmutableArray<DiscoveredAsset> selectedAssets = assets;
+        PackageVersionResolution continuityVersion = PackageVersionResolver.Resolve(new()
+        {
+            PackageIdentifier = identifier,
+            ExplicitPackageVersion = requestedVersion,
+            OverridePacks = operationRequest.OverridePacks,
+            Assets = assets,
+        });
+        AssetMappingContinuityPlan continuity =
+            isUpdate && continuityVersion.Version is { } targetVersion
+                ? AssetMappingPlanner.CompleteReleaseAssetContinuity(
+                    assets,
+                    continuityCandidates,
+                    previousInstallers,
+                    targetVersion)
+                : new([], []);
+        ImmutableArray<AssetMappingCompletion> discoveredCompletions = continuity.Completions;
+        ImmutableArray<AssetMappingCompletion> completions =
+        [
+            .. preparedCompletions
+                .Concat(discoveredCompletions)
+                .DistinctBy(static completion => completion.PreviousPosition)
+                .OrderBy(static completion => completion.PreviousPosition),
+        ];
+        ImmutableArray<AssetMappingBinding> bindings =
+        [
+            .. preparedBindings
+                .Concat(continuity.Bindings)
+                .DistinctBy(static binding => binding.PreviousPosition)
+                .OrderBy(static binding => binding.PreviousPosition),
+        ];
+        if (!discoveredCompletions.IsEmpty)
+        {
+            assets =
+            [
+                .. assets
+                    .Concat(discoveredCompletions.Select(static completion => completion.Asset))
+                    .DistinctBy(static asset => asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal),
+            ];
+        }
+
+        HashSet<string> callerUrls = release.InstallerUrls
+            .Select(static uri => uri.AbsoluteUri)
+            .ToHashSet(StringComparer.Ordinal);
+        ImmutableArray<WorkflowAuditEntry> assetInputAudit =
+        [
+            .. selectedAssets
+                .Where(asset => callerUrls.Contains(asset.DownloadUri.AbsoluteUri))
+                .Select(static asset => new WorkflowAuditEntry(
+                    "MAP_SUPPLIED",
+                    asset.DownloadUri.AbsoluteUri,
+                    "caller-supplied URL")),
+            .. completions.Select(static completion => new WorkflowAuditEntry(
+                "MAP_COMPLETED",
+                $"Previous installer {completion.PreviousPosition} mapped to {completion.Asset.DownloadUri.AbsoluteUri}.",
+                completion.Provenance)),
+        ];
 
         ImmutableArray<WorkflowAuditEntry> releaseMetadataAudit = [];
         if (create is not null && _releases is IWorkflowReleaseMetadataSource metadataSource)
@@ -651,7 +748,8 @@ public sealed class LocalWorkflowEngine
 
         using var artifactDirectory = new ArtifactDirectoryLease(
             operationRequest.ExecutionMode,
-            create?.ArtifactDirectory ?? update?.ArtifactDirectory);
+            create?.ArtifactDirectory ?? update?.ArtifactDirectory,
+            update?.UsePreparedArtifactDirectory ?? false);
         var artifactSnapshots = ImmutableArray.CreateBuilder<ArtifactSnapshot>();
         var installerArtifacts = ImmutableArray.CreateBuilder<InstallerArtifact>();
         installerArtifacts.AddRange(create?.InstallerArtifacts ?? update!.InstallerArtifacts);
@@ -699,7 +797,6 @@ public sealed class LocalWorkflowEngine
             enrichedAssets.Add(snapshot.Asset);
         }
 
-        string? requestedVersion = create?.PackageVersion ?? update?.PackageVersion;
         PackageVersionResolution versionResolution = PackageVersionResolver.Resolve(new()
         {
             PackageIdentifier = identifier,
@@ -708,15 +805,13 @@ public sealed class LocalWorkflowEngine
             Assets = enrichedAssets.ToImmutable(),
         });
         ImmutableArray<UrlOverride> urlOverrides = create?.UrlOverrides ?? update!.UrlOverrides;
-        ImmutableArray<PreviousInstallerEntry> previousInstallers = previous is null
-            ? []
-            : PreviousInstallerEntry.FromManifests(previous.Manifests);
         AssetMappingPlan mapping = AssetMappingPlanner.CreatePlan(new()
         {
             PackageIdentifier = identifier,
             Version = versionResolution,
             Assets = enrichedAssets.ToImmutable(),
             PreviousInstallers = previousInstallers,
+            AssetBindings = bindings,
             OverridePacks = operationRequest.OverridePacks,
             UrlOverrides = urlOverrides,
             AllowStructuralRewrite = update?.AllowStructuralRewrite ?? false,
@@ -747,8 +842,8 @@ public sealed class LocalWorkflowEngine
                 mappingQuestions.IsEmpty
                     ? [new("MAPPING_UNRESOLVED", "Release asset mapping requires explicit input.", [])]
                     : mappingQuestions,
-                mapping.Diagnostics.Select(static item =>
-                    new WorkflowAuditEntry(item.Code, item.Message, item.AssetUrl)));
+                assetInputAudit.Concat(mapping.Diagnostics.Select(static item =>
+                    new WorkflowAuditEntry(item.Code, item.Message, item.AssetUrl))));
         }
 
         PackageVersion newVersion = versionResolution.Version;
@@ -1056,6 +1151,7 @@ public sealed class LocalWorkflowEngine
                 $"MAP_{decision.Kind.ToString().ToUpperInvariant()}",
                 decision.Reason,
                 decision.Installer?.Url.AbsoluteUri)),
+            .. assetInputAudit,
             .. releaseMetadataAudit,
             .. learnedStoreAudit,
             .. isUpdate && changes.IsEmpty
@@ -2514,7 +2610,7 @@ public sealed class LocalWorkflowEngine
             _ => throw new ArgumentException("Unsupported workflow request.", nameof(request)),
         };
 
-    private static WorkflowReleaseProvenance? CreateReleaseProvenance(
+    private WorkflowReleaseProvenance? CreateReleaseProvenance(
         IEnumerable<DiscoveredAsset> assets)
     {
         DiscoveredAsset[] releaseAssets =
@@ -2529,7 +2625,7 @@ public sealed class LocalWorkflowEngine
 
         Uri releaseUri = releaseAssets[0].ReleaseUri;
         if (!releaseUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-            || !releaseUri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+            || !releaseUri.Host.Equals(_trustedGitHubHost, StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }
@@ -2665,9 +2761,13 @@ public sealed class LocalWorkflowEngine
     {
         private readonly bool _owned;
 
-        public ArtifactDirectoryLease(WorkflowExecutionMode mode, string? requestedPath)
+        public ArtifactDirectoryLease(
+            WorkflowExecutionMode mode,
+            string? requestedPath,
+            bool usePreparedPathInPlan = false)
         {
-            if (mode == WorkflowExecutionMode.Apply && !string.IsNullOrWhiteSpace(requestedPath))
+            if ((mode == WorkflowExecutionMode.Apply || usePreparedPathInPlan)
+                && !string.IsNullOrWhiteSpace(requestedPath))
             {
                 Path = System.IO.Path.GetFullPath(requestedPath);
                 return;

@@ -155,7 +155,7 @@ public sealed class GitHubLifecycleE2ETests
             new PullRequestSearch(
                 PullRequestState.Open,
                 ExactTitleToken: $"winmatsch-read-only-{Guid.NewGuid():N}"));
-        ImmutableArray<DiscoveredAsset> discovered = await new GitHubWorkflowReleaseSource(
+        WorkflowReleaseAssets discovered = await new GitHubWorkflowReleaseSource(
                 client,
                 repository)
             .DiscoverAsync(
@@ -182,7 +182,7 @@ public sealed class GitHubLifecycleE2ETests
         Assert.Empty(pullRequests);
         Assert.Equal(
             ReleaseAssetDiscovery.Discover(releases).Select(static asset => asset.DownloadUri),
-            discovered.Select(static asset => asset.DownloadUri));
+            discovered.Selected.Select(static asset => asset.DownloadUri));
         Assert.True(recorder.Requests.Count >= 7);
         Assert.Contains(recorder.Requests, static request => request.Method == HttpMethod.Get);
         Assert.Contains(
