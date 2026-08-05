@@ -12,8 +12,12 @@ internal static class MsixFixtures
         "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
 
     /// <summary>Builds a package zip with an <c>AppxManifest.xml</c> and an optional signature entry.</summary>
-    public static MemoryStream BuildPackage(string manifestXml, byte[]? signature = null)
-        => BuildZip(("AppxManifest.xml", Encoding.UTF8.GetBytes(manifestXml)), ("AppxSignature.p7x", signature));
+    public static MemoryStream BuildPackage(
+        string manifestXml,
+        byte[]? signature = null,
+        params (string Name, byte[]? Content)[] additionalEntries)
+        => BuildZip(
+            [("AppxManifest.xml", Encoding.UTF8.GetBytes(manifestXml)), ("AppxSignature.p7x", signature), .. additionalEntries]);
 
     /// <summary>Builds a bundle zip with an <c>AppxMetadata/AppxBundleManifest.xml</c> and an optional signature entry.</summary>
     public static MemoryStream BuildBundle(string bundleManifestXml, byte[]? signature = null)
@@ -51,6 +55,40 @@ internal static class MsixFixtures
               {(capabilities is null ? "" : $"<Capabilities>{capabilities}</Capabilities>")}
             </Package>
             """;
+    }
+
+    public static MemoryStream MarkZipEntryEncrypted(MemoryStream source, string entryName)
+    {
+        byte[] bytes = source.ToArray();
+        Span<byte> data = bytes;
+        int centralOffset = data.IndexOf("PK\x01\x02"u8);
+        while (centralOffset >= 0)
+        {
+            int nameLength = BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 28)..]);
+            int extraLength = BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 30)..]);
+            int commentLength = BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 32)..]);
+            string name = Encoding.UTF8.GetString(data.Slice(centralOffset + 46, nameLength));
+            if (string.Equals(name, entryName, StringComparison.Ordinal))
+            {
+                int localOffset = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(data[(centralOffset + 42)..]));
+                BinaryPrimitives.WriteUInt16LittleEndian(
+                    data[(localOffset + 6)..],
+                    (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[(localOffset + 6)..]) | 1));
+                BinaryPrimitives.WriteUInt16LittleEndian(
+                    data[(centralOffset + 8)..],
+                    (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 8)..]) | 1));
+                return new MemoryStream(bytes, writable: false);
+            }
+
+            centralOffset += 46 + nameLength + extraLength + commentLength;
+            if (centralOffset >= data.Length
+                || BinaryPrimitives.ReadUInt32LittleEndian(data[centralOffset..]) != 0x02014B50u)
+            {
+                break;
+            }
+        }
+
+        throw new InvalidDataException($"Synthetic ZIP has no '{entryName}' entry.");
     }
 
     private static MemoryStream BuildZip(params (string Name, byte[]? Content)[] entries)

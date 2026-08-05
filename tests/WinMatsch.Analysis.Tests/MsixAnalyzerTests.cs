@@ -103,6 +103,34 @@ public class MsixAnalyzerTests
     }
 
     [Fact]
+    public void Encrypted_non_manifest_resource_does_not_block_msix_analysis()
+    {
+        const string resourcePath = "af-ZA/Microsoft.ui.xaml.dll.mui";
+        using MemoryStream plain = MsixFixtures.BuildPackage(
+            MsixFixtures.PackageManifest(),
+            additionalEntries: [(resourcePath, "localized resource"u8.ToArray())]);
+        using MemoryStream encrypted = MsixFixtures.MarkZipEntryEncrypted(plain, resourcePath);
+
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(encrypted, "app.zip");
+
+        Assert.Equal(DetectedInstallerFormat.Msix, analysis.Format);
+        Assert.Equal(Architecture.X64, Assert.Single(analysis.Installers).Architecture);
+    }
+
+    [Fact]
+    public void Encrypted_manifest_remains_rejected()
+    {
+        using MemoryStream plain = MsixFixtures.BuildPackage(MsixFixtures.PackageManifest());
+        using MemoryStream encrypted = MsixFixtures.MarkZipEntryEncrypted(plain, "AppxManifest.xml");
+
+        UnsupportedZipFeatureException exception = Assert.Throws<UnsupportedZipFeatureException>(
+            () => _analyzer.Analyze(encrypted, "app.msix"));
+
+        Assert.Equal("AppxManifest.xml", exception.EntryPath);
+        Assert.Equal("traditional ZIP encryption", exception.UnsupportedFeature);
+    }
+
+    [Fact]
     public void Target_device_families_map_to_platforms_and_the_minimum_os_version()
     {
         using MemoryStream package = MsixFixtures.BuildPackage(MsixFixtures.PackageManifest(dependencies: """

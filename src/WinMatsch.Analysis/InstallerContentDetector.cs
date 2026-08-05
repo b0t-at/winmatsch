@@ -61,7 +61,8 @@ internal static class InstallerContentDetector
             using var archive = new SupportedZipArchive(
                 stream,
                 fileName,
-                $"'{fileName}'");
+                $"'{fileName}'",
+                validateAllEntryFeatures: false);
             AnalysisLimits.ValidateArchive(archive, $"'{fileName}'");
             bool hasPackageManifest = false;
             foreach (SupportedZipArchiveEntry entry in archive.Entries)

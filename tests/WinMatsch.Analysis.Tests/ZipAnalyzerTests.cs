@@ -223,7 +223,7 @@ public class ZipAnalyzerTests
             ("payload/app.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
         using MemoryStream encrypted = RewriteZipEntryFeature(plain, encryptedPath, setFlags: 1);
 
-        InstallerAnalysis analysis = _analyzer.Analyze(encrypted, "mixed.zip");
+        InstallerAnalysis analysis = FileAnalyzer.Analyze(encrypted, "mixed.zip");
 
         Installer installer = Assert.Single(analysis.Installers);
         Assert.Equal(InstallerType.Portable, installer.NestedInstallerType);
