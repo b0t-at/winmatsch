@@ -25,7 +25,8 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         using var archive = new SupportedZipArchive(
             stream,
             fileName,
-            $"'{fileName}'");
+            $"'{fileName}'",
+            validateAllEntryFeatures: false);
         AnalysisLimits.ValidateArchive(archive, $"'{fileName}'");
 
         List<Candidate> candidates = [];
