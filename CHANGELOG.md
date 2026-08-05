@@ -21,6 +21,8 @@ minor versions may contain breaking changes).
   qualified override absorb duplicate inferred candidates while preserving
   each previous entry's switches and metadata. Same-URL user/machine twins
   also validate when standard installer switches differ only by scope markers.
+- URL version continuity checks now preserve prerelease and build suffixes,
+  avoiding false mapping conflicts when release paths contain the exact target version.
 
 ## [0.8.12] - 2026-08-05
 

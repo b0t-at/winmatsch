@@ -106,6 +106,31 @@ public sealed class PackageVersionResolverTests
         Assert.Equal("12.87", PackageVersionResolver.ExtractUrlVersion(uri));
     }
 
+    [Theory]
+    [InlineData(
+        "https://github.com/hoppscotch/releases/releases/download/v26.7.0-0/Hoppscotch_win_x64.msi",
+        "26.7.0-0")]
+    [InlineData("https://example.test/tool-v1.2.3-beta.1-x64.exe", "1.2.3-beta.1")]
+    [InlineData("https://example.test/tool-v1.2.3-rc2-x64.exe", "1.2.3-rc2")]
+    [InlineData("https://example.test/tool-v1.2.3+build.5-x64.exe", "1.2.3+build.5")]
+    [InlineData("https://example.test/tool-V1_2_3-BETA_1-x64.exe", "1.2.3-BETA.1")]
+    [InlineData("https://example.test/tool-v1.2.3-beta.1_x64.exe", "1.2.3-beta.1")]
+    [InlineData("https://example.test/tool-v1.2.3-beta.1_arm.exe", "1.2.3-beta.1")]
+    [InlineData("https://example.test/tool-v1.2.3+build.5_arm64.exe", "1.2.3+build.5")]
+    [InlineData("https://example.test/tool-v1.2.3-dev.4-x64.exe", "1.2.3-dev.4")]
+    [InlineData("https://example.test/tool-v1.2.3-dev-4-x64.exe", "1.2.3-dev-4")]
+    [InlineData("https://example.test/tool-v1.2.3-setup-x64.exe", "1.2.3")]
+    [InlineData("https://example.test/tool-v1.2.3-portable-x64.exe", "1.2.3")]
+    [InlineData("https://example.test/tool-v1.2.3-device-x64.exe", "1.2.3")]
+    [InlineData("https://example.test/tool-v1.2.3-previewed-x64.exe", "1.2.3")]
+    [InlineData("https://example.test/tool-v1.2.3-rc1-qt6-x64.exe", "1.2.3-rc1")]
+    [InlineData("https://example.test/tool-v1.2.3-beta-gtk3-x64.exe", "1.2.3-beta")]
+    [InlineData("https://example.test/tool-v1.2.3-5-signed-x64.exe", "1.2.3-5")]
+    public void Url_version_preserves_prerelease_and_build_suffixes(string url, string expected)
+    {
+        Assert.Equal(expected, PackageVersionResolver.ExtractUrlVersion(new Uri(url)));
+    }
+
     [Fact]
     public void Invalid_explicit_version_does_not_fall_back()
     {
