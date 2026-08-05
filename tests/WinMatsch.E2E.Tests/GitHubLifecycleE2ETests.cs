@@ -63,12 +63,13 @@ public sealed class GitHubLifecycleE2ETests
         {
             MoveUpstreamBeforeCommitTo = "cccccccccccccccccccccccccccccccccccccccc",
         };
-        GitHubLifecycleResult conflict = await GitHubLifecycleTestSupport.Workflow(moved)
+        GitHubLifecycleResult reanchored = await GitHubLifecycleTestSupport.Workflow(moved)
             .ExecuteAsync(GitHubLifecycleTestSupport.Request());
-        Assert.Equal(GitHubLifecycleResultCode.Conflict, conflict.Code);
-        Assert.Equal(["branch"], moved.Mutations);
-        Assert.True(conflict.RemoteState.BranchCreated);
-        Assert.False(conflict.RemoteState.CommitCreated);
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, reanchored.Code);
+        Assert.Equal(["branch", "commit", "pull-request"], moved.Mutations);
+        Assert.True(reanchored.RemoteState.BranchCreated);
+        Assert.True(reanchored.RemoteState.CommitCreated);
+        Assert.Contains(reanchored.Audit, entry => entry.Code == "GH2043");
     }
 
     [Fact]

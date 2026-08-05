@@ -2033,7 +2033,7 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
-    public async Task Upstream_movement_after_branch_creation_prevents_commit()
+    public async Task Benign_upstream_movement_before_branch_creation_reanchors_and_succeeds()
     {
         var client = new FakeGitHubClient
         {
@@ -2043,10 +2043,117 @@ public sealed class GitHubLifecycleWorkflowTests
         GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
             .ExecuteAsync(GitHubLifecycleTestSupport.Request());
 
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.True(result.RemoteState.BranchCreated);
+        Assert.True(result.RemoteState.CommitCreated);
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.Equal(["branch", "commit", "pull-request"], client.Mutations);
+        Assert.Contains(result.Audit, entry => entry.Code == "GH2043");
+    }
+
+    [Fact]
+    public async Task Benign_upstream_movement_at_branch_mutation_reanchors_and_succeeds()
+    {
+        var client = new FakeGitHubClient
+        {
+            MoveUpstreamBeforeBranchTo = "cccccccccccccccccccccccccccccccccccccccc",
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.Equal(["branch", "commit", "pull-request"], client.Mutations);
+        Assert.Contains(result.Audit, entry => entry.Code == "GH2043");
+    }
+
+    [Fact]
+    public async Task Upstream_movement_that_creates_planned_path_still_fails_closed()
+    {
+        const string movedSha = "cccccccccccccccccccccccccccccccccccccccc";
+        var client = new FakeGitHubClient
+        {
+            MoveUpstreamBeforeCommitTo = movedSha,
+        };
+        WorkflowFileChange change = GitHubLifecycleTestSupport.Request().LocalPlan.FileChanges[0];
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            change.RepositoryPath,
+            movedSha,
+            "concurrent manifest"u8);
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
         Assert.Equal(GitHubLifecycleResultCode.Conflict, result.Code);
         Assert.True(result.RemoteState.BranchCreated);
         Assert.False(result.RemoteState.CommitCreated);
         Assert.Equal(["branch"], client.Mutations);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2044");
+    }
+
+    [Fact]
+    public async Task Upstream_movement_refreshes_repository_evidence_and_fails_closed()
+    {
+        const string movedSha = "cccccccccccccccccccccccccccccccccccccccc";
+        var client = new FakeGitHubClient();
+        var repositoryEvidence = new FakeRepositorySubmissionEvidenceProvider();
+        var artifacts = new FakeArtifactRevalidator
+        {
+            OnRevalidate = call =>
+            {
+                if (call == 2)
+                {
+                    client.MoveUpstream(movedSha);
+                    repositoryEvidence.Evidence = new()
+                    {
+                        InstallerEvidence =
+                        [
+                            new(
+                                new PackageIdentifier("Example.App"),
+                                new PackageVersion("1.0.0"),
+                                new string('A', 64),
+                                "manifests/e/Example/App/1.0.0/Example.App.installer.yaml",
+                                RetiredIdentifier: true),
+                        ],
+                    };
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(
+                client,
+                artifacts: artifacts,
+                repositoryEvidence: repositoryEvidence)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.InvalidPlan, result.Code);
+        Assert.Empty(client.Mutations);
+        Assert.Equal([GitHubLifecycleTestSupport.UpstreamSha, movedSha], repositoryEvidence.UpstreamHeadShas);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH1013");
+    }
+
+    [Fact]
+    public async Task Upstream_reanchor_retries_are_bounded()
+    {
+        var client = new FakeGitHubClient
+        {
+            OnGetDefaultBranch = static (fake, repository, read) =>
+            {
+                if (repository == GitHubLifecycleTestSupport.Upstream && read > 1)
+                {
+                    fake.MoveUpstream($"{read:x40}");
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Conflict, result.Code);
+        Assert.False(result.RemoteState.BranchCreated);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2045");
+        Assert.Equal(4, result.Audit.Count(entry => entry.Code == "GH2043"));
     }
 
     [Fact]
@@ -2060,6 +2167,37 @@ public sealed class GitHubLifecycleWorkflowTests
         Assert.Equal(GitHubLifecycleResultCode.Conflict, result.Code);
         Assert.True(result.RemoteState.BranchCreated);
         Assert.False(result.Applied);
+    }
+
+    [Fact]
+    public async Task Resume_after_clean_commit_conflict_keeps_journaled_branch_across_upstream_churn()
+    {
+        var client = new FakeGitHubClient { FailMutation = "commit" };
+        GitHubSubmissionRequest request = GitHubLifecycleTestSupport.Request();
+
+        GitHubLifecycleResult first = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(request);
+
+        Assert.Equal(GitHubLifecycleResultCode.Conflict, first.Code);
+        Assert.True(first.RemoteState.BranchCreated);
+        Assert.False(first.RemoteState.RemoteOutcomeUncertain);
+        string journaledBranch = Assert.IsType<string>(first.RemoteState.BranchName);
+        string journaledHead = Assert.IsType<string>(first.RemoteState.BranchHeadSha);
+
+        client.FailMutation = null;
+        client.MoveUpstream("cccccccccccccccccccccccccccccccccccccccc");
+        var progress = new FakeSubmissionProgressSink();
+        GitHubLifecycleResult resumed = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteJournaledAsync(
+                request with { ResumeFrom = first.RemoteState },
+                progress);
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, resumed.Code);
+        Assert.Equal(journaledBranch, resumed.RemoteState.BranchName);
+        Assert.NotEqual(journaledHead, resumed.RemoteState.CommitSha);
+        Assert.True(resumed.RemoteState.BranchAdopted);
+        Assert.Equal(1, client.Mutations.Count(mutation => mutation == "branch"));
+        Assert.Contains(SubmissionJournalState.CommitCreated, progress.States);
     }
 
     [Fact]
@@ -2510,7 +2648,7 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
-    public async Task Upstream_move_after_commit_prevents_pull_request_creation()
+    public async Task Benign_upstream_move_after_commit_reanchors_before_pull_request_creation()
     {
         var client = new FakeGitHubClient
         {
@@ -2526,9 +2664,156 @@ public sealed class GitHubLifecycleWorkflowTests
         GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
             .ExecuteAsync(GitHubLifecycleTestSupport.Request());
 
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.Equal(["branch", "commit", "pull-request"], client.Mutations);
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.Contains(result.Audit, entry => entry.Code == "GH2043");
+    }
+
+    [Fact]
+    public async Task Benign_upstream_move_during_final_validation_reanchors_and_succeeds()
+    {
+        var client = new FakeGitHubClient();
+        var artifacts = new FakeArtifactRevalidator
+        {
+            OnRevalidate = call =>
+            {
+                if (call == 2)
+                {
+                    client.MoveUpstream("cccccccccccccccccccccccccccccccccccccccc");
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(
+                client,
+                artifacts: artifacts)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.Equal(["sync", "branch", "commit", "pull-request"], client.Mutations);
+        Assert.Contains(result.Audit, entry => entry.Code == "GH2043");
+    }
+
+    [Fact]
+    public async Task Benign_upstream_move_during_post_creation_validation_reanchors_and_succeeds()
+    {
+        var client = new FakeGitHubClient
+        {
+            MoveUpstreamAfterPullRequestCreationTo =
+                "cccccccccccccccccccccccccccccccccccccccc",
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.False(result.RemoteState.PullRequestClosed);
+        Assert.Contains(result.Audit, entry => entry.Code == "GH2043");
+    }
+
+    [Fact]
+    public async Task Post_creation_upstream_path_change_closes_the_invalidated_pull_request()
+    {
+        const string movedSha = "cccccccccccccccccccccccccccccccccccccccc";
+        var client = new FakeGitHubClient
+        {
+            MoveUpstreamAfterPullRequestCreationTo = movedSha,
+        };
+        WorkflowFileChange change = GitHubLifecycleTestSupport.Request().LocalPlan.FileChanges[0];
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            change.RepositoryPath,
+            movedSha,
+            "concurrent manifest"u8);
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
         Assert.Equal(GitHubLifecycleResultCode.Conflict, result.Code);
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.True(result.RemoteState.PullRequestClosed);
+        Assert.Equal(
+            ["branch", "commit", "pull-request", "comment", "close"],
+            client.Mutations);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2044");
+    }
+
+    [Fact]
+    public async Task Upstream_movement_that_introduces_duplicate_stops_before_mutation()
+    {
+        var client = new FakeGitHubClient();
+        var artifacts = new FakeArtifactRevalidator
+        {
+            OnRevalidate = call =>
+            {
+                if (call == 2)
+                {
+                    client.MoveUpstream("cccccccccccccccccccccccccccccccccccccccc");
+                    client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(51));
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(
+                client,
+                artifacts: artifacts)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Empty(client.Mutations);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2008");
+    }
+
+    [Fact]
+    public async Task Duplicate_introduced_during_final_duplicate_reanchor_still_stops_pull_request()
+    {
+        var client = new FakeGitHubClient
+        {
+            OnGetDefaultBranch = static (fake, repository, read) =>
+            {
+                if (repository == GitHubLifecycleTestSupport.Upstream && read == 11)
+                {
+                    fake.MoveUpstream("cccccccccccccccccccccccccccccccccccccccc");
+                    fake.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(52));
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
         Assert.Equal(["branch", "commit"], client.Mutations);
         Assert.False(result.RemoteState.PullRequestCreated);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2008");
+    }
+
+    [Fact]
+    public async Task Validated_branch_movement_during_final_duplicate_check_still_fails_closed()
+    {
+        var client = new FakeGitHubClient
+        {
+            OnSearch = static (fake, call) =>
+            {
+                if (call == 2)
+                {
+                    fake.AddBranch(
+                        GitHubLifecycleTestSupport.Fork,
+                        "winmatsch/update/example-app/2.0.0/test",
+                        "cccccccccccccccccccccccccccccccccccccccc");
+                }
+            },
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Conflict, result.Code);
+        Assert.True(result.RemoteState.CommitCreated);
+        Assert.False(result.RemoteState.PullRequestCreated);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2033");
     }
 
     [Fact]

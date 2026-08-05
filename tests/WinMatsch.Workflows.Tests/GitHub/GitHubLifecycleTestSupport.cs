@@ -142,6 +142,7 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     private readonly Dictionary<(RepositoryCoordinates Repository, string Branch), GitReference> _references = [];
     private readonly Dictionary<(RepositoryCoordinates Repository, string Path, string Reference), byte[]> _contents = [];
     private readonly Dictionary<(RepositoryCoordinates Repository, string Treeish, bool Recursive), IReadOnlyList<RepositoryTreeEntry>> _trees = [];
+    private readonly Dictionary<RepositoryCoordinates, int> _defaultBranchReads = [];
     private readonly Dictionary<long, IReadOnlyList<PullRequestChangedFile>> _pullRequestFiles = [];
     private readonly List<PullRequestInfo> _pullRequests = [];
     private ServerCommitRequest? _lastCommitRequest;
@@ -221,7 +222,13 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public Action<FakeGitHubClient, int>? OnGetReleases { get; set; }
 
+    public Action<FakeGitHubClient, RepositoryCoordinates, int>? OnGetDefaultBranch { get; set; }
+
     public string? MoveUpstreamBeforeCommitTo { get; set; }
+
+    public string? MoveUpstreamBeforeBranchTo { get; set; }
+
+    public string? MoveUpstreamAfterPullRequestCreationTo { get; set; }
 
     public string? FailMutation { get; set; }
 
@@ -360,7 +367,12 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     public async Task<BranchState> GetDefaultBranchAsync(
         RepositoryCoordinates repository,
         CancellationToken cancellationToken = default)
-        => (await GetRepositoryAsync(repository, cancellationToken)).DefaultBranch;
+    {
+        int read = _defaultBranchReads.GetValueOrDefault(repository) + 1;
+        _defaultBranchReads[repository] = read;
+        OnGetDefaultBranch?.Invoke(this, repository, read);
+        return (await GetRepositoryAsync(repository, cancellationToken)).DefaultBranch;
+    }
 
     public Task<RepositoryContent> GetContentAsync(
         RepositoryCoordinates repository,
@@ -485,6 +497,12 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
     {
         LastBranchMutationKey = mutation.IdempotencyKey;
+        if (MoveUpstreamBeforeBranchTo is { } movedUpstream)
+        {
+            MoveUpstream(movedUpstream);
+            MoveUpstreamBeforeBranchTo = null;
+        }
+
         if (_references.ContainsKey((repository, branchName)))
         {
             return Task.FromException<GitReference>(new GitHubApiException(
@@ -858,6 +876,12 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
             ];
         }
 
+        if (MoveUpstreamAfterPullRequestCreationTo is { } movedUpstream)
+        {
+            MoveUpstream(movedUpstream);
+            MoveUpstreamAfterPullRequestCreationTo = null;
+        }
+
         return Task.FromResult(result);
     }
 
@@ -1104,6 +1128,8 @@ internal sealed class FakeArtifactRevalidator : IFinalArtifactRevalidator
 {
     public int Calls { get; private set; }
 
+    public Action<int>? OnRevalidate { get; init; }
+
     public FinalArtifactRevalidationResult Result { get; set; } =
         FinalArtifactRevalidationResult.Valid;
 
@@ -1113,6 +1139,7 @@ internal sealed class FakeArtifactRevalidator : IFinalArtifactRevalidator
     {
         cancellationToken.ThrowIfCancellationRequested();
         Calls++;
+        OnRevalidate?.Invoke(Calls);
         return Task.FromResult(Result);
     }
 }
@@ -1122,10 +1149,12 @@ internal sealed class FakeRepositorySubmissionEvidenceProvider
 {
     public Exception? Failure { get; init; }
 
-    public RepositorySubmissionEvidence Evidence { get; init; } =
+    public RepositorySubmissionEvidence Evidence { get; set; } =
         RepositorySubmissionEvidence.Empty;
 
     public int Calls { get; private set; }
+
+    public List<string> UpstreamHeadShas { get; } = [];
 
     public Task<RepositorySubmissionEvidence> GetEvidenceAsync(
         GitHubSubmissionRequest request,
@@ -1134,6 +1163,7 @@ internal sealed class FakeRepositorySubmissionEvidenceProvider
     {
         cancellationToken.ThrowIfCancellationRequested();
         Calls++;
+        UpstreamHeadShas.Add(upstreamHeadSha);
         if (Failure is not null)
         {
             return Task.FromException<RepositorySubmissionEvidence>(Failure);

@@ -7,6 +7,14 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub submission now tolerates unrelated upstream default-branch churn by
+  re-anchoring scoped manifest-path, repository-evidence, duplicate-PR, and fork
+  freshness checks with bounded retries. Planned-path changes, new duplicates,
+  retry exhaustion, and validated branch or pull-request identity drift still
+  fail closed, including verified cleanup when post-creation validation changes.
+
 ## [0.8.10] - 2026-08-05
 
 ### Fixed

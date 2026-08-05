@@ -19,6 +19,7 @@ public sealed class GitHubLifecycleWorkflow
     private readonly IRepositorySubmissionEvidenceProvider _repositoryEvidence;
     private readonly IPullRequestManifestEvidenceProvider _pullRequestEvidence;
     private const int MaximumBranchReservationAttempts = 8;
+    private const int MaximumUpstreamReanchorAttempts = 4;
 
     public GitHubLifecycleWorkflow(
         IGitHubRepositoryClient gitHub,
@@ -322,41 +323,19 @@ public sealed class GitHubLifecycleWorkflow
             };
             mutationRepository = targetRepository.Coordinates;
 
-            attemptedMutation = RemoteOperationKind.SyncFork;
-            await EnsureTargetDefaultIsFreshAsync(
-                request.UpstreamRepository,
-                targetRepository,
+            UpstreamAnchor refreshedAnchor = await ReanchorUpstreamAsync(
+                request,
+                plan,
                 upstreamDefault,
-                request.IdempotencyKey,
+                targetRepository,
+                checkPullRequestDuplicates: true,
+                "fresh branch creation",
                 audit,
+                kind => attemptedMutation = kind,
                 cancellationToken).ConfigureAwait(false);
-            attemptedMutation = null;
-            BranchState freshTargetDefault = await _gitHub.GetDefaultBranchAsync(
-                targetRepository.Coordinates,
-                cancellationToken).ConfigureAwait(false);
-            BranchState refreshedUpstream = await _gitHub.GetDefaultBranchAsync(
-                request.UpstreamRepository,
-                cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(refreshedUpstream.Name, upstreamDefault.Name, StringComparison.Ordinal)
-                || !string.Equals(refreshedUpstream.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal))
-            {
-                return Result(
-                    GitHubLifecycleResultCode.Conflict,
-                    plan,
-                    state,
-                    audit,
-                    [new("GH2017", "Upstream default branch moved before fresh branch creation.")]);
-            }
-
-            if (!string.Equals(freshTargetDefault.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal))
-            {
-                return Result(
-                    GitHubLifecycleResultCode.Conflict,
-                    plan,
-                    state,
-                    audit,
-                    [new("GH2004", "The target default branch is not an exact fresh copy of upstream.")]);
-            }
+            request = refreshedAnchor.Request;
+            plan = refreshedAnchor.Plan;
+            upstreamDefault = refreshedAnchor.Upstream;
 
             string branchName = request.ResumeFrom?.BranchName
                 ?? _branchNames.Create(new(
@@ -367,6 +346,9 @@ public sealed class GitHubLifecycleWorkflow
                     upstreamDefault.Name,
                     upstreamDefault.HeadSha,
                     request.IdempotencyKey));
+            BranchState branchBase = request.ResumeFrom?.BranchHeadSha is { } resumedBaseSha
+                ? new BranchState(upstreamDefault.Name, resumedBaseSha, false)
+                : upstreamDefault;
 
             GitReference? branch = null;
             ServerCommitResult? commit = null;
@@ -391,23 +373,19 @@ public sealed class GitHubLifecycleWorkflow
                         ref state);
                     await VerifyLiveReleaseFreshnessAsync(request, boundaryCancellation)
                         .ConfigureAwait(false);
-                    await VerifyRemoteFilePreconditionsAsync(
+                    refreshedAnchor = await ReanchorUpstreamAsync(
                         request,
-                        upstreamDefault.HeadSha,
+                        plan,
+                        upstreamDefault,
+                        targetRepository,
+                        checkPullRequestDuplicates: true,
+                        "final pre-mutation validation",
+                        audit,
+                        kind => attemptedMutation = kind,
                         boundaryCancellation).ConfigureAwait(false);
-                    BranchState currentUpstream = await _gitHub.GetDefaultBranchAsync(
-                        request.UpstreamRepository,
-                        boundaryCancellation).ConfigureAwait(false);
-                    BranchState currentTarget = await _gitHub.GetDefaultBranchAsync(
-                        targetRepository.Coordinates,
-                        boundaryCancellation).ConfigureAwait(false);
-                    if (!string.Equals(currentUpstream.Name, upstreamDefault.Name, StringComparison.Ordinal)
-                        || !string.Equals(currentUpstream.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal)
-                        || !string.Equals(currentTarget.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal))
-                    {
-                        throw new RemoteStateConflictException(
-                            "Upstream or the target default branch moved during final validation.");
-                    }
+                    request = refreshedAnchor.Request;
+                    plan = refreshedAnchor.Plan;
+                    upstreamDefault = refreshedAnchor.Upstream;
 
                     if (request.ResumeFrom?.CommitCreated == true)
                     {
@@ -442,14 +420,24 @@ public sealed class GitHubLifecycleWorkflow
                     }
 
                     if (recoverCommitResponseLoss
-                        && (state.Fork != targetRepository.Coordinates
-                            || !string.Equals(
-                                state.BranchHeadSha,
-                                upstreamDefault.HeadSha,
-                                StringComparison.Ordinal)))
+                        && state.Fork != targetRepository.Coordinates)
                     {
                         throw new CommitRecoveryException(
-                            "The journaled in-flight commit is not bound to the current fork and upstream base.");
+                            "The journaled in-flight commit is not bound to the current fork.");
+                    }
+
+                    if (!recoverCommitResponseLoss
+                        && request.ResumeFrom?.BranchName is null)
+                    {
+                        branchBase = upstreamDefault;
+                        branchName = _branchNames.Create(new(
+                            request.LocalPlan.PackageIdentifier,
+                            request.LocalPlan.PackageVersion,
+                            request.Operation,
+                            request.SupersedesPullRequestNumber,
+                            branchBase.Name,
+                            branchBase.HeadSha,
+                            request.IdempotencyKey));
                     }
 
                     for (int attempt = 0; attempt < MaximumBranchReservationAttempts; attempt++)
@@ -475,7 +463,7 @@ public sealed class GitHubLifecycleWorkflow
                             {
                                 if (string.Equals(
                                         existing.Sha,
-                                        upstreamDefault.HeadSha,
+                                        branchBase.HeadSha,
                                         StringComparison.Ordinal))
                                 {
                                     throw new CommitRecoveryException(
@@ -486,7 +474,7 @@ public sealed class GitHubLifecycleWorkflow
                                     plan,
                                     targetRepository,
                                     existing,
-                                    upstreamDefault,
+                                    branchBase,
                                     boundaryCancellation).ConfigureAwait(false);
                                 if (recovered is null)
                                 {
@@ -513,7 +501,7 @@ public sealed class GitHubLifecycleWorkflow
 
                             if (string.Equals(
                                     existing.Sha,
-                                    upstreamDefault.HeadSha,
+                                    branchBase.HeadSha,
                                     StringComparison.Ordinal))
                             {
                                 branchName = candidateName;
@@ -541,7 +529,7 @@ public sealed class GitHubLifecycleWorkflow
                         }
 
                         attemptedMutation = RemoteOperationKind.CreateBranch;
-                        expectedReservationSha = upstreamDefault.HeadSha;
+                        expectedReservationSha = branchBase.HeadSha;
                         state = state with
                         {
                             BranchName = candidateName,
@@ -557,9 +545,9 @@ public sealed class GitHubLifecycleWorkflow
                             branch = await _gitHub.CreateUniqueReferenceAsync(
                                 targetRepository.Coordinates,
                                 candidateName,
-                                upstreamDefault.HeadSha,
+                                branchBase.HeadSha,
                                 Mutation(
-                                    $"{request.IdempotencyKey}:branch:{candidateName}:{upstreamDefault.HeadSha}"),
+                                    $"{request.IdempotencyKey}:branch:{candidateName}:{branchBase.HeadSha}"),
                                 boundaryCancellation).ConfigureAwait(false);
                             branchName = candidateName;
                             break;
@@ -604,23 +592,31 @@ public sealed class GitHubLifecycleWorkflow
 
                     attemptedMutation = null;
 
+                    refreshedAnchor = await ReanchorUpstreamAsync(
+                        request,
+                        plan,
+                        upstreamDefault,
+                        targetRepository: null,
+                        checkPullRequestDuplicates: false,
+                        "server-side commit",
+                        audit,
+                        kind => attemptedMutation = kind,
+                        boundaryCancellation).ConfigureAwait(false);
+                    request = refreshedAnchor.Request;
+                    plan = refreshedAnchor.Plan;
+                    upstreamDefault = refreshedAnchor.Upstream;
                     GitReference? currentBranch = await _gitHub.GetReferenceAsync(
                         targetRepository.Coordinates,
                         branchName,
                         boundaryCancellation).ConfigureAwait(false);
-                    currentUpstream = await _gitHub.GetDefaultBranchAsync(
-                        request.UpstreamRepository,
-                        boundaryCancellation).ConfigureAwait(false);
-                    if (!string.Equals(currentUpstream.Name, upstreamDefault.Name, StringComparison.Ordinal)
-                        || !string.Equals(currentUpstream.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal)
-                        || currentBranch is null
+                    if (currentBranch is null
                         || !string.Equals(
                             currentBranch.Sha,
                             commit?.Sha ?? branch.Sha,
                             StringComparison.Ordinal))
                     {
                         throw new RemoteStateConflictException(
-                            "Upstream or the fresh branch moved before the server-side commit.");
+                            "The validated branch moved before the server-side commit.");
                     }
 
                     if (commit is null)
@@ -676,20 +672,24 @@ public sealed class GitHubLifecycleWorkflow
             attemptedMutation = null;
 
             await VerifyLiveReleaseFreshnessAsync(request, cancellationToken).ConfigureAwait(false);
-            await VerifyRemoteFilePreconditionsAsync(
+            refreshedAnchor = await ReanchorUpstreamAsync(
                 request,
-                upstreamDefault.HeadSha,
+                plan,
+                upstreamDefault,
+                targetRepository: null,
+                checkPullRequestDuplicates: false,
+                "pull request creation",
+                audit,
+                kind => attemptedMutation = kind,
                 cancellationToken).ConfigureAwait(false);
-            BranchState prePullRequestUpstream = await _gitHub.GetDefaultBranchAsync(
-                request.UpstreamRepository,
-                cancellationToken).ConfigureAwait(false);
+            request = refreshedAnchor.Request;
+            plan = refreshedAnchor.Plan;
+            upstreamDefault = refreshedAnchor.Upstream;
             GitReference? prePullRequestBranch = await _gitHub.GetReferenceAsync(
                 targetRepository.Coordinates,
                 branchName,
                 cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(prePullRequestUpstream.Name, upstreamDefault.Name, StringComparison.Ordinal)
-                || !string.Equals(prePullRequestUpstream.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal)
-                || prePullRequestBranch is null
+            if (prePullRequestBranch is null
                 || !string.Equals(prePullRequestBranch.Sha, commit.Sha, StringComparison.Ordinal))
             {
                 return Result(
@@ -697,7 +697,7 @@ public sealed class GitHubLifecycleWorkflow
                     plan,
                     state,
                     audit,
-                    [new("GH2020", "Upstream or the validated branch moved immediately before pull request creation.")]);
+                    [new("GH2020", "The validated branch moved immediately before pull request creation.")]);
             }
 
             PullRequestInfo? finalDuplicate = await FindDuplicateAsync(
@@ -714,16 +714,24 @@ public sealed class GitHubLifecycleWorkflow
                     [new("GH2008", $"Pull request race detected; #{finalDuplicate.Number} now covers this package version.")]);
             }
 
-            prePullRequestUpstream = await _gitHub.GetDefaultBranchAsync(
-                request.UpstreamRepository,
+            refreshedAnchor = await ReanchorUpstreamAsync(
+                request,
+                plan,
+                upstreamDefault,
+                targetRepository: null,
+                checkPullRequestDuplicates: true,
+                "final duplicate check",
+                audit,
+                kind => attemptedMutation = kind,
                 cancellationToken).ConfigureAwait(false);
+            request = refreshedAnchor.Request;
+            plan = refreshedAnchor.Plan;
+            upstreamDefault = refreshedAnchor.Upstream;
             prePullRequestBranch = await _gitHub.GetReferenceAsync(
                 targetRepository.Coordinates,
                 branchName,
                 cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(prePullRequestUpstream.Name, upstreamDefault.Name, StringComparison.Ordinal)
-                || !string.Equals(prePullRequestUpstream.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal)
-                || prePullRequestBranch is null
+            if (prePullRequestBranch is null
                 || !string.Equals(prePullRequestBranch.Sha, commit.Sha, StringComparison.Ordinal))
             {
                 return Result(
@@ -731,7 +739,7 @@ public sealed class GitHubLifecycleWorkflow
                     plan,
                     state,
                     audit,
-                    [new("GH2033", "Upstream or the validated branch moved during the final duplicate check.")]);
+                    [new("GH2033", "The validated branch moved during the final duplicate check.")]);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -785,6 +793,42 @@ public sealed class GitHubLifecycleWorkflow
                     [new("GH2018", "Created pull request does not reference the final validated commit and branch.")]);
             }
 
+            try
+            {
+                refreshedAnchor = await ReanchorUpstreamAsync(
+                    request,
+                    plan,
+                    upstreamDefault,
+                    targetRepository: null,
+                    checkPullRequestDuplicates: false,
+                    "post-creation final verification",
+                    audit,
+                    kind => attemptedMutation = kind,
+                    cancellationToken).ConfigureAwait(false);
+                request = refreshedAnchor.Request;
+                plan = refreshedAnchor.Plan;
+                upstreamDefault = refreshedAnchor.Upstream;
+            }
+            catch (UpstreamRevalidationException exception)
+            {
+                plan = exception.Plan;
+                return await CloseCreatedPullRequestAfterFinalValidationFailureAsync(
+                    request,
+                    plan,
+                    targetRepository.Coordinates,
+                    branchName,
+                    upstreamDefault,
+                    commit,
+                    pullRequest,
+                    state,
+                    audit,
+                    exception.ResultCode,
+                    "final upstream revalidation invalidated the submission",
+                    "upstream-revalidation-failure",
+                    exception.Diagnostics,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             IReadOnlyList<PullRequestInfo> associated =
                 await FindAssociatedPullRequestsAsync(
                     plan,
@@ -799,18 +843,13 @@ public sealed class GitHubLifecycleWorkflow
                 targetRepository.Coordinates,
                 branchName,
                 cancellationToken).ConfigureAwait(false);
-            BranchState finalUpstream = await _gitHub.GetDefaultBranchAsync(
-                request.UpstreamRepository,
-                cancellationToken).ConfigureAwait(false);
             if (freshPullRequest.State != PullRequestState.Open
                 || !string.Equals(freshPullRequest.HeadOwner, targetRepository.Coordinates.Owner, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(freshPullRequest.HeadBranch, branchName, StringComparison.Ordinal)
                 || !string.Equals(freshPullRequest.BaseBranch, upstreamDefault.Name, StringComparison.Ordinal)
                 || !string.Equals(freshPullRequest.HeadSha, commit.Sha, StringComparison.Ordinal)
                 || finalBranch is null
-                || !string.Equals(finalBranch.Sha, commit.Sha, StringComparison.Ordinal)
-                || !string.Equals(finalUpstream.Name, upstreamDefault.Name, StringComparison.Ordinal)
-                || !string.Equals(finalUpstream.HeadSha, upstreamDefault.HeadSha, StringComparison.Ordinal))
+                || !string.Equals(finalBranch.Sha, commit.Sha, StringComparison.Ordinal))
             {
                 state = state with
                 {
@@ -822,7 +861,7 @@ public sealed class GitHubLifecycleWorkflow
                     plan,
                     state,
                     audit,
-                    [new("GH2021", "The pull request, branch, or upstream base moved before final verification.")]);
+                    [new("GH2021", "The pull request or validated branch moved before final verification.")]);
             }
 
             associated =
@@ -916,7 +955,7 @@ public sealed class GitHubLifecycleWorkflow
             }
             catch (FinalArtifactValidationException exception)
             {
-                return await CloseCreatedPullRequestAfterValidationFailureAsync(
+                return await CloseCreatedPullRequestAfterFinalValidationFailureAsync(
                     request,
                     plan,
                     targetRepository.Coordinates,
@@ -926,6 +965,9 @@ public sealed class GitHubLifecycleWorkflow
                     pullRequest,
                     state,
                     audit,
+                    GitHubLifecycleResultCode.ValidationFailed,
+                    "final live artifact freshness validation failed",
+                    "freshness-failure",
                     exception.Diagnostics,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -1002,6 +1044,26 @@ public sealed class GitHubLifecycleWorkflow
                 state,
                 audit,
                 [new("GH2016", exception.Message)]);
+        }
+        catch (UpstreamDuplicatePullRequestException exception)
+        {
+            plan = exception.Plan;
+            return Result(
+                GitHubLifecycleResultCode.DuplicatePullRequest,
+                plan,
+                state,
+                audit,
+                [new("GH2008", $"Pull request race detected; #{exception.PullRequest.Number} now covers this package version.")]);
+        }
+        catch (UpstreamRevalidationException exception)
+        {
+            plan = exception.Plan;
+            return Result(
+                exception.ResultCode,
+                plan,
+                state,
+                audit,
+                exception.Diagnostics);
         }
         catch (RemoteStateConflictException exception)
         {
@@ -1149,6 +1211,158 @@ public sealed class GitHubLifecycleWorkflow
             ? Task.CompletedTask
             : progress.RecordAsync(state, journalState, CancellationToken.None);
 
+    private async Task<UpstreamAnchor> ReanchorUpstreamAsync(
+        GitHubSubmissionRequest request,
+        GitHubSubmissionPlan plan,
+        BranchState upstream,
+        RepositoryInfo? targetRepository,
+        bool checkPullRequestDuplicates,
+        string stage,
+        ImmutableArray<GitHubLifecycleAuditEntry>.Builder audit,
+        Action<RemoteOperationKind?> setAttemptedMutation,
+        CancellationToken cancellationToken)
+    {
+        GitHubSubmissionRequest currentRequest = request;
+        GitHubSubmissionPlan currentPlan = plan;
+        string validatedSha = upstream.HeadSha;
+        for (int attempt = 1; attempt <= MaximumUpstreamReanchorAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            BranchState observed = await _gitHub.GetDefaultBranchAsync(
+                currentRequest.UpstreamRepository,
+                cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(observed.Name, upstream.Name, StringComparison.Ordinal))
+            {
+                throw new UpstreamRevalidationException(
+                    GitHubLifecycleResultCode.Conflict,
+                    currentPlan,
+                    [new("GH2044", "The upstream default branch name changed during scoped revalidation.")]);
+            }
+
+            bool moved = !string.Equals(observed.HeadSha, validatedSha, StringComparison.Ordinal);
+            if (moved)
+            {
+                Audit(
+                    audit,
+                    "GH2043",
+                    $"Re-anchoring {stage} from upstream '{validatedSha}' to '{observed.HeadSha}' " +
+                    $"(attempt {attempt}/{MaximumUpstreamReanchorAttempts}).");
+            }
+
+            try
+            {
+                await VerifyRemoteFilePreconditionsAsync(
+                    currentRequest,
+                    observed.HeadSha,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (RemoteStateConflictException exception)
+            {
+                throw new UpstreamRevalidationException(
+                    GitHubLifecycleResultCode.Conflict,
+                    currentPlan,
+                    [new("GH2044", exception.Message)]);
+            }
+
+            if (moved)
+            {
+                RepositorySubmissionEvidence repositoryEvidence =
+                    await _repositoryEvidence.GetEvidenceAsync(
+                        currentRequest,
+                        observed.HeadSha,
+                        cancellationToken).ConfigureAwait(false);
+                currentRequest = RepositorySubmissionEvidenceMerger.Merge(
+                    currentRequest,
+                    repositoryEvidence);
+                currentPlan = CreatePlan(currentRequest, _clock.UtcNow);
+                if (!currentPlan.CanApply)
+                {
+                    throw new UpstreamRevalidationException(
+                        GitHubLifecycleResultCode.InvalidPlan,
+                        currentPlan,
+                        currentPlan.Diagnostics);
+                }
+
+                if (checkPullRequestDuplicates)
+                {
+                    PullRequestInfo? duplicate = await FindDuplicateAsync(
+                        currentPlan,
+                        observed.Name,
+                        cancellationToken).ConfigureAwait(false);
+                    if (duplicate is not null)
+                    {
+                        throw new UpstreamDuplicatePullRequestException(currentPlan, duplicate);
+                    }
+                }
+
+                validatedSha = observed.HeadSha;
+            }
+
+            BranchState? targetDefault = null;
+            if (targetRepository is not null)
+            {
+                RepositoryInfo currentTarget = await _gitHub.GetRepositoryAsync(
+                    targetRepository.Coordinates,
+                    cancellationToken).ConfigureAwait(false);
+                ValidateTarget(currentRequest.UpstreamRepository, currentTarget);
+                setAttemptedMutation(RemoteOperationKind.SyncFork);
+                await EnsureTargetDefaultIsFreshAsync(
+                    currentRequest.UpstreamRepository,
+                    currentTarget,
+                    observed,
+                    currentRequest.IdempotencyKey,
+                    audit,
+                    cancellationToken).ConfigureAwait(false);
+                setAttemptedMutation(null);
+                targetDefault = await _gitHub.GetDefaultBranchAsync(
+                    currentTarget.Coordinates,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            BranchState confirmed = await _gitHub.GetDefaultBranchAsync(
+                currentRequest.UpstreamRepository,
+                cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(confirmed.Name, observed.Name, StringComparison.Ordinal))
+            {
+                throw new UpstreamRevalidationException(
+                    GitHubLifecycleResultCode.Conflict,
+                    currentPlan,
+                    [new("GH2044", "The upstream default branch name changed during scoped revalidation.")]);
+            }
+
+            bool upstreamStable = string.Equals(
+                confirmed.HeadSha,
+                observed.HeadSha,
+                StringComparison.Ordinal);
+            bool targetStable = targetDefault is null
+                || string.Equals(
+                    targetDefault.HeadSha,
+                    observed.HeadSha,
+                    StringComparison.Ordinal);
+            if (upstreamStable && targetStable)
+            {
+                return new(currentRequest, currentPlan, observed);
+            }
+
+            if (attempt < MaximumUpstreamReanchorAttempts)
+            {
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(100 * attempt),
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        throw new UpstreamRevalidationException(
+            GitHubLifecycleResultCode.Conflict,
+            currentPlan,
+            [
+                new(
+                    "GH2045",
+                    $"Upstream continued moving during {stage}; scoped revalidation exhausted " +
+                    $"{MaximumUpstreamReanchorAttempts} bounded attempts."),
+            ]);
+    }
+
     private async Task<(RepositoryInfo Repository, bool Created)> EnsureTargetAsync(
         GitHubSubmissionRequest request,
         RepositoryCoordinates target,
@@ -1214,7 +1428,7 @@ public sealed class GitHubLifecycleWorkflow
         _ = await _gitHub.SyncForkAsync(
             target.Coordinates,
             target.DefaultBranch.Name,
-            Mutation($"{idempotencyKey}:sync"),
+            Mutation($"{idempotencyKey}:sync:{upstreamDefault.HeadSha}"),
             cancellationToken).ConfigureAwait(false);
         Audit(audit, "GH2015", "Safely synchronized the fork default branch with upstream.");
     }
@@ -1694,7 +1908,7 @@ public sealed class GitHubLifecycleWorkflow
         }
     }
 
-    private async Task<GitHubLifecycleResult> CloseCreatedPullRequestAfterValidationFailureAsync(
+    private async Task<GitHubLifecycleResult> CloseCreatedPullRequestAfterFinalValidationFailureAsync(
         GitHubSubmissionRequest request,
         GitHubSubmissionPlan plan,
         RepositoryCoordinates targetRepository,
@@ -1704,6 +1918,9 @@ public sealed class GitHubLifecycleWorkflow
         PullRequestInfo createdPullRequest,
         RemoteMutationState state,
         ImmutableArray<GitHubLifecycleAuditEntry>.Builder audit,
+        GitHubLifecycleResultCode resultCode,
+        string closureReason,
+        string idempotencyScope,
         ImmutableArray<GitHubLifecycleDiagnostic> validationDiagnostics,
         CancellationToken cancellationToken)
     {
@@ -1732,7 +1949,7 @@ public sealed class GitHubLifecycleWorkflow
                     .. validationDiagnostics,
                     new(
                         "GH2028",
-                        "Final validation failed, but the created PR no longer has the exact proven tool-owned identity required for automatic closure."),
+                        "Final validation invalidated the submission, but the created PR no longer has the exact proven tool-owned identity required for automatic closure."),
                 ]);
         }
 
@@ -1742,20 +1959,20 @@ public sealed class GitHubLifecycleWorkflow
             _ = await _gitHub.CommentOnPullRequestAsync(
                 request.UpstreamRepository,
                 freshPullRequest.Number,
-                "Closing this tool-owned PR because final live artifact freshness validation failed.",
-                Mutation($"{request.IdempotencyKey}:freshness-failure-comment"),
+                $"Closing this tool-owned PR because {closureReason}.",
+                Mutation($"{request.IdempotencyKey}:{idempotencyScope}:comment"),
                 cancellationToken).ConfigureAwait(false);
             state = state with { CommentCreated = true };
             attempted = RemoteOperationKind.ClosePullRequest;
             _ = await _gitHub.ClosePullRequestAsync(
                 request.UpstreamRepository,
                 freshPullRequest.Number,
-                Mutation($"{request.IdempotencyKey}:freshness-failure-close"),
+                Mutation($"{request.IdempotencyKey}:{idempotencyScope}:close"),
                 cancellationToken).ConfigureAwait(false);
             state = state with { PullRequestClosed = true };
-            Audit(audit, "GH2029", $"Closed PR #{freshPullRequest.Number} after final freshness validation failed.");
+            Audit(audit, "GH2029", $"Closed PR #{freshPullRequest.Number} because {closureReason}.");
             return Result(
-                GitHubLifecycleResultCode.ValidationFailed,
+                resultCode,
                 plan,
                 state,
                 audit,
@@ -2009,6 +2226,32 @@ public sealed class GitHubLifecycleWorkflow
     {
         public ImmutableArray<GitHubLifecycleDiagnostic> Diagnostics { get; } = diagnostics;
     }
+
+    private sealed class UpstreamDuplicatePullRequestException(
+        GitHubSubmissionPlan plan,
+        PullRequestInfo pullRequest) : Exception
+    {
+        public GitHubSubmissionPlan Plan { get; } = plan;
+
+        public PullRequestInfo PullRequest { get; } = pullRequest;
+    }
+
+    private sealed class UpstreamRevalidationException(
+        GitHubLifecycleResultCode resultCode,
+        GitHubSubmissionPlan plan,
+        ImmutableArray<GitHubLifecycleDiagnostic> diagnostics) : Exception
+    {
+        public GitHubLifecycleResultCode ResultCode { get; } = resultCode;
+
+        public GitHubSubmissionPlan Plan { get; } = plan;
+
+        public ImmutableArray<GitHubLifecycleDiagnostic> Diagnostics { get; } = diagnostics;
+    }
+
+    private sealed record UpstreamAnchor(
+        GitHubSubmissionRequest Request,
+        GitHubSubmissionPlan Plan,
+        BranchState Upstream);
 
     private sealed class RemoteStateConflictException(string message) : Exception(message);
 
