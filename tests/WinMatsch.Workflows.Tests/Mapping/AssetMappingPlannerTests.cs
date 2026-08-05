@@ -555,7 +555,7 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
-    public void Fresh_direct_executable_analysis_clears_impossible_nested_state_without_approval()
+    public void Fresh_direct_executable_analysis_requires_approval_to_clear_declared_nested_state()
     {
         PreviousInstallerEntry previous = Previous(
             0,
@@ -570,10 +570,9 @@ public sealed class AssetMappingPlannerTests
 
         AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]));
 
-        Assert.True(plan.CanApply);
-        PlannedInstaller installer = Assert.Single(plan.Decisions).Installer!;
-        Assert.Null(installer.NestedInstallerType);
-        Assert.Empty(installer.NestedInstallerFiles);
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_STRUCTURAL_REWRITE");
+        Assert.Contains(plan.UnresolvedQuestions, static question => question.Code == "MAP_STRUCTURAL_REWRITE");
     }
 
     [Fact]
@@ -700,6 +699,47 @@ public sealed class AssetMappingPlannerTests
                 ],
                 ArchiveEntries = ["tool.exe"],
                 NestedInstallerCandidates = ["tool.exe"],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]));
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_STRUCTURAL_REWRITE");
+    }
+
+    [Fact]
+    public void Archive_path_dependency_rewrite_requires_structural_approval()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/1.0.0/tool-x64.zip",
+            Architecture.X64,
+            InstallerType.Zip) with
+        {
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new("tool.exe", "tool")],
+            ArchiveBinariesDependOnPath = true,
+        };
+        DiscoveredAsset asset = Asset("tool-x64.zip", InstallerType.Zip, Architecture.X64);
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Zip,
+                        NestedInstallerType = InstallerType.Portable,
+                        NestedInstallerFiles = [new("tool.exe", "tool")],
+                        ArchiveBinariesDependOnPath = false,
+                    },
+                ],
+                ArchiveEntries = ["tool.exe"],
+                NestedInstallerCandidates = ["tool.exe"],
+                ArchiveBinariesDependOnPath = false,
             },
         };
 
