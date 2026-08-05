@@ -185,6 +185,12 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public List<PullRequestSearch> PullRequestSearches { get; } = [];
 
+    public int TextSearchCalls { get; private set; }
+
+    public List<PullRequestTextSearch> PullRequestTextSearches { get; } = [];
+
+    public Exception? PullRequestTextSearchFailure { get; set; }
+
     public int ContentCalls { get; private set; }
 
     public List<(RepositoryCoordinates Repository, string Path, string Reference)> ContentRequests { get; } = [];
@@ -206,6 +212,8 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     public int FailNextPullRequestContentCalls { get; set; }
 
     public Action<FakeGitHubClient, int>? OnSearch { get; set; }
+
+    public Action<FakeGitHubClient, int>? OnTextSearch { get; set; }
 
     public Action<FakeGitHubClient, long>? OnGetPullRequest { get; set; }
 
@@ -232,6 +240,20 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
     public string PullRequestHeadSha { get; set; } = GitHubLifecycleTestSupport.CommitSha;
 
     public string PullRequestMergeBaseSha { get; set; } = GitHubLifecycleTestSupport.UpstreamSha;
+
+    public Exception? PullRequestMergeBaseFailure { get; set; }
+
+    public HashSet<long> PullRequestContentFallbackNumbers { get; } = [];
+
+    public HashSet<long> PullRequestRescreenNumbers { get; } = [];
+
+    public Dictionary<long, string> PullRequestScreeningTitleOverrides { get; } = [];
+
+    public Dictionary<long, string> PullRequestScreeningBaseOverrides { get; } = [];
+
+    public Dictionary<long, PullRequestState> PullRequestScreeningStateOverrides { get; } = [];
+
+    public Dictionary<long, string> PullRequestScreeningHeadOverrides { get; } = [];
 
     public IReadOnlyList<GitHubRelease> Releases { get; set; } = [];
 
@@ -573,6 +595,11 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (PullRequestMergeBaseFailure is not null)
+        {
+            return Task.FromException<string>(PullRequestMergeBaseFailure);
+        }
+
         return Task.FromResult(PullRequestMergeBaseSha);
     }
 
@@ -652,6 +679,145 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
         return Task.FromResult<IReadOnlyList<PullRequestInfo>>(matches);
     }
 
+    public Task<IReadOnlyList<PullRequestInfo>> SearchPullRequestsByTextAsync(
+        RepositoryCoordinates repository,
+        PullRequestTextSearch search,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        TextSearchCalls++;
+        PullRequestTextSearches.Add(search);
+        OnTextSearch?.Invoke(this, TextSearchCalls);
+        if (PullRequestTextSearchFailure is not null)
+        {
+            return Task.FromException<IReadOnlyList<PullRequestInfo>>(
+                PullRequestTextSearchFailure);
+        }
+
+        IEnumerable<PullRequestInfo> result = _pullRequests;
+        if (search.State != PullRequestState.All)
+        {
+            result = result.Where(pr => pr.State == search.State);
+        }
+
+        if (search.BaseBranch is not null)
+        {
+            result = result.Where(pr => pr.BaseBranch == search.BaseBranch);
+        }
+
+        result = result.Where(pullRequest =>
+            search.Terms.All(term =>
+                pullRequest.Title.Contains(term, StringComparison.OrdinalIgnoreCase)
+                || pullRequest.Body?.Contains(term, StringComparison.OrdinalIgnoreCase) == true));
+        PullRequestInfo[] matches = [.. result];
+        if (matches.Length > search.MaximumResults)
+        {
+            return Task.FromException<IReadOnlyList<PullRequestInfo>>(
+                new GitHubApiException(
+                    "GitHub pull-request text search exceeded the safe candidate limit of " +
+                    $"{search.MaximumResults}."));
+        }
+
+        return Task.FromResult<IReadOnlyList<PullRequestInfo>>(matches);
+    }
+
+    public Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
+        GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            IReadOnlySet<string> paths,
+            int maximumMatches,
+            CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        PullRequestFileBatchCalls++;
+        PullRequestFileBatchSizes.Add(pullRequests.Count);
+        var result = new Dictionary<long, PullRequestChangedFilesSnapshot>();
+        int matchCount = 0;
+        foreach (PullRequestInfo pullRequest in pullRequests)
+        {
+            PullRequestInfo screenedPullRequest =
+                PullRequestScreeningTitleOverrides.TryGetValue(
+                    pullRequest.Number,
+                    out string? screenedTitle)
+                    ? pullRequest with { Title = screenedTitle }
+                    : pullRequest;
+            if (PullRequestScreeningBaseOverrides.TryGetValue(
+                    pullRequest.Number,
+                    out string? screenedBase))
+            {
+                screenedPullRequest = screenedPullRequest with
+                {
+                    BaseBranch = screenedBase,
+                };
+            }
+
+            if (PullRequestScreeningStateOverrides.TryGetValue(
+                    pullRequest.Number,
+                    out PullRequestState screenedState))
+            {
+                screenedPullRequest = screenedPullRequest with
+                {
+                    State = screenedState,
+                };
+            }
+
+            if (PullRequestScreeningHeadOverrides.TryGetValue(
+                    pullRequest.Number,
+                    out string? screenedHead))
+            {
+                screenedPullRequest = screenedPullRequest with
+                {
+                    HeadSha = screenedHead,
+                };
+            }
+
+            if (PullRequestRescreenNumbers.Contains(pullRequest.Number))
+            {
+                result.Add(
+                    pullRequest.Number,
+                    new(screenedPullRequest with { State = PullRequestState.Closed }, [])
+                    {
+                        RequiresRescreen = true,
+                    });
+                continue;
+            }
+
+            if (PullRequestContentFallbackNumbers.Contains(pullRequest.Number))
+            {
+                result.Add(
+                    pullRequest.Number,
+                    new(screenedPullRequest, [])
+                    {
+                        RequiresContentFallback = true,
+                    });
+                matchCount++;
+                continue;
+            }
+
+            IReadOnlyList<PullRequestChangedFile> files =
+                _pullRequestFiles.TryGetValue(
+                    pullRequest.Number,
+                    out IReadOnlyList<PullRequestChangedFile>? configured)
+                    ? configured
+                    : [];
+            result.Add(pullRequest.Number, new(screenedPullRequest, files));
+            if (files.Any(file =>
+                    paths.Contains(file.Path)
+                    || (file.PreviousPath is not null && paths.Contains(file.PreviousPath))))
+            {
+                matchCount++;
+            }
+        }
+
+        return matchCount > maximumMatches
+            ? Task.FromException<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>(
+                new GitHubApiException(
+                    $"Pull-request changed-file screening exceeded the safe match limit of {maximumMatches}."))
+            : Task.FromResult<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>(
+                result);
+    }
+
     public Task<PullRequestInfo> CreatePullRequestAsync(
         RepositoryCoordinates repository,
         CreatePullRequestRequest request,
@@ -729,6 +895,42 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
             _pullRequestFiles.TryGetValue(number, out IReadOnlyList<PullRequestChangedFile>? files)
                 ? files
                 : (IReadOnlyList<PullRequestChangedFile>)[]);
+    }
+
+    public Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
+        GetPullRequestChangedFilesSnapshotsBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        PullRequestFileBatchCalls++;
+        PullRequestFileBatchSizes.Add(pullRequests.Count);
+        if (PullRequestChangedFilesFailure is not null)
+        {
+            throw PullRequestChangedFilesFailure;
+        }
+
+        if (PullRequestChangedFilesUnsupported)
+        {
+            throw new NotSupportedException("Synthetic changed-file evidence is unavailable.");
+        }
+
+        return Task.FromResult<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>(
+            pullRequests.ToDictionary(
+                static pullRequest => pullRequest.Number,
+                pullRequest => PullRequestContentFallbackNumbers.Contains(pullRequest.Number)
+                    ? new PullRequestChangedFilesSnapshot(pullRequest, [])
+                    {
+                        RequiresContentFallback = true,
+                    }
+                    : new PullRequestChangedFilesSnapshot(
+                        pullRequest,
+                        _pullRequestFiles.TryGetValue(
+                            pullRequest.Number,
+                            out IReadOnlyList<PullRequestChangedFile>? files)
+                            ? files
+                            : [])));
     }
 
     public Task<IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>>>

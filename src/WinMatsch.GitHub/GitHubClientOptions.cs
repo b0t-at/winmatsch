@@ -20,6 +20,10 @@ public sealed class GitHubClientOptions
 
     public TimeSpan MaxRetryDelay { get; init; } = TimeSpan.FromSeconds(30);
 
+    public TimeSpan SecondaryRateLimitBaseDelay { get; init; } = TimeSpan.FromMinutes(1);
+
+    public TimeSpan MaxSecondaryRateLimitDelay { get; init; } = TimeSpan.FromMinutes(8);
+
     public int MaxPaginationPages { get; init; } = 100;
 
     public int MaxPaginationItems { get; init; } = 10_000;
@@ -71,6 +75,10 @@ public sealed class GitHubClientOptions
         ArgumentOutOfRangeException.ThrowIfNegative(MaxTransientRetries);
         ArgumentOutOfRangeException.ThrowIfLessThan(RetryBaseDelay, TimeSpan.Zero);
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxRetryDelay, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThan(SecondaryRateLimitBaseDelay, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThan(
+            MaxSecondaryRateLimitDelay,
+            SecondaryRateLimitBaseDelay);
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxPaginationPages, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxPaginationItems, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(ForkAvailabilityMaxAttempts, 1);

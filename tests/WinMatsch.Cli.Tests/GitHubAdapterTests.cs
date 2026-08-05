@@ -79,4 +79,21 @@ public sealed class GitHubAdapterTests
 
         Assert.Equal(PullRequestFileStatus.Removed, Assert.Single(files).Status);
     }
+
+    [Fact]
+    public async Task Immutable_merge_base_evidence_is_forwarded()
+    {
+        var inner = new FakeMaintenanceGitHubClient
+        {
+            MergeBaseSha = "cccccccccccccccccccccccccccccccccccccccc",
+        };
+        using var client = new RedactingGitHubRepositoryClient(inner);
+
+        string mergeBase = await client.GetMergeBaseAsync(
+            new RepositoryCoordinates("owner", "repo"),
+            "base",
+            "head");
+
+        Assert.Equal(inner.MergeBaseSha, mergeBase);
+    }
 }

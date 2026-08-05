@@ -125,6 +125,13 @@ public sealed class RedactingGitHubRepositoryClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
         => _inner.CompareAsync(repository, baseReference, head, cancellationToken);
 
+    public Task<string> GetMergeBaseAsync(
+        RepositoryCoordinates repository,
+        string baseReference,
+        string head,
+        CancellationToken cancellationToken = default)
+        => _inner.GetMergeBaseAsync(repository, baseReference, head, cancellationToken);
+
     public Task<ForkResult> EnsureForkAsync(
         RepositoryCoordinates upstream,
         string owner,
@@ -144,6 +151,12 @@ public sealed class RedactingGitHubRepositoryClient : IGitHubRepositoryClient
         PullRequestSearch search,
         CancellationToken cancellationToken = default)
         => _inner.SearchPullRequestsAsync(repository, search, cancellationToken);
+
+    public Task<IReadOnlyList<PullRequestInfo>> SearchPullRequestsByTextAsync(
+        RepositoryCoordinates repository,
+        PullRequestTextSearch search,
+        CancellationToken cancellationToken = default)
+        => _inner.SearchPullRequestsByTextAsync(repository, search, cancellationToken);
 
     public Task<PullRequestInfo> CreatePullRequestAsync(
         RepositoryCoordinates repository,
@@ -190,6 +203,20 @@ public sealed class RedactingGitHubRepositoryClient : IGitHubRepositoryClient
         => _inner.GetPullRequestChangedFilesSnapshotsBatchAsync(
             repository,
             pullRequests,
+            cancellationToken);
+
+    public Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
+        GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            IReadOnlySet<string> paths,
+            int maximumMatches,
+            CancellationToken cancellationToken = default)
+        => _inner.GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+            repository,
+            pullRequests,
+            paths,
+            maximumMatches,
             cancellationToken);
 
     public Task<PullRequestComment> CommentOnPullRequestAsync(

@@ -11,12 +11,16 @@ namespace WinMatsch.GitHub;
 /// <summary>A raw-HTTP, AOT-friendly GitHub GraphQL and REST client.</summary>
 public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
 {
-    private const int MaximumPullRequestFilePages = 10;
-    private const int MaximumPullRequestFiles = 1_000;
+    private const int MaximumPullRequestFilePages = 30;
+    private const int MaximumPullRequestFiles = 3_000;
     private const int MaximumPullRequestFileBatchSize = 50;
     private const int MaximumRestPullRequestFileFallbackPullRequests = 64;
     private const int MaximumRestPullRequestFileFallbackPages = 64;
     private const int MaximumTruncatedPullRequestFileFallbacks = 16;
+    private const int MaximumPathScreeningRestCompletions = 64;
+    private const int MaximumPullRequestTextSearchResults = 100;
+    private const int MaximumPullRequestTextSearchTerms = 5;
+    private const int MaximumPullRequestTextSearchTermLength = 128;
 
     private const string ViewerQuery =
         """
@@ -67,6 +71,7 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
               updatedAt
               headRepository { nameWithOwner }
               files(first: 100) {
+                totalCount
                 nodes { path changeType }
                 pageInfo { hasNextPage }
               }
@@ -843,7 +848,139 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                 ContainsExactToken(pullRequest.Title, search.ExactTitleToken));
         }
 
-        return filtered.ToArray();
+        return
+        [
+            .. filtered
+                .GroupBy(static pullRequest => pullRequest.Number)
+                .Select(static group => group
+                    .OrderByDescending(static pullRequest => pullRequest.UpdatedAt)
+                    .First()),
+        ];
+    }
+
+    public async Task<IReadOnlyList<PullRequestInfo>> SearchPullRequestsByTextAsync(
+        RepositoryCoordinates repository,
+        PullRequestTextSearch search,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(search);
+        ArgumentNullException.ThrowIfNull(search.Terms);
+        if (search.Terms.Count is 0 or > MaximumPullRequestTextSearchTerms)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(search),
+                $"Pull-request text search requires between 1 and {MaximumPullRequestTextSearchTerms} terms.");
+        }
+
+        if (search.MaximumResults is <= 0 or > MaximumPullRequestTextSearchResults)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(search),
+                $"Pull-request text search supports between 1 and {MaximumPullRequestTextSearchResults} results.");
+        }
+
+        var searchQuery = new StringBuilder();
+        foreach (string term in search.Terms)
+        {
+            if (string.IsNullOrWhiteSpace(term) || term.Length > MaximumPullRequestTextSearchTermLength)
+            {
+                throw new ArgumentException(
+                    $"Pull-request text search terms must be non-empty and at most {MaximumPullRequestTextSearchTermLength} characters.",
+                    nameof(search));
+            }
+
+            searchQuery.Append(QuoteSearchValue(term));
+            searchQuery.Append(' ');
+        }
+
+        searchQuery.Append("in:title,body repo:");
+        searchQuery.Append(repository);
+        searchQuery.Append(" is:pr");
+        searchQuery.Append(search.State switch
+        {
+            PullRequestState.Open => " is:open",
+            PullRequestState.Closed => " is:closed",
+            PullRequestState.All => "",
+            _ => throw new ArgumentOutOfRangeException(nameof(search)),
+        });
+        if (!string.IsNullOrWhiteSpace(search.BaseBranch))
+        {
+            searchQuery.Append(" base:");
+            searchQuery.Append(QuoteSearchValue(search.BaseBranch));
+        }
+
+        string relativePath =
+            $"search/issues?per_page={search.MaximumResults.ToString(CultureInfo.InvariantCulture)}" +
+            $"&q={Escape(searchQuery.ToString())}";
+        RestIssueSearchResponseDto response = await _transport.GetAsync(
+            relativePath,
+            GitHubJsonContext.Default.RestIssueSearchResponseDto,
+            cancellationToken).ConfigureAwait(false);
+        if (response.IncompleteResults)
+        {
+            throw new GitHubApiException(
+                "GitHub pull-request text search returned incomplete results.");
+        }
+
+        if (response.TotalCount < 0 || response.Items is null)
+        {
+            throw new GitHubApiException(
+                "GitHub pull-request text search returned an invalid response.");
+        }
+
+        if (response.TotalCount > search.MaximumResults
+            || response.Items.Count > search.MaximumResults)
+        {
+            throw new GitHubApiException(
+                "GitHub pull-request text search exceeded the safe candidate limit of " +
+                $"{search.MaximumResults}.");
+        }
+
+        long[] numbers =
+        [
+            .. response.Items.Select(item =>
+            {
+                if (item.Number <= 0 || item.PullRequest is null)
+                {
+                    throw new GitHubApiException(
+                        "GitHub pull-request text search returned a non-pull-request result.");
+                }
+
+                return item.Number;
+            }),
+        ];
+        if (numbers.Distinct().Count() != numbers.Length)
+        {
+            throw new GitHubApiException(
+                "GitHub pull-request text search returned duplicate candidates.");
+        }
+
+        var pullRequests = new List<PullRequestInfo>(numbers.Length);
+        foreach (long number in numbers)
+        {
+            PullRequestInfo pullRequest = await GetPullRequestAsync(
+                repository,
+                number,
+                cancellationToken).ConfigureAwait(false);
+            if (search.State != PullRequestState.All && pullRequest.State != search.State)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(search.BaseBranch)
+                && !string.Equals(
+                    pullRequest.BaseBranch,
+                    search.BaseBranch,
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            pullRequests.Add(pullRequest);
+        }
+
+        return [.. pullRequests.OrderBy(static pullRequest => pullRequest.Number)];
     }
 
     public Task<PullRequestInfo> CreatePullRequestAsync(
@@ -923,7 +1060,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         RepositoryCoordinates repository,
         long number,
         PaginationRequestBudget? requestBudget,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? expectedFileCount = null)
     {
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(number);
@@ -938,6 +1076,19 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             maximumResults: MaximumPullRequestFiles,
             maximumPages: MaximumPullRequestFilePages,
             requestBudget).ConfigureAwait(false);
+        if (expectedFileCount is null && files.Count == MaximumPullRequestFiles)
+        {
+            throw new GitHubApiException(
+                $"Pull request #{number} returned GitHub's maximum {MaximumPullRequestFiles} " +
+                "changed files without an authoritative total count.");
+        }
+
+        if (expectedFileCount is { } expected && files.Count != expected)
+        {
+            throw new GitHubApiException(
+                $"GitHub returned {files.Count} of {expected} changed files for pull request #{number}.");
+        }
+
         return files.Select(static file =>
             new PullRequestChangedFile(
                 file.Filename,
@@ -950,13 +1101,23 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             RepositoryCoordinates repository,
             IReadOnlyList<PullRequestInfo> pullRequests,
             CancellationToken cancellationToken = default)
-        => (await GetPullRequestChangedFilesSnapshotsBatchAsync(
+    {
+        IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot> snapshots =
+            await GetPullRequestChangedFilesSnapshotsBatchAsync(
                 repository,
                 pullRequests,
-                cancellationToken).ConfigureAwait(false))
-            .ToDictionary(
-                static pair => pair.Key,
-                static pair => pair.Value.Files);
+                cancellationToken).ConfigureAwait(false);
+        if (snapshots.Values.Any(static snapshot =>
+                snapshot.RequiresContentFallback || snapshot.RequiresRescreen))
+        {
+            throw new GitHubApiException(
+                "Pull-request changed-file evidence is unavailable as a complete files-only batch.");
+        }
+
+        return snapshots.ToDictionary(
+            static pair => pair.Key,
+            static pair => pair.Value.Files);
+    }
 
     public async Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
         GetPullRequestChangedFilesSnapshotsBatchAsync(
@@ -972,25 +1133,15 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             return new Dictionary<long, PullRequestChangedFilesSnapshot>();
         }
 
-        if (pullRequests.Any(static pullRequest =>
-                pullRequest.Number <= 0
-                || string.IsNullOrWhiteSpace(pullRequest.NodeId)
-                || string.IsNullOrWhiteSpace(pullRequest.HeadSha))
-            || pullRequests.Select(static pullRequest => pullRequest.Number).Distinct().Count()
-                != pullRequests.Count
-            || pullRequests.Select(static pullRequest => pullRequest.NodeId)
-                .Distinct(StringComparer.Ordinal).Count() != pullRequests.Count)
-        {
-            throw new ArgumentException(
-                "Pull-request file batches require unique positive numbers, node IDs, and head SHAs.",
-                nameof(pullRequests));
-        }
+        ValidatePullRequestFileBatch(pullRequests);
 
         try
         {
             return await GetPullRequestChangedFilesViaGraphQlAsync(
                 repository,
                 pullRequests,
+                targetPaths: null,
+                pullRequests.Count,
                 cancellationToken).ConfigureAwait(false);
         }
         catch (GitHubApiException exception) when (IsGraphQlUnavailable(exception))
@@ -1020,14 +1171,60 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         }
     }
 
+    public async Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
+        GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            IReadOnlySet<string> paths,
+            int maximumMatches,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(pullRequests);
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentOutOfRangeException.ThrowIfNegative(maximumMatches);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (paths.Count == 0)
+        {
+            throw new ArgumentException(
+                "Pull-request changed-file screening requires at least one target path.",
+                nameof(paths));
+        }
+
+        if (pullRequests.Count == 0)
+        {
+            return new Dictionary<long, PullRequestChangedFilesSnapshot>();
+        }
+
+        ValidatePullRequestFileBatch(pullRequests);
+        try
+        {
+            return await GetPullRequestChangedFilesViaGraphQlAsync(
+                repository,
+                pullRequests,
+                paths,
+                maximumMatches,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (GitHubApiException exception) when (IsGraphQlUnavailable(exception))
+        {
+            throw new GitHubApiException(
+                "GitHub GraphQL is required for bounded pull-request changed-file screening.",
+                exception);
+        }
+    }
+
     private async Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
         GetPullRequestChangedFilesViaGraphQlAsync(
             RepositoryCoordinates repository,
             IReadOnlyList<PullRequestInfo> pullRequests,
+            IReadOnlySet<string>? targetPaths,
+            int maximumMatches,
             CancellationToken cancellationToken)
     {
         var result = new Dictionary<long, PullRequestChangedFilesSnapshot>();
-        var restCompletions = new List<PullRequestChangedFilesSnapshot>();
+        var restCompletions = new List<PullRequestFilesCompletion>();
+        int pathMatchCount = 0;
         foreach (PullRequestInfo[] batch in pullRequests.Chunk(MaximumPullRequestFileBatchSize))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -1056,10 +1253,59 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             var expectedByNode = batch.ToDictionary(
                 static pullRequest => pullRequest.NodeId,
                 StringComparer.Ordinal);
-            foreach (GraphQlPullRequestFileNodeDto? node in data.Nodes)
+            for (int index = 0; index < data.Nodes.Count; index++)
             {
-                if (node is null
-                    || !expectedByNode.Remove(node.Id, out PullRequestInfo? expected)
+                PullRequestInfo positionalExpected = batch[index];
+                GraphQlPullRequestFileNodeDto? node = data.Nodes[index];
+                if (node is null)
+                {
+                    expectedByNode.Remove(positionalExpected.NodeId);
+                    PullRequestInfo? nullNodeCurrent = await TryGetPullRequestAsync(
+                        repository,
+                        positionalExpected.Number,
+                        cancellationToken).ConfigureAwait(false);
+                    if (nullNodeCurrent is null)
+                    {
+                        result.Add(
+                            positionalExpected.Number,
+                            new(
+                                positionalExpected with { State = PullRequestState.Closed },
+                                [])
+                            {
+                                RequiresRescreen = true,
+                            });
+                    }
+                    else if (nullNodeCurrent.State != PullRequestState.Open)
+                    {
+                        result.Add(
+                            nullNodeCurrent.Number,
+                            new(nullNodeCurrent, [])
+                            {
+                                RequiresRescreen = true,
+                            });
+                    }
+                    else
+                    {
+                        result.Add(
+                            nullNodeCurrent.Number,
+                            new(nullNodeCurrent, [])
+                            {
+                                RequiresContentFallback = true,
+                            });
+                        if (targetPaths is null)
+                        {
+                            EnsureMatchLimit(result.Count, maximumMatches);
+                        }
+                        else
+                        {
+                            EnsureMatchLimit(++pathMatchCount, maximumMatches);
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (!expectedByNode.Remove(node.Id, out PullRequestInfo? expected)
                     || node.Number != expected.Number
                     || string.IsNullOrWhiteSpace(node.Title)
                     || string.IsNullOrWhiteSpace(node.State)
@@ -1067,16 +1313,49 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                     || string.IsNullOrWhiteSpace(node.HeadRefOid)
                     || string.IsNullOrWhiteSpace(node.BaseRefName)
                     || string.IsNullOrWhiteSpace(node.BaseRefOid)
-                    || string.IsNullOrWhiteSpace(node.Url)
-                    || node.Files?.Nodes is null
+                    || string.IsNullOrWhiteSpace(node.Url))
+                {
+                    throw InvalidGraphQlResponse(
+                        "complete pull-request identity for changed-file evidence");
+                }
+
+                PullRequestInfo current = MapPullRequestFileSnapshot(node, expected);
+                if (node.Files is null)
+                {
+                    result.Add(
+                        current.Number,
+                        new(current, [])
+                        {
+                            RequiresContentFallback = true,
+                        });
+                    if (targetPaths is null)
+                    {
+                        EnsureMatchLimit(result.Count, maximumMatches);
+                    }
+                    else
+                    {
+                        EnsureMatchLimit(++pathMatchCount, maximumMatches);
+                    }
+
+                    continue;
+                }
+
+                if (node.Files.Nodes is null
                     || node.Files.PageInfo is null
+                    || node.Files.TotalCount < node.Files.Nodes.Count
                     || node.Files.Nodes.Any(static file => file is null))
                 {
                     throw InvalidGraphQlResponse(
                         "complete changed-file evidence at the requested pull-request identity");
                 }
 
-                PullRequestInfo current = MapPullRequestFileSnapshot(node, expected);
+                if (node.Files.TotalCount > MaximumPullRequestFiles)
+                {
+                    throw new GitHubApiException(
+                        $"Pull request #{node.Number} has {node.Files.TotalCount} changed files, " +
+                        $"exceeding GitHub's safe response limit of {MaximumPullRequestFiles}.");
+                }
+
                 PullRequestChangedFile[] files =
                 [
                     .. node.Files.Nodes.Select(static file =>
@@ -1085,15 +1364,37 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                             Status: ParseGraphQlPullRequestFileStatus(file.ChangeType))),
                 ];
                 bool requiresRestCompletion = node.Files.PageInfo.HasNextPage
+                    || node.Files.TotalCount != files.Length
                     || files.Any(static file => file.Status is
                         PullRequestFileStatus.Renamed or PullRequestFileStatus.Copied);
+                if (targetPaths is not null
+                    && !requiresRestCompletion
+                    && ContainsTargetPath(files, targetPaths))
+                {
+                    result.Add(current.Number, new(current, files));
+                    EnsureMatchLimit(++pathMatchCount, maximumMatches);
+                    continue;
+                }
+
                 if (requiresRestCompletion)
                 {
-                    restCompletions.Add(new(current, files));
+                    restCompletions.Add(new(
+                        new PullRequestChangedFilesSnapshot(current, files),
+                        node.Files.TotalCount));
                 }
                 else
                 {
+                    if (files.Length != node.Files.TotalCount)
+                    {
+                        throw InvalidGraphQlResponse(
+                            $"all {node.Files.TotalCount} changed files for pull request #{node.Number}");
+                    }
+
                     result.Add(current.Number, new(current, files));
+                    if (targetPaths is null)
+                    {
+                        EnsureMatchLimit(result.Count, maximumMatches);
+                    }
                 }
             }
 
@@ -1103,22 +1404,32 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
             }
         }
 
-        if (restCompletions.Count > MaximumTruncatedPullRequestFileFallbacks)
+        int maximumRestCompletions = targetPaths is null
+            ? MaximumTruncatedPullRequestFileFallbacks
+            : MaximumPathScreeningRestCompletions;
+        if (restCompletions.Count > maximumRestCompletions)
         {
             throw new GitHubApiException(
                 "GitHub returned more truncated or renamed pull-request file lists than can be " +
-                $"completed within the safe REST fallback bound of {MaximumTruncatedPullRequestFileFallbacks}.");
+                $"completed within the safe REST fallback bound of {maximumRestCompletions}.");
         }
 
-        var requestBudget = new PaginationRequestBudget(MaximumRestPullRequestFileFallbackPages);
-        foreach (PullRequestChangedFilesSnapshot snapshot in restCompletions)
+        PaginationRequestBudget? sharedRequestBudget = targetPaths is null
+            ? new PaginationRequestBudget(MaximumRestPullRequestFileFallbackPages)
+            : null;
+        foreach (PullRequestFilesCompletion completion in restCompletions)
         {
+            PullRequestChangedFilesSnapshot snapshot = completion.Snapshot;
+            PaginationRequestBudget requestBudget = sharedRequestBudget
+                ?? new PaginationRequestBudget(MaximumPullRequestFilePages);
             IReadOnlyList<PullRequestChangedFile> files =
                 await GetPullRequestChangedFilesAsync(
                     repository,
                     snapshot.PullRequest.Number,
                     requestBudget,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    completion.ExpectedFileCount).ConfigureAwait(false);
+
             PullRequestInfo verified = await GetPullRequestAsync(
                 repository,
                 snapshot.PullRequest.Number,
@@ -1129,12 +1440,75 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                     $"Pull request #{snapshot.PullRequest.Number} changed identity while completing its changed-file snapshot.");
             }
 
+            bool hasTargetPath = targetPaths is not null
+                && ContainsTargetPath(files, targetPaths);
+            if (hasTargetPath)
+            {
+                EnsureMatchLimit(++pathMatchCount, maximumMatches);
+            }
+
             result.Add(
                 snapshot.PullRequest.Number,
                 snapshot with { Files = files });
+            if (targetPaths is null)
+            {
+                EnsureMatchLimit(result.Count, maximumMatches);
+            }
         }
 
         return result;
+    }
+
+    private static void ValidatePullRequestFileBatch(IReadOnlyList<PullRequestInfo> pullRequests)
+    {
+        if (pullRequests.Any(static pullRequest =>
+                pullRequest.Number <= 0
+                || string.IsNullOrWhiteSpace(pullRequest.NodeId)
+                || string.IsNullOrWhiteSpace(pullRequest.HeadSha))
+            || pullRequests.Select(static pullRequest => pullRequest.Number).Distinct().Count()
+                != pullRequests.Count
+            || pullRequests.Select(static pullRequest => pullRequest.NodeId)
+                .Distinct(StringComparer.Ordinal).Count() != pullRequests.Count)
+        {
+            throw new ArgumentException(
+                "Pull-request file batches require unique positive numbers, node IDs, and head SHAs.",
+                nameof(pullRequests));
+        }
+    }
+
+    private static bool ContainsTargetPath(
+        IReadOnlyList<PullRequestChangedFile> files,
+        IReadOnlySet<string> targetPaths)
+        => files.Any(file =>
+            targetPaths.Contains(file.Path)
+            || (file.PreviousPath is not null && targetPaths.Contains(file.PreviousPath)));
+
+    private static void EnsureMatchLimit(int matchCount, int maximumMatches)
+    {
+        if (matchCount > maximumMatches)
+        {
+            throw new GitHubApiException(
+                $"Pull-request changed-file screening exceeded the safe match limit of {maximumMatches}.");
+        }
+    }
+
+    private async Task<PullRequestInfo?> TryGetPullRequestAsync(
+        RepositoryCoordinates repository,
+        long number,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await GetPullRequestAsync(
+                repository,
+                number,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (GitHubApiException exception) when (
+            exception.ErrorKind == GitHubApiErrorKind.ResourceNotFound)
+        {
+            return null;
+        }
     }
 
     private async Task<IReadOnlyDictionary<long, IReadOnlyList<PullRequestChangedFile>>>
@@ -1809,6 +2183,9 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         return false;
     }
 
+    private static string QuoteSearchValue(string value)
+        => $"\"{value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal)}\"";
+
     private static void ValidateCommitRequest(ServerCommitRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -2012,4 +2389,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
         Lazy<Task<object>> Result);
 
     private sealed record ForkMutationResult(RepositoryInfo? Existing);
+
+    private sealed record PullRequestFilesCompletion(
+        PullRequestChangedFilesSnapshot Snapshot,
+        int? ExpectedFileCount);
 }

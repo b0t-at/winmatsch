@@ -98,6 +98,8 @@ internal static class GitHubClientTestSupport
             GraphQlUri = new Uri("https://github.invalid/graphql"),
             UserAgent = "winmatsch-tests",
             RetryBaseDelay = TimeSpan.Zero,
+            SecondaryRateLimitBaseDelay = TimeSpan.Zero,
+            MaxSecondaryRateLimitDelay = TimeSpan.Zero,
             MaxTransientRetries = 2,
             ForkAvailabilityBaseDelay = TimeSpan.Zero,
             ForkAvailabilityMaxAttempts = 3,

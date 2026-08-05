@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Net;
 using System.Text.Json;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
@@ -486,9 +487,317 @@ public sealed class GitHubLifecycleWorkflowTests
             movedSnapshot,
             CancellationToken.None));
 
-        Assert.Equal(2, client.PullRequestFileBatchCalls);
         Assert.Equal([400, 1], client.PullRequestFileBatchSizes);
+        Assert.Equal(2, client.PullRequestFileBatchCalls);
         Assert.Equal(0, client.PullRequestFilesCalls);
+    }
+
+    [Fact]
+    public async Task Cross_page_duplicate_pull_request_observations_are_normalized()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int index = 1; index <= 65; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        client.AddPullRequest(client.PullRequests[6]);
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            client.PullRequests,
+            CancellationToken.None));
+        Assert.Equal([65], client.PullRequestFileBatchSizes);
+    }
+
+    [Fact]
+    public async Task Closed_null_node_is_rescreened_after_reopen_at_same_identity()
+    {
+        const int rescreenPullRequestNumber = 10_007;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        client.PullRequestRescreenNumbers.Add(rescreenPullRequestNumber);
+        for (int index = 1; index <= 65; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        PullRequestInfo[] snapshot = [.. client.PullRequests];
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            snapshot,
+            CancellationToken.None));
+        client.PullRequestRescreenNumbers.Clear();
+        client.SetPullRequestChangedFiles(
+            rescreenPullRequestNumber,
+            plan.Request.LocalPlan.FileChanges[0].RepositoryPath);
+
+        PullRequestInfo candidate = Assert.Single(await provider.GetCandidatesAsync(
+            plan,
+            snapshot,
+            CancellationToken.None));
+
+        Assert.Equal(rescreenPullRequestNumber, candidate.Number);
+        Assert.Equal([65, 1], client.PullRequestFileBatchSizes);
+    }
+
+    [Fact]
+    public async Task Closed_nonnull_snapshot_is_rescreened_after_reopen_at_same_identity()
+    {
+        const int reopenedPullRequestNumber = 10_007;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        client.PullRequestScreeningStateOverrides[reopenedPullRequestNumber] =
+            PullRequestState.Closed;
+        for (int index = 1; index <= 65; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        PullRequestInfo[] snapshot = [.. client.PullRequests];
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            snapshot,
+            CancellationToken.None));
+        client.PullRequestScreeningStateOverrides.Clear();
+        client.SetPullRequestChangedFiles(
+            reopenedPullRequestNumber,
+            plan.Request.LocalPlan.FileChanges[0].RepositoryPath);
+
+        PullRequestInfo candidate = Assert.Single(await provider.GetCandidatesAsync(
+            plan,
+            snapshot,
+            CancellationToken.None));
+
+        Assert.Equal(reopenedPullRequestNumber, candidate.Number);
+        Assert.Equal([65, 1], client.PullRequestFileBatchSizes);
+    }
+
+    [Fact]
+    public async Task Reverted_head_identity_is_rescreened_after_intermediate_force_push()
+    {
+        const int revertedPullRequestNumber = 10_007;
+        const string intermediateHead = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        client.PullRequestScreeningHeadOverrides[revertedPullRequestNumber] =
+            intermediateHead;
+        for (int index = 1; index <= 65; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        PullRequestInfo[] originalSnapshot = [.. client.PullRequests];
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            originalSnapshot,
+            CancellationToken.None));
+        client.PullRequestScreeningHeadOverrides.Clear();
+        client.SetPullRequestChangedFiles(
+            revertedPullRequestNumber,
+            plan.Request.LocalPlan.FileChanges[0].RepositoryPath);
+
+        PullRequestInfo candidate = Assert.Single(await provider.GetCandidatesAsync(
+            plan,
+            originalSnapshot,
+            CancellationToken.None));
+
+        Assert.Equal(revertedPullRequestNumber, candidate.Number);
+        Assert.Equal([65, 1], client.PullRequestFileBatchSizes);
+    }
+
+    [Fact]
+    public async Task Canonical_title_observed_during_screening_is_promoted_to_candidate()
+    {
+        const int promotedPullRequestNumber = 10_007;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        client.PullRequestScreeningTitleOverrides[promotedPullRequestNumber] =
+            "Update version: Example.App version 2.0.0";
+        for (int index = 1; index <= 65; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        PullRequestInfo candidate = Assert.Single(await provider.GetCandidatesAsync(
+            plan,
+            client.PullRequests,
+            CancellationToken.None));
+
+        Assert.Equal(promotedPullRequestNumber, candidate.Number);
+    }
+
+    [Fact]
+    public async Task Retargeted_snapshot_is_not_promoted_or_reused_as_candidate()
+    {
+        const int retargetedPullRequestNumber = 10_007;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        client.PullRequestScreeningTitleOverrides[retargetedPullRequestNumber] =
+            "Update version: Example.App version 2.0.0";
+        client.PullRequestScreeningBaseOverrides[retargetedPullRequestNumber] =
+            "release";
+        for (int index = 1; index <= 65; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        client.SetPullRequestChangedFiles(
+            retargetedPullRequestNumber,
+            GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath);
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            client.PullRequests,
+            CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Canonical_only_evidence_is_recomputed_after_noncanonical_retitle()
+    {
+        var client = new FakeGitHubClient();
+        PullRequestInfo candidate = GitHubLifecycleTestSupport.PullRequest(7);
+        client.AddPullRequest(candidate);
+        client.SetPullRequestChangedFiles(
+            candidate.Number,
+            GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath);
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        PullRequestManifestEvidence canonical = await provider.GetEvidenceAsync(
+            plan,
+            candidate,
+            CancellationToken.None);
+        client.UpdatePullRequest(
+            candidate.Number,
+            pullRequest => pullRequest with { Title = "Hand-authored manifest update" });
+        PullRequestManifestEvidence retitled = await provider.GetEvidenceAsync(
+            plan,
+            candidate with { Title = "Hand-authored manifest update" },
+            CancellationToken.None);
+
+        Assert.True(canonical.HasCanonicalTitle);
+        Assert.False(retitled.HasCanonicalTitle);
+        Assert.True(retitled.HasManifestPath);
+        Assert.True(retitled.IsAssociated);
+    }
+
+    [Fact]
+    public async Task Retained_candidate_overflow_fails_with_evidence_limit()
+    {
+        const int cachedPathPullRequestNumber = 20_000;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(
+            cachedPathPullRequestNumber) with
+        {
+            Title = "Hand-authored manifest update",
+            Body = null,
+        });
+        client.SetPullRequestChangedFiles(
+            cachedPathPullRequestNumber,
+            GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath);
+        for (int index = 1; index <= 64; index++)
+        {
+            int number = 20_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+        _ = await provider.GetCandidatesAsync(
+            plan,
+            client.PullRequests,
+            CancellationToken.None);
+        foreach (PullRequestInfo pullRequest in client.PullRequests.Where(
+                     pullRequest => pullRequest.Number != cachedPathPullRequestNumber).ToArray())
+        {
+            client.UpdatePullRequest(
+                pullRequest.Number,
+                current => current with
+                {
+                    Title = "Update version: Example.App version 2.0.0",
+                });
+        }
+
+        await Assert.ThrowsAsync<PullRequestEvidenceLimitException>(
+            () => provider.GetCandidatesAsync(
+                plan,
+                client.PullRequests,
+                CancellationToken.None));
     }
 
     [Fact]
@@ -538,6 +847,58 @@ public sealed class GitHubLifecycleWorkflowTests
             .ExecuteAsync(GitHubLifecycleTestSupport.Request());
 
         Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+    }
+
+    [Fact]
+    public async Task Large_replace_screening_ignores_prior_version_only_pull_requests()
+    {
+        PackageIdentifier package = new("Example.App");
+        string priorPath =
+            $"{ManifestPaths.GetVersionDirectory(package, new PackageVersion("1.0.0"))}/Example.App.yaml";
+        byte[] priorContent = "old"u8.ToArray();
+        LocalOperationPlan local = GitHubLifecycleTestSupport.Plan(
+        [
+            GitHubLifecycleTestSupport.Plan().FileChanges[0],
+            new WorkflowFileChange(
+                PlannedChangeKind.Delete,
+                priorPath,
+                expectedState: ExpectedFileState.Present,
+                expectedSha256: WorkflowFileChange.Hash(priorContent)),
+        ]);
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int index = 1; index <= 65; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Prior version maintenance {number}",
+                Body = null,
+            });
+            client.SetPullRequestChangedFiles(number, priorPath);
+        }
+
+        GitHubSubmissionRequest request = GitHubLifecycleTestSupport.Request(
+            WorkflowExecutionMode.Plan) with
+        {
+            LocalPlan = local,
+            Operation = GitHubManifestOperation.Replace,
+            Policy = new()
+            {
+                ReplacePreviousVersion = true,
+                PreviousVersion = new PackageVersion("1.0.0"),
+                MinimumReleaseFreshness = TimeSpan.Zero,
+            },
+        };
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(request);
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+
+        Assert.Empty(await provider.GetCandidatesAsync(
+            plan,
+            client.PullRequests,
+            CancellationToken.None));
     }
 
     [Fact]
@@ -891,10 +1252,10 @@ public sealed class GitHubLifecycleWorkflowTests
         Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
         Assert.True(client.PullRequestHeadContentCalls <= 1);
         Assert.Equal(0, client.PullRequestFilesCalls);
-        Assert.Equal(1, client.PullRequestFileBatchCalls);
         Assert.Equal(
             [PullRequestManifestEvidenceLimits.MaximumCandidates + 1],
             client.PullRequestFileBatchSizes);
+        Assert.Equal(1, client.PullRequestFileBatchCalls);
     }
 
     [Fact]
@@ -918,6 +1279,325 @@ public sealed class GitHubLifecycleWorkflowTests
 
         Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Large_upstream_without_duplicate_completes_all_association_checks()
+    {
+        const int openPullRequestCount = 1_201;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int number = 1; number <= openPullRequestCount; number++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(100 + number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.Equal(3, client.SearchCalls);
+        Assert.Equal(2, client.TextSearchCalls);
+        Assert.Equal(
+            [
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests + 1,
+            ],
+            client.PullRequestSearches.Select(static search => search.MaximumResults));
+        Assert.Contains(openPullRequestCount, client.PullRequestFileBatchSizes);
+    }
+
+    [Fact]
+    public async Task Large_upstream_duplicate_is_found_by_narrowed_search_before_mutation()
+    {
+        const int unrelatedPullRequestCount = 1_201;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int number = 1; number <= unrelatedPullRequestCount; number++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(100 + number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7));
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2002");
+        Assert.Equal(1, client.TextSearchCalls);
+        Assert.Equal(0, client.SearchCalls);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Large_upstream_pre_creation_recheck_detects_duplicate_race()
+    {
+        const int openPullRequestCount = 1_201;
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+            OnSearch = static (fake, call) =>
+            {
+                if (call == 2)
+                {
+                    fake.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(8, author: "racer"));
+                }
+            },
+        };
+        for (int number = 1; number <= openPullRequestCount; number++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(100 + number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2008");
+        Assert.True(result.RemoteState.CommitCreated);
+        Assert.False(result.RemoteState.PullRequestCreated);
+        Assert.Equal(["branch", "commit"], client.Mutations);
+    }
+
+    [Fact]
+    public async Task Large_upstream_unavailable_diff_uses_pinned_base_content_fallback()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+            PullRequestMergeBaseFailure = new GitHubApiException(
+                "Synthetic diff generation timeout.",
+                HttpStatusCode.UnprocessableEntity,
+                null),
+        };
+        const int fallbackPullRequestNumber = 10_007;
+        client.PullRequestContentFallbackNumbers.Add(fallbackPullRequestNumber);
+        for (int index = 1; index <= 1_201; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.Equal(["branch", "commit", "pull-request"], client.Mutations);
+    }
+
+    [Fact]
+    public async Task Direct_evidence_rechecks_new_content_fallback_marker()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+            PullRequestMergeBaseFailure = new GitHubApiException(
+                "Synthetic diff generation timeout.",
+                HttpStatusCode.UnprocessableEntity,
+                null),
+        };
+        client.PullRequestContentFallbackNumbers.Add(7);
+        PullRequestInfo pullRequest = GitHubLifecycleTestSupport.PullRequest(7) with
+        {
+            Title = "Unrelated maintenance",
+            Body = null,
+        };
+        client.AddPullRequest(pullRequest);
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        PullRequestManifestEvidence evidence = await provider.GetEvidenceAsync(
+            plan,
+            pullRequest,
+            CancellationToken.None);
+
+        Assert.False(evidence.IsAssociated);
+        Assert.Equal([1], client.PullRequestFileBatchSizes);
+    }
+
+    [Fact]
+    public async Task Large_upstream_unavailable_diff_still_detects_target_content_change()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+            PullRequestMergeBaseFailure = new GitHubApiException(
+                "Synthetic diff generation timeout.",
+                HttpStatusCode.UnprocessableEntity,
+                null),
+        };
+        const int fallbackPullRequestNumber = 10_007;
+        client.PullRequestContentFallbackNumbers.Add(fallbackPullRequestNumber);
+        for (int index = 1; index <= 1_201; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        PullRequestInfo fallback = client.PullRequests.Single(
+            pullRequest => pullRequest.Number == fallbackPullRequestNumber);
+        WorkflowFileChange change = GitHubLifecycleTestSupport.Plan().FileChanges[0];
+        client.SetContent(
+            fallback.HeadRepository!,
+            change.RepositoryPath,
+            fallback.HeadSha,
+            change.Content.AsSpan());
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2002");
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Unavailable_merge_base_escalates_ambiguous_base_only_difference()
+    {
+        const int fallbackPullRequestNumber = 10_007;
+        string path = "manifests/e/Example/App/2.0.0/Example.App.yaml";
+        byte[] current = "current upstream"u8.ToArray();
+        var change = new WorkflowFileChange(
+            PlannedChangeKind.Update,
+            path,
+            "our update"u8,
+            ExpectedFileState.Present,
+            WorkflowFileChange.Hash(current));
+        LocalOperationPlan local = GitHubLifecycleTestSupport.Plan([change]) with
+        {
+            BeforeDocuments = [new RawManifestDocument(path, current)],
+        };
+        local = GitHubLifecycleTestSupport.SynchronizePreflight(local);
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+            PullRequestMergeBaseFailure = new GitHubApiException(
+                "Synthetic diff generation timeout.",
+                HttpStatusCode.UnprocessableEntity,
+                null),
+        };
+        client.PullRequestContentFallbackNumbers.Add(fallbackPullRequestNumber);
+        for (int index = 1; index <= 1_201; index++)
+        {
+            int number = 10_000 + index;
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
+            {
+                Title = $"Unrelated maintenance {number}",
+                Body = null,
+            });
+        }
+
+        PullRequestInfo fallback = client.PullRequests.Single(
+            pullRequest => pullRequest.Number == fallbackPullRequestNumber);
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            path,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            current);
+        client.SetContent(
+            fallback.HeadRepository!,
+            path,
+            fallback.HeadSha,
+            "previous upstream"u8);
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request() with { LocalPlan = local });
+
+        Assert.Equal(GitHubLifecycleResultCode.HumanEscalationRequired, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2034");
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "GH2002");
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Text_search_failure_falls_back_to_exhaustive_duplicate_evidence()
+    {
+        var client = new FakeGitHubClient
+        {
+            PullRequestTextSearchFailure = new GitHubApiException(
+                "GitHub pull-request text search returned incomplete results."),
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7));
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2002");
+        Assert.Equal(1, client.TextSearchCalls);
+        Assert.Equal(1, client.SearchCalls);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Text_search_io_failure_falls_back_to_exhaustive_duplicate_evidence()
+    {
+        var client = new FakeGitHubClient
+        {
+            PullRequestTextSearchFailure = new IOException("Synthetic response stream failure."),
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7));
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "GH2002");
+        Assert.Equal(1, client.TextSearchCalls);
+        Assert.Equal(1, client.SearchCalls);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Text_search_rate_limit_stops_before_exhaustive_api_traffic()
+    {
+        var client = new FakeGitHubClient
+        {
+            PullRequestTextSearchFailure = new GitHubApiException(
+                "secondary rate limit",
+                HttpStatusCode.Forbidden,
+                null,
+                errorKind: GitHubApiErrorKind.RateLimited),
+        };
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.RemoteFailure, result.Code);
+        Assert.Equal(1, client.TextSearchCalls);
+        Assert.Equal(0, client.SearchCalls);
         Assert.Empty(client.Mutations);
     }
 
@@ -996,6 +1676,36 @@ public sealed class GitHubLifecycleWorkflowTests
 
         Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
         Assert.True(result.RemoteState.PullRequestCreated);
+    }
+
+    [Fact]
+    public async Task Post_creation_reconciliation_budgets_new_pr_above_open_limit()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        for (int index = 0; index < PullRequestManifestEvidenceLimits.MaximumOpenPullRequests; index++)
+        {
+            client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(10_000 + index) with
+            {
+                Title = $"Unrelated maintenance {index}",
+                Body = null,
+            });
+        }
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.Succeeded, result.Code);
+        Assert.True(result.RemoteState.PullRequestCreated);
+        Assert.Equal(
+            [
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests,
+                PullRequestManifestEvidenceLimits.MaximumOpenPullRequests + 1,
+            ],
+            client.PullRequestSearches.Select(static search => search.MaximumResults));
     }
 
     [Fact]

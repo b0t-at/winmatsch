@@ -21,6 +21,7 @@ namespace WinMatsch.GitHub.Internal;
 [JsonSerializable(typeof(List<RestPullRequestDto>))]
 [JsonSerializable(typeof(List<RestPullRequestChangedFileDto>))]
 [JsonSerializable(typeof(RestPullRequestDto))]
+[JsonSerializable(typeof(RestIssueSearchResponseDto))]
 [JsonSerializable(typeof(CreatePullRequestDto))]
 [JsonSerializable(typeof(UpdatePullRequestDto))]
 [JsonSerializable(typeof(CreateCommentDto))]

@@ -461,6 +461,8 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         _changedFilesCache = [];
     private readonly ConcurrentDictionary<PullRequestSnapshotKey, PullRequestInfo>
         _pullRequestSnapshots = [];
+    private readonly ConcurrentDictionary<ChangedFilesCacheKey, byte>
+        _contentFallbackCandidates = [];
 
     public async Task<IReadOnlyList<PullRequestInfo>> GetCandidatesAsync(
         GitHubSubmissionPlan plan,
@@ -470,6 +472,8 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(openPullRequests);
         cancellationToken.ThrowIfCancellationRequested();
+        openPullRequests = NormalizePullRequests(openPullRequests);
+        _pullRequestSnapshots.Clear();
         if (openPullRequests.Count > PullRequestManifestEvidenceLimits.MaximumOpenPullRequests)
         {
             throw new PullRequestEvidenceLimitException(
@@ -477,12 +481,193 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                 $"{PullRequestManifestEvidenceLimits.MaximumOpenPullRequests}.");
         }
 
+        string targetPrefix = plan.PackageVersionDirectory + "/";
         var plannedPaths = new HashSet<string>(
-            plan.Request.LocalPlan.FileChanges.Select(static change => change.RepositoryPath),
+            plan.Request.LocalPlan.FileChanges
+                .Where(change => change.RepositoryPath.StartsWith(
+                    targetPrefix,
+                    StringComparison.Ordinal))
+                .Select(static change => change.RepositoryPath),
             StringComparer.Ordinal);
+        if (openPullRequests.Count > PullRequestManifestEvidenceLimits.MaximumCandidates)
+        {
+            PullRequestInfo[] canonicalCandidates =
+            [
+                .. openPullRequests
+                    .Where(pullRequest => GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                        pullRequest.Title,
+                        plan.Request.LocalPlan.PackageIdentifier,
+                        plan.Request.LocalPlan.PackageVersion))
+                    .OrderBy(static pullRequest => pullRequest.Number),
+            ];
+            if (canonicalCandidates.Length > PullRequestManifestEvidenceLimits.MaximumCandidates)
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Manifest evidence candidate count exceeds the safe limit of {PullRequestManifestEvidenceLimits.MaximumCandidates}.");
+            }
+
+            var canonicalNumbers = canonicalCandidates
+                .Select(static pullRequest => pullRequest.Number)
+                .ToHashSet();
+            PullRequestInfo[] pathScreeningCandidates =
+            [
+                .. openPullRequests.Where(pullRequest =>
+                    !canonicalNumbers.Contains(pullRequest.Number)),
+            ];
+            var pathScreeningByNumber = pathScreeningCandidates.ToDictionary(
+                static pullRequest => pullRequest.Number);
+            var currentByNumber = pathScreeningCandidates.ToDictionary(
+                static pullRequest => pullRequest.Number,
+                pullRequest => ResolvePullRequestSnapshot(
+                    plan.Request.UpstreamRepository,
+                    pullRequest));
+            var pathMatchNumbers = new HashSet<long>();
+            var promotedCanonicalNumbers = new HashSet<long>();
+            foreach ((long number, PullRequestInfo current) in currentByNumber)
+            {
+                PullRequestInfo original = pathScreeningByNumber[number];
+                bool remainsInScope = current.State == PullRequestState.Open
+                    && string.Equals(
+                        current.BaseBranch,
+                        original.BaseBranch,
+                        StringComparison.Ordinal);
+                if (remainsInScope
+                    && GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                        current.Title,
+                        plan.Request.LocalPlan.PackageIdentifier,
+                        plan.Request.LocalPlan.PackageVersion))
+                {
+                    promotedCanonicalNumbers.Add(number);
+                }
+
+                if (remainsInScope
+                    && (IsContentFallbackCandidate(
+                        plan.Request.UpstreamRepository,
+                        current)
+                    || (HasCurrentChangedFiles(plan.Request.UpstreamRepository, current)
+                        && ContainsTargetPath(
+                        GetCachedChangedFiles(plan.Request.UpstreamRepository, current),
+                        plannedPaths))))
+                {
+                    pathMatchNumbers.Add(number);
+                }
+            }
+
+            int retainedCandidateCount = canonicalNumbers
+                .Concat(pathMatchNumbers)
+                .Concat(promotedCanonicalNumbers)
+                .Distinct()
+                .Count();
+            if (retainedCandidateCount > PullRequestManifestEvidenceLimits.MaximumCandidates)
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Manifest evidence candidate count exceeds the safe limit of {PullRequestManifestEvidenceLimits.MaximumCandidates}.");
+            }
+
+            PullRequestInfo[] missing =
+            [
+                .. currentByNumber.Values.Where(current =>
+                    !HasCurrentChangedFiles(plan.Request.UpstreamRepository, current)
+                    && !IsContentFallbackCandidate(
+                        plan.Request.UpstreamRepository,
+                        current)),
+            ];
+            IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot> screened =
+                missing.Length == 0
+                    ? new Dictionary<long, PullRequestChangedFilesSnapshot>()
+                    : await GetPathScreeningSnapshotsAsync(
+                        plan.Request.UpstreamRepository,
+                        missing,
+                        plannedPaths,
+                        PullRequestManifestEvidenceLimits.MaximumCandidates
+                            - retainedCandidateCount,
+                        cancellationToken).ConfigureAwait(false);
+            if (screened.Count != missing.Length)
+            {
+                throw new PullRequestEvidenceLimitException(
+                    "Pull request changed-file screening returned an incomplete batch.");
+            }
+
+            foreach (PullRequestInfo expected in missing)
+            {
+                if (!screened.TryGetValue(
+                        expected.Number,
+                        out PullRequestChangedFilesSnapshot? snapshot)
+                    || !pathScreeningByNumber.TryGetValue(
+                        expected.Number,
+                        out PullRequestInfo? original))
+                {
+                    throw new PullRequestEvidenceLimitException(
+                        $"Pull request #{expected.Number} changed-file screening returned incomplete or out-of-scope evidence.");
+                }
+
+                PullRequestInfo resolvedExpected = ResolvePullRequestSnapshot(
+                    plan.Request.UpstreamRepository,
+                    original);
+                bool snapshotRemainsInScope =
+                    snapshot.PullRequest.State == PullRequestState.Open
+                    && string.Equals(
+                        snapshot.PullRequest.BaseBranch,
+                        original.BaseBranch,
+                        StringComparison.Ordinal);
+                PullRequestInfo current = !snapshotRemainsInScope
+                    || snapshot.RequiresRescreen
+                    ? snapshot.PullRequest
+                    : snapshot.RequiresContentFallback
+                        ? CacheContentFallbackSnapshot(
+                        plan.Request.UpstreamRepository,
+                        resolvedExpected,
+                        original,
+                        snapshot)
+                        : CacheChangedFilesSnapshot(
+                        plan.Request.UpstreamRepository,
+                        resolvedExpected,
+                        original,
+                        snapshot);
+                currentByNumber[original.Number] = current;
+                bool remainsInScope = current.State == PullRequestState.Open
+                    && string.Equals(
+                        current.BaseBranch,
+                        original.BaseBranch,
+                        StringComparison.Ordinal);
+                if (remainsInScope
+                    && GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                        current.Title,
+                        plan.Request.LocalPlan.PackageIdentifier,
+                        plan.Request.LocalPlan.PackageVersion))
+                {
+                    promotedCanonicalNumbers.Add(original.Number);
+                }
+
+                if (remainsInScope
+                    && (snapshot.RequiresContentFallback
+                        || ContainsTargetPath(
+                            GetCachedChangedFiles(plan.Request.UpstreamRepository, current),
+                            plannedPaths)))
+                {
+                    pathMatchNumbers.Add(original.Number);
+                }
+            }
+
+            PullRequestInfo[] screenedCandidates =
+            [
+                .. canonicalCandidates
+                    .Concat(pathScreeningCandidates.Where(pullRequest =>
+                        pathMatchNumbers.Contains(pullRequest.Number)
+                        || promotedCanonicalNumbers.Contains(pullRequest.Number)))
+                    .DistinctBy(static pullRequest => pullRequest.Number)
+                    .OrderBy(static pullRequest => pullRequest.Number),
+            ];
+            if (screenedCandidates.Length > PullRequestManifestEvidenceLimits.MaximumCandidates)
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Manifest evidence candidate count exceeds the safe limit of {PullRequestManifestEvidenceLimits.MaximumCandidates}.");
+            }
+
+            return screenedCandidates;
+        }
+
         var candidates = new List<PullRequestInfo>();
-        bool canVerifyEveryOpenPullRequest =
-            openPullRequests.Count <= PullRequestManifestEvidenceLimits.MaximumCandidates;
         IReadOnlyDictionary<long, PullRequestInfo> currentPullRequests =
             await EnsureChangedFilesAsync(
             plan.Request.UpstreamRepository,
@@ -497,23 +682,6 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                     current.BaseBranch,
                     pullRequest.BaseBranch,
                     StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            IReadOnlyList<PullRequestChangedFile> changedFiles =
-                GetCachedChangedFiles(plan.Request.UpstreamRepository, current);
-
-            bool hasTargetPath = changedFiles.Any(file =>
-                plannedPaths.Contains(file.Path)
-                || (file.PreviousPath is not null && plannedPaths.Contains(file.PreviousPath)));
-            bool hasCanonicalTitleHint = GitHubSubmissionFormatter.IsCanonicalTitleFor(
-                current.Title,
-                plan.Request.LocalPlan.PackageIdentifier,
-                plan.Request.LocalPlan.PackageVersion);
-            if (!canVerifyEveryOpenPullRequest
-                && !hasTargetPath
-                && !hasCanonicalTitleHint)
             {
                 continue;
             }
@@ -555,20 +723,34 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
             current.BaseSha!);
         if (_cache.TryGetValue(key, out PullRequestManifestEvidence? cached))
         {
-            return cached with
+            bool hasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                current.Title,
+                plan.Request.LocalPlan.PackageIdentifier,
+                plan.Request.LocalPlan.PackageVersion);
+            if (!hasCanonicalTitle
+                && cached.HasCanonicalTitle
+                && !cached.HasManifestPath
+                && !cached.HasMatchingContent)
             {
-                HasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleFor(
-                    current.Title,
-                    plan.Request.LocalPlan.PackageIdentifier,
-                    plan.Request.LocalPlan.PackageVersion),
-            };
+                _cache.TryRemove(key, out _);
+            }
+            else
+            {
+                return cached with { HasCanonicalTitle = hasCanonicalTitle };
+            }
         }
 
         PullRequestManifestEvidence evidence = await GetEvidenceCoreAsync(
             plan,
             current,
             cancellationToken).ConfigureAwait(false);
-        _cache.TryAdd(key, evidence);
+        if (evidence.HasManifestPath
+            || evidence.HasMatchingContent
+            || !evidence.HasCanonicalTitle)
+        {
+            _cache.TryAdd(key, evidence);
+        }
+
         return evidence;
     }
 
@@ -578,36 +760,57 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        IReadOnlyDictionary<long, PullRequestInfo> currentPullRequests =
-            await EnsureChangedFilesAsync(
-            plan.Request.UpstreamRepository,
-            [pullRequest],
-            cancellationToken).ConfigureAwait(false);
-        PullRequestInfo changedFilesIdentity = currentPullRequests[pullRequest.Number];
-        if (!HasSamePullRequestIdentity(changedFilesIdentity, pullRequest))
+        bool hasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleFor(
+            pullRequest.Title,
+            plan.Request.LocalPlan.PackageIdentifier,
+            plan.Request.LocalPlan.PackageVersion);
+        if (hasCanonicalTitle)
         {
-            throw new PullRequestEvidenceLimitException(
-                $"Pull request #{pullRequest.Number} head or base identity changed while gathering manifest evidence.");
+            await VerifyPullRequestIdentityAsync(
+                plan,
+                pullRequest,
+                cancellationToken).ConfigureAwait(false);
+            return new(false, false, true);
         }
 
-        IReadOnlyList<PullRequestChangedFile> changedFiles =
-            GetCachedChangedFiles(plan.Request.UpstreamRepository, changedFilesIdentity);
         string targetPrefix = plan.PackageVersionDirectory + "/";
         WorkflowFileChange[] plannedChanges =
         [
             .. plan.Request.LocalPlan.FileChanges.Where(change =>
                 change.RepositoryPath.StartsWith(targetPrefix, StringComparison.Ordinal)),
         ];
-        bool hasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleFor(
-            pullRequest.Title,
-            plan.Request.LocalPlan.PackageIdentifier,
-            plan.Request.LocalPlan.PackageVersion);
-        var plannedPaths = new HashSet<string>(
+        var targetPaths = new HashSet<string>(
             plannedChanges.Select(static change => change.RepositoryPath),
             StringComparer.Ordinal);
-        bool hasManifestPath = changedFiles.Any(file =>
-            plannedPaths.Contains(file.Path)
-            || (file.PreviousPath is not null && plannedPaths.Contains(file.PreviousPath)));
+        bool requiresContentFallback = IsContentFallbackCandidate(
+            plan.Request.UpstreamRepository,
+            pullRequest);
+        bool hasManifestPath = false;
+        if (!requiresContentFallback)
+        {
+            IReadOnlyDictionary<long, PullRequestInfo> currentPullRequests =
+                await EnsureChangedFilesAsync(
+                plan.Request.UpstreamRepository,
+                [pullRequest],
+                cancellationToken).ConfigureAwait(false);
+            PullRequestInfo changedFilesIdentity = currentPullRequests[pullRequest.Number];
+            if (!HasSamePullRequestIdentity(changedFilesIdentity, pullRequest))
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Pull request #{pullRequest.Number} head or base identity changed while gathering manifest evidence.");
+            }
+
+            requiresContentFallback = IsContentFallbackCandidate(
+                plan.Request.UpstreamRepository,
+                changedFilesIdentity);
+            if (!requiresContentFallback)
+            {
+                IReadOnlyList<PullRequestChangedFile> changedFiles =
+                    GetCachedChangedFiles(plan.Request.UpstreamRepository, changedFilesIdentity);
+                hasManifestPath = ContainsTargetPath(changedFiles, targetPaths);
+            }
+        }
+
         if (hasCanonicalTitle || hasManifestPath)
         {
             await VerifyPullRequestIdentityAsync(
@@ -627,6 +830,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         }
 
         string mergeBaseSha;
+        bool usingPinnedBaseTipFallback = false;
         try
         {
             mergeBaseSha = await _gitHub.GetMergeBaseAsync(
@@ -635,10 +839,22 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                 pullRequest.HeadSha,
                 cancellationToken).ConfigureAwait(false);
         }
+        catch (NotSupportedException) when (requiresContentFallback)
+        {
+            mergeBaseSha = pullRequest.BaseSha!;
+            usingPinnedBaseTipFallback = true;
+        }
         catch (NotSupportedException exception)
         {
             throw new PullRequestEvidenceLimitException(
                 $"Pull request #{pullRequest.Number} merge-base evidence is unavailable: {exception.Message}");
+        }
+        catch (GitHubApiException exception) when (
+            requiresContentFallback
+            && exception.ErrorKind != GitHubApiErrorKind.RateLimited)
+        {
+            mergeBaseSha = pullRequest.BaseSha!;
+            usingPinnedBaseTipFallback = true;
         }
 
         if (plannedChanges.Length > PullRequestManifestEvidenceLimits.MaximumContentFiles)
@@ -672,18 +888,92 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                 continue;
             }
 
-            hasManifestPath = true;
-            if (change.Kind != PlannedChangeKind.Delete && headContent is not null)
-            {
-                hasMatchingContent |= string.Equals(
+            bool hasDesiredHeadContent = change.Kind != PlannedChangeKind.Delete
+                && headContent is not null
+                && string.Equals(
                     WorkflowFileChange.Hash(headContent.Bytes.Span),
                     WorkflowFileChange.Hash(change.Content.AsSpan()),
                     StringComparison.Ordinal);
+            if (usingPinnedBaseTipFallback)
+            {
+                if (hasDesiredHeadContent)
+                {
+                    hasMatchingContent = true;
+                    continue;
+                }
+
+                throw new PullRequestEvidenceLimitException(
+                    $"Pull request #{pullRequest.Number} differs at planned path '{change.RepositoryPath}', " +
+                    "but immutable merge-base evidence is unavailable.");
             }
+
+            hasManifestPath = true;
+            hasMatchingContent |= hasDesiredHeadContent;
         }
 
         await VerifyPullRequestIdentityAsync(plan, pullRequest, cancellationToken).ConfigureAwait(false);
         return new(hasManifestPath, hasMatchingContent, hasCanonicalTitle);
+    }
+
+    private async Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
+        GetPathScreeningSnapshotsAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            HashSet<string> plannedPaths,
+            int maximumMatches,
+            CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _gitHub.GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+                repository,
+                pullRequests,
+                plannedPaths,
+                maximumMatches,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (NotSupportedException exception)
+        {
+            throw new PullRequestEvidenceLimitException(
+                $"Pull request changed-file screening is unavailable: {exception.Message}");
+        }
+        catch (GitHubApiException exception) when (
+            exception.StatusCode is null
+            && exception.ErrorKind != GitHubApiErrorKind.RateLimited)
+        {
+            throw new PullRequestEvidenceLimitException(
+                "Pull request changed-file screening failed a local transport safety bound: "
+                + exception.Message);
+        }
+    }
+
+    private static bool ContainsTargetPath(
+        IReadOnlyList<PullRequestChangedFile> files,
+        HashSet<string> plannedPaths)
+        => files.Any(file =>
+            plannedPaths.Contains(file.Path)
+            || (file.PreviousPath is not null && plannedPaths.Contains(file.PreviousPath)));
+
+    private static List<PullRequestInfo> NormalizePullRequests(
+        IReadOnlyList<PullRequestInfo> pullRequests)
+    {
+        var normalized = new List<PullRequestInfo>();
+        foreach (IGrouping<long, PullRequestInfo> group in pullRequests.GroupBy(
+                     static pullRequest => pullRequest.Number))
+        {
+            if (group.Select(static pullRequest => pullRequest.NodeId)
+                .Distinct(StringComparer.Ordinal).Skip(1).Any())
+            {
+                throw new PullRequestEvidenceLimitException(
+                    $"Pull request #{group.Key} was returned with conflicting node identities.");
+            }
+
+            normalized.Add(group
+                .OrderByDescending(static pullRequest => pullRequest.UpdatedAt)
+                .First());
+        }
+
+        return normalized;
     }
 
     private async Task<RepositoryContent?> TryGetContentAsync(
@@ -764,7 +1054,9 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         PullRequestInfo[] missing =
         [
             .. currentByNumber.Values
-                .Where(pullRequest => !HasCurrentChangedFiles(repository, pullRequest)),
+                .Where(pullRequest =>
+                    !HasCurrentChangedFiles(repository, pullRequest)
+                    && !IsContentFallbackCandidate(repository, pullRequest)),
         ];
         if (missing.Length == 0)
         {
@@ -817,50 +1109,121 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                     $"Pull request #{expected.Number} changed-file evidence is missing or has a different node identity.");
             }
 
-            PullRequestInfo current = fetchedSnapshot.PullRequest;
-            PullRequestChangedFile[] snapshot = [.. fetchedSnapshot.Files];
-            ValidateChangedFiles(current.Number, snapshot);
-            var key = CreateChangedFilesCacheKey(repository, current);
-            _changedFilesCache[key] = new(
-                current.NodeId,
-                current.BaseSha,
-                snapshot);
-            _pullRequestSnapshots[CreatePullRequestSnapshotKey(repository, expected)] = current;
-            _pullRequestSnapshots[
-                CreatePullRequestSnapshotKey(repository, originalByNumber[expected.Number])] =
-                current;
+            PullRequestInfo original = originalByNumber[expected.Number];
+            bool snapshotRemainsInScope =
+                fetchedSnapshot.PullRequest.State == PullRequestState.Open
+                && string.Equals(
+                    fetchedSnapshot.PullRequest.BaseBranch,
+                    original.BaseBranch,
+                    StringComparison.Ordinal);
+            PullRequestInfo current = !snapshotRemainsInScope
+                || fetchedSnapshot.RequiresRescreen
+                ? fetchedSnapshot.PullRequest
+                : fetchedSnapshot.RequiresContentFallback
+                    ? CacheContentFallbackSnapshot(
+                    repository,
+                    expected,
+                    original,
+                    fetchedSnapshot)
+                    : CacheChangedFilesSnapshot(
+                    repository,
+                    expected,
+                    original,
+                    fetchedSnapshot);
             currentByNumber[expected.Number] = current;
-            foreach (ChangedFilesCacheKey stale in _changedFilesCache.Keys.Where(candidate =>
-                         string.Equals(
-                             candidate.Repository,
-                             key.Repository,
-                             StringComparison.Ordinal)
-                         && candidate.PullRequestNumber == key.PullRequestNumber
-                         && !string.Equals(
-                             candidate.HeadSha,
-                             key.HeadSha,
-                             StringComparison.Ordinal)))
-            {
-                _changedFilesCache.TryRemove(stale, out _);
-            }
-
-            foreach (EvidenceCacheKey stale in _cache.Keys.Where(candidate =>
-                         string.Equals(
-                             candidate.UpstreamRepository,
-                             key.Repository,
-                             StringComparison.Ordinal)
-                         && candidate.PullRequestNumber == key.PullRequestNumber
-                         && !string.Equals(
-                             candidate.HeadSha,
-                             key.HeadSha,
-                             StringComparison.Ordinal)))
-            {
-                _cache.TryRemove(stale, out _);
-            }
         }
 
         return currentByNumber;
     }
+
+    private PullRequestInfo CacheChangedFilesSnapshot(
+        RepositoryCoordinates repository,
+        PullRequestInfo expected,
+        PullRequestInfo original,
+        PullRequestChangedFilesSnapshot fetchedSnapshot)
+    {
+        if (fetchedSnapshot.PullRequest.Number != expected.Number
+            || !string.Equals(
+                fetchedSnapshot.PullRequest.NodeId,
+                expected.NodeId,
+                StringComparison.Ordinal))
+        {
+            throw new PullRequestEvidenceLimitException(
+                $"Pull request #{expected.Number} changed-file evidence is missing or has a different node identity.");
+        }
+
+        PullRequestInfo current = fetchedSnapshot.PullRequest;
+        PullRequestChangedFile[] snapshot = [.. fetchedSnapshot.Files];
+        ValidateChangedFiles(current.Number, snapshot);
+        var key = CreateChangedFilesCacheKey(repository, current);
+        _changedFilesCache[key] = new(
+            current.NodeId,
+            current.BaseSha,
+            snapshot);
+        _contentFallbackCandidates.TryRemove(key, out _);
+        _pullRequestSnapshots[CreatePullRequestSnapshotKey(repository, expected)] = current;
+        _pullRequestSnapshots[CreatePullRequestSnapshotKey(repository, original)] = current;
+        foreach (ChangedFilesCacheKey stale in _changedFilesCache.Keys.Where(candidate =>
+                     string.Equals(
+                         candidate.Repository,
+                         key.Repository,
+                         StringComparison.Ordinal)
+                     && candidate.PullRequestNumber == key.PullRequestNumber
+                     && !string.Equals(
+                         candidate.HeadSha,
+                         key.HeadSha,
+                         StringComparison.Ordinal)))
+        {
+            _changedFilesCache.TryRemove(stale, out _);
+        }
+
+        foreach (EvidenceCacheKey stale in _cache.Keys.Where(candidate =>
+                     string.Equals(
+                         candidate.UpstreamRepository,
+                         key.Repository,
+                         StringComparison.Ordinal)
+                     && candidate.PullRequestNumber == key.PullRequestNumber
+                     && !string.Equals(
+                         candidate.HeadSha,
+                         key.HeadSha,
+                         StringComparison.Ordinal)))
+        {
+            _cache.TryRemove(stale, out _);
+        }
+
+        return current;
+    }
+
+    private PullRequestInfo CacheContentFallbackSnapshot(
+        RepositoryCoordinates repository,
+        PullRequestInfo expected,
+        PullRequestInfo original,
+        PullRequestChangedFilesSnapshot fetchedSnapshot)
+    {
+        if (!fetchedSnapshot.RequiresContentFallback
+            || fetchedSnapshot.PullRequest.Number != expected.Number
+            || !string.Equals(
+                fetchedSnapshot.PullRequest.NodeId,
+                expected.NodeId,
+                StringComparison.Ordinal))
+        {
+            throw new PullRequestEvidenceLimitException(
+                $"Pull request #{expected.Number} content-fallback evidence is missing or has a different node identity.");
+        }
+
+        PullRequestInfo current = fetchedSnapshot.PullRequest;
+        var key = CreateChangedFilesCacheKey(repository, current);
+        _contentFallbackCandidates[key] = 0;
+        _pullRequestSnapshots[CreatePullRequestSnapshotKey(repository, expected)] = current;
+        _pullRequestSnapshots[CreatePullRequestSnapshotKey(repository, original)] = current;
+        return current;
+    }
+
+    private bool IsContentFallbackCandidate(
+        RepositoryCoordinates repository,
+        PullRequestInfo pullRequest)
+        => _contentFallbackCandidates.ContainsKey(
+            CreateChangedFilesCacheKey(repository, pullRequest));
 
     private bool HasCurrentChangedFiles(
         RepositoryCoordinates repository,
@@ -913,7 +1276,15 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         => _pullRequestSnapshots.TryGetValue(
             CreatePullRequestSnapshotKey(repository, pullRequest),
             out PullRequestInfo? snapshot)
-                ? snapshot
+                ? snapshot with
+                {
+                    Title = pullRequest.Title,
+                    Body = pullRequest.Body,
+                    State = pullRequest.State,
+                    IsDraft = pullRequest.IsDraft,
+                    CreatedAt = pullRequest.CreatedAt,
+                    UpdatedAt = pullRequest.UpdatedAt,
+                }
                 : pullRequest;
 
     private static PullRequestSnapshotKey CreatePullRequestSnapshotKey(

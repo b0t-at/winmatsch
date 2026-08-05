@@ -7,6 +7,16 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub submission now combines bounded repository-scoped text search with
+  authoritative changed-path screening for up to 5,000 open pull requests.
+  Complete GraphQL nonmatches are discarded before full evidence collection;
+  only ambiguous large or renamed pull requests use per-PR REST completion.
+  Large upstreams no longer fail at the former 1,000-result or 16-completion
+  bounds, while GitHub's 3,000-file ceiling, merge-base, and pinned identity
+  checks remain fail-closed.
+
 ## [0.8.9] - 2026-08-04
 
 ### Fixed
