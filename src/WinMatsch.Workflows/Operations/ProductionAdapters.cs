@@ -5,7 +5,6 @@ using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
 using WinMatsch.Analysis;
 using WinMatsch.Analysis.Dependencies;
@@ -45,9 +44,9 @@ public sealed class GitHubWorkflowReleaseSource(
             releases = await _client.GetReleasesAsync(repository, cancellationToken)
                 .ConfigureAwait(false);
         }
-        catch (Exception exception) when (
+        catch (Exception) when (
             allowUnavailable
-            && IsUnavailable(exception, cancellationToken))
+            && !cancellationToken.IsCancellationRequested)
         {
             return new(DirectWorkflowReleaseSource.CreateAssets(request), []);
         }
@@ -127,14 +126,6 @@ public sealed class GitHubWorkflowReleaseSource(
             : [];
         return new(selectedAssets, continuityCandidates);
     }
-
-    private static bool IsUnavailable(Exception exception, CancellationToken cancellationToken)
-        => exception is GitHubApiException
-            or HttpRequestException
-            or IOException
-            or JsonException
-            or NotSupportedException
-            || (exception is OperationCanceledException && !cancellationToken.IsCancellationRequested);
 
     public async Task<WorkflowReleaseMetadata> DiscoverMetadataAsync(
         PackageIdentifier packageIdentifier,

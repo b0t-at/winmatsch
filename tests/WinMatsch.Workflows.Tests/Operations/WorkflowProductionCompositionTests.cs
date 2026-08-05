@@ -96,6 +96,72 @@ public sealed class WorkflowProductionCompositionTests
     }
 
     [Fact]
+    public async Task Optional_GitHub_release_discovery_propagates_caller_cancellation()
+    {
+        var client = new FakeGitHubClient();
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"),
+            allowUnavailable: true);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => source.DiscoverAsync(
+            new PackageIdentifier("vcmi.vcmi"),
+            new ReleaseRequest(null, [AssetUrl("1.7.4", "VCMI-Windows-x64.exe")], []),
+            cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Invalid_optional_GitHub_release_data_preserves_map_removed_questions()
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+        });
+        var client = new FakeGitHubClient
+        {
+            OnGetReleases = static (_, _) => throw new InvalidDataException("response exceeds limit"),
+        };
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"),
+            allowUnavailable: true);
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+            downloader,
+            source);
+        string output = CreateDirectory();
+        Uri selected = AssetUrl("2.0.0", "VCMI-Windows-x64.exe");
+        try
+        {
+            WritePrevious(output, releaseAssetSiblings: true);
+
+            WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PreviousVersion = new PackageVersion("1.0.0"),
+                PackageVersion = "2.0.0",
+                Release = new(null, [selected], []),
+                NetworkValidationMode = NetworkValidationMode.Skip,
+            });
+
+            Assert.Equal(WorkflowResultCode.QuestionsRequired, result.Code);
+            Assert.Single(
+                result.Plan.Questions,
+                static question => question.Code == "MAP_REMOVED");
+            Assert.Equal(1, client.GetReleasesCalls);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Unresolved_caller_release_asset_disables_continuity_candidates()
     {
         var client = new FakeGitHubClient
@@ -1874,7 +1940,8 @@ public sealed class WorkflowProductionCompositionTests
     private static void WritePrevious(
         string output,
         bool scopedTwins = false,
-        bool staleDirectNestedState = false)
+        bool staleDirectNestedState = false,
+        bool releaseAssetSiblings = false)
     {
         var identifier = new PackageIdentifier("Example.Composed");
         var version = new PackageVersion("1.0.0");
@@ -1926,6 +1993,18 @@ public sealed class WorkflowProductionCompositionTests
                 InstallerUrl = first.InstallerUrl,
                 InstallerSha256 = first.InstallerSha256,
                 InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" },
+            });
+        }
+
+        if (releaseAssetSiblings)
+        {
+            Installer first = Assert.Single(manifests.Installer.Installers!);
+            first.InstallerUrl = AssetUrl("1.0.0", "VCMI-Windows-x64.exe").AbsoluteUri;
+            manifests.Installer.Installers.Add(new Installer
+            {
+                Architecture = Architecture.X86,
+                InstallerUrl = AssetUrl("1.0.0", "VCMI-Windows-x86.exe").AbsoluteUri,
+                InstallerSha256 = first.InstallerSha256,
             });
         }
 
