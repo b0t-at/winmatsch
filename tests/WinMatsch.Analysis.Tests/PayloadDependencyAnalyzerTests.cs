@@ -81,6 +81,42 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Encrypted_non_payload_resource_does_not_block_dependency_evidence()
+    {
+        const string resourcePath = "af-ZA/Microsoft.ui.xaml.dll.mui";
+        using MemoryStream plain = DependencyFixtures.BuildZip(
+            (resourcePath, "localized resource"u8.ToArray()),
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64, "VCRUNTIME140.dll")));
+        using MemoryStream encrypted = RewriteZipEntryFlags(plain, resourcePath, setFlags: 1);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(encrypted, "mixed.zip");
+
+        DependencyEvidence evidence = Find(
+            analysis,
+            "app.exe",
+            DependencyEvidenceKind.VisualCppRuntime);
+        Assert.True(analysis.IsComplete);
+        Assert.Equal(DependencyEvidenceStatus.Detected, evidence.Status);
+        Assert.Equal(["vcruntime140.dll"], evidence.Signals);
+    }
+
+    [Fact]
+    public void Encrypted_dependency_payload_remains_rejected()
+    {
+        const string encryptedPayload = "runtime/support.dll";
+        using MemoryStream plain = DependencyFixtures.BuildZip(
+            ("app.exe", DependencyFixtures.BuildPe(Machine.Amd64)),
+            (encryptedPayload, DependencyFixtures.BuildPe(Machine.Amd64)));
+        using MemoryStream encrypted = RewriteZipEntryFlags(plain, encryptedPayload, setFlags: 1);
+
+        UnsupportedZipFeatureException exception = Assert.Throws<UnsupportedZipFeatureException>(
+            () => _analyzer.Analyze(encrypted, "mixed.zip"));
+
+        Assert.Equal(encryptedPayload, exception.EntryPath);
+        Assert.Equal("traditional ZIP encryption", exception.UnsupportedFeature);
+    }
+
+    [Fact]
     public void Tfm_without_a_framework_version_is_inferred_not_detected()
     {
         byte[] runtimeConfig = """{"runtimeOptions":{"tfm":"net10.0-windows"}}"""u8.ToArray();
@@ -1101,6 +1137,44 @@ public class PayloadDependencyAnalyzerTests
         => Assert.Single(
             analysis.Evidence,
             evidence => evidence.PayloadPath == payloadPath && evidence.Kind == kind);
+
+    private static MemoryStream RewriteZipEntryFlags(
+        MemoryStream source,
+        string entryName,
+        ushort setFlags)
+    {
+        byte[] bytes = source.ToArray();
+        Span<byte> data = bytes;
+        int centralOffset = data.IndexOf("PK\x01\x02"u8);
+        while (centralOffset >= 0)
+        {
+            int nameLength = BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 28)..]);
+            int extraLength = BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 30)..]);
+            int commentLength = BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 32)..]);
+            string name = Encoding.UTF8.GetString(data.Slice(centralOffset + 46, nameLength));
+            if (string.Equals(name, entryName, StringComparison.Ordinal))
+            {
+                int localOffset = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(data[(centralOffset + 42)..]));
+                Assert.Equal(0x04034B50u, BinaryPrimitives.ReadUInt32LittleEndian(data[localOffset..]));
+                BinaryPrimitives.WriteUInt16LittleEndian(
+                    data[(localOffset + 6)..],
+                    (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[(localOffset + 6)..]) | setFlags));
+                BinaryPrimitives.WriteUInt16LittleEndian(
+                    data[(centralOffset + 8)..],
+                    (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 8)..]) | setFlags));
+                return new MemoryStream(bytes, writable: false);
+            }
+
+            centralOffset += 46 + nameLength + extraLength + commentLength;
+            if (centralOffset >= data.Length
+                || BinaryPrimitives.ReadUInt32LittleEndian(data[centralOffset..]) != 0x02014B50u)
+            {
+                break;
+            }
+        }
+
+        throw new InvalidOperationException($"ZIP entry '{entryName}' was not found.");
+    }
 
     private static void AssertInvalid(PayloadDependencyAnalyzerOptions options)
         => Assert.Throws<ArgumentOutOfRangeException>(() => new PayloadDependencyAnalyzer(options));

@@ -241,7 +241,8 @@ public sealed partial class PayloadDependencyAnalyzer
             fileName,
             "The dependency-analysis archive",
             _options.MaximumArchiveEntries,
-            _options.MaximumCentralDirectoryBytes);
+            _options.MaximumCentralDirectoryBytes,
+            validateAllEntryFeatures: false);
         if (archive.Entries.Count > _options.MaximumArchiveEntries)
         {
             throw new AnalysisResourceLimitException(
