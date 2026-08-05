@@ -2563,7 +2563,7 @@ public sealed class GitHubLifecycleWorkflowTests
     {
         GitHubSubmissionRequest request = GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan) with
         {
-            Resolves = "token=secret-value",
+            Resolves = "#32",
             CustomTitle = "Update Example.App password=hunter2",
         };
 
@@ -2572,10 +2572,11 @@ public sealed class GitHubLifecycleWorkflowTests
         Assert.Equal(
             "Update version: Example.App version 2.0.0 - Update Example.App password=[REDACTED]",
             plan.PullRequestTitle);
-        Assert.Contains("Created with: winmatsch tests", plan.PullRequestBody, StringComparison.Ordinal);
-        Assert.Contains("Rules", plan.PullRequestBody, StringComparison.Ordinal);
-        Assert.Contains("Validation", plan.PullRequestBody, StringComparison.Ordinal);
-        Assert.Contains("Resolves: token=[REDACTED]", plan.PullRequestBody, StringComparison.Ordinal);
+        Assert.Contains("Created with winmatsch tests", plan.PullRequestBody, StringComparison.Ordinal);
+        Assert.Contains("Internal validation passed.", plan.PullRequestBody, StringComparison.Ordinal);
+        Assert.Contains("Resolves #32", plan.PullRequestBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("## Rules", plan.PullRequestBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("## Changes", plan.PullRequestBody, StringComparison.Ordinal);
         Assert.DoesNotContain("hunter2", plan.PullRequestBody, StringComparison.Ordinal);
     }
 

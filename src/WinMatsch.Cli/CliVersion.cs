@@ -10,4 +10,8 @@ public static class CliVersion
         typeof(CliVersion).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
         ?? "unknown";
+
+    /// <summary>The package version without build metadata.</summary>
+    public static string PackageVersion { get; } =
+        InformationalVersion.Split('+', 2, StringSplitOptions.None)[0];
 }

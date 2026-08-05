@@ -193,18 +193,15 @@ public sealed class AllowlistedApprovedRepairPlanner(
         string? version = parts.FirstOrDefault(static part =>
             part.StartsWith("version=", StringComparison.Ordinal))?["version=".Length..];
         GitHubManifestOperation operation = GitHubManifestOperation.Update;
-        string? operationLine = body!.Replace("\r\n", "\n", StringComparison.Ordinal)
-            .Split('\n')
-            .FirstOrDefault(static line =>
-                line.StartsWith("Operation:", StringComparison.OrdinalIgnoreCase));
-        if (operationLine is not null
-            && !Enum.TryParse(
-                operationLine["Operation:".Length..].Trim(),
-                ignoreCase: true,
-                out operation))
+        if (!GitHubSubmissionFormatter.TryGetOperation(body, out operation))
         {
-            throw new CliOperationException(
-                "Approved repair pull request contains an unknown operation.");
+            if (GitHubSubmissionFormatter.HasOperationMetadata(body))
+            {
+                throw new CliOperationException(
+                    "Approved repair pull request contains an unknown operation.");
+            }
+
+            operation = GitHubManifestOperation.Update;
         }
 
         ImmutableArray<string> deletions = operation == GitHubManifestOperation.Replace

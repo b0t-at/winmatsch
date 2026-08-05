@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
 using WinMatsch.Core;
-using WinMatsch.Rules;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Operations;
 
@@ -58,16 +57,13 @@ public static partial class GitHubSubmissionFormatter
         LocalOperationPlan plan = request.LocalPlan;
         var builder = new StringBuilder();
         builder.AppendLine($"<!-- winmatsch:package={plan.PackageIdentifier.Value};version={plan.PackageVersion.Value} -->");
-        builder.AppendLine($"Created with: {request.CreatedWith}");
-        builder.AppendLine($"Operation: {request.Operation}");
+        builder.AppendLine($"<!-- winmatsch:operation={request.Operation} -->");
         builder.AppendLine(
-            $"Target repository: {request.TargetRepository?.ToString() ?? "authenticated-user fork"}");
-        builder.AppendLine($"Manifest path: `{versionDirectory}`");
-        builder.AppendLine($"Dry run: {request.ExecutionMode == WorkflowExecutionMode.Plan}");
-        builder.AppendLine($"Skip PR check: {request.Policy.SkipPullRequestCheck}");
+            $"{GetHumanAction(request.Operation)} {plan.PackageIdentifier.Value} version {plan.PackageVersion.Value}.");
+        builder.AppendLine($"Created with {GetCreatedWith(request.CreatedWith)}");
         if (!string.IsNullOrWhiteSpace(request.Resolves))
         {
-            builder.AppendLine($"Resolves: {request.Resolves.Trim()}");
+            builder.AppendLine($"Resolves {NormalizeIssueReference(request.Resolves)}");
         }
 
         if (request.SupersedesPullRequestNumber is { } superseded)
@@ -75,32 +71,20 @@ public static partial class GitHubSubmissionFormatter
             builder.AppendLine($"Supersedes: #{superseded}");
         }
 
+        builder.AppendLine("Internal validation passed.");
+        AppendValidationWarnings(builder, plan.Validation);
+
         if (!request.VanityUrlAnnotations.IsEmpty)
         {
-            builder.AppendLine("Vanity URL annotations:");
             foreach (string annotation in request.VanityUrlAnnotations)
             {
                 builder.AppendLine($"- {annotation}");
             }
         }
 
-        builder.AppendLine();
-        builder.AppendLine("## Validation");
-        AppendValidation(builder, plan.Validation);
-        builder.AppendLine();
-        builder.AppendLine("## Rules");
-        AppendRules(builder, plan.Rules);
-        builder.AppendLine();
-        builder.AppendLine("## Changes");
-        foreach (WorkflowFileChange change in plan.FileChanges.OrderBy(static item => item.RepositoryPath, StringComparer.Ordinal))
-        {
-            builder.AppendLine($"- {change.Kind}: `{change.RepositoryPath}`");
-        }
-
         if (!string.IsNullOrWhiteSpace(request.Policy.DuplicateHashes.OverrideAnnotation))
         {
-            builder.AppendLine();
-            builder.AppendLine($"Duplicate-hash override: {request.Policy.DuplicateHashes.OverrideAnnotation}");
+            builder.AppendLine($"- Duplicate-hash override: {request.Policy.DuplicateHashes.OverrideAnnotation}");
         }
 
         return Redact(builder.ToString().TrimEnd());
@@ -125,42 +109,89 @@ public static partial class GitHubSubmissionFormatter
             _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, null),
         };
 
-    private static void AppendValidation(StringBuilder builder, ValidationReport validation)
+    public static bool TryGetOperation(string? body, out GitHubManifestOperation operation)
     {
-        builder.AppendLine($"Status: {(validation.IsValid ? "passed" : "failed")}");
-        if (validation.Findings.Count == 0)
+        operation = default;
+        const string markerPrefix = "<!-- winmatsch:operation=";
+        string? marker = body?.Split('\n', StringSplitOptions.TrimEntries)
+            .FirstOrDefault(static line => line.StartsWith(markerPrefix, StringComparison.Ordinal));
+        if (marker is not null)
         {
-            builder.AppendLine("- No findings.");
-            return;
+            return marker.EndsWith("-->", StringComparison.Ordinal)
+                && TryParseNamedOperation(marker[markerPrefix.Length..^3].Trim(), out operation);
         }
 
-        foreach (ValidationFinding finding in validation.Findings)
-        {
-            builder.Append("- ")
-                .Append(finding.Code)
-                .Append(" [")
-                .Append(finding.Severity)
-                .Append("]: ")
-                .AppendLine(finding.Message);
-        }
+        const string legacyPrefix = "Operation:";
+        string? legacyLine = body?.Split('\n', StringSplitOptions.TrimEntries)
+            .FirstOrDefault(static line => line.StartsWith(legacyPrefix, StringComparison.Ordinal));
+        return legacyLine is not null
+            && TryParseNamedOperation(legacyLine[legacyPrefix.Length..].Trim(), out operation);
     }
 
-    private static void AppendRules(StringBuilder builder, RuleRunSummary rules)
+    public static bool HasOperationMetadata(string? body)
+        => body?.Contains("<!-- winmatsch:operation=", StringComparison.Ordinal) == true
+            || body?.Split('\n', StringSplitOptions.TrimEntries)
+                .Any(static line => line.StartsWith(
+                    "Operation:",
+                    StringComparison.OrdinalIgnoreCase)) == true;
+
+    private static bool TryParseNamedOperation(
+        string value,
+        out GitHubManifestOperation operation)
     {
-        if (rules.Executions.IsEmpty)
+        foreach (GitHubManifestOperation candidate in Enum.GetValues<GitHubManifestOperation>())
         {
-            builder.AppendLine("- No rule executions.");
-        }
-        else
-        {
-            foreach (RuleExecution execution in rules.Executions)
+            if (string.Equals(value, candidate.ToString(), StringComparison.OrdinalIgnoreCase))
             {
-                builder.AppendLine($"- {execution.RuleId}: {execution.Mode} ({execution.ModeSource})");
+                operation = candidate;
+                return true;
             }
         }
 
-        builder.AppendLine($"Changes: {rules.Changes.Length}");
-        builder.AppendLine($"Reviews: {rules.Reviews.Length}");
+        operation = default;
+        return false;
+    }
+
+    private static string GetHumanAction(GitHubManifestOperation operation)
+        => operation switch
+        {
+            GitHubManifestOperation.New or GitHubManifestOperation.Add => "Add",
+            GitHubManifestOperation.Update or GitHubManifestOperation.Replace => "Update",
+            GitHubManifestOperation.Remove => "Remove",
+            _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, null),
+        };
+
+    private static string NormalizeIssueReference(string resolves)
+    {
+        string reference = resolves.Trim();
+        return long.TryParse(reference, out long number) && number > 0
+            ? $"#{number}"
+            : reference;
+    }
+
+    private static string GetCreatedWith(string createdWith)
+    {
+        if (!string.Equals(createdWith, "winmatsch", StringComparison.OrdinalIgnoreCase))
+        {
+            return createdWith;
+        }
+
+        Version? version = typeof(GitHubSubmissionFormatter).Assembly.GetName().Version;
+        return version is null
+            ? createdWith
+            : $"{createdWith} v{version.Major}.{version.Minor}.{version.Build}";
+    }
+
+    private static void AppendValidationWarnings(StringBuilder builder, ValidationReport validation)
+    {
+        foreach (ValidationFinding finding in validation.Findings.Where(
+                     static finding => finding.Severity == ValidationSeverity.Warning))
+        {
+            builder.Append("- ")
+                .Append(finding.Code)
+                .Append(": ")
+                .AppendLine(finding.Message);
+        }
     }
 
     [GeneratedRegex(@"(?i)\b(token|password|secret|client_secret|access_token)\s*=\s*[^\s&]+")]

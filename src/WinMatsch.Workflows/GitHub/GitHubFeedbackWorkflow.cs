@@ -662,16 +662,7 @@ public sealed class GitHubFeedbackWorkflow
 
         packageIdentifier = association[..separator];
         packageVersion = association[(separator + versionSeparator.Length)..];
-        const string operationPrefix = "Operation:";
-        string? operationLine = body?.Split('\n', StringSplitOptions.TrimEntries)
-            .FirstOrDefault(static line => line.StartsWith(
-                operationPrefix,
-                StringComparison.Ordinal));
-        return operationLine is not null
-            && Enum.TryParse(
-                operationLine[operationPrefix.Length..].Trim(),
-                ignoreCase: true,
-                out operation);
+        return GitHubSubmissionFormatter.TryGetOperation(body, out operation);
     }
 
     private async Task<SupersessionResult> CloseSupersededAsync(
@@ -808,19 +799,7 @@ public sealed class GitHubFeedbackWorkflow
     private static bool TryGetOperation(
         string? body,
         out GitHubManifestOperation operation)
-    {
-        operation = default;
-        const string operationPrefix = "Operation:";
-        string? operationLine = body?.Split('\n', StringSplitOptions.TrimEntries)
-            .FirstOrDefault(static line => line.StartsWith(
-                operationPrefix,
-                StringComparison.Ordinal));
-        return operationLine is not null
-            && Enum.TryParse(
-                operationLine[operationPrefix.Length..].Trim(),
-                ignoreCase: true,
-                out operation);
-    }
+        => GitHubSubmissionFormatter.TryGetOperation(body, out operation);
 
     private sealed record ExistingReplacementResolution(
         PullRequestInfo? PullRequest,
