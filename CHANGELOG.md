@@ -7,6 +7,8 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.14] - 2026-08-05
+
 ### Fixed
 
 - Updates now retain every previously declared per-installer property while
@@ -258,7 +260,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.13...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.14...main
+[0.8.14]: https://github.com/b0t-at/winmatsch/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/b0t-at/winmatsch/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/b0t-at/winmatsch/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/b0t-at/winmatsch/compare/v0.8.10...v0.8.11
