@@ -30,7 +30,8 @@ internal sealed class SupportedZipArchive : IDisposable
         string archiveName,
         string description,
         int maximumEntryCount = AnalysisLimits.MaxArchiveEntries,
-        long maximumCentralDirectoryBytes = AnalysisLimits.MaxDependencyCentralDirectoryBytes)
+        long maximumCentralDirectoryBytes = AnalysisLimits.MaxDependencyCentralDirectoryBytes,
+        bool validateAllEntryFeatures = true)
     {
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentException.ThrowIfNullOrWhiteSpace(archiveName);
@@ -51,10 +52,11 @@ internal sealed class SupportedZipArchive : IDisposable
 
             for (int index = 0; index < directory.Count; index++)
             {
-                ValidateSupportedFeature(
+                ValidateEntry(
                     archiveName,
                     _archive.Entries[index].FullName,
-                    directory[index]);
+                    directory[index],
+                    validateAllEntryFeatures);
             }
 
             if (directory.Any(static entry => entry.CompressionMethod == Deflate64))
@@ -103,7 +105,8 @@ internal sealed class SupportedZipArchive : IDisposable
                     archiveName,
                     entry,
                     extendedEntry,
-                    directory[index].CompressionMethod);
+                    directory[index],
+                    !validateAllEntryFeatures);
             }
 
             Entries = entries;
@@ -158,7 +161,7 @@ internal sealed class SupportedZipArchive : IDisposable
             _ => "Unknown",
         };
 
-    private static void ValidateSupportedFeature(
+    internal static void ValidateSupportedFeature(
         string archiveName,
         string entryPath,
         ZipCentralDirectoryEntry entry)
@@ -187,6 +190,60 @@ internal sealed class SupportedZipArchive : IDisposable
 
         if (entry.GeneralPurposeBitFlags != entry.LocalGeneralPurposeBitFlags)
         {
+            throw InvalidEntry(
+                archiveName,
+                entryPath,
+                entry.CompressionMethod,
+                $"the local header flags 0x{entry.LocalGeneralPurposeBitFlags:X4} do not match "
+                    + $"the central directory flags 0x{entry.GeneralPurposeBitFlags:X4}.");
+        }
+    }
+
+    private static void ValidateEntry(
+        string archiveName,
+        string entryPath,
+        ZipCentralDirectoryEntry entry,
+        bool validateFeatures)
+    {
+        if (validateFeatures)
+        {
+            ValidateSupportedFeature(archiveName, entryPath, entry);
+            return;
+        }
+
+        if (entry.CompressionMethod != entry.LocalCompressionMethod)
+        {
+            ValidateSupportedHeader(
+                archiveName,
+                entryPath,
+                entry.GeneralPurposeBitFlags,
+                entry.CompressionMethod);
+            ValidateSupportedHeader(
+                archiveName,
+                entryPath,
+                entry.LocalGeneralPurposeBitFlags,
+                entry.LocalCompressionMethod);
+            throw InvalidEntry(
+                archiveName,
+                entryPath,
+                entry.CompressionMethod,
+                $"the local header declares compression method {entry.LocalCompressionMethod} "
+                    + $"({CompressionMethodName(entry.LocalCompressionMethod)}) while the central directory "
+                    + $"declares method {entry.CompressionMethod} ({CompressionMethodName(entry.CompressionMethod)}).");
+        }
+
+        if (entry.GeneralPurposeBitFlags != entry.LocalGeneralPurposeBitFlags)
+        {
+            ValidateSupportedHeader(
+                archiveName,
+                entryPath,
+                entry.GeneralPurposeBitFlags,
+                entry.CompressionMethod);
+            ValidateSupportedHeader(
+                archiveName,
+                entryPath,
+                entry.LocalGeneralPurposeBitFlags,
+                entry.LocalCompressionMethod);
             throw InvalidEntry(
                 archiveName,
                 entryPath,
@@ -290,7 +347,8 @@ internal sealed class SupportedZipArchiveEntry(
     string archiveName,
     DotNetZipArchiveEntry entry,
     IArchiveEntry? extendedEntry,
-    ushort compressionMethod)
+    ZipCentralDirectoryEntry directoryEntry,
+    bool validateFeaturesOnOpen)
 {
     public string FullName => entry.FullName;
 
@@ -298,10 +356,15 @@ internal sealed class SupportedZipArchiveEntry(
 
     public long CompressedLength => entry.CompressedLength;
 
-    public ushort CompressionMethod { get; } = compressionMethod;
+    public ushort CompressionMethod { get; } = directoryEntry.CompressionMethod;
 
     public Stream Open()
     {
+        if (validateFeaturesOnOpen)
+        {
+            SupportedZipArchive.ValidateSupportedFeature(archiveName, FullName, directoryEntry);
+        }
+
         if (extendedEntry is null)
         {
             return entry.Open();

@@ -215,6 +215,23 @@ public class ZipAnalyzerTests
     }
 
     [Fact]
+    public void Encrypted_non_candidate_entry_does_not_block_candidate_analysis()
+    {
+        const string encryptedPath = "af-ZA/Microsoft.ui.xaml.dll.mui";
+        using MemoryStream plain = BuildZip(
+            (encryptedPath, "localized resource"u8.ToArray()),
+            ("payload/app.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
+        using MemoryStream encrypted = RewriteZipEntryFeature(plain, encryptedPath, setFlags: 1);
+
+        InstallerAnalysis analysis = _analyzer.Analyze(encrypted, "mixed.zip");
+
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(InstallerType.Portable, installer.NestedInstallerType);
+        Assert.Equal(Architecture.X64, installer.Architecture);
+        Assert.Equal("payload/app.exe", Assert.Single(installer.NestedInstallerFiles!).RelativeFilePath);
+    }
+
+    [Fact]
     public void Newer_unsupported_method_reports_its_registered_name()
     {
         using MemoryStream deflate = BuildZip(("payload/app.exe", PeFixtures.BuildExe()));
@@ -551,6 +568,51 @@ public class ZipAnalyzerTests
         }
 
         return new MemoryStream(bytes, writable: false);
+    }
+
+    private static MemoryStream RewriteZipEntryFeature(
+        MemoryStream source,
+        string entryName,
+        ushort? compressionMethod = null,
+        ushort setFlags = 0)
+    {
+        byte[] bytes = source.ToArray();
+        Span<byte> data = bytes;
+        int centralOffset = data.IndexOf("PK\x01\x02"u8);
+        while (centralOffset >= 0)
+        {
+            int nameLength = BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 28)..]);
+            int extraLength = BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 30)..]);
+            int commentLength = BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 32)..]);
+            string name = Encoding.UTF8.GetString(data.Slice(centralOffset + 46, nameLength));
+            if (string.Equals(name, entryName, StringComparison.Ordinal))
+            {
+                int localOffset = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(data[(centralOffset + 42)..]));
+                Assert.Equal(0x04034B50u, BinaryPrimitives.ReadUInt32LittleEndian(data[localOffset..]));
+                BinaryPrimitives.WriteUInt16LittleEndian(
+                    data[(localOffset + 6)..],
+                    (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[(localOffset + 6)..]) | setFlags));
+                BinaryPrimitives.WriteUInt16LittleEndian(
+                    data[(centralOffset + 8)..],
+                    (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[(centralOffset + 8)..]) | setFlags));
+                if (compressionMethod is { } method)
+                {
+                    BinaryPrimitives.WriteUInt16LittleEndian(data[(localOffset + 8)..], method);
+                    BinaryPrimitives.WriteUInt16LittleEndian(data[(centralOffset + 10)..], method);
+                }
+
+                return new MemoryStream(bytes, writable: false);
+            }
+
+            centralOffset += 46 + nameLength + extraLength + commentLength;
+            if (centralOffset >= data.Length
+                || BinaryPrimitives.ReadUInt32LittleEndian(data[centralOffset..]) != 0x02014B50u)
+            {
+                break;
+            }
+        }
+
+        throw new InvalidOperationException($"ZIP entry '{entryName}' was not found.");
     }
 
     private static MemoryStream CorruptEntryData(MemoryStream source)
