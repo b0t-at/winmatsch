@@ -2062,30 +2062,37 @@ public sealed class LocalWorkflowEngine
                     return previousInstallerModels[previous.Position];
                 }
 
-                return new Installer
+                Installer rebuilt = previous is not null
+                    && previousInstallerModels is not null
+                    && previous.Position < previousInstallerModels.Count
+                    ? previousInstallerModels[previous.Position]
+                    : new Installer();
+                rebuilt.InstallerUrl = planned.Url.AbsoluteUri;
+                rebuilt.InstallerSha256 = planned.Sha256;
+                rebuilt.SignatureSha256 = null;
+                rebuilt.Architecture = planned.Architecture;
+                rebuilt.InstallerType = planned.InstallerType;
+                rebuilt.NestedInstallerType = planned.NestedInstallerType;
+                rebuilt.Scope = planned.Scope;
+                rebuilt.InstallerLocale = planned.InstallerLocale;
+                rebuilt.NestedInstallerFiles = planned.NestedInstallerFiles.IsEmpty
+                    ? null
+                    :
+                    [
+                        .. planned.NestedInstallerFiles.Select(static file => new NestedInstallerFile
+                        {
+                            RelativeFilePath = file.RelativeFilePath,
+                            PortableCommandAlias = file.PortableCommandAlias,
+                        }),
+                    ];
+                rebuilt.ArchiveBinariesDependOnPath = planned.ArchiveBinariesDependOnPath;
+                if (previous is null && planned.DisplayVersion is not null)
                 {
-                    InstallerUrl = planned.Url.AbsoluteUri,
-                    InstallerSha256 = planned.Sha256,
-                    Architecture = planned.Architecture,
-                    InstallerType = planned.InstallerType,
-                    NestedInstallerType = planned.NestedInstallerType,
-                    Scope = planned.Scope,
-                    InstallerLocale = planned.InstallerLocale,
-                    NestedInstallerFiles = planned.NestedInstallerFiles.IsEmpty
-                        ? null
-                        :
-                        [
-                            .. planned.NestedInstallerFiles.Select(static file => new NestedInstallerFile
-                            {
-                                RelativeFilePath = file.RelativeFilePath,
-                                PortableCommandAlias = file.PortableCommandAlias,
-                            }),
-                        ],
-                    ArchiveBinariesDependOnPath = planned.ArchiveBinariesDependOnPath,
-                    AppsAndFeaturesEntries = planned.DisplayVersion is null
-                        ? null
-                        : [new AppsAndFeaturesEntry { DisplayVersion = planned.DisplayVersion }],
-                };
+                    rebuilt.AppsAndFeaturesEntries =
+                        [new AppsAndFeaturesEntry { DisplayVersion = planned.DisplayVersion }];
+                }
+
+                return rebuilt;
             })
             .ToList();
 

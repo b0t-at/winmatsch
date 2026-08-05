@@ -1355,6 +1355,90 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
+    public void Neutral_override_collapses_multi_architecture_zip_to_one_previous_layout_entry()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://example.test/1.0.0/F95Checker-Windows.zip",
+            Architecture.Neutral,
+            InstallerType.Zip) with
+        {
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new("F95Checker.exe", null)],
+        };
+        DiscoveredAsset asset = F95CheckerAsset();
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]) with
+        {
+            UrlOverrides = [new(asset.DownloadUri, Architecture.Neutral, null, null)],
+        });
+
+        Assert.True(plan.CanApply);
+        AssetMappingDecision decision = Assert.Single(plan.Decisions);
+        Assert.Equal(Architecture.Neutral, decision.Installer!.Architecture);
+        Assert.Equal(
+            [new PlannedNestedInstallerFile("F95Checker.exe", null)],
+            decision.Installer.NestedInstallerFiles);
+        Assert.DoesNotContain(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code is "MAP_AMBIGUOUS" or "MAP_DUPLICATE_INSTALLER_KEY");
+    }
+
+    [Fact]
+    public void Unique_multi_architecture_zip_inherits_previous_single_neutral_layout()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://example.test/1.0.0/F95Checker-Windows.zip",
+            Architecture.Neutral,
+            InstallerType.Zip) with
+        {
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new("F95Checker.exe", null)],
+        };
+        DiscoveredAsset asset = F95CheckerAsset();
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]));
+
+        Assert.True(plan.CanApply);
+        AssetMappingDecision decision = Assert.Single(plan.Decisions);
+        Assert.Equal(Architecture.Neutral, decision.Installer!.Architecture);
+        Assert.Equal(
+            [new PlannedNestedInstallerFile("F95Checker.exe", null)],
+            decision.Installer.NestedInstallerFiles);
+        Assert.DoesNotContain(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code is "MAP_REMOVED" or "MAP_DUPLICATE_INSTALLER_KEY");
+    }
+
+    [Fact]
+    public void Distinct_neutral_overrides_that_force_one_effective_key_remain_rejected()
+    {
+        DiscoveredAsset first = Asset(
+            "F95Checker-Windows.zip",
+            InstallerType.Zip,
+            Architecture.X64);
+        DiscoveredAsset second = Asset(
+            "F95Checker-Portable-Windows.zip",
+            InstallerType.Zip,
+            Architecture.Arm64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([first, second]) with
+        {
+            UrlOverrides =
+            [
+                new(first.DownloadUri, Architecture.Neutral, null, null),
+                new(second.DownloadUri, Architecture.Neutral, null, null),
+            ],
+        });
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code == "MAP_DUPLICATE_INSTALLER_KEY");
+    }
+
+    [Fact]
     public void Shared_url_layout_does_not_mask_incompatible_concrete_architecture()
     {
         Uri oldShared = new("https://example.test/1.0.0/zero-install.exe");
@@ -1549,6 +1633,48 @@ public sealed class AssetMappingPlannerTests
         Assert.Null(installer.NestedInstallerType);
         Assert.Empty(installer.NestedInstallerFiles);
         Assert.Null(installer.ArchiveBinariesDependOnPath);
+    }
+
+    [Fact]
+    public void Explicit_arp_shape_contradiction_requires_structural_approval()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://old.test/1.0.0/tool-x64.exe",
+            Architecture.X64,
+            InstallerType.Exe) with
+        {
+            AppsAndFeaturesEntries =
+            [
+                new("Tool", "Example", "1.0.0", "Tool_is1", null, null),
+            ],
+        };
+        DiscoveredAsset asset = Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64);
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Exe,
+                        AppsAndFeaturesEntries = [],
+                    },
+                ],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]));
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code == "MAP_STRUCTURAL_REWRITE");
+        Assert.Contains(
+            plan.UnresolvedQuestions,
+            static question => question.Code == "MAP_STRUCTURAL_REWRITE");
     }
 
     [Fact]
@@ -1848,6 +1974,54 @@ public sealed class AssetMappingPlannerTests
                         Architecture = architecture,
                         InstallerType = type,
                     },
+                ],
+            },
+        };
+    }
+
+    private static DiscoveredAsset F95CheckerAsset()
+    {
+        DiscoveredAsset asset = Asset(
+            "F95Checker-Windows.zip",
+            InstallerType.Zip,
+            Architecture.X64);
+        return asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                Format = DetectedInstallerFormat.Zip,
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Zip,
+                        NestedInstallerType = InstallerType.Portable,
+                        NestedInstallerFiles =
+                        [
+                            new("F95Checker-Debug.exe", null),
+                            new("F95Checker.exe", null),
+                        ],
+                    },
+                    new()
+                    {
+                        Architecture = Architecture.Arm64,
+                        InstallerType = InstallerType.Zip,
+                        NestedInstallerType = InstallerType.Portable,
+                        NestedInstallerFiles = [new("lib/QtWebEngineProcess.exe", null)],
+                    },
+                ],
+                ArchiveEntries =
+                [
+                    "F95Checker-Debug.exe",
+                    "F95Checker.exe",
+                    "lib/QtWebEngineProcess.exe",
+                ],
+                NestedInstallerCandidates =
+                [
+                    "F95Checker-Debug.exe",
+                    "F95Checker.exe",
+                    "lib/QtWebEngineProcess.exe",
                 ],
             },
         };

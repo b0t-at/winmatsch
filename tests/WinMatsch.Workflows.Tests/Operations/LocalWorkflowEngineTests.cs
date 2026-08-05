@@ -256,6 +256,151 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Update_preserves_and_refreshes_multi_architecture_arp_for_supplied_and_completed_assets()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests previous = CreateContinuityPackage(withInstallerMetadata: true);
+        var processor = new RecordingContinuityArtifactProcessor(withArpEvidence: true);
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            new RulePipelineWorkflowRunner(ProductionRuleComposer.Compose),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            artifacts: processor,
+            clock: new FixedClock());
+        DiscoveredAsset selected = ContinuityAsset(
+            "VCMI-Windows-x64.exe",
+            Architecture.X64,
+            withEvidence: false);
+        DiscoveredAsset x86 = ContinuityAsset(
+            "VCMI-Windows-x86.exe",
+            Architecture.X86,
+            withEvidence: false);
+        DiscoveredAsset arm64 = ContinuityAsset(
+            "VCMI-Windows-arm64.exe",
+            Architecture.Arm64,
+            withEvidence: false);
+
+        WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            PackageIdentifier = new PackageIdentifier("vcmi.vcmi"),
+            PreviousVersion = new PackageVersion("1.7.3"),
+            PackageVersion = "1.7.4",
+            Assets = [selected],
+            ReleaseAssetCandidates = [x86, arm64],
+            Release = new(null, [selected.DownloadUri], []),
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        });
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        RawManifestDocument installerDocument = Assert.Single(
+            result.Plan.AfterDocuments,
+            static document => document.RepositoryPath.EndsWith(
+                ".installer.yaml",
+                StringComparison.Ordinal));
+        InstallerManifest manifest = ManifestYamlReader.ReadInstaller(
+            System.Text.Encoding.UTF8.GetString(installerDocument.Content.AsSpan()));
+        Assert.Equal(3, manifest.Installers?.Count);
+        Assert.All(
+            manifest.Installers!,
+            installer =>
+            {
+                AppsAndFeaturesEntry arp = Assert.Single(installer.AppsAndFeaturesEntries!);
+                Assert.Equal("VCMI Team", arp.Publisher);
+                Assert.True(
+                    string.Equals("1.7.4.315a90f", arp.DisplayVersion, StringComparison.Ordinal),
+                    string.Join(
+                        Environment.NewLine,
+                        result.Plan.Rules.Changes.Select(static change =>
+                            $"{change.RuleId} {change.FieldPath}: {change.Before} -> {change.After} ({change.SourceEvidence})")));
+                Assert.Equal(installer.ProductCode, arp.ProductCode);
+                Assert.NotNull(installer.InstallerSwitches ?? manifest.InstallerSwitches);
+                Assert.Equal(
+                    UpgradeBehavior.UninstallPrevious,
+                    installer.UpgradeBehavior ?? manifest.UpgradeBehavior);
+                Assert.Equal(["vcm"], installer.FileExtensions ?? manifest.FileExtensions);
+                Assert.Equal(["vcmi"], installer.Commands ?? manifest.Commands);
+                Assert.Equal(["vcmi"], installer.Protocols ?? manifest.Protocols);
+            });
+        Assert.Equal(
+            2,
+            result.Plan.Audit.Count(static entry => entry.Code == "MAP_COMPLETED"));
+        Assert.Contains(
+            result.Plan.Audit,
+            entry => entry.Code == "MAP_SUPPLIED"
+                && entry.Message == selected.DownloadUri.AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task Rebuilt_installer_generically_preserves_per_installer_properties()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests previous = CreatePackage("1.0.0", "A");
+        Installer previousInstaller = Assert.Single(previous.Installer.Installers!);
+        previousInstaller.UpgradeBehavior = UpgradeBehavior.UninstallPrevious;
+        previousInstaller.FileExtensions = ["example"];
+        previousInstaller.Commands = ["example"];
+        previousInstaller.Protocols = ["example"];
+        previousInstaller.InstallerSwitches = new InstallerSwitches
+        {
+            Silent = "/S",
+            Custom = "/KEEP",
+        };
+        DiscoveredAsset asset = Asset("2.0.0", "D");
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                Format = DetectedInstallerFormat.Nullsoft,
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Nullsoft,
+                    },
+                ],
+            },
+        };
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PreviousVersion = new PackageVersion("1.0.0"),
+            PackageVersion = "2.0.0",
+            Assets = [asset],
+            Release = new(null, [asset.DownloadUri], []),
+            AllowStructuralRewrite = true,
+            AllowStableUrlContentChange = true,
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        });
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        RawManifestDocument installerDocument = Assert.Single(
+            result.Plan.AfterDocuments,
+            static document => document.RepositoryPath.EndsWith(
+                ".installer.yaml",
+                StringComparison.Ordinal));
+        Installer rebuilt = Assert.Single(ManifestYamlReader.ReadInstaller(
+            System.Text.Encoding.UTF8.GetString(installerDocument.Content.AsSpan())).Installers!);
+        Assert.Equal(InstallerType.Nullsoft, rebuilt.InstallerType);
+        Assert.Equal(UpgradeBehavior.UninstallPrevious, rebuilt.UpgradeBehavior);
+        Assert.Equal(["example"], rebuilt.FileExtensions);
+        Assert.Equal(["example"], rebuilt.Commands);
+        Assert.Equal(["example"], rebuilt.Protocols);
+        Assert.Equal("/S", rebuilt.InstallerSwitches?.Silent);
+        Assert.Equal("/KEEP", rebuilt.InstallerSwitches?.Custom);
+    }
+
+    [Fact]
     public async Task Release_metadata_unavailable_preserves_map_removed_questions()
     {
         using var temporary = new TemporaryDirectory();
@@ -2194,7 +2339,7 @@ public sealed class LocalWorkflowEngineTests
         };
     }
 
-    private static PackageManifests CreateContinuityPackage()
+    private static PackageManifests CreateContinuityPackage(bool withInstallerMetadata = false)
     {
         PackageManifests package = CreatePackage("1.7.3", "A");
         package.Version.PackageIdentifier = new("vcmi.vcmi");
@@ -2202,9 +2347,9 @@ public sealed class LocalWorkflowEngineTests
         package.DefaultLocale.PackageIdentifier = new("vcmi.vcmi");
         package.Installer.Installers =
         [
-            ContinuityInstaller("VCMI-Windows-x64.exe", Architecture.X64, 'A'),
-            ContinuityInstaller("VCMI-Windows-x86.exe", Architecture.X86, 'B'),
-            ContinuityInstaller("VCMI-Windows-arm64.exe", Architecture.Arm64, 'C'),
+            ContinuityInstaller("VCMI-Windows-x64.exe", Architecture.X64, 'A', withInstallerMetadata),
+            ContinuityInstaller("VCMI-Windows-x86.exe", Architecture.X86, 'B', withInstallerMetadata),
+            ContinuityInstaller("VCMI-Windows-arm64.exe", Architecture.Arm64, 'C', withInstallerMetadata),
         ];
         return package;
     }
@@ -2212,8 +2357,11 @@ public sealed class LocalWorkflowEngineTests
     private static Installer ContinuityInstaller(
         string assetName,
         Architecture architecture,
-        char hash)
-        => new()
+        char hash,
+        bool withInstallerMetadata)
+    {
+        string architectureToken = architecture.ToString().ToLowerInvariant();
+        var installer = new Installer
         {
             Architecture = architecture,
             InstallerType = InstallerType.Exe,
@@ -2221,6 +2369,28 @@ public sealed class LocalWorkflowEngineTests
                 $"https://github.com/vcmi/vcmi/releases/download/1.7.3/{assetName}",
             InstallerSha256 = new Sha256Hash(new string(hash, 64)),
         };
+        if (withInstallerMetadata)
+        {
+            string productCode = $"VCMI .{architectureToken}_is1";
+            installer.ProductCode = productCode;
+            installer.AppsAndFeaturesEntries =
+            [
+                new AppsAndFeaturesEntry
+                {
+                    Publisher = "VCMI Team",
+                    DisplayVersion = "1.7.3.315a90f",
+                    ProductCode = productCode,
+                },
+            ];
+            installer.InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" };
+            installer.UpgradeBehavior = UpgradeBehavior.UninstallPrevious;
+            installer.FileExtensions = ["vcm"];
+            installer.Commands = ["vcmi"];
+            installer.Protocols = ["vcmi"];
+        }
+
+        return installer;
+    }
 
     private static DiscoveredAsset ContinuityAsset(
         string assetName,
@@ -2759,7 +2929,7 @@ public sealed class LocalWorkflowEngineTests
                 "Zstandard"));
     }
 
-    private sealed class RecordingContinuityArtifactProcessor : IWorkflowArtifactProcessor
+    private sealed class RecordingContinuityArtifactProcessor(bool withArpEvidence = false) : IWorkflowArtifactProcessor
     {
         public List<string> AcquiredUrls { get; } = [];
 
@@ -2786,6 +2956,28 @@ public sealed class LocalWorkflowEngineTests
                 InitialUrl = asset.DownloadUri.AbsoluteUri,
                 FinalUrl = asset.DownloadUri.AbsoluteUri,
             };
+            string architectureToken = architecture.ToString().ToLowerInvariant();
+            var analyzedInstaller = new Installer
+            {
+                Architecture = architecture,
+                InstallerType = InstallerType.Exe,
+            };
+            if (withArpEvidence)
+            {
+                string productCode = $"VCMI .{architectureToken}_is1";
+                analyzedInstaller.ProductCode = productCode;
+                analyzedInstaller.AppsAndFeaturesEntries =
+                [
+                    new AppsAndFeaturesEntry
+                    {
+                        Publisher = "VCMI Team",
+                        DisplayVersion = "1.7.4.315a90f",
+                        ProductCode = productCode,
+                        InstallerType = InstallerType.Exe,
+                    },
+                ];
+            }
+
             return Task.FromResult(new ArtifactSnapshot
             {
                 Asset = enriched,
@@ -2794,14 +2986,7 @@ public sealed class LocalWorkflowEngineTests
                 {
                     Format = DetectedInstallerFormat.GenericInstallerExe,
                     ProductVersion = "1.7.4",
-                    Installers =
-                    [
-                        new Installer
-                            {
-                                Architecture = architecture,
-                                InstallerType = InstallerType.Exe,
-                            },
-                        ],
+                    Installers = [analyzedInstaller],
                 },
             });
         }

@@ -4,6 +4,9 @@
 PackageIdentifier: Waytech.CloudDrive2
 PackageVersion: 0.9.8
 InstallerType: inno
+AppsAndFeaturesEntries:
+- DisplayName: CloudDrive2 0.9.8
+  ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
 Installers:
 - Architecture: x64
   InstallerUrl: https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-X64-0.9.8.exe

@@ -70,6 +70,27 @@ public sealed record PlannedInstaller
 
 public sealed record PlannedNestedInstallerFile(string RelativeFilePath, string? PortableCommandAlias);
 
+public sealed record InstallerArpEntryEvidence(
+    string? DisplayName,
+    string? Publisher,
+    string? DisplayVersion,
+    string? ProductCode,
+    string? UpgradeCode,
+    InstallerType? InstallerType)
+{
+    public static InstallerArpEntryEvidence FromManifest(AppsAndFeaturesEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        return new(
+            entry.DisplayName,
+            entry.Publisher,
+            entry.DisplayVersion,
+            entry.ProductCode,
+            entry.UpgradeCode,
+            entry.InstallerType);
+    }
+}
+
 public sealed record AssetMappingDecision(
     AssetMappingDecisionKind Kind,
     int? PreviousPosition,
@@ -158,6 +179,8 @@ public sealed record PreviousInstallerEntry
 
     public bool? ArchiveBinariesDependOnPath { get; init; }
 
+    public ImmutableArray<InstallerArpEntryEvidence>? AppsAndFeaturesEntries { get; init; }
+
     public static ImmutableArray<PreviousInstallerEntry> FromManifests(PackageManifests manifests)
     {
         ArgumentNullException.ThrowIfNull(manifests);
@@ -183,9 +206,15 @@ public sealed record PreviousInstallerEntry
                     NestedInstallerType = installer.NestedInstallerType ?? manifest.NestedInstallerType,
                     Scope = installer.Scope ?? manifest.Scope,
                     InstallerLocale = installer.InstallerLocale ?? manifest.InstallerLocale,
-                    DisplayVersion = (installer.AppsAndFeaturesEntries ?? manifest.AppsAndFeaturesEntries)?
+                    DisplayVersion = EffectiveArpEntries(manifest, installer)?
                         .Select(static entry => entry.DisplayVersion)
                         .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value)),
+                    AppsAndFeaturesEntries = EffectiveArpEntries(manifest, installer) is { } arpEntries
+                        ?
+                        [
+                            .. arpEntries.Select(InstallerArpEntryEvidence.FromManifest),
+                        ]
+                        : null,
                     PackageVersion = version,
                     NestedInstallerFiles =
                     [
@@ -200,6 +229,11 @@ public sealed record PreviousInstallerEntry
                 }),
         ];
     }
+
+    private static List<AppsAndFeaturesEntry>? EffectiveArpEntries(
+        InstallerManifest manifest,
+        Installer installer)
+        => installer.AppsAndFeaturesEntries ?? manifest.AppsAndFeaturesEntries;
 }
 
 public sealed record AssetMappingRequest

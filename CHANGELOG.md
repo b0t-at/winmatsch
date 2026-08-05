@@ -7,6 +7,18 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- Updates now retain every previously declared per-installer property while
+  rebuilding mapped installers, refresh declared ARP identity and version values
+  from fresh analysis, and stop with a structural question when explicit ARP
+  evidence contradicts the accepted entry count. This also covers installers
+  added through release-asset continuity.
+- A qualified architecture override now collapses same-URL analyzed variants
+  that resolve to one effective installer key, while distinct conflicting
+  overrides remain rejected. A unique replacement asset also inherits a
+  previous single-neutral ZIP layout without requiring an override.
+
 ## [0.8.13] - 2026-08-05
 
 ### Fixed
