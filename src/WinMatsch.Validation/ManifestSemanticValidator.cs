@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.Downloads;
@@ -17,6 +18,10 @@ internal static class ManifestSemanticValidator
     private const uint EndOfCentralDirectorySignature = 0x06054B50;
     private const uint Zip64EndOfCentralDirectorySignature = 0x06064B50;
     private const uint Zip64LocatorSignature = 0x07064B50;
+    private static readonly string[] _userScopeSwitchTokens =
+        ["/CURRENTUSER", "MSIINSTALLPERUSER=1", "ALLUSERS=\"\"", "ALLUSERS=2"];
+    private static readonly string[] _machineScopeSwitchTokens =
+        ["/ALLUSERS", "ALLUSERS=1", "--machine"];
 
     public static SemanticValidationResult Validate(
         ParsedPackage package,
@@ -248,28 +253,90 @@ internal static class ManifestSemanticValidator
         if (first.InstallerType != second.InstallerType
             || first.Scope is null
             || second.Scope is null
-            || first.Scope == second.Scope
-            || first with { Scope = null, Custom = null } != second with { Scope = null, Custom = null })
+            || first.Scope == second.Scope)
         {
             return false;
         }
 
-        return ClassifyScopeSwitch(first.Custom) == first.Scope
-            && ClassifyScopeSwitch(second.Custom) == second.Scope;
+        ScopeSwitchEvidence firstMarker = ClassifyScopeSwitches(first);
+        ScopeSwitchEvidence secondMarker = ClassifyScopeSwitches(second);
+        return ScopeEvidenceMatches(firstMarker, first.Scope.Value)
+            && ScopeEvidenceMatches(secondMarker, second.Scope.Value)
+            && (firstMarker != ScopeSwitchEvidence.None || secondMarker != ScopeSwitchEvidence.None)
+            && WithoutScopeSwitches(first) == WithoutScopeSwitches(second);
     }
 
-    private static Scope? ClassifyScopeSwitch(string? value)
+    private static ScopeSwitchEvidence ClassifyScopeSwitches(InstallerSemantics semantics)
+    {
+        string[] values = SwitchValues(semantics)
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .OfType<string>()
+            .ToArray();
+        bool user = values.Any(value => _userScopeSwitchTokens.Any(token => ContainsSwitchToken(value, token)));
+        bool machine = values.Any(value => _machineScopeSwitchTokens.Any(token => ContainsSwitchToken(value, token)));
+        return (user, machine) switch
+        {
+            (false, false) => ScopeSwitchEvidence.None,
+            (true, false) => ScopeSwitchEvidence.User,
+            (false, true) => ScopeSwitchEvidence.Machine,
+            _ => ScopeSwitchEvidence.Conflicting,
+        };
+    }
+
+    private static bool ScopeEvidenceMatches(ScopeSwitchEvidence evidence, Scope scope)
+        => evidence switch
+        {
+            ScopeSwitchEvidence.None => true,
+            ScopeSwitchEvidence.User => scope == Scope.User,
+            ScopeSwitchEvidence.Machine => scope == Scope.Machine,
+            _ => false,
+        };
+
+    private static InstallerSemantics WithoutScopeSwitches(InstallerSemantics semantics)
+        => semantics with
+        {
+            Scope = null,
+            Silent = RemoveScopeSwitchTokens(semantics.Silent),
+            SilentWithProgress = RemoveScopeSwitchTokens(semantics.SilentWithProgress),
+            Interactive = RemoveScopeSwitchTokens(semantics.Interactive),
+            InstallLocation = RemoveScopeSwitchTokens(semantics.InstallLocation),
+            Log = RemoveScopeSwitchTokens(semantics.Log),
+            Upgrade = RemoveScopeSwitchTokens(semantics.Upgrade),
+            Custom = RemoveScopeSwitchTokens(semantics.Custom),
+            Repair = RemoveScopeSwitchTokens(semantics.Repair),
+        };
+
+    private static IEnumerable<string?> SwitchValues(InstallerSemantics semantics)
+    {
+        yield return semantics.Silent;
+        yield return semantics.SilentWithProgress;
+        yield return semantics.Interactive;
+        yield return semantics.InstallLocation;
+        yield return semantics.Log;
+        yield return semantics.Upgrade;
+        yield return semantics.Custom;
+        yield return semantics.Repair;
+    }
+
+    private static string? RemoveScopeSwitchTokens(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
             return null;
         }
 
-        string[] userTokens = ["/CURRENTUSER", "MSIINSTALLPERUSER=1", "ALLUSERS=\"\"", "ALLUSERS=2"];
-        string[] machineTokens = ["/ALLUSERS", "ALLUSERS=1"];
-        bool user = userTokens.Any(token => ContainsSwitchToken(value, token));
-        bool machine = machineTokens.Any(token => ContainsSwitchToken(value, token));
-        return user == machine ? null : user ? Scope.User : Scope.Machine;
+        string normalized = _userScopeSwitchTokens
+            .Concat(_machineScopeSwitchTokens)
+            .OrderByDescending(static token => token.Length)
+            .Aggregate(
+                value,
+                static (current, token) => Regex.Replace(
+                    current,
+                    $"(?<![A-Za-z0-9-]){Regex.Escape(token)}(?![A-Za-z0-9-])",
+                    "",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
+        normalized = Regex.Replace(normalized, @"\s+", " ").Trim();
+        return normalized.Length == 0 ? null : normalized;
     }
 
     private static bool ContainsSwitchToken(string value, string token)
@@ -284,8 +351,8 @@ internal static class ManifestSemanticValidator
             }
 
             int end = index + token.Length;
-            if ((index == 0 || !char.IsLetterOrDigit(value[index - 1]))
-                && (end == value.Length || !char.IsLetterOrDigit(value[end])))
+            if ((index == 0 || !IsSwitchTokenCharacter(value[index - 1]))
+                && (end == value.Length || !IsSwitchTokenCharacter(value[end])))
             {
                 return true;
             }
@@ -293,6 +360,9 @@ internal static class ManifestSemanticValidator
             start = index + 1;
         }
     }
+
+    private static bool IsSwitchTokenCharacter(char value)
+        => char.IsLetterOrDigit(value) || value == '-';
 
     private static void ValidateNestedInstaller(
         InstallerManifest manifest,
@@ -1033,6 +1103,14 @@ internal static class ManifestSemanticValidator
         string? Upgrade,
         string? Custom,
         string? Repair);
+
+    private enum ScopeSwitchEvidence
+    {
+        None,
+        User,
+        Machine,
+        Conflicting,
+    }
 
     private sealed record ComparableVersion(string Raw, PackageVersion? Parsed);
 
