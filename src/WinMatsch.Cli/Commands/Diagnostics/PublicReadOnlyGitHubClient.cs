@@ -171,10 +171,50 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
         => throw Unsupported();
 
-    public Task<IReadOnlyList<GitHubRelease>> GetReleasesAsync(
+    public async Task<IReadOnlyList<GitHubRelease>> GetReleasesAsync(
         RepositoryCoordinates repository,
         CancellationToken cancellationToken = default)
-        => throw Unsupported();
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        Uri? next = new(
+            _options.ApiBaseUri,
+            $"repos/{Escape(repository.Owner)}/{Escape(repository.Name)}/releases?per_page=100");
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var releases = new List<GitHubRelease>();
+        int pages = 0;
+        while (next is not null)
+        {
+            if (pages++ >= _options.MaxPaginationPages
+                || !visited.Add(next.AbsoluteUri))
+            {
+                throw new InvalidDataException(
+                    "GitHub release pagination exceeded its page bound or repeated a page.");
+            }
+
+            (JsonDocument document, Uri? nextPage) = await GetJsonPageAsync(
+                next,
+                cancellationToken).ConfigureAwait(false);
+            using (document)
+            {
+                if (document.RootElement.ValueKind != JsonValueKind.Array)
+                {
+                    throw new InvalidDataException("GitHub releases response must be an array.");
+                }
+
+                if (document.RootElement.GetArrayLength() > _options.MaxPaginationItems - releases.Count)
+                {
+                    throw new InvalidDataException(
+                        "GitHub release pagination exceeded its item bound.");
+                }
+
+                releases.AddRange(document.RootElement.EnumerateArray().Select(ParseRelease));
+            }
+
+            next = nextPage;
+        }
+
+        return releases;
+    }
 
     public Task<IReadOnlyList<BranchState>> GetBranchesAsync(
         RepositoryCoordinates repository,
@@ -292,6 +332,15 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
         CancellationToken cancellationToken)
     {
         Uri uri = new(_options.ApiBaseUri, relativePath);
+        (JsonDocument document, _) = await GetJsonPageAsync(uri, cancellationToken)
+            .ConfigureAwait(false);
+        return document;
+    }
+
+    private async Task<(JsonDocument Document, Uri? Next)> GetJsonPageAsync(
+        Uri uri,
+        CancellationToken cancellationToken)
+    {
         string? token = Volatile.Read(ref _token);
         HttpResponseMessage response = await SendAsync(uri, token, cancellationToken)
             .ConfigureAwait(false);
@@ -321,6 +370,7 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
                         : null);
             }
 
+            Uri? next = ParseNextPage(response, uri);
             await using Stream content = await response.Content
                 .ReadAsStreamAsync(cancellationToken)
                 .ConfigureAwait(false);
@@ -343,7 +393,7 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
                     .ConfigureAwait(false);
             }
 
-            return JsonDocument.Parse(payload.ToArray());
+            return (JsonDocument.Parse(payload.ToArray()), next);
         }
     }
 
@@ -378,11 +428,86 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
         return RepositoryCoordinates.Parse(fullName);
     }
 
+    private static GitHubRelease ParseRelease(JsonElement release)
+    {
+        string tag = RequiredString(release, "tag_name");
+        return new(
+            RequiredInt64(release, "id"),
+            tag,
+            OptionalString(release, "name") ?? tag,
+            OptionalString(release, "body"),
+            RequiredUri(release, "html_url"),
+            RequiredBoolean(release, "draft"),
+            RequiredBoolean(release, "prerelease"),
+            OptionalDateTimeOffset(release, "published_at"),
+            [
+                .. RequiredArray(release, "assets").EnumerateArray().Select(static asset => new ReleaseAsset(
+                    RequiredInt64(asset, "id"),
+                    RequiredString(asset, "name"),
+                    RequiredUri(asset, "browser_download_url"),
+                    RequiredString(asset, "content_type"),
+                    RequiredInt64(asset, "size"),
+                    checked((int)RequiredInt64(asset, "download_count")),
+                    RequiredDateTimeOffset(asset, "created_at"),
+                    OptionalDateTimeOffset(asset, "updated_at"))),
+            ],
+            OptionalDateTimeOffset(release, "updated_at"));
+    }
+
+    private Uri? ParseNextPage(HttpResponseMessage response, Uri current)
+    {
+        if (!response.Headers.TryGetValues("Link", out IEnumerable<string>? values))
+        {
+            return null;
+        }
+
+        foreach (string item in values.SelectMany(static value => value.Split(',')))
+        {
+            if (!item.Contains("rel=\"next\"", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            int start = item.IndexOf('<');
+            int end = item.IndexOf('>', start + 1);
+            if (start < 0
+                || end <= start + 1
+                || !Uri.TryCreate(item[(start + 1)..end], UriKind.Absolute, out Uri? next))
+            {
+                throw new InvalidDataException("GitHub returned an invalid release pagination link.");
+            }
+
+            Uri api = _options.ApiBaseUri;
+            string apiPath = api.AbsolutePath.TrimEnd('/');
+            if (!string.Equals(next.Scheme, api.Scheme, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(next.Host, api.Host, StringComparison.OrdinalIgnoreCase)
+                || next.Port != api.Port
+                || (!string.IsNullOrEmpty(apiPath)
+                    && !next.AbsolutePath.StartsWith(
+                        $"{apiPath}/",
+                        StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidDataException(
+                    $"GitHub release pagination left the configured API origin after '{current}'.");
+            }
+
+            return next;
+        }
+
+        return null;
+    }
+
     private static string RequiredString(JsonElement element, string name)
         => element.TryGetProperty(name, out JsonElement value)
             && value.ValueKind == JsonValueKind.String
             ? value.GetString()!
             : throw new InvalidDataException($"GitHub response is missing string property '{name}'.");
+
+    private static string? OptionalString(JsonElement element, string name)
+        => element.TryGetProperty(name, out JsonElement value)
+            && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     private static bool RequiredBoolean(JsonElement element, string name)
         => element.TryGetProperty(name, out JsonElement value)
@@ -395,6 +520,23 @@ internal sealed class PublicReadOnlyGitHubClient : IGitHubRepositoryClient
             && value.ValueKind == JsonValueKind.Number
             ? value.GetInt64()
             : throw new InvalidDataException($"GitHub response is missing numeric property '{name}'.");
+
+    private static JsonElement RequiredArray(JsonElement element, string name)
+        => element.TryGetProperty(name, out JsonElement value)
+            && value.ValueKind == JsonValueKind.Array
+            ? value
+            : throw new InvalidDataException($"GitHub response is missing array property '{name}'.");
+
+    private static DateTimeOffset RequiredDateTimeOffset(JsonElement element, string name)
+        => OptionalDateTimeOffset(element, name)
+            ?? throw new InvalidDataException($"GitHub response is missing date property '{name}'.");
+
+    private static DateTimeOffset? OptionalDateTimeOffset(JsonElement element, string name)
+        => element.TryGetProperty(name, out JsonElement value)
+            && value.ValueKind == JsonValueKind.String
+            && value.TryGetDateTimeOffset(out DateTimeOffset result)
+                ? result
+                : null;
 
     private static Uri RequiredUri(JsonElement element, string name)
         => new(RequiredString(element, name), UriKind.Absolute);

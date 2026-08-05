@@ -132,6 +132,134 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Update_auto_completes_release_asset_siblings_through_artifact_pipeline()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests previous = CreateContinuityPackage();
+        var processor = new RecordingContinuityArtifactProcessor();
+        var preflight = new VerifyingArtifactPreflight();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            new PassThroughRuleRunner(),
+            preflight,
+            new RecordingTransaction(),
+            artifacts: processor,
+            clock: new FixedClock());
+        var selected = ContinuityAsset("VCMI-Windows-x64.exe", Architecture.X64, withEvidence: true);
+        var x86 = ContinuityAsset("VCMI-Windows-x86.exe", Architecture.X86, withEvidence: false);
+        var arm64 = ContinuityAsset("VCMI-Windows-arm64.exe", Architecture.Arm64, withEvidence: false);
+        string preparedArtifacts = Path.Combine(temporary.Path, "prepared-artifacts");
+        Directory.CreateDirectory(preparedArtifacts);
+        string selectedPath = Path.Combine(preparedArtifacts, selected.AssetName);
+        await File.WriteAllBytesAsync(selectedPath, "installer"u8.ToArray());
+        var selectedDownload = new DownloadResult
+        {
+            FilePath = selectedPath,
+            FileName = selected.AssetName,
+            Sha256 = selected.Content!.Identity.Sha256,
+            SizeInBytes = selected.Content.Identity.SizeInBytes,
+            RetrievedAt = selected.Content.RetrievedAt,
+            InitialUrl = selected.DownloadUri.AbsoluteUri,
+            FinalUrl = selected.DownloadUri.AbsoluteUri,
+        };
+
+        var request = new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            PackageIdentifier = new PackageIdentifier("vcmi.vcmi"),
+            PreviousVersion = new PackageVersion("1.7.3"),
+            PackageVersion = "1.7.4",
+            Assets = [selected],
+            ReleaseAssetCandidates = [x86, arm64],
+            Release = new(null, [selected.DownloadUri], []),
+            NetworkValidationMode = NetworkValidationMode.Skip,
+            ArtifactDirectory = preparedArtifacts,
+            UsePreparedArtifactDirectory = true,
+            InstallerArtifacts = [new(selected.DownloadUri.AbsoluteUri, selectedDownload)],
+        };
+        WorkflowOperationResult result = await engine.UpdateAsync(request);
+
+        Assert.True(
+            result.Code == WorkflowResultCode.Succeeded,
+            string.Join(
+                Environment.NewLine,
+                [$"Code: {result.Code}", .. result.Plan.Validation.Findings.Select(
+                    static finding => $"{finding.Code}: {finding.Message}")]));
+        RawManifestDocument installerDocument = Assert.Single(
+            result.Plan.AfterDocuments,
+            static document => document.RepositoryPath.EndsWith(
+                ".installer.yaml",
+                StringComparison.Ordinal));
+        InstallerManifest installer = ManifestYamlReader.ReadInstaller(
+            System.Text.Encoding.UTF8.GetString(installerDocument.Content.AsSpan()));
+        Assert.Equal(3, installer.Installers?.Count);
+        Assert.Equal(
+            [Architecture.X86, Architecture.X64, Architecture.Arm64],
+            installer.Installers!.Select(static item => item.Architecture).Order());
+        Assert.Equal(
+            [arm64.DownloadUri.AbsoluteUri, x86.DownloadUri.AbsoluteUri],
+            processor.AcquiredUrls.Order(StringComparer.Ordinal));
+        Assert.Equal(
+            3,
+            Directory.EnumerateFiles(preparedArtifacts).Count());
+        Assert.Equal(
+            2,
+            result.Plan.Audit.Count(static entry =>
+                entry.Code == "MAP_COMPLETED"
+                && entry.Provenance == "release-asset continuity"));
+        Assert.Contains(
+            result.Plan.Audit,
+            entry => entry.Code == "MAP_SUPPLIED"
+                && entry.Message == selected.DownloadUri.AbsoluteUri
+                && entry.Provenance == "caller-supplied URL");
+        Assert.DoesNotContain(
+            result.Plan.Questions,
+            static question => question.Code == "MAP_REMOVED");
+
+        WorkflowOperationResult applied = await engine.ApplyVerifiedPlanAsync(
+            request,
+            result.Plan.Fingerprint);
+
+        Assert.True(
+            applied.Applied,
+            $"Code: {applied.Code}; Error: {applied.ErrorMessage}; "
+            + $"Expected: {result.Plan.Fingerprint}; Actual: {applied.Plan.Fingerprint}");
+        Assert.True(preflight.FilesPresentAtVerifiedBoundary);
+        Assert.Equal(6, processor.AcquiredUrls.Count);
+        Assert.Equal(3, Directory.EnumerateFiles(preparedArtifacts).Count());
+    }
+
+    [Fact]
+    public async Task Release_metadata_unavailable_preserves_map_removed_questions()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests previous = CreateContinuityPackage();
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            new RecordingTransaction());
+        DiscoveredAsset selected = ContinuityAsset(
+            "VCMI-Windows-x64.exe",
+            Architecture.X64,
+            withEvidence: true);
+
+        WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            PackageIdentifier = new PackageIdentifier("vcmi.vcmi"),
+            PreviousVersion = new PackageVersion("1.7.3"),
+            PackageVersion = "1.7.4",
+            Assets = [selected],
+            Release = new(null, [selected.DownloadUri], []),
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        });
+
+        Assert.Equal(WorkflowResultCode.QuestionsRequired, result.Code);
+        Assert.Equal(
+            2,
+            result.Plan.Questions.Count(static question => question.Code == "MAP_REMOVED"));
+    }
+
+    [Fact]
     public async Task Remove_deletes_only_the_exact_version()
     {
         using var temporary = new TemporaryDirectory();
@@ -2040,6 +2168,99 @@ public sealed class LocalWorkflowEngineTests
         };
     }
 
+    private static PackageManifests CreateContinuityPackage()
+    {
+        PackageManifests package = CreatePackage("1.7.3", "A");
+        package.Version.PackageIdentifier = new("vcmi.vcmi");
+        package.Installer.PackageIdentifier = new("vcmi.vcmi");
+        package.DefaultLocale.PackageIdentifier = new("vcmi.vcmi");
+        package.Installer.Installers =
+        [
+            ContinuityInstaller("VCMI-Windows-x64.exe", Architecture.X64, 'A'),
+            ContinuityInstaller("VCMI-Windows-x86.exe", Architecture.X86, 'B'),
+            ContinuityInstaller("VCMI-Windows-arm64.exe", Architecture.Arm64, 'C'),
+        ];
+        return package;
+    }
+
+    private static Installer ContinuityInstaller(
+        string assetName,
+        Architecture architecture,
+        char hash)
+        => new()
+        {
+            Architecture = architecture,
+            InstallerType = InstallerType.Exe,
+            InstallerUrl =
+                $"https://github.com/vcmi/vcmi/releases/download/1.7.3/{assetName}",
+            InstallerSha256 = new Sha256Hash(new string(hash, 64)),
+        };
+
+    private static DiscoveredAsset ContinuityAsset(
+        string assetName,
+        Architecture architecture,
+        bool withEvidence)
+    {
+        Uri url = new(
+            $"https://github.com/vcmi/vcmi/releases/download/1.7.4/{assetName}");
+        var asset = new DiscoveredAsset
+        {
+            ReleaseId = 174,
+            ReleaseTag = "1.7.4",
+            ReleaseName = "1.7.4",
+            ReleaseUri = new("https://github.com/vcmi/vcmi/releases/tag/1.7.4"),
+            IsPrerelease = false,
+            ReleasePublishedAt = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero),
+            AssetId = assetName.GetHashCode(StringComparison.Ordinal),
+            AssetName = assetName,
+            DownloadUri = url,
+            DeclaredContentType = "application/octet-stream",
+            DeclaredSize = withEvidence ? 9 : 0,
+            AssetCreatedAt = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero),
+        };
+        return withEvidence ? AddContinuityEvidence(asset, architecture) : asset;
+    }
+
+    private static DiscoveredAsset AddContinuityEvidence(
+        DiscoveredAsset asset,
+        Architecture architecture)
+    {
+        char hash = architecture switch
+        {
+            Architecture.X64 => 'D',
+            Architecture.X86 => 'E',
+            Architecture.Arm64 => 'F',
+            _ => '0',
+        };
+        var identity = new DownloadContentIdentity(new Sha256Hash(new string(hash, 64)), 9);
+        var content = new AssetContentEvidence(
+            identity,
+            asset.DownloadUri.AbsoluteUri,
+            asset.DownloadUri.AbsoluteUri,
+            "application/octet-stream",
+            new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero));
+        return asset with
+        {
+            Content = content,
+            Analysis = new AssetAnalysisEvidence
+            {
+                Format = DetectedInstallerFormat.GenericInstallerExe,
+                AnalyzedContentIdentity = identity,
+                AnalyzedUrl = asset.DownloadUri.AbsoluteUri,
+                ProductVersion = "1.7.4",
+                IsProductVersionTrustworthy = true,
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = architecture,
+                        InstallerType = InstallerType.Exe,
+                    },
+                ],
+            },
+        };
+    }
+
     private static PackageSnapshot Snapshot(PackageManifests package)
         => new()
         {
@@ -2406,11 +2627,11 @@ public sealed class LocalWorkflowEngineTests
     {
         public int MetadataCalls { get; private set; }
 
-        public Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
+        public Task<WorkflowReleaseAssets> DiscoverAsync(
             PackageIdentifier packageIdentifier,
             ReleaseRequest request,
             CancellationToken cancellationToken)
-            => Task.FromResult(ImmutableArray<DiscoveredAsset>.Empty);
+            => Task.FromResult(WorkflowReleaseAssets.Empty);
 
         public Task<WorkflowReleaseMetadata> DiscoverMetadataAsync(
             PackageIdentifier packageIdentifier,
@@ -2496,6 +2717,88 @@ public sealed class LocalWorkflowEngineTests
                 Download = download,
                 Analysis = analysis,
             };
+        }
+    }
+
+    private sealed class RecordingContinuityArtifactProcessor : IWorkflowArtifactProcessor
+    {
+        public List<string> AcquiredUrls { get; } = [];
+
+        public Task<ArtifactSnapshot> AcquireAsync(
+            DiscoveredAsset asset,
+            string artifactDirectory,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Architecture architecture = ArchitectureTokenClassifier.Classify(asset.AssetName).Architecture
+                ?? throw new InvalidOperationException("Continuity fixture requires an architecture token.");
+            DiscoveredAsset enriched = AddContinuityEvidence(asset, architecture);
+            AcquiredUrls.Add(asset.DownloadUri.AbsoluteUri);
+            Directory.CreateDirectory(artifactDirectory);
+            string path = Path.Combine(artifactDirectory, asset.AssetName);
+            File.WriteAllBytes(path, "installer"u8.ToArray());
+            var download = new DownloadResult
+            {
+                FilePath = path,
+                FileName = asset.AssetName,
+                Sha256 = enriched.Content!.Identity.Sha256,
+                SizeInBytes = enriched.Content.Identity.SizeInBytes,
+                RetrievedAt = enriched.Content.RetrievedAt,
+                InitialUrl = asset.DownloadUri.AbsoluteUri,
+                FinalUrl = asset.DownloadUri.AbsoluteUri,
+            };
+            return Task.FromResult(new ArtifactSnapshot
+            {
+                Asset = enriched,
+                Download = download,
+                Analysis = new InstallerAnalysis
+                {
+                    Format = DetectedInstallerFormat.GenericInstallerExe,
+                    ProductVersion = "1.7.4",
+                    Installers =
+                    [
+                        new Installer
+                            {
+                                Architecture = architecture,
+                                InstallerType = InstallerType.Exe,
+                            },
+                        ],
+                },
+            });
+        }
+    }
+
+    private sealed class VerifyingArtifactPreflight : IWorkflowVerifiedPreflight
+    {
+        public bool FilesPresentAtVerifiedBoundary { get; private set; }
+
+        public Task<ValidationReport> ValidateAsync(
+            WorkflowPreflightRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new ValidationReport());
+        }
+
+        public async Task<ValidationReport> ExecuteAsync(
+            WorkflowPreflightRequest request,
+            Func<CancellationToken, Task> boundary,
+            CancellationToken cancellationToken)
+        {
+            await boundary(cancellationToken);
+            return new ValidationReport();
+        }
+
+        public async Task<ValidationReport> ExecuteVerifiedAsync(
+            WorkflowPreflightRequest request,
+            Func<ValidationReport, CancellationToken, Task> boundary,
+            CancellationToken cancellationToken)
+        {
+            FilesPresentAtVerifiedBoundary = request.InstallerArtifacts.All(
+                static artifact => File.Exists(artifact.Download.FilePath));
+            var validation = new ValidationReport();
+            await boundary(validation, cancellationToken);
+            return validation;
         }
     }
 

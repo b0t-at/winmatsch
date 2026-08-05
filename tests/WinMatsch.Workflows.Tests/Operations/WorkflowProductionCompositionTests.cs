@@ -29,12 +29,192 @@ public sealed class WorkflowProductionCompositionTests
         var source = new DirectWorkflowReleaseSource();
         var url = new Uri("https://example.test/setup.exe");
 
-        ImmutableArray<DiscoveredAsset> assets = await source.DiscoverAsync(
+        WorkflowReleaseAssets assets = await source.DiscoverAsync(
             new PackageIdentifier("Example.Composed"),
             new ReleaseRequest(null, [url, url], []),
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(url, Assert.Single(assets).DownloadUri);
+        Assert.Equal(url, Assert.Single(assets.Selected).DownloadUri);
+        Assert.Empty(assets.ContinuityCandidates);
+    }
+
+    [Fact]
+    public async Task GitHub_release_source_reuses_target_release_for_continuity_candidates()
+    {
+        var client = new FakeGitHubClient
+        {
+            Releases =
+            [
+                Release(
+                    174,
+                    "1.7.4",
+                    "VCMI-Windows-x64.exe",
+                    "VCMI-Windows-x86.exe",
+                    "VCMI-Windows-arm64.exe"),
+                Release(173, "1.7.3", "VCMI-Windows-x86.exe"),
+            ],
+        };
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"));
+        Uri selected = AssetUrl("1.7.4", "VCMI-Windows-x64.exe");
+
+        WorkflowReleaseAssets result = await source.DiscoverAsync(
+            new PackageIdentifier("vcmi.vcmi"),
+            new ReleaseRequest(null, [selected], []),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(selected, Assert.Single(result.Selected).DownloadUri);
+        Assert.Equal(2, result.ContinuityCandidates.Length);
+        Assert.All(
+            result.ContinuityCandidates,
+            static asset => Assert.Equal(174, asset.ReleaseId));
+        Assert.Equal(1, client.GetReleasesCalls);
+    }
+
+    [Fact]
+    public async Task Optional_GitHub_release_discovery_falls_back_to_direct_asset()
+    {
+        var client = new FakeGitHubClient
+        {
+            OnGetReleases = static (_, _) => throw new HttpRequestException("offline"),
+        };
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"),
+            allowUnavailable: true);
+        Uri selected = AssetUrl("1.7.4", "VCMI-Windows-x64.exe");
+
+        WorkflowReleaseAssets result = await source.DiscoverAsync(
+            new PackageIdentifier("vcmi.vcmi"),
+            new ReleaseRequest(null, [selected], []),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(selected, Assert.Single(result.Selected).DownloadUri);
+        Assert.Empty(result.ContinuityCandidates);
+        Assert.Equal(1, client.GetReleasesCalls);
+    }
+
+    [Fact]
+    public async Task Optional_GitHub_release_discovery_propagates_caller_cancellation()
+    {
+        var client = new FakeGitHubClient();
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"),
+            allowUnavailable: true);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => source.DiscoverAsync(
+            new PackageIdentifier("vcmi.vcmi"),
+            new ReleaseRequest(null, [AssetUrl("1.7.4", "VCMI-Windows-x64.exe")], []),
+            cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Invalid_optional_GitHub_release_data_preserves_map_removed_questions()
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+        });
+        var client = new FakeGitHubClient
+        {
+            OnGetReleases = static (_, _) => throw new InvalidDataException("response exceeds limit"),
+        };
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"),
+            allowUnavailable: true);
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+            downloader,
+            source);
+        string output = CreateDirectory();
+        Uri selected = AssetUrl("2.0.0", "VCMI-Windows-x64.exe");
+        try
+        {
+            WritePrevious(output, releaseAssetSiblings: true);
+
+            WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PreviousVersion = new PackageVersion("1.0.0"),
+                PackageVersion = "2.0.0",
+                Release = new(null, [selected], []),
+                NetworkValidationMode = NetworkValidationMode.Skip,
+            });
+
+            Assert.Equal(WorkflowResultCode.QuestionsRequired, result.Code);
+            Assert.Single(
+                result.Plan.Questions,
+                static question => question.Code == "MAP_REMOVED");
+            Assert.Equal(1, client.GetReleasesCalls);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Unresolved_caller_release_asset_disables_continuity_candidates()
+    {
+        var client = new FakeGitHubClient
+        {
+            Releases =
+            [
+                Release(
+                    174,
+                    "1.7.4",
+                    "VCMI-Windows-x64.exe",
+                    "VCMI-Windows-x86.exe"),
+            ],
+        };
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"));
+        Uri selected = AssetUrl("1.7.4", "VCMI-Windows-x64.exe");
+        var unresolved = new Uri(
+            "https://github.com/vcmi/vcmi/releases/latest/download/VCMI-Windows-arm64.exe");
+
+        WorkflowReleaseAssets result = await source.DiscoverAsync(
+            new PackageIdentifier("vcmi.vcmi"),
+            new ReleaseRequest(null, [selected, unresolved], []),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, result.Selected.Length);
+        Assert.Empty(result.ContinuityCandidates);
+    }
+
+    [Fact]
+    public async Task Architecture_named_zip_siblings_are_continuity_candidates()
+    {
+        var client = new FakeGitHubClient
+        {
+            Releases =
+            [
+                Release(200, "2.0.0", "app-x64.zip", "app-x86.zip"),
+            ],
+        };
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"));
+        Uri selected = AssetUrl("2.0.0", "app-x64.zip");
+
+        WorkflowReleaseAssets result = await source.DiscoverAsync(
+            new PackageIdentifier("Example.App"),
+            new ReleaseRequest(null, [selected], []),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(200, Assert.Single(result.Selected).ReleaseId);
+        Assert.Equal(
+            "app-x86.zip",
+            Assert.Single(result.ContinuityCandidates).AssetName);
     }
 
     [Fact]
@@ -280,6 +460,60 @@ public sealed class WorkflowProductionCompositionTests
             Assert.Equal(new RepositoryCoordinates("vendor", "app"), provenance.Repository);
             Assert.Equal(42, provenance.ReleaseId);
             Assert.Equal(assetUpdated, provenance.UpdatedAt);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Production_local_engine_carries_trusted_GHES_release_provenance()
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+        });
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+            downloader,
+            trustedGitHubHost: "ghe.example.test");
+        string output = CreateDirectory();
+        try
+        {
+            WorkflowOperationResult result = await engine.NewAsync(new NewOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PackageVersion = "1.0.0",
+                Assets =
+                [
+                    new DiscoveredAsset
+                    {
+                        ReleaseId = 42,
+                        ReleaseTag = "v1.0.0",
+                        ReleaseName = "1.0.0",
+                        ReleaseUri = new Uri(
+                            "https://ghe.example.test/vendor/app/releases/tag/v1.0.0"),
+                        IsPrerelease = false,
+                        ReleasePublishedAt = DateTimeOffset.UnixEpoch,
+                        AssetId = 7,
+                        AssetName = "setup.exe",
+                        DownloadUri = new Uri("https://example.test/setup.exe"),
+                        DeclaredContentType = "application/octet-stream",
+                        DeclaredSize = executable.Length,
+                        AssetCreatedAt = DateTimeOffset.UnixEpoch,
+                    },
+                ],
+                Locale = Locale(),
+            });
+
+            WorkflowReleaseProvenance provenance = Assert.IsType<WorkflowReleaseProvenance>(
+                result.Plan.Release);
+            Assert.Equal(new RepositoryCoordinates("vendor", "app"), provenance.Repository);
+            Assert.Equal(42, provenance.ReleaseId);
         }
         finally
         {
@@ -1706,7 +1940,8 @@ public sealed class WorkflowProductionCompositionTests
     private static void WritePrevious(
         string output,
         bool scopedTwins = false,
-        bool staleDirectNestedState = false)
+        bool staleDirectNestedState = false,
+        bool releaseAssetSiblings = false)
     {
         var identifier = new PackageIdentifier("Example.Composed");
         var version = new PackageVersion("1.0.0");
@@ -1758,6 +1993,18 @@ public sealed class WorkflowProductionCompositionTests
                 InstallerUrl = first.InstallerUrl,
                 InstallerSha256 = first.InstallerSha256,
                 InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" },
+            });
+        }
+
+        if (releaseAssetSiblings)
+        {
+            Installer first = Assert.Single(manifests.Installer.Installers!);
+            first.InstallerUrl = AssetUrl("1.0.0", "VCMI-Windows-x64.exe").AbsoluteUri;
+            manifests.Installer.Installers.Add(new Installer
+            {
+                Architecture = Architecture.X86,
+                InstallerUrl = AssetUrl("1.0.0", "VCMI-Windows-x86.exe").AbsoluteUri,
+                InstallerSha256 = first.InstallerSha256,
             });
         }
 
@@ -1972,7 +2219,29 @@ public sealed class WorkflowProductionCompositionTests
             static item => item.RepositoryPath.EndsWith(".installer.yaml", StringComparison.Ordinal));
         return ManifestYamlReader.ReadInstaller(Encoding.UTF8.GetString(document.Content.AsSpan()));
     }
+    private static GitHubRelease Release(long id, string version, params string[] assetNames)
+        => new(
+            id,
+            version,
+            version,
+            Body: null,
+            new Uri($"https://github.com/vcmi/vcmi/releases/tag/{version}"),
+            IsDraft: false,
+            IsPrerelease: false,
+            DateTimeOffset.UnixEpoch,
+            [
+                .. assetNames.Select((name, index) => new ReleaseAsset(
+                    (id * 10) + index,
+                    name,
+                    AssetUrl(version, name),
+                    "application/octet-stream",
+                    1,
+                    0,
+                    DateTimeOffset.UnixEpoch)),
+            ]);
 
+    private static Uri AssetUrl(string version, string assetName)
+        => new($"https://github.com/vcmi/vcmi/releases/download/{version}/{assetName}");
     private static void RewriteManifestVersion(string output, string version)
     {
         foreach (string path in Directory.EnumerateFiles(output, "*.yaml", SearchOption.AllDirectories))

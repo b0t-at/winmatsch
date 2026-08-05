@@ -22,7 +22,8 @@ namespace WinMatsch.Workflows.Operations;
 public sealed class GitHubWorkflowReleaseSource(
     IGitHubRepositoryClient client,
     RepositoryCoordinates repository,
-    IRepositoryReleaseMetadataSource? repositoryMetadataSource = null) :
+    IRepositoryReleaseMetadataSource? repositoryMetadataSource = null,
+    bool allowUnavailable = false) :
     IWorkflowReleaseSource,
     IWorkflowReleaseMetadataSource
 {
@@ -31,30 +32,44 @@ public sealed class GitHubWorkflowReleaseSource(
     private readonly IGitHubRepositoryClient _client = client ?? throw new ArgumentNullException(nameof(client));
     private RepositoryReleaseMetadata? _cachedMetadata;
 
-    public async Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
+    public async Task<WorkflowReleaseAssets> DiscoverAsync(
         PackageIdentifier packageIdentifier,
         ReleaseRequest request,
         CancellationToken cancellationToken)
     {
         _ = packageIdentifier ?? throw new ArgumentNullException(nameof(packageIdentifier));
-        IReadOnlyList<GitHubRelease> releases = await _client.GetReleasesAsync(repository, cancellationToken)
-            .ConfigureAwait(false);
+        IReadOnlyList<GitHubRelease> releases;
+        try
+        {
+            releases = await _client.GetReleasesAsync(repository, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception) when (
+            allowUnavailable
+            && !cancellationToken.IsCancellationRequested)
+        {
+            return new(DirectWorkflowReleaseSource.CreateAssets(request), []);
+        }
+
         IEnumerable<GitHubRelease> selected = string.IsNullOrWhiteSpace(request.Release)
             ? releases
             : releases.Where(release =>
                 string.Equals(release.TagName, request.Release, StringComparison.Ordinal)
                 || string.Equals(release.Name, request.Release, StringComparison.Ordinal));
-        ImmutableArray<DiscoveredAsset> discovered = ReleaseAssetDiscovery.Discover(selected);
+        GitHubRelease[] selectedReleases = [.. selected];
+        ImmutableArray<DiscoveredAsset> discovered = ReleaseAssetDiscovery.Discover(selectedReleases);
         if (request.InstallerUrls.IsEmpty)
         {
-            return discovered;
+            return new(discovered, []);
         }
 
+        ImmutableArray<DiscoveredAsset> releaseAssets =
+            ReleaseAssetDiscovery.DiscoverAll(selectedReleases);
         HashSet<string> urls = request.InstallerUrls
             .Select(static uri => uri.AbsoluteUri)
             .ToHashSet(StringComparer.Ordinal);
         var direct = request.InstallerUrls
-            .Where(uri => !discovered.Any(asset =>
+            .Where(uri => !releaseAssets.Any(asset =>
                 string.Equals(asset.DownloadUri.AbsoluteUri, uri.AbsoluteUri, StringComparison.Ordinal)))
             .OrderBy(static uri => uri.AbsoluteUri, StringComparer.Ordinal)
             .Select((uri, index) => new DiscoveredAsset
@@ -71,13 +86,45 @@ public sealed class GitHubWorkflowReleaseSource(
                 DeclaredSize = 0,
                 AssetCreatedAt = DateTimeOffset.UnixEpoch,
             });
-        return
+        ImmutableArray<DiscoveredAsset> selectedAssets =
         [
-            .. discovered
+            .. releaseAssets
                 .Where(asset => urls.Contains(asset.DownloadUri.AbsoluteUri))
                 .Concat(direct)
                 .OrderBy(static asset => asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal),
         ];
+        Uri[] callerReleaseAssetUrls =
+        [
+            .. request.InstallerUrls.Where(static uri =>
+                GitHubReleaseAssetIdentity.TryParse(uri, out _)),
+        ];
+        long[] selectedReleaseIds = releases
+            .Where(release => callerReleaseAssetUrls.Any(url => release.Assets.Any(
+                asset => string.Equals(
+                    asset.DownloadUri.AbsoluteUri,
+                    url.AbsoluteUri,
+                    StringComparison.Ordinal))))
+            .Select(static release => release.Id)
+            .Distinct()
+            .ToArray();
+        bool everyCallerReleaseAssetResolved = callerReleaseAssetUrls.All(url =>
+            releases.Any(release => release.Assets.Any(asset => string.Equals(
+                asset.DownloadUri.AbsoluteUri,
+                url.AbsoluteUri,
+                StringComparison.Ordinal))));
+        ImmutableArray<DiscoveredAsset> continuityCandidates =
+            callerReleaseAssetUrls.Length > 0
+            && everyCallerReleaseAssetResolved
+            && selectedReleaseIds.Length == 1
+            ?
+            [
+                .. releaseAssets
+                    .Where(asset => asset.ReleaseId == selectedReleaseIds[0])
+                    .Where(asset => !urls.Contains(asset.DownloadUri.AbsoluteUri))
+                    .OrderBy(static asset => asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal),
+            ]
+            : [];
+        return new(selectedAssets, continuityCandidates);
     }
 
     public async Task<WorkflowReleaseMetadata> DiscoverMetadataAsync(
@@ -245,15 +292,18 @@ public sealed class GitHubWorkflowReleaseSource(
 /// <summary>Creates release assets from explicit installer URLs without network discovery.</summary>
 public sealed class DirectWorkflowReleaseSource : IWorkflowReleaseSource
 {
-    public Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
+    public Task<WorkflowReleaseAssets> DiscoverAsync(
         PackageIdentifier packageIdentifier,
         ReleaseRequest request,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(packageIdentifier);
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(
-            request.InstallerUrls
+        return Task.FromResult(new WorkflowReleaseAssets(CreateAssets(request), []));
+    }
+
+    internal static ImmutableArray<DiscoveredAsset> CreateAssets(ReleaseRequest request)
+        => request.InstallerUrls
                 .DistinctBy(static uri => uri.AbsoluteUri, StringComparer.Ordinal)
                 .OrderBy(static uri => uri.AbsoluteUri, StringComparer.Ordinal)
                 .Select((uri, index) => new DiscoveredAsset
@@ -270,8 +320,7 @@ public sealed class DirectWorkflowReleaseSource : IWorkflowReleaseSource
                     DeclaredSize = 0,
                     AssetCreatedAt = DateTimeOffset.UnixEpoch,
                 })
-                .ToImmutableArray());
-    }
+                .ToImmutableArray();
 }
 
 public sealed class InstallerWorkflowArtifactProcessor(

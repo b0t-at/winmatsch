@@ -13,7 +13,9 @@ using WinMatsch.Workflows.Configuration;
 using WinMatsch.Workflows.Diagnostics;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.GitHub;
+using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.Operations;
+using WinMatsch.Workflows.Versioning;
 
 namespace WinMatsch.Cli.Commands.Mutations;
 
@@ -92,7 +94,8 @@ internal sealed class ProductionMutationWorkflow(
                 releases,
                 clock: null,
                 overridePackStoreOptions: OverrideStoreOptions(configuration),
-                fallbackManifestSource: CreateRepositoryManifestSource(request, gitHub));
+                fallbackManifestSource: CreateRepositoryManifestSource(request, gitHub),
+                trustedGitHubHost: TrustedGitHubWebHost(gitHubOptions));
             if (!usePrepared)
             {
                 if (request is UpdateOperationRequest update)
@@ -101,10 +104,17 @@ internal sealed class ProductionMutationWorkflow(
                         .ConfigureAwait(false);
                 }
 
+                ImmutableArray<PreviousInstallerEntry> previousInstallers =
+                    request is UpdateOperationRequest resolvedUpdate
+                        ? await engine.LoadPreviousInstallersAsync(
+                            resolvedUpdate,
+                            cancellationToken).ConfigureAwait(false)
+                        : [];
                 (request, _artifactDirectory) = await EnrichAssetsAsync(
                     request,
                     releases,
                     downloader,
+                    previousInstallers,
                     cancellationToken).ConfigureAwait(false);
                 request = await PrefetchSubmitAsync(
                     request,
@@ -180,7 +190,8 @@ internal sealed class ProductionMutationWorkflow(
             overridePackStoreOptions: OverrideStoreOptions(configuration),
             fallbackManifestSource: CreateRepositoryManifestSource(
                 prepared,
-                manifestGitHub ?? releaseGitHub));
+                manifestGitHub ?? releaseGitHub),
+            trustedGitHubHost: TrustedGitHubWebHost(gitHubOptions));
         WorkflowOperationResult result = await engine.ApplyVerifiedPlanAsync(
             prepared,
             expectedPlanFingerprint,
@@ -223,7 +234,7 @@ internal sealed class ProductionMutationWorkflow(
         }
     }
 
-    private static IWorkflowReleaseSource? CreateReleaseSource(
+    internal static IWorkflowReleaseSource? CreateReleaseSource(
         WorkflowOperationRequest request,
         IGitHubRepositoryClient? gitHub,
         GitHubClientOptions gitHubOptions)
@@ -241,7 +252,7 @@ internal sealed class ProductionMutationWorkflow(
 
         if (!release.ReleaseUrls.IsEmpty)
         {
-            RepositoryCoordinates repository = ParseGitHubRepository(
+            RepositoryCoordinates explicitRepository = ParseGitHubRepository(
                 release.ReleaseUrls[0],
                 gitHubOptions);
             IGitHubRepositoryClient requiredGitHub = gitHub
@@ -249,8 +260,21 @@ internal sealed class ProductionMutationWorkflow(
                     "GitHub release discovery requires an invocation-scoped GitHub client.");
             return new GitHubWorkflowReleaseSource(
                 requiredGitHub,
-                repository,
+                explicitRepository,
                 new GitHubRepositoryReleaseMetadataSource(requiredGitHub));
+        }
+
+        if (request is UpdateOperationRequest
+            && gitHub is not null
+            && TryGetReleaseAssetRepository(
+                release.InstallerUrls,
+                gitHubOptions,
+                out RepositoryCoordinates inferredRepository))
+        {
+            return new GitHubWorkflowReleaseSource(
+                gitHub,
+                inferredRepository,
+                allowUnavailable: true);
         }
 
         return release.InstallerUrls.IsEmpty ? null : new DirectWorkflowReleaseSource();
@@ -354,6 +378,46 @@ internal sealed class ProductionMutationWorkflow(
 
         return new(segments[0], segments[1]);
     }
+
+    private static bool TryGetReleaseAssetRepository(
+        ImmutableArray<Uri> installerUrls,
+        GitHubClientOptions gitHubOptions,
+        out RepositoryCoordinates repository)
+    {
+        string webAuthority = gitHubOptions.ApiBaseUri.Host.Equals(
+            "api.github.com",
+            StringComparison.OrdinalIgnoreCase)
+            ? "github.com"
+            : gitHubOptions.ApiBaseUri.Authority;
+        GitHubReleaseAssetIdentity[] identities =
+        [
+            .. installerUrls
+                .Select(static uri =>
+                    GitHubReleaseAssetIdentity.TryParse(uri, out GitHubReleaseAssetIdentity identity)
+                        ? identity
+                        : null)
+                .OfType<GitHubReleaseAssetIdentity>()
+                .Where(identity => string.Equals(
+                    identity.Authority,
+                    webAuthority,
+                    StringComparison.OrdinalIgnoreCase)),
+        ];
+        RepositoryCoordinates[] repositories =
+        [
+            .. identities
+                .Select(static identity => identity.Repository)
+                .DistinctBy(
+                    static item => $"{item.Owner}/{item.Name}",
+                    StringComparer.OrdinalIgnoreCase),
+        ];
+        repository = repositories.Length == 1 ? repositories[0] : null!;
+        return repositories.Length == 1;
+    }
+
+    private static string TrustedGitHubWebHost(GitHubClientOptions options)
+        => options.ApiBaseUri.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase)
+            ? "github.com"
+            : options.ApiBaseUri.Host;
 
     private DownloaderOptions DownloaderOptions(
         WinMatschConfiguration configuration,
@@ -543,11 +607,12 @@ internal sealed class ProductionMutationWorkflow(
         _artifactDirectory = null;
     }
 
-    private async Task<(WorkflowOperationRequest Request, string? ArtifactDirectory)>
+    internal async Task<(WorkflowOperationRequest Request, string? ArtifactDirectory)>
         EnrichAssetsAsync(
         WorkflowOperationRequest request,
         IWorkflowReleaseSource? releases,
         InstallerDownloader downloader,
+        ImmutableArray<PreviousInstallerEntry> previousInstallers,
         CancellationToken cancellationToken)
     {
         PackageIdentifier? identifier = request switch
@@ -573,10 +638,16 @@ internal sealed class ProductionMutationWorkflow(
             UpdateOperationRequest value => value.Assets,
             _ => [],
         };
+        ImmutableArray<DiscoveredAsset> continuityCandidates = request is UpdateOperationRequest update
+            ? update.ReleaseAssetCandidates
+            : [];
         if (assets.IsEmpty && releases is not null)
         {
-            assets = await releases.DiscoverAsync(identifier, release, cancellationToken)
+            WorkflowReleaseAssets discovered = await releases
+                .DiscoverAsync(identifier, release, cancellationToken)
                 .ConfigureAwait(false);
+            assets = discovered.Selected;
+            continuityCandidates = discovered.ContinuityCandidates;
         }
 
         DiscoveredAsset[] ordered =
@@ -588,9 +659,22 @@ internal sealed class ProductionMutationWorkflow(
         bool forceFresh = request.ExecutionMode == WorkflowExecutionMode.Apply;
         bool requiresAcquisition = ordered.Any(asset =>
             forceFresh || asset.Content is null || asset.Analysis is null);
-        if (!requiresAcquisition)
+        bool mayComplete = request is UpdateOperationRequest
+            && !previousInstallers.IsEmpty;
+        bool requiresPreparedDirectory = requiresAcquisition
+            || mayComplete;
+        if (!requiresPreparedDirectory)
         {
-            return (request, null);
+            return request switch
+            {
+                NewOperationRequest value => (value with { Assets = assets }, null),
+                UpdateOperationRequest value => (value with
+                {
+                    Assets = assets,
+                    ReleaseAssetCandidates = continuityCandidates,
+                }, null),
+                _ => (request, null),
+            };
         }
 
         _artifactDirectory = Directory.CreateTempSubdirectory(
@@ -605,31 +689,99 @@ internal sealed class ProductionMutationWorkflow(
 
         var processor = new InstallerWorkflowArtifactProcessor(downloader);
         using var gate = new SemaphoreSlim(configuration.ConcurrentDownloads);
-        ArtifactSnapshot?[] snapshots = new ArtifactSnapshot?[ordered.Length];
-        await Task.WhenAll(ordered.Select(async (asset, index) =>
+        async Task<(ImmutableArray<DiscoveredAsset> Assets, ImmutableArray<ArtifactSnapshot> Snapshots)>
+            AcquireAsync(DiscoveredAsset[] requested)
         {
-            if (!forceFresh && asset.Content is not null && asset.Analysis is not null)
+            ArtifactSnapshot?[] snapshots = new ArtifactSnapshot?[requested.Length];
+            await Task.WhenAll(requested.Select(async (asset, index) =>
             {
-                return;
+                if (!forceFresh && asset.Content is not null && asset.Analysis is not null)
+                {
+                    return;
+                }
+
+                await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    snapshots[index] = await processor.AcquireAsync(
+                        asset,
+                        artifactDirectory,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            })).ConfigureAwait(false);
+            return (
+                [.. requested.Select((asset, index) => snapshots[index]?.Asset ?? asset)],
+                [.. snapshots.OfType<ArtifactSnapshot>()]);
+        }
+
+        (ImmutableArray<DiscoveredAsset> selectedAssets, ImmutableArray<ArtifactSnapshot> selectedSnapshots) =
+            await AcquireAsync(ordered).ConfigureAwait(false);
+        ImmutableArray<AssetMappingCompletion> completions =
+            request is UpdateOperationRequest preparedUpdate
+                ? preparedUpdate.ReleaseAssetCompletions
+                : [];
+        ImmutableArray<AssetMappingBinding> bindings =
+            request is UpdateOperationRequest preparedBindings
+                ? preparedBindings.ReleaseAssetBindings
+                : [];
+        ImmutableArray<DiscoveredAsset> completedAssets = [];
+        ImmutableArray<ArtifactSnapshot> completedSnapshots = [];
+        if (request is UpdateOperationRequest updateRequest && mayComplete)
+        {
+            PackageVersionResolution version = PackageVersionResolver.Resolve(new()
+            {
+                PackageIdentifier = updateRequest.PackageIdentifier,
+                ExplicitPackageVersion = updateRequest.PackageVersion,
+                OverridePacks = updateRequest.OverridePacks,
+                Assets = selectedAssets,
+            });
+            if (version.Version is { } targetVersion)
+            {
+                AssetMappingContinuityPlan continuity =
+                    AssetMappingPlanner.CompleteReleaseAssetContinuity(
+                    selectedAssets,
+                    continuityCandidates,
+                    previousInstallers,
+                    targetVersion);
+                ImmutableArray<AssetMappingCompletion> discoveredCompletions =
+                    continuity.Completions;
+                completions =
+                [
+                    .. completions
+                        .Concat(discoveredCompletions)
+                        .DistinctBy(static completion => completion.PreviousPosition)
+                        .OrderBy(static completion => completion.PreviousPosition),
+                ];
+                bindings =
+                [
+                    .. bindings
+                        .Concat(continuity.Bindings)
+                        .DistinctBy(static binding => binding.PreviousPosition)
+                        .OrderBy(static binding => binding.PreviousPosition),
+                ];
+                DiscoveredAsset[] orderedCompletions =
+                [
+                    .. discoveredCompletions
+                        .Select(static completion => completion.Asset)
+                        .OrderBy(static asset => asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal),
+                ];
+                (completedAssets, completedSnapshots) = await AcquireAsync(orderedCompletions)
+                    .ConfigureAwait(false);
             }
 
-            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                snapshots[index] = await processor.AcquireAsync(
-                    asset,
-                    artifactDirectory,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                gate.Release();
-            }
-        })).ConfigureAwait(false);
+            continuityCandidates = [];
+        }
 
         ImmutableArray<DiscoveredAsset> enriched =
         [
-            .. ordered.Select((asset, index) => snapshots[index]?.Asset ?? asset),
+            .. selectedAssets
+                .Concat(completedAssets)
+                .DistinctBy(static asset => asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal)
+                .OrderBy(static asset => asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal),
         ];
         ImmutableArray<InstallerArtifact> existing = request switch
         {
@@ -640,8 +792,18 @@ internal sealed class ProductionMutationWorkflow(
         ImmutableArray<InstallerArtifact> installerArtifacts =
         [
             .. existing,
-            .. snapshots.OfType<ArtifactSnapshot>().Select(snapshot =>
+            .. selectedSnapshots.Concat(completedSnapshots).Select(snapshot =>
                 new InstallerArtifact(snapshot.Asset.DownloadUri.AbsoluteUri, snapshot.Download)),
+        ];
+        ImmutableArray<AssetMappingCompletion> enrichedCompletions =
+        [
+            .. completions.Select(completion => completion with
+            {
+                Asset = enriched.Single(asset => string.Equals(
+                    asset.DownloadUri.AbsoluteUri,
+                    completion.Asset.DownloadUri.AbsoluteUri,
+                    StringComparison.Ordinal)),
+            }),
         ];
         return request switch
         {
@@ -654,8 +816,12 @@ internal sealed class ProductionMutationWorkflow(
             UpdateOperationRequest value => (value with
             {
                 Assets = enriched,
+                ReleaseAssetCandidates = continuityCandidates,
+                ReleaseAssetCompletions = enrichedCompletions,
+                ReleaseAssetBindings = bindings,
                 InstallerArtifacts = installerArtifacts,
                 ArtifactDirectory = artifactDirectory,
+                UsePreparedArtifactDirectory = true,
             }, artifactDirectory),
             _ => (request, artifactDirectory),
         };

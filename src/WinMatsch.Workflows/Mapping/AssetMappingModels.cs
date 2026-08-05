@@ -77,6 +77,17 @@ public sealed record AssetMappingDecision(
     string Reason,
     EvidenceConfidence Confidence);
 
+public sealed record AssetMappingCompletion(
+    int PreviousPosition,
+    DiscoveredAsset Asset,
+    string Provenance);
+
+public sealed record AssetMappingBinding(int PreviousPosition, Uri AssetUrl);
+
+public sealed record AssetMappingContinuityPlan(
+    ImmutableArray<AssetMappingBinding> Bindings,
+    ImmutableArray<AssetMappingCompletion> Completions);
+
 public sealed record AssetMappingQuestion(
     string Code,
     string Prompt,
@@ -200,6 +211,8 @@ public sealed record AssetMappingRequest
     public required ImmutableArray<DiscoveredAsset> Assets { get; init; }
 
     public ImmutableArray<PreviousInstallerEntry> PreviousInstallers { get; init; } = [];
+
+    public ImmutableArray<AssetMappingBinding> AssetBindings { get; init; } = [];
 
     public OverridePackSet OverridePacks { get; init; } = OverridePackSet.Empty;
 

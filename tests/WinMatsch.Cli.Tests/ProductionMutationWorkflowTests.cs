@@ -1,12 +1,17 @@
 using System.Collections.Immutable;
+using System.Net;
 using WinMatsch.Cli.Hosting;
+using WinMatsch.Cli.Tests.Maintenance;
 using WinMatsch.Core;
+using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.GitHub.Auth;
 using WinMatsch.Validation;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.Configuration;
+using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.GitHub;
+using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.Operations;
 using Xunit;
 
@@ -14,6 +19,130 @@ namespace WinMatsch.Cli.Commands.Mutations;
 
 public sealed class ProductionMutationWorkflowTests
 {
+    [Fact]
+    public async Task Production_preparation_persists_completed_asset_evidence_without_redownload()
+    {
+        using var temporary = new TemporaryDirectory();
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Cli.Tests.dll"));
+        var handler = new StaticResponseHandler(executable);
+        using var downloader = new InstallerDownloader(handler);
+        using ProductionMutationWorkflow workflow = CreateWorkflow(temporary.Path);
+        DiscoveredAsset selected = ReleaseAsset("VCMI-Windows-x64.exe");
+        DiscoveredAsset x86 = ReleaseAsset("VCMI-Windows-x86.exe");
+        DiscoveredAsset arm64 = ReleaseAsset("VCMI-Windows-arm64.exe");
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            PreviousInstaller(0, "VCMI-Windows-x64.exe", Architecture.X64),
+            PreviousInstaller(1, "VCMI-Windows-x86.exe", Architecture.X86),
+            PreviousInstaller(2, "VCMI-Windows-arm64.exe", Architecture.Arm64),
+        ];
+        var request = new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            PackageIdentifier = new PackageIdentifier("vcmi.vcmi"),
+            PreviousVersion = new PackageVersion("1.7.3"),
+            PackageVersion = "1.7.4",
+            Release = new(null, [selected.DownloadUri], []),
+            NetworkValidationMode = NetworkValidationMode.Skip,
+        };
+        var releases = new StaticReleaseSource(new([selected], [x86, arm64]));
+
+        (WorkflowOperationRequest prepared, string? artifactDirectory) =
+            await workflow.EnrichAssetsAsync(
+                request,
+                releases,
+                downloader,
+                previous,
+                TestContext.Current.CancellationToken);
+
+        var update = Assert.IsType<UpdateOperationRequest>(prepared);
+        Assert.Equal(3, update.Assets.Length);
+        Assert.Empty(update.ReleaseAssetCandidates);
+        Assert.Equal(2, update.ReleaseAssetCompletions.Length);
+        Assert.Equal(2, update.ReleaseAssetBindings.Length);
+        Assert.Equal(3, update.InstallerArtifacts.Length);
+        Assert.All(update.Assets, static asset =>
+        {
+            Assert.NotNull(asset.Content);
+            Assert.NotNull(asset.Analysis);
+        });
+        Assert.NotNull(artifactDirectory);
+        Assert.All(
+            update.InstallerArtifacts,
+            static artifact => Assert.True(File.Exists(artifact.Download.FilePath)));
+        int requestsAfterPreparation = handler.Calls;
+
+        (WorkflowOperationRequest reused, _) = await workflow.EnrichAssetsAsync(
+            update,
+            releases,
+            downloader,
+            previous,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(requestsAfterPreparation, handler.Calls);
+        Assert.Equal(
+            update.ReleaseAssetCompletions,
+            Assert.IsType<UpdateOperationRequest>(reused).ReleaseAssetCompletions);
+        Assert.Equal(
+            update.ReleaseAssetBindings,
+            Assert.IsType<UpdateOperationRequest>(reused).ReleaseAssetBindings);
+    }
+
+    [Fact]
+    public void Update_GitHub_asset_url_enables_optional_release_discovery()
+    {
+        using var gitHub = new FakeMaintenanceGitHubClient();
+        var request = new UpdateOperationRequest
+        {
+            OutputDirectory = ".",
+            PackageIdentifier = new PackageIdentifier("vcmi.vcmi"),
+            PreviousVersion = new PackageVersion("1.7.3"),
+            PackageVersion = "1.7.4",
+            Release = new(
+                null,
+                [
+                    new Uri(
+                        "https://github.com/vcmi/vcmi/releases/download/1.7.4/VCMI-Windows-x64.exe"),
+                ],
+                []),
+        };
+
+        IWorkflowReleaseSource? source = ProductionMutationWorkflow.CreateReleaseSource(
+            request,
+            gitHub,
+            new GitHubClientOptions());
+
+        Assert.IsType<GitHubWorkflowReleaseSource>(source);
+    }
+
+    [Fact]
+    public void Cross_repository_GitHub_asset_urls_keep_direct_release_source()
+    {
+        using var gitHub = new FakeMaintenanceGitHubClient();
+        var request = new UpdateOperationRequest
+        {
+            OutputDirectory = ".",
+            PackageIdentifier = new PackageIdentifier("Example.App"),
+            PreviousVersion = new PackageVersion("1.0.0"),
+            PackageVersion = "2.0.0",
+            Release = new(
+                null,
+                [
+                    new Uri("https://github.com/one/app/releases/download/2.0.0/app-x64.exe"),
+                    new Uri("https://github.com/two/app/releases/download/2.0.0/app-x86.exe"),
+                ],
+                []),
+        };
+
+        IWorkflowReleaseSource? source = ProductionMutationWorkflow.CreateReleaseSource(
+            request,
+            gitHub,
+            new GitHubClientOptions());
+
+        Assert.IsType<DirectWorkflowReleaseSource>(source);
+    }
+
     [Fact]
     public async Task Verified_apply_uses_the_exact_native_plan_fingerprint()
     {
@@ -229,6 +358,68 @@ public sealed class ProductionMutationWorkflowTests
             new GitHubToken("test-token"),
             new GitHubClientOptions(),
             journals);
+
+    private static PreviousInstallerEntry PreviousInstaller(
+        int position,
+        string assetName,
+        Architecture architecture)
+        => new()
+        {
+            Position = position,
+            Url = new(
+                $"https://github.com/vcmi/vcmi/releases/download/1.7.3/{assetName}"),
+            Architecture = architecture,
+            InstallerType = InstallerType.Exe,
+            PackageVersion = new("1.7.3"),
+        };
+
+    private static DiscoveredAsset ReleaseAsset(string assetName)
+        => new()
+        {
+            ReleaseId = 174,
+            ReleaseTag = "1.7.4",
+            ReleaseName = "1.7.4",
+            ReleaseUri = new("https://github.com/vcmi/vcmi/releases/tag/1.7.4"),
+            IsPrerelease = false,
+            ReleasePublishedAt = DateTimeOffset.UnixEpoch,
+            AssetId = assetName.GetHashCode(StringComparison.Ordinal),
+            AssetName = assetName,
+            DownloadUri = new(
+                $"https://github.com/vcmi/vcmi/releases/download/1.7.4/{assetName}"),
+            DeclaredContentType = "application/octet-stream",
+            DeclaredSize = 0,
+            AssetCreatedAt = DateTimeOffset.UnixEpoch,
+        };
+
+    private sealed class StaticReleaseSource(WorkflowReleaseAssets assets)
+        : IWorkflowReleaseSource
+    {
+        public Task<WorkflowReleaseAssets> DiscoverAsync(
+            PackageIdentifier packageIdentifier,
+            ReleaseRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(assets);
+        }
+    }
+
+    private sealed class StaticResponseHandler(byte[] content) : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Calls++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(content),
+            });
+        }
+    }
 
     private static void WritePackage(string root)
     {

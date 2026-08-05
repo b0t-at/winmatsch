@@ -77,6 +77,47 @@ public sealed class PublicReadOnlyGitHubClientTests
     }
 
     [Fact]
+    public async Task Public_release_assets_are_available_without_a_token()
+    {
+        var handler = new RecordingHandler(
+            """
+            [{
+              "id": 174,
+              "tag_name": "1.7.4",
+              "name": "1.7.4",
+              "body": null,
+              "html_url": "https://github.com/vcmi/vcmi/releases/tag/1.7.4",
+              "draft": false,
+              "prerelease": false,
+              "published_at": "2026-08-01T00:00:00Z",
+              "updated_at": "2026-08-01T00:01:00Z",
+              "assets": [{
+                "id": 1,
+                "name": "VCMI-Windows-x64.exe",
+                "browser_download_url": "https://github.com/vcmi/vcmi/releases/download/1.7.4/VCMI-Windows-x64.exe",
+                "content_type": "application/octet-stream",
+                "size": 42,
+                "download_count": 7,
+                "created_at": "2026-08-01T00:00:00Z",
+                "updated_at": "2026-08-01T00:01:00Z"
+              }]
+            }]
+            """);
+        using var httpClient = new HttpClient(handler);
+        using var client = new PublicReadOnlyGitHubClient(
+            new GitHubClientOptions(),
+            token: null,
+            httpClient);
+
+        IReadOnlyList<GitHubRelease> releases = await client.GetReleasesAsync(
+            new RepositoryCoordinates("vcmi", "vcmi"));
+
+        ReleaseAsset asset = Assert.Single(Assert.Single(releases).Assets);
+        Assert.Equal("VCMI-Windows-x64.exe", asset.Name);
+        Assert.Null(handler.Authorization);
+    }
+
+    [Fact]
     public void Dispose_preserves_a_caller_owned_http_client()
     {
         var handler = new RecordingHandler(
