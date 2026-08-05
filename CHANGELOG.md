@@ -7,6 +7,8 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-08-05
+
 ### Fixed
 
 - Updates now preserve validated nested ZIP installer metadata and stop with a
@@ -20,12 +22,15 @@ minor versions may contain breaking changes).
   intentional same-URL scope layouts from one resolved asset, and let a
   qualified override absorb duplicate inferred candidates while preserving
   each previous entry's switches and metadata. Same-URL user/machine twins
-  also validate when standard installer switches differ only by scope markers.
+  also avoid false `VLD3002` conflicts when standard installer switches differ
+  only by scope markers.
 - URL version continuity checks now preserve prerelease and build suffixes,
   avoiding false mapping conflicts when release paths contain the exact target version.
 - ZIP analysis now supports bounded Deflate64 payload reads and reports encrypted
   or otherwise unsupported entries as the stable `ZIP004` domain diagnostic,
   including the archive, entry path, and compression method, instead of crashing.
+  ZIP64 archives whose end-of-central-directory fields all use sentinel values
+  are now parsed through the ZIP64 records instead of being rejected as corrupt.
 
 ## [0.8.12] - 2026-08-05
 
@@ -241,7 +246,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.12...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.13...main
+[0.8.13]: https://github.com/b0t-at/winmatsch/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/b0t-at/winmatsch/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/b0t-at/winmatsch/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/b0t-at/winmatsch/compare/v0.8.9...v0.8.10
