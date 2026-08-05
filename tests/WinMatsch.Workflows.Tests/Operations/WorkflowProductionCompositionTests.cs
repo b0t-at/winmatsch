@@ -11,6 +11,7 @@ using WinMatsch.Testing.Infrastructure;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.GitHub;
+using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.Operations;
 using WinMatsch.Workflows.Tests.GitHub;
 using Xunit;
@@ -121,6 +122,62 @@ public sealed class WorkflowProductionCompositionTests
         {
             Directory.Delete(output, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task Production_update_preserves_manifest_nested_state_for_single_architecture_zip()
+    {
+        WorkflowOperationResult result = await RunNestedUpdateAsync(
+            InstallerType.Zip,
+            [Architecture.X64],
+            "tool.exe");
+
+        AssertSucceeded(result);
+        AssertNestedInstallerMetadata(ReadInstaller(result), [Architecture.X64]);
+    }
+
+    [Fact]
+    public async Task Production_update_preserves_manifest_nested_state_for_multiple_architecture_zips()
+    {
+        WorkflowOperationResult result = await RunNestedUpdateAsync(
+            InstallerType.Zip,
+            [Architecture.X86, Architecture.X64],
+            "tool.exe");
+
+        AssertSucceeded(result);
+        AssertNestedInstallerMetadata(
+            ReadInstaller(result),
+            [Architecture.X86, Architecture.X64]);
+    }
+
+    [Fact]
+    public async Task Production_update_questions_before_dropping_nested_state_from_direct_executable()
+    {
+        WorkflowOperationResult result = await RunNestedUpdateAsync(
+            InstallerType.Portable,
+            [Architecture.X64],
+            null);
+
+        Assert.Equal(WorkflowResultCode.QuestionsRequired, result.Code);
+        Assert.Contains(
+            result.Plan.Questions,
+            static question => question.Code == "MAP_STRUCTURAL_REWRITE");
+        Assert.Empty(result.Plan.AfterDocuments);
+    }
+
+    [Fact]
+    public async Task Production_update_questions_when_previous_nested_file_is_missing_from_new_archive()
+    {
+        WorkflowOperationResult result = await RunNestedUpdateAsync(
+            InstallerType.Zip,
+            [Architecture.X64],
+            "replacement.exe");
+
+        Assert.Equal(WorkflowResultCode.QuestionsRequired, result.Code);
+        Assert.Contains(
+            result.Plan.Questions,
+            static question => question.Code == "NESTED_PATH_REMOVED");
+        Assert.Empty(result.Plan.AfterDocuments);
     }
 
     [Fact]
@@ -1726,6 +1783,194 @@ public sealed class WorkflowProductionCompositionTests
         {
             File.WriteAllText(Path.Combine(directory, fileName), content);
         }
+    }
+
+    private static async Task<WorkflowOperationResult> RunNestedUpdateAsync(
+        InstallerType previousInstallerType,
+        IReadOnlyList<Architecture> architectures,
+        string? archiveEntryPath)
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        bool isArchive = previousInstallerType == InstallerType.Zip;
+        byte[] content = isArchive
+            ? CreateZipArchive(
+                archiveEntryPath
+                    ?? throw new ArgumentException("An archive entry path is required for ZIP updates.", nameof(archiveEntryPath)),
+                executable)
+            : executable;
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(content),
+        });
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+            downloader,
+            new DirectWorkflowReleaseSource());
+        string extension = isArchive ? ".zip" : ".exe";
+        (Architecture Architecture, string Url)[] previousInstallers =
+        [
+            .. architectures.Select(architecture =>
+            {
+                string token = architecture.ToString().ToLowerInvariant();
+                return (architecture, $"https://example.test/1.0.0/tool-{token}{extension}");
+            }),
+        ];
+        Uri[] updatedUrls =
+        [
+            .. architectures.Select(architecture =>
+            {
+                string token = architecture.ToString().ToLowerInvariant();
+                return new Uri($"https://example.test/2.0.0/tool-{token}{extension}");
+            }),
+        ];
+        string output = CreateDirectory();
+        try
+        {
+            WriteNestedPrevious(output, previousInstallerType, previousInstallers);
+            return await engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PreviousVersion = new PackageVersion("1.0.0"),
+                PackageVersion = "2.0.0",
+                AllowSharedContentAcrossUrls = architectures.Count > 1,
+                UrlOverrides =
+                [
+                    .. updatedUrls.Select((url, index) => new UrlOverride(
+                        url,
+                        architectures[index],
+                        null,
+                        null)),
+                ],
+                Release = new(null, [.. updatedUrls], []),
+            });
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    private static void WriteNestedPrevious(
+        string output,
+        InstallerType installerType,
+        IReadOnlyList<(Architecture Architecture, string Url)> installers)
+    {
+        var identifier = new PackageIdentifier("Example.Composed");
+        var version = new PackageVersion("1.0.0");
+        var manifests = new PackageManifests
+        {
+            Version = new VersionManifest
+            {
+                PackageIdentifier = identifier,
+                PackageVersion = version,
+                DefaultLocale = new LanguageTag("en-US"),
+            },
+            Installer = new InstallerManifest
+            {
+                PackageIdentifier = identifier,
+                PackageVersion = version,
+                InstallerType = installerType,
+                NestedInstallerType = InstallerType.Portable,
+                Scope = Scope.Machine,
+                ArchiveBinariesDependOnPath = true,
+                NestedInstallerFiles =
+                [
+                    new NestedInstallerFile
+                    {
+                        RelativeFilePath = "tool.exe",
+                        PortableCommandAlias = "tool",
+                    },
+                ],
+                Installers =
+                [
+                    .. installers.Select((installer, index) => new Installer
+                    {
+                        Architecture = installer.Architecture,
+                        InstallerUrl = installer.Url,
+                        InstallerSha256 = new Sha256Hash((index + 1).ToString("X64")),
+                    }),
+                ],
+            },
+            DefaultLocale = new DefaultLocaleManifest
+            {
+                PackageIdentifier = identifier,
+                PackageVersion = version,
+                PackageLocale = new LanguageTag("en-US"),
+                Publisher = "Example",
+                PackageName = "Composed",
+                License = "MIT",
+                ShortDescription = "Composition test",
+            },
+            Locales = [],
+        };
+        string directory = Path.Combine(
+            output,
+            ManifestPaths.GetVersionDirectory(identifier, version).Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(directory);
+        foreach ((string fileName, string content) in PackageManifestIO.SerializeFiles(manifests))
+        {
+            File.WriteAllText(Path.Combine(directory, fileName), content);
+        }
+    }
+
+    private static void AssertSucceeded(WorkflowOperationResult result)
+        => Assert.True(
+            result.Code == WorkflowResultCode.Succeeded,
+            string.Join(
+                Environment.NewLine,
+                [
+                    $"Code: {result.Code}",
+                    .. result.Plan.Validation.Findings.Select(static finding =>
+                        $"{finding.Code}: {finding.Message}"),
+                    .. result.Plan.Questions.Select(static question =>
+                        $"{question.Code}: {question.Prompt}"),
+                ]));
+
+    private static void AssertNestedInstallerMetadata(
+        InstallerManifest manifest,
+        IReadOnlyList<Architecture> expectedArchitectures)
+    {
+        Assert.Equal(InstallerType.Zip, manifest.InstallerType);
+        Assert.Equal(InstallerType.Portable, manifest.NestedInstallerType);
+        Assert.Equal(Scope.Machine, manifest.Scope);
+        Assert.True(manifest.ArchiveBinariesDependOnPath);
+        NestedInstallerFile rootNested = Assert.Single(manifest.NestedInstallerFiles!);
+        Assert.Equal("tool.exe", rootNested.RelativeFilePath);
+        Assert.Equal("tool", rootNested.PortableCommandAlias);
+        List<Installer> installers = Assert.IsType<List<Installer>>(manifest.Installers);
+        Assert.All(installers, static installer => Assert.NotNull(installer.Architecture));
+        Assert.Equal(
+            expectedArchitectures,
+            installers.Select(static installer => installer.Architecture!.Value));
+        Assert.All(
+            installers,
+            installer =>
+            {
+                Assert.Equal(
+                    InstallerType.Zip,
+                    installer.InstallerType ?? manifest.InstallerType);
+                Assert.Equal(
+                    InstallerType.Portable,
+                    installer.NestedInstallerType ?? manifest.NestedInstallerType);
+                Assert.Equal(Scope.Machine, installer.Scope ?? manifest.Scope);
+                Assert.True(
+                    installer.ArchiveBinariesDependOnPath
+                    ?? manifest.ArchiveBinariesDependOnPath);
+                NestedInstallerFile nested = Assert.Single(
+                    installer.NestedInstallerFiles ?? manifest.NestedInstallerFiles!);
+                Assert.Equal("tool.exe", nested.RelativeFilePath);
+                Assert.Equal("tool", nested.PortableCommandAlias);
+            });
+    }
+
+    private static InstallerManifest ReadInstaller(WorkflowOperationResult result)
+    {
+        RawManifestDocument document = Assert.Single(
+            result.Plan.AfterDocuments,
+            static item => item.RepositoryPath.EndsWith(".installer.yaml", StringComparison.Ordinal));
+        return ManifestYamlReader.ReadInstaller(Encoding.UTF8.GetString(document.Content.AsSpan()));
     }
 
     private static void RewriteManifestVersion(string output, string version)

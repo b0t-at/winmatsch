@@ -244,6 +244,7 @@ public static class AssetMappingPlanner
                 null,
                 request.Version.Version!.Value,
                 preservePreviousStructure: false,
+                allowStructuralRewrite: false,
                 diagnostics,
                 questions);
             decisions.Add(new(
@@ -748,13 +749,20 @@ public static class AssetMappingPlanner
             return;
         }
 
-        bool structureChanged = !preserveIntentionalLayout
+        bool previousHasNestedState = HasNestedState(previous);
+        bool? analyzedArchivePathDependency =
+            candidate.AnalyzedShape?.ArchiveBinariesDependOnPath
+            ?? candidate.Asset.Analysis?.ArchiveBinariesDependOnPath;
+        bool structureChanged = (!preserveIntentionalLayout
             && ((candidate.Architecture is not null && previous.Architecture != candidate.Architecture)
             || (candidate.Type is not null && previous.InstallerType != candidate.Type)
             || (candidate.NestedType is not null && previous.NestedInstallerType != candidate.NestedType)
             || (candidate.Scope is not null && previous.Scope != candidate.Scope)
             || (candidate.InstallerLocale is not null && previous.InstallerLocale != candidate.InstallerLocale)
-            || (candidate.ClearsNestedState && previous.NestedInstallerType is not null));
+            || (analyzedArchivePathDependency is not null
+                && previous.ArchiveBinariesDependOnPath is not null
+                && analyzedArchivePathDependency != previous.ArchiveBinariesDependOnPath)))
+            || (candidate.ClearsNestedState && previousHasNestedState);
         bool unauthorizedArchitectureChange = candidate.Architecture is not null
             && previous.Architecture != candidate.Architecture
             && !candidate.HasExplicitArchitecture;
@@ -770,13 +778,11 @@ public static class AssetMappingPlanner
         bool unauthorizedLocaleChange = candidate.InstallerLocale is not null
             && previous.InstallerLocale is not null
             && previous.InstallerLocale != candidate.InstallerLocale;
+        bool unauthorizedArchivePathDependencyChange = analyzedArchivePathDependency is not null
+            && previous.ArchiveBinariesDependOnPath is not null
+            && analyzedArchivePathDependency != previous.ArchiveBinariesDependOnPath;
         bool unauthorizedNestedClear = candidate.ClearsNestedState
-            && previous.NestedInstallerType is not null
-            && (previous.InstallerType == InstallerType.Zip
-                || string.Equals(
-                    Path.GetExtension(previous.Url.AbsolutePath),
-                    ".zip",
-                    StringComparison.OrdinalIgnoreCase));
+            && previousHasNestedState;
         if (structureChanged
             && !request.AllowStructuralRewrite
             && (unauthorizedArchitectureChange
@@ -784,12 +790,13 @@ public static class AssetMappingPlanner
                 || unauthorizedNestedTypeChange
                 || unauthorizedScopeChange
                 || unauthorizedLocaleChange
+                || unauthorizedArchivePathDependencyChange
                 || unauthorizedNestedClear))
         {
             diagnostics.Add(new(
                 "MAP_STRUCTURAL_REWRITE",
                 AssetMappingDiagnosticSeverity.Error,
-                "An accepted architecture/type/scope layout would be rewritten without explicit approval.",
+                "An accepted architecture/type/scope/nested-installer layout would be rewritten without explicit approval.",
                 candidate.Asset.DownloadUri.AbsoluteUri,
                 previous.Position));
             questions.Add(new(
@@ -840,6 +847,7 @@ public static class AssetMappingPlanner
             previous,
             request.Version.Version!.Value,
             preserveIntentionalLayout,
+            request.AllowStructuralRewrite,
             diagnostics,
             questions);
         if (exactUrl && hashChanged && !request.AllowStableUrlContentChange)
@@ -877,14 +885,19 @@ public static class AssetMappingPlanner
         PreviousInstallerEntry? previous,
         string newVersion,
         bool preservePreviousStructure,
+        bool allowStructuralRewrite,
         List<AssetMappingDiagnostic> diagnostics,
         List<AssetMappingQuestion> questions)
     {
-        NestedPathResolution nested = NestedInstallerPathResolver.Resolve(
-            previous,
-            candidate.Asset.Analysis,
-            candidate.AnalyzedShape,
-            newVersion);
+        bool clearNestedState = candidate.ClearsNestedState
+            && (previous is null || !HasNestedState(previous) || allowStructuralRewrite);
+        NestedPathResolution nested = clearNestedState
+            ? NestedPathResolution.Empty
+            : NestedInstallerPathResolver.Resolve(
+                previous,
+                candidate.Asset.Analysis,
+                candidate.AnalyzedShape,
+                newVersion);
         if (nested.ErrorCode is not null)
         {
             diagnostics.Add(new(
@@ -918,7 +931,7 @@ public static class AssetMappingPlanner
                 : candidate.Type ?? previous?.InstallerType,
             NestedInstallerType = preservePreviousStructure
                 ? previous!.NestedInstallerType
-                : candidate.ClearsNestedState
+                : clearNestedState
                     ? null
                     : candidate.NestedType ?? previous?.NestedInstallerType,
             Scope = preservePreviousStructure
@@ -930,13 +943,18 @@ public static class AssetMappingPlanner
             DisplayVersion = candidate.DisplayVersion ?? previous?.DisplayVersion,
             NestedInstallerFiles = nested.Files,
             ArchiveBinariesDependOnPath =
-                candidate.ClearsNestedState
+                clearNestedState
                     ? null
                     : candidate.AnalyzedShape?.ArchiveBinariesDependOnPath
                         ?? candidate.Asset.Analysis?.ArchiveBinariesDependOnPath
                         ?? previous?.ArchiveBinariesDependOnPath,
         };
     }
+
+    private static bool HasNestedState(PreviousInstallerEntry previous)
+        => previous.NestedInstallerType is not null
+            || !previous.NestedInstallerFiles.IsEmpty
+            || previous.ArchiveBinariesDependOnPath is not null;
 
     private static void ValidateVersionContinuity(
         PreviousInstallerEntry previous,

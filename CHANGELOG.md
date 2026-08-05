@@ -7,6 +7,12 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- Updates now preserve validated nested ZIP installer metadata and stop with a
+  structural question when fresh analysis would otherwise remove accepted
+  `NestedInstallerType`, `NestedInstallerFiles`, or archive-path semantics.
+
 ## [0.8.12] - 2026-08-05
 
 ### Added
