@@ -16,6 +16,7 @@ internal static class MutationOutput
         WorkflowOperationResult local,
         GitHubLifecycleResult? remote)
     {
+        context.ResultJson?.CaptureMutation(local, remote);
         context.Output.WriteFormatted(
             writer => WriteText(writer, local, remote),
             json => WriteJson(json, local, remote));

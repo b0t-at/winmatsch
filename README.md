@@ -141,10 +141,13 @@ winmatsch update MyPublisher.MyApp 1.2.3 \
 ```bash
 winmatsch analyze ./MyApp.msi --format json | jq .
 winmatsch update MyPublisher.MyApp 1.2.3 --urls <url> --dry-run --format json
+winmatsch update MyPublisher.MyApp 1.2.3 --urls <url> --result-json ./result.json
 ```
 
 `--format json` never prompts; missing required input fails with exit code 4
-instead of hanging in CI. See [exit codes and JSON contract](docs/commands.md#exit-codes).
+instead of hanging in CI. `--result-json` independently writes one stable
+success/failure outcome file without changing console output or the exit code.
+See the [exit codes and JSON contracts](docs/commands.md#exit-codes).
 
 ## Configuration and tokens
 

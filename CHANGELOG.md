@@ -7,6 +7,14 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- A global `--result-json <path>` flag atomically writes a redacted,
+  machine-readable terminal outcome on success and controlled failure without
+  changing console output or process exit codes. Mutation outcomes include
+  package identity, absolute manifest path, stable domain error identifiers,
+  and verified pull-request metadata when a submission created one.
+
 ### Fixed
 
 - Update source resolution now skips version directories that contain no manifest

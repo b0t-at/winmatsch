@@ -38,6 +38,7 @@ through to the next layer. See the
 | `--no-color` | flag | Disable ANSI color (the `NO_COLOR` environment variable is also honored). |
 | `--config` | file | Path to the user configuration file (default: `~/.config/winmatsch/config.yaml`). |
 | `--token` | token | GitHub token. Precedence: `--token` > `GITHUB_TOKEN` > OS keyring. Never echoed. Prefer `token add --stdin` or `GITHUB_TOKEN` over passing a secret as a process argument. |
+| `--result-json` | path | Atomically write one machine-readable terminal outcome object to this file on success or controlled failure. |
 | `--github-api-url` | URL | GitHub REST API base URL. For GHES, use `https://host/api/v3/`. |
 | `--github-graphql-url` | URL | Optional GitHub GraphQL endpoint; safely derived from `--github-api-url` when omitted. |
 | `-?`, `-h`, `--help` | flag | Show help. |
@@ -114,6 +115,93 @@ The stream contract is stable and scripts may rely on it:
   exactly one JSON document in JSON mode. Nothing else is ever written there.
 - **stderr** carries diagnostics, warnings, progress, prompts, and error
   messages as plain text in both formats.
+
+`--result-json <path>` is independent of `--format`: it does not change either
+stream or the process exit code. On every successful or controlled failing
+invocation, the CLI creates parent directories and atomically replaces the
+target with exactly one UTF-8 JSON object:
+
+```json
+{
+  "command": "update",
+  "success": true,
+  "exitCode": 0,
+  "packageIdentifier": "Publisher.Package",
+  "packageVersion": "1.2.3",
+  "manifestPath": "/absolute/output/manifests/p/Publisher/Package/1.2.3",
+  "pullRequest": {
+    "url": "https://github.com/microsoft/winget-pkgs/pull/12345",
+    "number": 12345
+  },
+  "error": null
+}
+```
+
+`command` is the selected command path (for example `update` or `config path`),
+or `null` when parsing did not select one. Package fields and `manifestPath` are
+populated when a mutation produced a local plan; other commands and failures
+before planning use `null`.
+`manifestPath` is absolute. `pullRequest` is non-null only when this invocation
+actually created a pull request and both its URL and number were verified.
+`error` is non-null exactly when `success` is false:
+
+```json
+{
+  "code": "MAP_REMOVED",
+  "message": "Previous installer assets have no compatible release assets."
+}
+```
+
+Messages pass the same bounded secret and URL redaction used by console and
+normal JSON output. Tokens, authorization values, credentials, URL user-info,
+and URL query values are never intentionally persisted. If the outcome file
+cannot be written, the original exit code is preserved and a redacted warning
+is written to stderr.
+
+### Result-file error codes
+
+`error.code` is a stable SCREAMING_SNAKE_CASE identifier. The most specific
+existing domain identifier wins, in this order:
+
+1. the first remote diagnostic (`GH…`, `VLD…`, or another stable diagnostic);
+2. the first unresolved workflow question, including mapping identifiers such
+   as `MAP_REMOVED`, `MAP_AMBIGUOUS`, and `MAP_STRUCTURAL_REWRITE`;
+3. the first blocking validation finding, including `VLD…`, `WF_INVALID`,
+   `WF_…`, and `RULE_…` identifiers;
+4. one of the fixed fallback identifiers below.
+
+The reused diagnostic/question/finding identifiers are the same wire values
+already emitted by mutation JSON; `--result-json` does not rename them.
+The complete fixed fallback set is:
+
+| Code | Meaning |
+|---|---|
+| `UNEXPECTED_ERROR` | Exit 1; unclassified internal failure. |
+| `USAGE_ERROR` | Exit 2; parse or command-usage failure. |
+| `CONFIGURATION_ERROR` | Exit 3; invalid environment, file, or effective configuration. |
+| `KEYRING_FAILURE` | Exit 5; the OS credential store failed. |
+| `MISSING_INPUT` | Exit 4; required input was unavailable and there was no more specific question code. |
+| `QUESTIONS_REQUIRED` | Exit 4; questions remained but carried no more specific code. |
+| `WF_REVIEW_REQUIRED` | Human-correction review approval is required. |
+| `VALIDATION_FAILED` | Local validation failed without a specific finding code. |
+| `WF_NO_CHANGES` | A mutation requiring a change produced none. |
+| `WF_NOT_FOUND` | The requested local package/version was not found. |
+| `WF_CONFLICT` | Local state conflicted with the requested mutation. |
+| `WF_INVALID` | The local mutation request or plan was invalid. |
+| `WF_APPLY_FAILED` | Applying a validated local plan failed. |
+| `WF_STALE_PLAN` | The approved local plan changed before apply. |
+| `GH_INVALID_PLAN` | The remote submission plan was invalid. |
+| `GH_CONSENT_REQUIRED` | Remote account/repository mutation requires consent. |
+| `GH_DUPLICATE_PULL_REQUEST` | An equivalent pull request already exists. |
+| `GH_DUPLICATE_INSTALLER_HASH` | Installer hash policy rejected a duplicate. |
+| `GH_CONFLICT` | Verified GitHub state changed or conflicted. |
+| `GH_CANCELLED` | A remote operation was cancelled without process cancellation. |
+| `GH_VALIDATION_FAILED` | Remote pre- or post-mutation validation failed. |
+| `GH_REMOTE_FAILURE` | GitHub rejected or failed a remote operation. |
+| `GH_HUMAN_ESCALATION_REQUIRED` | Remote state is uncertain and needs reconciliation. |
+| `GH_NO_ACTION` | The remote workflow had no valid action to apply. |
+| `OPERATION_FAILED` | Exit 5; domain failure without a more specific code. |
+| `CANCELLED` | Exit 130; process cancellation. |
 
 JSON documents are compact (not indented), UTF-8 with non-ASCII preserved,
 byte-stable for identical inputs, and terminated by a single trailing newline.

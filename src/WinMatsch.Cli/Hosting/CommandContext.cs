@@ -49,6 +49,8 @@ public sealed class CommandContext
     /// <summary>Cancelled on Ctrl+C or host shutdown; handlers must observe it.</summary>
     public required CancellationToken CancellationToken { get; init; }
 
+    internal ResultJsonRecorder? ResultJson { get; init; }
+
     /// <summary>True when the invocation runs in plan mode. See the type docs for the contract.</summary>
     public bool IsDryRun => ExecutionMode == WorkflowExecutionMode.Plan;
 }
