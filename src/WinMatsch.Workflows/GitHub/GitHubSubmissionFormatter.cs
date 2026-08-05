@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
 using WinMatsch.Core;
-using WinMatsch.Validation;
 using WinMatsch.Workflows.Operations;
 
 namespace WinMatsch.Workflows.GitHub;
@@ -69,22 +68,6 @@ public static partial class GitHubSubmissionFormatter
         if (request.SupersedesPullRequestNumber is { } superseded)
         {
             builder.AppendLine($"Supersedes: #{superseded}");
-        }
-
-        builder.AppendLine("Internal validation passed.");
-        AppendValidationWarnings(builder, plan.Validation);
-
-        if (!request.VanityUrlAnnotations.IsEmpty)
-        {
-            foreach (string annotation in request.VanityUrlAnnotations)
-            {
-                builder.AppendLine($"- {annotation}");
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(request.Policy.DuplicateHashes.OverrideAnnotation))
-        {
-            builder.AppendLine($"- Duplicate-hash override: {request.Policy.DuplicateHashes.OverrideAnnotation}");
         }
 
         return Redact(builder.ToString().TrimEnd());
@@ -180,18 +163,6 @@ public static partial class GitHubSubmissionFormatter
         return version is null
             ? createdWith
             : $"{createdWith} v{version.Major}.{version.Minor}.{version.Build}";
-    }
-
-    private static void AppendValidationWarnings(StringBuilder builder, ValidationReport validation)
-    {
-        foreach (ValidationFinding finding in validation.Findings.Where(
-                     static finding => finding.Severity == ValidationSeverity.Warning))
-        {
-            builder.Append("- ")
-                .Append(finding.Code)
-                .Append(": ")
-                .AppendLine(finding.Message);
-        }
     }
 
     [GeneratedRegex(@"(?i)\b(token|password|secret|client_secret|access_token)\s*=\s*[^\s&]+")]

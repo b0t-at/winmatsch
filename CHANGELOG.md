@@ -18,8 +18,8 @@ minor versions may contain breaking changes).
 ### Changed
 
 - Generated upstream pull request bodies now focus on the package change,
-  tool attribution, internal validation result, optional issue resolution, and
-  validation warnings while preserving hidden lifecycle association metadata.
+  tool attribution, and optional issue resolution while preserving hidden
+  lifecycle association metadata and omitting internal validation details.
 
 ### Fixed
 

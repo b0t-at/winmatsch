@@ -28,7 +28,6 @@ public sealed class GitHubSubmissionFormatterTests
             <!-- winmatsch:operation=Add -->
             Add Example.App version 2.0.0.
             Created with winmatsch v{version.Major}.{version.Minor}.{version.Build}
-            Internal validation passed.
             """,
             body);
         Assert.DoesNotContain("Operation:", body, StringComparison.Ordinal);
@@ -41,7 +40,7 @@ public sealed class GitHubSubmissionFormatterTests
     }
 
     [Fact]
-    public void Update_body_includes_custom_attribution_resolution_and_only_warnings()
+    public void Update_body_includes_custom_attribution_and_resolution_but_no_validation_details()
     {
         LocalOperationPlan plan = GitHubLifecycleTestSupport.Plan() with
         {
@@ -57,6 +56,14 @@ public sealed class GitHubSubmissionFormatterTests
             LocalPlan = plan,
             CreatedWith = "[Komac](https://github.com/russellbanks/Komac)",
             Resolves = "32",
+            VanityUrlAnnotations = ["Stable vendor URL revalidated."],
+            Policy = new()
+            {
+                DuplicateHashes = new()
+                {
+                    OverrideAnnotation = "Repository steward approved shared vendor payload.",
+                },
+            },
         };
 
         string body = GitHubSubmissionFormatter.CreateBody(
@@ -70,13 +77,13 @@ public sealed class GitHubSubmissionFormatterTests
             Update Example.App version 2.0.0.
             Created with [Komac](https://github.com/russellbanks/Komac)
             Resolves #32
-            Internal validation passed.
-            - VLD3007: Declare a PortableCommandAlias.
             """,
             body);
         Assert.DoesNotContain("VLD1000", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("Status: passed", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("No findings", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("VLD3007", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("Internal validation", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("Stable vendor URL", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("Duplicate-hash override", body, StringComparison.Ordinal);
     }
 
     [Fact]

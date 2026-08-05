@@ -2517,7 +2517,7 @@ public sealed class GitHubLifecycleWorkflowTests
 
         Assert.Equal(GitHubLifecycleResultCode.InvalidPlan, blocked.Code);
         Assert.Contains(blocked.Diagnostics, diagnostic => diagnostic.Code == "GH1010");
-        Assert.Contains(
+        Assert.DoesNotContain(
             "Stable vendor URL revalidated.",
             blocked.Plan.PullRequestBody,
             StringComparison.Ordinal);
@@ -2573,7 +2573,7 @@ public sealed class GitHubLifecycleWorkflowTests
             "Update version: Example.App version 2.0.0 - Update Example.App password=[REDACTED]",
             plan.PullRequestTitle);
         Assert.Contains("Created with winmatsch tests", plan.PullRequestBody, StringComparison.Ordinal);
-        Assert.Contains("Internal validation passed.", plan.PullRequestBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("Internal validation", plan.PullRequestBody, StringComparison.Ordinal);
         Assert.Contains("Resolves #32", plan.PullRequestBody, StringComparison.Ordinal);
         Assert.DoesNotContain("## Rules", plan.PullRequestBody, StringComparison.Ordinal);
         Assert.DoesNotContain("## Changes", plan.PullRequestBody, StringComparison.Ordinal);
