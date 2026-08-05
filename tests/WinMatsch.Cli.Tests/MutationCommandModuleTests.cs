@@ -1609,8 +1609,29 @@ public sealed class MutationCommandModuleTests
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         GitHubSubmissionRequest request = Assert.Single(submission.Requests);
         Assert.Equal(
-            "winmatsch-test (https://example.test/tool)",
+            "[winmatsch-test](https://example.test/tool)",
             request.CreatedWith);
+    }
+
+    [Fact]
+    public async Task Default_submission_attribution_includes_the_cli_version()
+    {
+        var workflow = new FakeMutationWorkflow();
+        var submission = new FakeSubmissionWorkflow();
+        CliHarness harness = CreateHarness(workflow, submission);
+
+        CliRunResult result = await harness.RunAsync(
+        [
+            "update",
+            "Example.App",
+            "1.0",
+            "--submit",
+            "--yes",
+        ]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        GitHubSubmissionRequest request = Assert.Single(submission.Requests);
+        Assert.Equal($"winmatsch v{CliVersion.PackageVersion}", request.CreatedWith);
     }
 
     [Theory]

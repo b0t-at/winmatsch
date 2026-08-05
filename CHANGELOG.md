@@ -15,6 +15,12 @@ minor versions may contain breaking changes).
   package identity, absolute manifest path, stable domain error identifiers,
   and verified pull-request metadata when a submission created one.
 
+### Changed
+
+- Generated upstream pull request bodies now focus on the package change,
+  tool attribution, validation success, and optional issue resolution while
+  preserving hidden lifecycle metadata and omitting validation details.
+
 ### Fixed
 
 - Update source resolution now skips version directories that contain no manifest

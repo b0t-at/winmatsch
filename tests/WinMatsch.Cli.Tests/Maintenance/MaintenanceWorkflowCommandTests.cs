@@ -760,9 +760,8 @@ public sealed class MaintenanceWorkflowCommandTests
             PullRequestInfo pullRequest = MaintenancePullRequests.ToolOwned(41) with
             {
                 Body = "<!-- winmatsch:package=Example.App;version=1.0 -->\n"
-                    + "Operation: Replace\n"
-                    + "## Changes\n"
-                    + "- Delete: `manifests/a/Attacker/App/9.9/Attacker.App.yaml`",
+                    + "<!-- winmatsch:operation=Replace -->\n"
+                    + "Update Example.App version 1.0.",
             };
             PullRequestObservation observation =
                 Assert.Single(MaintenancePullRequests.Observe(pullRequest)) with

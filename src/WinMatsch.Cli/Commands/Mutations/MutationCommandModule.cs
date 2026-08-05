@@ -1388,7 +1388,7 @@ public sealed class MutationCommandModule : ICommandModule
                     ? TimeSpan.Zero
                     : context.Configuration.FreshnessDelay,
             },
-            CreatedWith = localRequest.CreatedWith,
+            CreatedWith = PullRequestAttribution(context, options),
             CustomTitle = context.ParseResult.GetValue(options.PullRequestTitle),
             Resolves = context.ParseResult.GetValue(options.Resolves),
             IdempotencyKey =
@@ -1397,6 +1397,26 @@ public sealed class MutationCommandModule : ICommandModule
             ReleaseRepository = plan.Release?.Repository,
             ReleaseId = plan.Release?.ReleaseId,
         };
+    }
+
+    private static string PullRequestAttribution(
+        CommandContext context,
+        MutationOptions options)
+    {
+        string createdWith = context.ParseResult.GetValue(options.CreatedWith)
+            ?? $"winmatsch v{CliVersion.PackageVersion}";
+        string? createdWithUrl = context.ParseResult.GetValue(options.CreatedWithUrl);
+        if (string.IsNullOrWhiteSpace(createdWithUrl))
+        {
+            return createdWith;
+        }
+
+        Uri normalizedUrl = ParseHttpUri(createdWithUrl, "--created-with-url");
+        string linkText = createdWith
+            .Replace(@"\", @"\\", StringComparison.Ordinal)
+            .Replace("[", @"\[", StringComparison.Ordinal)
+            .Replace("]", @"\]", StringComparison.Ordinal);
+        return $"[{linkText}]({normalizedUrl.AbsoluteUri})";
     }
 
     private static PackageLocaleMetadata BindLocale(
@@ -1742,12 +1762,12 @@ public sealed class MutationCommandModule : ICommandModule
 
         public Option<string?> CreatedWith { get; } = new("--created-with")
         {
-            Description = "Tool name written to generated manifest headers.",
+            Description = "Tool name written to generated manifest headers and pull request attribution.",
         };
 
         public Option<string?> CreatedWithUrl { get; } = new("--created-with-url")
         {
-            Description = "Tool HTTP(S) URL written with generated manifest provenance.",
+            Description = "Tool HTTP(S) URL linked from generated provenance.",
         };
 
         public Option<bool> SkipPullRequestCheck { get; } = new("--skip-pr-check")

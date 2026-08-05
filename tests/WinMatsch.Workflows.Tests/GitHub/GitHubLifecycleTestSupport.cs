@@ -119,8 +119,8 @@ internal static class GitHubLifecycleTestSupport
             $"PR_{number}",
             "Update version: Example.App version 2.0.0",
             "<!-- winmatsch:package=Example.App;version=2.0.0 -->\n" +
-            "Operation: Update\n" +
-            "Manifest path: `manifests/e/Example/App/2.0.0`",
+            "<!-- winmatsch:operation=Update -->\n" +
+            "Update Example.App version 2.0.0.",
             state,
             false,
             author,

@@ -317,7 +317,7 @@ public sealed class GitHubFeedbackWorkflowTests
         {
             Title = "Remove version: Example.App version 2.0.0",
             Body = GitHubLifecycleTestSupport.PullRequest(42).Body!
-                .Replace("Operation: Update", "Operation: Remove", StringComparison.Ordinal)
+                .Replace("operation=Update", "operation=Remove", StringComparison.Ordinal)
                 + "\nSupersedes: #20",
         };
         client.AddPullRequest(observation.PullRequest);
@@ -784,8 +784,7 @@ public sealed class GitHubFeedbackWorkflowTests
             PullRequest = GitHubLifecycleTestSupport.PullRequest(20) with
             {
                 Body = GitHubLifecycleTestSupport.PullRequest(20).Body!
-                    .Replace("Operation: Update", "Operation: Replace", StringComparison.Ordinal)
-                    + $"\n- Delete: `{originalPath}`",
+                    .Replace("operation=Update", "operation=Replace", StringComparison.Ordinal),
             },
             ChangedFiles =
             [
