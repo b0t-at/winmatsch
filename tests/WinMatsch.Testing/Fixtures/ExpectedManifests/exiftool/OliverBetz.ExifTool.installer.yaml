@@ -11,23 +11,35 @@ Installers:
   InstallerSha256: 1D0C49746AF4279B36349A262DFB15B96A42B36A7EDFAC1EB2410C40DA121758
   InstallerSwitches:
     Custom: /CURRENTUSER
+  AppsAndFeaturesEntries:
+  - DisplayName: OliverBetz.ExifTool 12.87
+    ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
 - Architecture: x86
   Scope: machine
   InstallerUrl: https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_32.exe
   InstallerSha256: 1D0C49746AF4279B36349A262DFB15B96A42B36A7EDFAC1EB2410C40DA121758
   InstallerSwitches:
     Custom: /ALLUSERS
+  AppsAndFeaturesEntries:
+  - DisplayName: OliverBetz.ExifTool 12.87
+    ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
 - Architecture: x64
   Scope: user
   InstallerUrl: https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_64.exe
   InstallerSha256: F3ADEA776A48E5770A4C7B6D8C20762A7F9143DE28400D2A5E057DC0BB13E6CB
   InstallerSwitches:
     Custom: /CURRENTUSER
+  AppsAndFeaturesEntries:
+  - DisplayName: OliverBetz.ExifTool 12.87
+    ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
 - Architecture: x64
   Scope: machine
   InstallerUrl: https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_64.exe
   InstallerSha256: F3ADEA776A48E5770A4C7B6D8C20762A7F9143DE28400D2A5E057DC0BB13E6CB
   InstallerSwitches:
     Custom: /ALLUSERS
+  AppsAndFeaturesEntries:
+  - DisplayName: OliverBetz.ExifTool 12.87
+    ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
 ManifestType: installer
 ManifestVersion: 1.12.0

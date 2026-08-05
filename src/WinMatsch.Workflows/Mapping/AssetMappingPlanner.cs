@@ -749,7 +749,7 @@ public static class AssetMappingPlanner
                     questions)),
             ];
             IEnumerable<Candidate> selected = urlOverride is null
-                ? variants
+                ? InheritSingleNeutralLayout(variants, request)
                 : CollapseQualifiedVariants(variants, request.PreviousInstallers);
             foreach (Candidate candidate in selected)
             {
@@ -790,27 +790,50 @@ public static class AssetMappingPlanner
                         candidate.InstallerLocale,
                         candidate.DisplayVersion,
                         candidate.Entry))
-            .SelectMany(group =>
+            .Select(group =>
             {
                 Candidate[] ordered = group
                     .OrderByDescending(candidate => PreviousLayoutMatchScore(candidate, previousInstallers))
                     .ThenBy(static candidate => FormatNullableNestedShape(candidate.AnalyzedShape), StringComparer.Ordinal)
                     .ToArray();
-                if (ordered.Length == 1
-                    || ordered
-                        .Select(static candidate => FormatNullableNestedShape(candidate.AnalyzedShape))
-                        .Distinct(StringComparer.Ordinal)
-                        .Count() == 1)
-                {
-                    return [ordered[0]];
-                }
-
-                int firstScore = PreviousLayoutMatchScore(ordered[0], previousInstallers);
-                int secondScore = PreviousLayoutMatchScore(ordered[1], previousInstallers);
-                return firstScore > secondScore
-                    ? [ordered[0]]
-                    : ordered;
+                return ordered[0];
             });
+
+    private static Candidate[] InheritSingleNeutralLayout(
+        Candidate[] variants,
+        AssetMappingRequest request)
+    {
+        if (request.PreviousInstallers is not [PreviousInstallerEntry previous]
+            || previous.Architecture != Architecture.Neutral
+            || request.Assets
+                .Select(static asset => asset.DownloadUri.AbsoluteUri)
+                .Distinct(StringComparer.Ordinal)
+                .Count() != 1
+            || variants.Length == 0
+            || variants.Any(static candidate =>
+                candidate.HasExplicitArchitecture
+                || candidate.HasExplicitType
+                || candidate.HasExplicitScope)
+            || variants.Any(candidate =>
+                !TypesCompatible(previous.InstallerType, candidate.Type)
+                || (candidate.NestedType is not null
+                    && previous.NestedInstallerType != candidate.NestedType)
+                || (candidate.Scope is not null
+                    && previous.Scope is not null
+                    && previous.Scope != candidate.Scope)
+                || (candidate.InstallerLocale is not null
+                    && previous.InstallerLocale is not null
+                    && previous.InstallerLocale != candidate.InstallerLocale)))
+        {
+            return variants;
+        }
+
+        Candidate selected = variants
+            .OrderByDescending(candidate => PreviousLayoutMatchScore(candidate, request.PreviousInstallers))
+            .ThenBy(static candidate => FormatNullableNestedShape(candidate.AnalyzedShape), StringComparer.Ordinal)
+            .First();
+        return [selected.InheritLayout(previous)];
+    }
 
     private static int PreviousLayoutMatchScore(
         Candidate candidate,
@@ -829,6 +852,13 @@ public static class AssetMappingPlanner
                     && previous.NestedInstallerFiles.SequenceEqual(shape.NestedInstallerFiles))
                 {
                     score += 32;
+                }
+
+                if (previous.AppsAndFeaturesEntries is { } previousArp
+                    && candidate.AnalyzedShape?.AppsAndFeaturesEntries is { } analyzedArp
+                    && previousArp.Length == analyzedArp.Length)
+                {
+                    score += 64;
                 }
 
                 return score;
@@ -1033,12 +1063,13 @@ public static class AssetMappingPlanner
         }
 
         bool exactUrl = UriEquals(previous.Url, candidate.Asset.DownloadUri);
-        bool preserveIntentionalLayout = request.PreviousInstallers.Count(
-                entry => UriEquals(entry.Url, previous.Url)) > 1
-            && !request.AllowStructuralRewrite
-            && !candidate.HasExplicitArchitecture
-            && !candidate.HasExplicitType
-            && !candidate.HasExplicitScope;
+        bool preserveIntentionalLayout = (request.PreviousInstallers.Count(
+                    entry => UriEquals(entry.Url, previous.Url)) > 1
+                && !request.AllowStructuralRewrite
+                && !candidate.HasExplicitArchitecture
+                && !candidate.HasExplicitType
+                && !candidate.HasExplicitScope)
+            || candidate.PreservesPreviousStructure;
         bool packagingChanged = !string.Equals(
                 Path.GetExtension(previous.Url.AbsolutePath),
                 Path.GetExtension(candidate.Asset.DownloadUri.AbsolutePath),
@@ -1128,6 +1159,10 @@ public static class AssetMappingPlanner
             && analyzedArchivePathDependency != previous.ArchiveBinariesDependOnPath;
         bool unauthorizedNestedClear = candidate.ClearsNestedState
             && previousHasNestedState;
+        bool unauthorizedArpShapeChange = previous.AppsAndFeaturesEntries is { IsEmpty: false } previousArp
+            && candidate.AnalyzedShape?.AppsAndFeaturesEntries is { } analyzedArp
+            && previousArp.Length != analyzedArp.Length;
+        structureChanged = structureChanged || unauthorizedArpShapeChange;
         if (structureChanged
             && !request.AllowStructuralRewrite
             && (unauthorizedArchitectureChange
@@ -1136,12 +1171,13 @@ public static class AssetMappingPlanner
                 || unauthorizedScopeChange
                 || unauthorizedLocaleChange
                 || unauthorizedArchivePathDependencyChange
-                || unauthorizedNestedClear))
+                || unauthorizedNestedClear
+                || unauthorizedArpShapeChange))
         {
             diagnostics.Add(new(
                 "MAP_STRUCTURAL_REWRITE",
                 AssetMappingDiagnosticSeverity.Error,
-                "An accepted architecture/type/scope/nested-installer layout would be rewritten without explicit approval.",
+                "An accepted architecture/type/scope/nested-installer or per-installer property layout would be rewritten without explicit approval.",
                 candidate.Asset.DownloadUri.AbsoluteUri,
                 previous.Position));
             questions.Add(new(
@@ -1669,7 +1705,8 @@ public static class AssetMappingPlanner
         bool hasExplicitType,
         bool hasExplicitScope,
         EvidenceConfidence confidence,
-        AnalyzedInstallerShape? analyzedShape)
+        AnalyzedInstallerShape? analyzedShape,
+        bool preservesPreviousStructure = false)
     {
         public DiscoveredAsset Asset { get; } = asset;
 
@@ -1697,8 +1734,27 @@ public static class AssetMappingPlanner
 
         public AnalyzedInstallerShape? AnalyzedShape { get; } = analyzedShape;
 
+        public bool PreservesPreviousStructure { get; } = preservesPreviousStructure;
+
         public bool ClearsNestedState => Asset.Analysis is not null
             && Asset.Analysis.Format != DetectedInstallerFormat.Zip
             && Type != InstallerType.Zip;
+
+        public Candidate InheritLayout(PreviousInstallerEntry previous)
+            => new(
+                Asset,
+                previous.Architecture,
+                previous.InstallerType ?? Type,
+                previous.NestedInstallerType ?? NestedType,
+                previous.Scope ?? Scope,
+                previous.InstallerLocale ?? InstallerLocale,
+                DisplayVersion,
+                Entry,
+                HasExplicitArchitecture,
+                HasExplicitType,
+                HasExplicitScope,
+                Confidence,
+                AnalyzedShape,
+                preservesPreviousStructure: true);
     }
 }

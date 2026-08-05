@@ -85,6 +85,111 @@ public class Arp1VersionTemplateRuleTests
     }
 
     [Fact]
+    public void Analyzer_refreshes_declared_identity_without_expanding_arp_shape()
+    {
+        (PackageManifests current, PackageManifests previous) = CreateUpdate(
+            "3.1.0",
+            "4.2.0",
+            displayVersion: "3.1.0");
+        Installer installer = current.Installer.Installers![0];
+        installer.ProductCode = "OldProduct";
+        installer.PackageFamilyName = "OldFamily";
+        AppsAndFeaturesEntry arp = Assert.Single(installer.AppsAndFeaturesEntries!);
+        arp.Publisher = "Keep Publisher";
+        arp.ProductCode = "OldProduct";
+        arp.UpgradeCode = "OldUpgrade";
+        arp.InstallerType = InstallerType.Exe;
+        var evidence = new InstallerEvidence
+        {
+            InstallerUrl = installer.InstallerUrl!,
+            Analysis = new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.InnoSetup,
+                Installers =
+                [
+                    new Installer
+                    {
+                        ProductCode = "NewProduct",
+                        PackageFamilyName = "NewFamily",
+                        AppsAndFeaturesEntries =
+                        [
+                            new AppsAndFeaturesEntry
+                            {
+                                DisplayVersion = "4.2.0+build",
+                                ProductCode = "NewProduct",
+                                UpgradeCode = "NewUpgrade",
+                                InstallerType = InstallerType.Inno,
+                            },
+                        ],
+                    },
+                ],
+            },
+        };
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous, evidence: [evidence]);
+
+        _rule.Apply(context);
+
+        Assert.Equal("NewProduct", installer.ProductCode);
+        Assert.Equal("NewFamily", installer.PackageFamilyName);
+        Assert.Equal("4.2.0+build", arp.DisplayVersion);
+        Assert.Equal("NewProduct", arp.ProductCode);
+        Assert.Equal("NewUpgrade", arp.UpgradeCode);
+        Assert.Equal(InstallerType.Inno, arp.InstallerType);
+        Assert.Equal("Keep Publisher", arp.Publisher);
+    }
+
+    [Fact]
+    public void Singleton_analysis_entry_is_not_broadcast_across_multiple_arp_entries()
+    {
+        (PackageManifests current, PackageManifests previous) = CreateUpdate(
+            "3.1.0",
+            "4.2.0",
+            displayVersion: "3.1.0");
+        Installer installer = current.Installer.Installers![0];
+        List<AppsAndFeaturesEntry> entries = Assert.IsType<List<AppsAndFeaturesEntry>>(
+            installer.AppsAndFeaturesEntries);
+        AppsAndFeaturesEntry primary = Assert.Single(entries);
+        primary.ProductCode = "Primary";
+        var component = new AppsAndFeaturesEntry
+        {
+            DisplayName = "Component",
+            DisplayVersion = "9.9.9",
+            ProductCode = "Component",
+        };
+        entries.Add(component);
+        var evidence = new InstallerEvidence
+        {
+            InstallerUrl = installer.InstallerUrl!,
+            Analysis = new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.InnoSetup,
+                Installers =
+                [
+                    new Installer
+                    {
+                        AppsAndFeaturesEntries =
+                        [
+                            new AppsAndFeaturesEntry
+                            {
+                                DisplayVersion = "4.2.0+build",
+                                ProductCode = "Primary",
+                            },
+                        ],
+                    },
+                ],
+            },
+        };
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous, evidence: [evidence]);
+
+        _rule.Apply(context);
+
+        Assert.Equal("4.2.0+build", primary.DisplayVersion);
+        Assert.Equal("Primary", primary.ProductCode);
+        Assert.Equal("9.9.9", component.DisplayVersion);
+        Assert.Equal("Component", component.ProductCode);
+    }
+
+    [Fact]
     public void Root_level_entries_are_templated()
     {
         (PackageManifests current, PackageManifests previous) = CreateUpdate("1.0.0", "2.0.0");

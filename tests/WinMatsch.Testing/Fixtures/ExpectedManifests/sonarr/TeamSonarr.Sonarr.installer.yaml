@@ -4,6 +4,9 @@
 PackageIdentifier: TeamSonarr.Sonarr
 PackageVersion: 4.0.15.2941
 InstallerType: inno
+AppsAndFeaturesEntries:
+- DisplayName: Sonarr 4.0.15.2941
+  ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
 Installers:
 - Architecture: x86
   InstallerUrl: https://github.com/Sonarr/Sonarr/releases/download/v4.0.15.2941/Sonarr.main.4.0.15.2941.win-x86-installer.exe

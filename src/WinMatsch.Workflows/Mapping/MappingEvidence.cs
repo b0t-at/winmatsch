@@ -124,6 +124,7 @@ public sealed record AssetAnalysisEvidence
         foreach (AnalyzedInstallerShape shape in InstallerShapes)
         {
             totalItems += shape.NestedInstallerFiles.Length;
+            totalItems += shape.AppsAndFeaturesEntries?.Length ?? 0;
             if (totalItems > MaximumEvidenceItems)
             {
                 return [$"Total analysis evidence count exceeds {MaximumEvidenceItems}."];
@@ -157,7 +158,18 @@ public sealed record AssetAnalysisEvidence
         }
 
         foreach (string text in Diagnostics.Concat(
-                     PayloadEvidence.SelectMany(static evidence => evidence.Signals)))
+                     PayloadEvidence.SelectMany(static evidence => evidence.Signals))
+                     .Concat(InstallerShapes
+                         .SelectMany(static shape => shape.AppsAndFeaturesEntries ?? [])
+                         .SelectMany(static entry => new[]
+                         {
+                             entry.DisplayName,
+                             entry.Publisher,
+                             entry.DisplayVersion,
+                             entry.ProductCode,
+                             entry.UpgradeCode,
+                         })
+                         .OfType<string>()))
         {
             if (text.Length > MaximumEvidenceTextLength)
             {
@@ -281,6 +293,12 @@ public sealed record AssetAnalysisEvidence
                                 .ThenBy(static file => file.PortableCommandAlias, StringComparer.Ordinal),
                         ],
                         ArchiveBinariesDependOnPath = installer.ArchiveBinariesDependOnPath,
+                        AppsAndFeaturesEntries = installer.AppsAndFeaturesEntries is { } entries
+                            ?
+                            [
+                                .. entries.Select(InstallerArpEntryEvidence.FromManifest),
+                            ]
+                            : null,
                     })
                     .OrderBy(static shape => shape.Architecture)
                     .ThenBy(static shape => shape.InstallerType)
@@ -380,10 +398,16 @@ public sealed record AssetAnalysisEvidence
             .Any(static group => group.Distinct(StringComparer.Ordinal).Skip(1).Any());
 
     private static string FormatShape(AnalyzedInstallerShape shape)
-        => string.Join(
+        => $"{string.Join(
             '|',
             shape.NestedInstallerFiles.Select(
-                static file => $"{file.RelativeFilePath}=>{file.PortableCommandAlias}"));
+                static file => $"{file.RelativeFilePath}=>{file.PortableCommandAlias}"))}"
+            + $"|arp:{string.Join(
+                '|',
+                (shape.AppsAndFeaturesEntries ?? [])
+                    .Select(static entry =>
+                        $"{entry.DisplayName};{entry.Publisher};{entry.DisplayVersion};"
+                        + $"{entry.ProductCode};{entry.UpgradeCode};{entry.InstallerType}"))}";
 }
 
 /// <summary>One correlated architecture/type/scope variant emitted for an analyzed asset.</summary>
@@ -402,6 +426,12 @@ public sealed record AnalyzedInstallerShape
     public ImmutableArray<PlannedNestedInstallerFile> NestedInstallerFiles { get; init; } = [];
 
     public bool? ArchiveBinariesDependOnPath { get; init; }
+
+    /// <summary>
+    /// ARP entries emitted by analysis. Null means the analyzer has no ARP evidence; an empty
+    /// array is explicit evidence that no entries were found.
+    /// </summary>
+    public ImmutableArray<InstallerArpEntryEvidence>? AppsAndFeaturesEntries { get; init; }
 }
 
 /// <summary>Architecture and dependency evidence tied to one bounded payload path.</summary>
