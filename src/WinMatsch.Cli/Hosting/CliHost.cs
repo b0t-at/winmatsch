@@ -23,6 +23,7 @@ public sealed class CliHost
     private readonly CliHostOptions _options;
     private readonly GlobalOptions _globalOptions;
     private readonly RootCommand _rootCommand;
+    private readonly AsyncLocal<ResultJsonRecorder?> _activeResultJson = new();
 
     public CliHost(CliHostOptions options)
     {
@@ -56,37 +57,117 @@ public sealed class CliHost
         ArgumentNullException.ThrowIfNull(args);
 
         ParseResult parseResult = _rootCommand.Parse(args);
-        string? unknownOption = FindUnknownOption(args, parseResult);
-        if (parseResult.Errors.Count > 0 || unknownOption is not null)
-        {
-            IEnumerable<string> messages = unknownOption is null
-                ? parseResult.Errors.Select(static error => CliRedactor.Redact(error.Message))
-                : [$"Unrecognized option '{CliRedactor.Redact(unknownOption)}'."];
-            foreach (string message in messages.Distinct(StringComparer.Ordinal))
-            {
-                _options.Error.WriteLine(message);
-            }
-
-            _options.Error.WriteLine("Run with '--help' for usage.");
-            return ExitCodes.UsageError;
-        }
-
-        var invocation = new InvocationConfiguration
-        {
-            Output = _options.Output,
-            Error = _options.Error,
-            EnableDefaultExceptionHandler = false,
-        };
-
+        string? resultJsonPath = parseResult.GetValue(_globalOptions.ResultJson);
+        var resultJson = new ResultJsonRecorder();
+        ResultJsonRecorder? previousResultJson = _activeResultJson.Value;
+        _activeResultJson.Value = resultJson;
         try
         {
-            return await parseResult.InvokeAsync(invocation, cancellationToken).ConfigureAwait(false);
+            int exitCode;
+            string? unknownOption = FindUnknownOption(args, parseResult);
+            if (parseResult.Errors.Count > 0 || unknownOption is not null)
+            {
+                string[] messages = unknownOption is null
+                    ? [.. parseResult.Errors.Select(static error => CliRedactor.Redact(error.Message))]
+                    : [$"Unrecognized option '{CliRedactor.Redact(unknownOption)}'."];
+                foreach (string message in messages.Distinct(StringComparer.Ordinal))
+                {
+                    _options.Error.WriteLine(message);
+                }
+
+                _options.Error.WriteLine("Run with '--help' for usage.");
+                resultJson.CaptureHostError(
+                    "USAGE_ERROR",
+                    string.Join(" ", messages.Distinct(StringComparer.Ordinal)));
+                exitCode = ExitCodes.UsageError;
+            }
+            else
+            {
+                var invocation = new InvocationConfiguration
+                {
+                    Output = _options.Output,
+                    Error = _options.Error,
+                    EnableDefaultExceptionHandler = false,
+                };
+
+                try
+                {
+                    exitCode = await parseResult.InvokeAsync(invocation, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    const string message = "The operation was cancelled.";
+                    _options.Error.WriteLine(message);
+                    resultJson.CaptureHostError("CANCELLED", message);
+                    exitCode = ExitCodes.Cancelled;
+                }
+            }
+
+            WriteResultJson(
+                resultJsonPath,
+                resultJson.Create(CommandName(parseResult), exitCode));
+            return exitCode;
         }
-        catch (OperationCanceledException)
+        finally
         {
-            _options.Error.WriteLine("The operation was cancelled.");
-            return ExitCodes.Cancelled;
+            _activeResultJson.Value = previousResultJson;
         }
+    }
+
+    private string? CommandName(ParseResult parseResult)
+    {
+        Command selected = parseResult.CommandResult.Command;
+        if (selected is RootCommand)
+        {
+            return null;
+        }
+
+        var path = new List<string>();
+        return TryCommandPath(_rootCommand, selected, path)
+            ? string.Join(' ', path)
+            : selected.Name;
+    }
+
+    private static bool TryCommandPath(
+        Command current,
+        Command selected,
+        List<string> path)
+    {
+        foreach (Command child in current.Subcommands)
+        {
+            path.Add(child.Name);
+            if (ReferenceEquals(child, selected)
+                || TryCommandPath(child, selected, path))
+            {
+                return true;
+            }
+
+            path.RemoveAt(path.Count - 1);
+        }
+
+        return false;
+    }
+
+    private void WriteResultJson(string? path, ResultJsonOutcome outcome)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+#pragma warning disable CA1031 // Result-file failures are diagnostic-only by contract.
+        try
+        {
+            ResultJsonWriter.Write(path, outcome);
+        }
+        catch (Exception exception)
+        {
+            _options.Error.WriteLine(
+                "Warning: failed to write result JSON: "
+                + CliRedactor.RedactUrl(exception.Message, redactAllQueryValues: true));
+        }
+#pragma warning restore CA1031
     }
 
     private string? FindUnknownOption(IReadOnlyList<string> args, ParseResult parseResult)
@@ -212,19 +293,25 @@ public sealed class CliHost
         {
             // FileNotFoundException (missing --config) is an IOException; unreadable
             // configuration files (locked, deny-read ACL) land here too.
-            error.WriteLine($"Configuration error: {CliRedactor.Redact(exception.Message)}");
+            string message = $"Configuration error: {CliRedactor.Redact(exception.Message)}";
+            error.WriteLine(message);
+            CaptureHostError("CONFIGURATION_ERROR", message);
             return ExitCodes.ConfigurationError;
         }
         catch (OperationCanceledException)
         {
-            error.WriteLine("The operation was cancelled.");
+            const string message = "The operation was cancelled.";
+            error.WriteLine(message);
+            CaptureHostError("CANCELLED", message);
             return ExitCodes.Cancelled;
         }
 #pragma warning disable CA1031 // Nothing may escape the host; unclassified failures map to exit code 1.
         catch (Exception exception)
 #pragma warning restore CA1031
         {
-            error.WriteLine($"Unexpected error: {CliRedactor.Redact(exception.Message)}");
+            string message = $"Unexpected error: {CliRedactor.Redact(exception.Message)}";
+            error.WriteLine(message);
+            CaptureHostError("UNEXPECTED_ERROR", message);
             return ExitCodes.UnexpectedError;
         }
 
@@ -234,22 +321,30 @@ public sealed class CliHost
         }
         catch (CliUsageException exception)
         {
-            error.WriteLine(CliRedactor.Redact(exception.Message));
+            string message = CliRedactor.Redact(exception.Message);
+            error.WriteLine(message);
+            CaptureHostError("USAGE_ERROR", message);
             return ExitCodes.UsageError;
         }
         catch (MissingInputException exception)
         {
-            error.WriteLine(CliRedactor.Redact(exception.Message));
+            string message = CliRedactor.Redact(exception.Message);
+            error.WriteLine(message);
+            CaptureHostError("MISSING_INPUT", message);
             return ExitCodes.MissingInput;
         }
         catch (CliOperationException exception)
         {
-            error.WriteLine(CliRedactor.Redact(exception.Message));
+            string message = CliRedactor.Redact(exception.Message);
+            error.WriteLine(message);
+            CaptureHostError("OPERATION_FAILED", message);
             return ExitCodes.OperationFailed;
         }
         catch (TokenStoreException exception)
         {
-            error.WriteLine(CliRedactor.Redact($"OS keyring failure: {exception.Message}"));
+            string message = CliRedactor.Redact($"OS keyring failure: {exception.Message}");
+            error.WriteLine(message);
+            CaptureHostError("KEYRING_FAILURE", message);
             return ExitCodes.OperationFailed;
         }
         catch (FormatException exception)
@@ -257,22 +352,31 @@ public sealed class CliHost
             // By repository convention FormatException always carries a bad user-supplied
             // value (configuration, environment, or option content) discovered lazily, such
             // as a malformed GITHUB_TOKEN resolved at handler time.
-            error.WriteLine($"Configuration error: {CliRedactor.Redact(exception.Message)}");
+            string message = $"Configuration error: {CliRedactor.Redact(exception.Message)}";
+            error.WriteLine(message);
+            CaptureHostError("CONFIGURATION_ERROR", message);
             return ExitCodes.ConfigurationError;
         }
         catch (OperationCanceledException)
         {
-            error.WriteLine("The operation was cancelled.");
+            const string message = "The operation was cancelled.";
+            error.WriteLine(message);
+            CaptureHostError("CANCELLED", message);
             return ExitCodes.Cancelled;
         }
 #pragma warning disable CA1031 // The host is the last-chance boundary mapping bugs to exit code 1.
         catch (Exception exception)
 #pragma warning restore CA1031
         {
-            error.WriteLine($"Unexpected error: {CliRedactor.Redact(exception.Message)}");
+            string message = $"Unexpected error: {CliRedactor.Redact(exception.Message)}";
+            error.WriteLine(message);
+            CaptureHostError("UNEXPECTED_ERROR", message);
             return ExitCodes.UnexpectedError;
         }
     }
+
+    private void CaptureHostError(string code, string message)
+        => _activeResultJson.Value?.CaptureHostError(code, message);
 
     private CommandContext CreateContext(ParseResult parseResult, CancellationToken cancellationToken)
     {
@@ -316,6 +420,7 @@ public sealed class CliHost
             Tokens = new TokenAccessor(tokenResolver, parseResult.GetValue(_globalOptions.Token)),
             GitHubOptions = gitHubOptions,
             CancellationToken = cancellationToken,
+            ResultJson = _activeResultJson.Value,
         };
     }
 

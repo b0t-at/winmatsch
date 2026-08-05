@@ -25,6 +25,7 @@ namespace WinMatsch.Cli.Hosting;
 /// <item><term><c>--no-color</c></term><description>Disable ANSI color (also honored via <c>NO_COLOR</c>).</description></item>
 /// <item><term><c>--config</c></term><description>Path to the user configuration file.</description></item>
 /// <item><term><c>--token</c></term><description>GitHub token; overrides <c>GITHUB_TOKEN</c> and the OS keyring.</description></item>
+/// <item><term><c>--result-json</c></term><description>Write the terminal outcome as JSON to a file.</description></item>
 /// </list>
 /// </summary>
 public sealed class GlobalOptions
@@ -119,6 +120,13 @@ public sealed class GlobalOptions
             CustomParser = ParseToken,
         };
 
+        ResultJson = new Option<string?>("--result-json")
+        {
+            Description = "Write one machine-readable terminal outcome object atomically to this file.",
+            HelpName = "path",
+            Recursive = true,
+        };
+
         GitHubApiUrl = new Option<Uri?>("--github-api-url")
         {
             Description = "GitHub REST API base URL. For GHES, use https://host/api/v3/.",
@@ -160,6 +168,8 @@ public sealed class GlobalOptions
 
     public Option<GitHubToken?> Token { get; }
 
+    public Option<string?> ResultJson { get; }
+
     public Option<Uri?> GitHubApiUrl { get; }
 
     public Option<Uri?> GitHubGraphQlUrl { get; }
@@ -179,6 +189,7 @@ public sealed class GlobalOptions
         NoColor,
         ConfigFile,
         Token,
+        ResultJson,
         GitHubApiUrl,
         GitHubGraphQlUrl,
     ];
