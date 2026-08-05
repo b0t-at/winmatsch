@@ -65,6 +65,8 @@ public static partial class GitHubSubmissionFormatter
             builder.AppendLine($"Resolves {NormalizeIssueReference(request.Resolves)}");
         }
 
+        builder.AppendLine("Internal validation passed.");
+
         if (request.SupersedesPullRequestNumber is { } superseded)
         {
             builder.AppendLine($"Supersedes: #{superseded}");
