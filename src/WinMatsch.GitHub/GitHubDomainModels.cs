@@ -189,7 +189,12 @@ public sealed record PullRequestChangedFile(
 
 public sealed record PullRequestChangedFilesSnapshot(
     PullRequestInfo PullRequest,
-    IReadOnlyList<PullRequestChangedFile> Files);
+    IReadOnlyList<PullRequestChangedFile> Files)
+{
+    public bool RequiresContentFallback { get; init; }
+
+    public bool RequiresRescreen { get; init; }
+}
 
 public sealed record CreatePullRequestRequest(
     string Title,

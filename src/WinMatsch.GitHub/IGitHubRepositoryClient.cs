@@ -206,6 +206,35 @@ public interface IGitHubRepositoryClient : IDisposable
                 pair.Value));
     }
 
+    public async Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
+        GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            IReadOnlySet<string> paths,
+            int maximumMatches,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentOutOfRangeException.ThrowIfNegative(maximumMatches);
+        IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot> snapshots =
+            await GetPullRequestChangedFilesSnapshotsBatchAsync(
+                repository,
+                pullRequests,
+                cancellationToken).ConfigureAwait(false);
+        int matchCount = snapshots.Count(pair =>
+            pair.Value.RequiresContentFallback
+            || pair.Value.Files.Any(file =>
+                paths.Contains(file.Path)
+                || (file.PreviousPath is not null && paths.Contains(file.PreviousPath))));
+        if (matchCount > maximumMatches)
+        {
+            throw new GitHubApiException(
+                $"Pull-request changed-file screening exceeded the safe match limit of {maximumMatches}.");
+        }
+
+        return snapshots;
+    }
+
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,
         long number,

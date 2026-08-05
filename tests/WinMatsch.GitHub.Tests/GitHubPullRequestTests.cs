@@ -202,6 +202,30 @@ public sealed class GitHubPullRequestTests
     }
 
     [Fact]
+    public async Task Pull_request_search_collapses_cross_page_duplicates()
+    {
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $"[{GitHubClientTestSupport.PullRequestJson(1, "One")}]",
+            headers:
+            [
+                ("Link", "<https://github.invalid/api/pr-page-2>; rel=\"next\""),
+            ]));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            $"[{GitHubClientTestSupport.PullRequestJson(1, "One")}," +
+            $"{GitHubClientTestSupport.PullRequestJson(2, "Two")}]"));
+
+        IReadOnlyList<PullRequestInfo> pullRequests = await GitHubClientTestSupport
+            .CreateClient(handler)
+            .SearchPullRequestsAsync(
+                _repository,
+                new PullRequestSearch(),
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal([1L, 2L], pullRequests.Select(static pullRequest => pullRequest.Number));
+    }
+
+    [Fact]
     public async Task Pull_request_head_branch_without_owner_is_rejected_before_transport()
     {
         var handler = new ScriptedHttpMessageHandler();
@@ -448,6 +472,88 @@ public sealed class GitHubPullRequestTests
         Assert.Equal(expected.NodeId, snapshot.PullRequest.NodeId);
         Assert.Equal(observed.HeadSha, snapshot.PullRequest.HeadSha);
         Assert.Single(snapshot.Files);
+    }
+
+    [Fact]
+    public async Task Path_screening_marks_null_graphql_files_for_content_fallback()
+    {
+        PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlUnavailableFilesJson(pullRequest, nullNode: false)));
+
+        IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot> snapshots =
+            await GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+                    _repository,
+                    [pullRequest],
+                    new HashSet<string>(StringComparer.Ordinal)
+                    {
+                        "manifests/e/Example/App/2.0.0/Example.App.yaml",
+                    },
+                    maximumMatches: 1,
+                    cancellationToken: TestContext.Current.CancellationToken);
+
+        PullRequestChangedFilesSnapshot snapshot = Assert.Single(snapshots).Value;
+        Assert.True(snapshot.RequiresContentFallback);
+        Assert.Empty(snapshot.Files);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Path_screening_excludes_null_graphql_node_confirmed_closed_by_rest()
+    {
+        PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlUnavailableFilesJson(pullRequest, nullNode: true)));
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GitHubClientTestSupport.PullRequestJson(
+                pullRequest.Number,
+                pullRequest.Title,
+                state: "closed",
+                headOwner: pullRequest.HeadOwner,
+                headBranch: pullRequest.HeadBranch,
+                headSha: pullRequest.HeadSha,
+                baseSha: pullRequest.BaseSha!)));
+
+        IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot> snapshots =
+            await GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+                    _repository,
+                    [pullRequest],
+                    new HashSet<string>(StringComparer.Ordinal)
+                    {
+                        "manifests/e/Example/App/2.0.0/Example.App.yaml",
+                    },
+                    maximumMatches: 1,
+                    cancellationToken: TestContext.Current.CancellationToken);
+
+        PullRequestChangedFilesSnapshot snapshot = Assert.Single(snapshots).Value;
+        Assert.Equal(PullRequestState.Closed, snapshot.PullRequest.State);
+        Assert.False(snapshot.RequiresContentFallback);
+        Assert.True(snapshot.RequiresRescreen);
+        Assert.Empty(snapshot.Files);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Files_only_batch_rejects_content_fallback_snapshot()
+    {
+        PullRequestInfo pullRequest = Assert.Single(CreatePullRequests(1));
+        var handler = new ScriptedHttpMessageHandler();
+        handler.Add(_ => GitHubClientTestSupport.Json(
+            GraphQlUnavailableFilesJson(pullRequest, nullNode: false)));
+
+        GitHubApiException exception = await Assert.ThrowsAsync<GitHubApiException>(
+            () => GitHubClientTestSupport.CreateClient(handler)
+                .GetPullRequestChangedFilesBatchAsync(
+                    _repository,
+                    [pullRequest],
+                    TestContext.Current.CancellationToken));
+
+        Assert.Contains("files-only batch", exception.Message, StringComparison.Ordinal);
+        Assert.Single(handler.Requests);
     }
 
     [Fact]
@@ -1170,6 +1276,45 @@ public sealed class GitHubPullRequestTests
         {
           "data": {
             "nodes": [{{nodes}}],
+            "rateLimit": {
+              "limit": 5000,
+              "remaining": 4999,
+              "used": 1,
+              "resetAt": "2026-01-01T01:00:00Z"
+            }
+          }
+        }
+        """;
+    }
+
+    private static string GraphQlUnavailableFilesJson(
+        PullRequestInfo pullRequest,
+        bool nullNode)
+    {
+        string node = nullNode
+            ? "null"
+            : $$"""
+              {
+                "id":"{{pullRequest.NodeId}}",
+                "number":{{pullRequest.Number}},
+                "title":"{{pullRequest.Title}}",
+                "state":"OPEN",
+                "isDraft":false,
+                "headRefName":"{{pullRequest.HeadBranch}}",
+                "headRefOid":"{{pullRequest.HeadSha}}",
+                "baseRefName":"{{pullRequest.BaseBranch}}",
+                "baseRefOid":"{{pullRequest.BaseSha}}",
+                "url":"{{pullRequest.WebUri}}",
+                "createdAt":"{{pullRequest.CreatedAt:O}}",
+                "updatedAt":"{{pullRequest.UpdatedAt:O}}",
+                "headRepository":{"nameWithOwner":"{{pullRequest.HeadRepository}}"},
+                "files":null
+              }
+              """;
+        return $$"""
+        {
+          "data": {
+            "nodes": [{{node}}],
             "rateLimit": {
               "limit": 5000,
               "remaining": 4999,

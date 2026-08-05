@@ -205,6 +205,20 @@ public sealed class RedactingGitHubRepositoryClient : IGitHubRepositoryClient
             pullRequests,
             cancellationToken);
 
+    public Task<IReadOnlyDictionary<long, PullRequestChangedFilesSnapshot>>
+        GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+            RepositoryCoordinates repository,
+            IReadOnlyList<PullRequestInfo> pullRequests,
+            IReadOnlySet<string> paths,
+            int maximumMatches,
+            CancellationToken cancellationToken = default)
+        => _inner.GetPullRequestChangedFilesPathScreeningSnapshotsBatchAsync(
+            repository,
+            pullRequests,
+            paths,
+            maximumMatches,
+            cancellationToken);
+
     public Task<PullRequestComment> CommentOnPullRequestAsync(
         RepositoryCoordinates repository,
         long number,

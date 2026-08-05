@@ -293,6 +293,148 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
         Assert.Equal("graphql", Assert.IsType<RateLimitInfo>(client.LastRateLimit).Resource);
     }
 
+    [Fact]
+    public async Task Large_upstream_path_screening_completes_more_than_sixteen_ambiguous_prs()
+    {
+        (
+            IReadOnlyList<PullRequestInfo> candidates,
+            bool associated,
+            int graphQlRequests,
+            int restCompletions,
+            int restPageRequests) =
+            await RunLargeUpstreamPathScreeningAsync(matchingPullRequestNumber: null);
+
+        Assert.Empty(candidates);
+        Assert.False(associated);
+        Assert.Equal(25, graphQlRequests);
+        Assert.Equal(26, restCompletions);
+        Assert.Equal(78, restPageRequests);
+    }
+
+    [Fact]
+    public async Task Large_upstream_path_screening_detects_duplicate_after_ambiguous_completion()
+    {
+        const long matchingPullRequestNumber = 17;
+
+        (
+            IReadOnlyList<PullRequestInfo> candidates,
+            bool associated,
+            int graphQlRequests,
+            int restCompletions,
+            int restPageRequests) =
+            await RunLargeUpstreamPathScreeningAsync(matchingPullRequestNumber);
+
+        Assert.Equal(matchingPullRequestNumber, Assert.Single(candidates).Number);
+        Assert.True(associated);
+        Assert.Equal(25, graphQlRequests);
+        Assert.Equal(26, restCompletions);
+        Assert.Equal(78, restPageRequests);
+    }
+
+    private static async Task<(
+        IReadOnlyList<PullRequestInfo> Candidates,
+        bool Associated,
+        int GraphQlRequests,
+        int RestCompletions,
+        int RestPageRequests)> RunLargeUpstreamPathScreeningAsync(
+        long? matchingPullRequestNumber)
+    {
+        const int openPullRequestCount = 1_201;
+        const int ambiguousPullRequestCount = 26;
+        PullRequestInfo[] pullRequests =
+        [
+            .. Enumerable.Range(1, openPullRequestCount).Select(PullRequest),
+        ];
+        var byNode = pullRequests.ToDictionary(
+            static pullRequest => pullRequest.NodeId,
+            StringComparer.Ordinal);
+        HashSet<long> ambiguousNumbers =
+        [
+            .. pullRequests
+                .Take(ambiguousPullRequestCount)
+                .Select(static pullRequest => pullRequest.Number),
+        ];
+        string targetPath = GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath;
+        int graphQlRequests = 0;
+        int restPageRequests = 0;
+        var restCompletionNumbers = new HashSet<long>();
+        var handler = new StubHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                graphQlRequests++;
+                string body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument document = JsonDocument.Parse(body);
+                PullRequestInfo[] batch =
+                [
+                    .. document.RootElement
+                        .GetProperty("variables")
+                        .GetProperty("ids")
+                        .EnumerateArray()
+                        .Select(id => byNode[id.GetString()!]),
+                ];
+                return Json(GraphQlPathScreeningJson(batch, ambiguousNumbers));
+            }
+
+            string[] segments = request.RequestUri!.AbsolutePath.Split(
+                '/',
+                StringSplitOptions.RemoveEmptyEntries);
+            long number = long.Parse(
+                segments[^1] == "files" ? segments[^2] : segments[^1],
+                System.Globalization.CultureInfo.InvariantCulture);
+            PullRequestInfo pullRequest = pullRequests[checked((int)number - 1)];
+            if (segments[^1] == "files")
+            {
+                restPageRequests++;
+                restCompletionNumbers.Add(number);
+                int page = ReadPage(request.RequestUri);
+                string path = number == matchingPullRequestNumber && page == 3
+                    ? targetPath
+                    : $"unrelated/completed/{number}/{page}.txt";
+                return page < 3
+                    ? Json(
+                        $$"""[{"filename":"{{path}}","status":"modified"}]""",
+                        ("Link",
+                            $"<https://ghe.invalid/api/v3/repos/upstream/repo/pulls/{number}" +
+                            $"/files?per_page=100&page={page + 1}>; rel=\"next\""))
+                    : Json($$"""[{"filename":"{{path}}","status":"modified"}]""");
+            }
+
+            return Json(RestPullRequestsJson([pullRequest])[1..^1]);
+        });
+        var options = new GitHubClientOptions
+        {
+            ApiBaseUri = new Uri("https://ghe.invalid/api/v3"),
+            GraphQlUri = new Uri("https://ghe.invalid/api/graphql"),
+            UserAgent = "winmatsch-large-screening-tests",
+            RetryBaseDelay = TimeSpan.Zero,
+            MaxTransientRetries = 0,
+        };
+        using var client = new GitHubRepositoryClient(
+            new HttpClient(handler),
+            "synthetic-token",
+            options);
+        var provider = new GitHubPullRequestManifestEvidenceProvider(client);
+        GitHubSubmissionPlan plan = GitHubLifecycleWorkflow.Plan(
+            GitHubLifecycleTestSupport.Request(WorkflowExecutionMode.Plan));
+
+        IReadOnlyList<PullRequestInfo> candidates = await provider.GetCandidatesAsync(
+            plan,
+            pullRequests,
+            CancellationToken.None);
+        bool associated = candidates.Count == 1
+            && (await provider.GetEvidenceAsync(
+                plan,
+                candidates[0],
+                CancellationToken.None)).IsAssociated;
+        return (
+            candidates,
+            associated,
+            graphQlRequests,
+            restCompletionNumbers.Count,
+            restPageRequests);
+    }
+
     private static (GitHubRepositoryClient Client, List<ObservedRequest> Requests) CreateClient(
         Queue<Func<HttpRequestMessage, HttpResponseMessage>> steps)
     {
@@ -505,6 +647,56 @@ public sealed class GitHubAuthoritativeEvidenceIntegrationTests
               "limit": 5000,
               "remaining": 4999,
               "used": 1,
+              "resetAt": "2026-01-01T01:00:00Z"
+            }
+          }
+        }
+        """;
+    }
+
+    private static string GraphQlPathScreeningJson(
+        IEnumerable<PullRequestInfo> pullRequests,
+        HashSet<long> ambiguousNumbers)
+    {
+        string nodes = string.Join(
+            ',',
+            pullRequests.Select(pullRequest =>
+            {
+                bool ambiguous = ambiguousNumbers.Contains(pullRequest.Number);
+                return $$"""
+                {
+                  "id":"{{pullRequest.NodeId}}",
+                  "number":{{pullRequest.Number}},
+                  "title":"{{pullRequest.Title}}",
+                  "state":"OPEN",
+                  "isDraft":false,
+                  "headRefName":"{{pullRequest.HeadBranch}}",
+                  "headRefOid":"{{pullRequest.HeadSha}}",
+                  "baseRefName":"{{pullRequest.BaseBranch}}",
+                  "baseRefOid":"{{pullRequest.BaseSha}}",
+                  "url":"{{pullRequest.WebUri}}",
+                  "createdAt":"{{pullRequest.CreatedAt:O}}",
+                  "updatedAt":"{{pullRequest.UpdatedAt:O}}",
+                  "headRepository":{"nameWithOwner":"{{pullRequest.HeadRepository}}"},
+                  "files":{
+                    "totalCount":{{(ambiguous ? 3 : 1)}},
+                    "nodes":[{
+                      "path":"unrelated/first/{{pullRequest.Number}}.txt",
+                      "changeType":"MODIFIED"
+                    }],
+                    "pageInfo":{"hasNextPage":{{ambiguous.ToString().ToLowerInvariant()}}}
+                  }
+                }
+                """;
+            }));
+        return $$"""
+        {
+          "data": {
+            "nodes": [{{nodes}}],
+            "rateLimit": {
+              "limit": 5000,
+              "remaining": 4900,
+              "used": 100,
               "resetAt": "2026-01-01T01:00:00Z"
             }
           }
