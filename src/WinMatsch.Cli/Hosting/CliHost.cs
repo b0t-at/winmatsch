@@ -57,7 +57,7 @@ public sealed class CliHost
         ArgumentNullException.ThrowIfNull(args);
 
         ParseResult parseResult = _rootCommand.Parse(args);
-        string? resultJsonPath = parseResult.GetValue(_globalOptions.ResultJson);
+        string? resultJsonPath = ResultJsonPath(parseResult);
         var resultJson = new ResultJsonRecorder();
         ResultJsonRecorder? previousResultJson = _activeResultJson.Value;
         _activeResultJson.Value = resultJson;
@@ -113,6 +113,14 @@ public sealed class CliHost
         {
             _activeResultJson.Value = previousResultJson;
         }
+    }
+
+    private string? ResultJsonPath(ParseResult parseResult)
+    {
+        OptionResult? result = parseResult.GetResult(_globalOptions.ResultJson);
+        return result is null || result.Tokens.Count == 0
+            ? null
+            : result.Tokens[0].Value;
     }
 
     private string? CommandName(ParseResult parseResult)

@@ -154,6 +154,20 @@ public sealed class ResultJsonTests
     }
 
     [Fact]
+    public async Task Missing_result_json_path_is_a_controlled_usage_error()
+    {
+        var harness = new CliHarness();
+        harness.Modules.Add(new ProbeModule());
+
+        CliRunResult result = await harness.RunAsync(["probe", "--result-json"]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Equal(string.Empty, result.StandardOutput);
+        Assert.Contains("--result-json", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain(" at WinMatsch.", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Result_file_failure_warns_without_changing_exit_code()
     {
         using var temporary = new TemporaryDirectory();
