@@ -67,29 +67,32 @@ internal static class ZipArchiveBounds
             }
 
             ReadOnlySpan<byte> eocd = tail.AsSpan(eocdIndex);
-            if (BinaryPrimitives.ReadUInt16LittleEndian(eocd[4..]) != 0
-                || BinaryPrimitives.ReadUInt16LittleEndian(eocd[6..]) != 0)
-            {
-                throw new InvalidDataException($"{description} uses a multi-disk ZIP, which is not supported.");
-            }
-
+            ushort diskNumber = BinaryPrimitives.ReadUInt16LittleEndian(eocd[4..]);
+            ushort directoryDiskNumber = BinaryPrimitives.ReadUInt16LittleEndian(eocd[6..]);
             ushort entriesOnDisk = BinaryPrimitives.ReadUInt16LittleEndian(eocd[8..]);
             ushort totalEntries = BinaryPrimitives.ReadUInt16LittleEndian(eocd[10..]);
-            if (entriesOnDisk != totalEntries)
-            {
-                throw Corrupt(description);
-            }
-
+            uint legacyDirectorySize = BinaryPrimitives.ReadUInt32LittleEndian(eocd[12..]);
+            uint legacyDirectoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(eocd[16..]);
             ulong entryCount = totalEntries;
-            ulong directorySize = BinaryPrimitives.ReadUInt32LittleEndian(eocd[12..]);
-            ulong directoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(eocd[16..]);
+            ulong directorySize = legacyDirectorySize;
+            ulong directoryOffset = legacyDirectoryOffset;
             long eocdOffset = stream.Length - tailLength + eocdIndex;
             ulong directoryEnd = (ulong)eocdOffset;
 
-            if (entryCount == ushort.MaxValue
-                || directorySize == uint.MaxValue
-                || directoryOffset == uint.MaxValue)
+            bool isZip64 = diskNumber == ushort.MaxValue
+                || directoryDiskNumber == ushort.MaxValue
+                || entriesOnDisk == ushort.MaxValue
+                || totalEntries == ushort.MaxValue
+                || legacyDirectorySize == uint.MaxValue
+                || legacyDirectoryOffset == uint.MaxValue;
+            if (isZip64)
             {
+                if (diskNumber is not 0 and not ushort.MaxValue
+                    || directoryDiskNumber is not 0 and not ushort.MaxValue)
+                {
+                    throw MultiDisk(description);
+                }
+
                 ReadZip64(
                     stream,
                     eocdOffset,
@@ -98,6 +101,25 @@ internal static class ZipArchiveBounds
                     out directorySize,
                     out directoryOffset,
                     out directoryEnd);
+                if (entriesOnDisk != ushort.MaxValue && entriesOnDisk != entryCount
+                    || totalEntries != ushort.MaxValue && totalEntries != entryCount
+                    || legacyDirectorySize != uint.MaxValue && legacyDirectorySize != directorySize
+                    || legacyDirectoryOffset != uint.MaxValue && legacyDirectoryOffset != directoryOffset)
+                {
+                    throw Corrupt(description);
+                }
+            }
+            else
+            {
+                if (diskNumber != 0 || directoryDiskNumber != 0)
+                {
+                    throw MultiDisk(description);
+                }
+
+                if (entriesOnDisk != totalEntries)
+                {
+                    throw Corrupt(description);
+                }
             }
 
             if (directoryOffset > directoryEnd
@@ -410,6 +432,9 @@ internal static class ZipArchiveBounds
 
     private static InvalidDataException Corrupt(string description)
         => new($"{description} is truncated or has an invalid ZIP directory.");
+
+    private static InvalidDataException MultiDisk(string description)
+        => new($"{description} uses a multi-disk ZIP, which is not supported.");
 }
 
 internal readonly record struct ZipCentralDirectoryEntry(
