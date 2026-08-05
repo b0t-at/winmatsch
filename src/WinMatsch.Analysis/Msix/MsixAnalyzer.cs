@@ -1,4 +1,3 @@
-using System.IO.Compression;
 using System.Xml;
 using WinMatsch.Core;
 
@@ -27,10 +26,13 @@ public sealed class MsixAnalyzer : IInstallerAnalyzer
     {
         ArgumentNullException.ThrowIfNull(stream);
         using IDisposable scope = AnalysisLimits.EnterArchive($"'{fileName}'");
-        using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+        using var archive = new SupportedZipArchive(
+            stream,
+            fileName,
+            $"'{fileName}'");
         AnalysisLimits.ValidateArchive(archive, $"'{fileName}'");
 
-        ZipArchiveEntry manifestEntry = archive.GetEntry(ManifestEntryName)
+        SupportedZipArchiveEntry manifestEntry = archive.GetEntry(ManifestEntryName)
             ?? throw new InvalidDataException($"'{fileName}' is not an MSIX/AppX package: it has no {ManifestEntryName} entry.");
         byte[] manifestBytes = MsixReader.ReadEntryBytes(manifestEntry);
         ParsedManifest manifest = ParseManifest(manifestBytes);

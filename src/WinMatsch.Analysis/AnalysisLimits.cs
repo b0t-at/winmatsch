@@ -61,6 +61,28 @@ internal static class AnalysisLimits
         ValidateExpandedSize(total, description);
     }
 
+    public static void ValidateArchive(SupportedZipArchive archive, string description)
+    {
+        ArgumentNullException.ThrowIfNull(archive);
+        long total = 0;
+        foreach (SupportedZipArchiveEntry entry in archive.Entries)
+        {
+            ValidateAllocation(entry.Length, $"{description} entry '{entry.FullName}'", MaxEntryBytes);
+            try
+            {
+                total = checked(total + entry.Length);
+            }
+            catch (OverflowException exception)
+            {
+                throw new AnalysisResourceLimitException(
+                    $"{description} declares an overflowing expanded size.",
+                    exception);
+            }
+        }
+
+        ValidateExpandedSize(total, description);
+    }
+
     public static byte[] ReadEntryBytes(ZipArchiveEntry entry, string description)
     {
         ValidateAllocation(entry.Length, description, MaxEntryBytes);

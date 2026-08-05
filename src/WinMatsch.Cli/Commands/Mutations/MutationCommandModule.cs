@@ -4,6 +4,7 @@ using System.CommandLine.Parsing;
 using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
+using WinMatsch.Analysis;
 using WinMatsch.Cli.Hosting;
 using WinMatsch.Cli.Output;
 using WinMatsch.Core;
@@ -836,7 +837,8 @@ public sealed class MutationCommandModule : ICommandModule
                 or UnauthorizedAccessException
                 or HttpRequestException
                 or DownloadException
-                or WorkflowOperationException)
+                or WorkflowOperationException
+                or ZipAnalysisException)
         {
             throw new CliOperationException(
                 $"Local mutation failed: {MutationRedact(exception.Message)}",
@@ -876,7 +878,8 @@ public sealed class MutationCommandModule : ICommandModule
                 or UnauthorizedAccessException
                 or HttpRequestException
                 or DownloadException
-                or WorkflowOperationException)
+                or WorkflowOperationException
+                or ZipAnalysisException)
         {
             throw new CliOperationException(
                 $"Verified local mutation failed: {MutationRedact(exception.Message)}",

@@ -23,6 +23,9 @@ minor versions may contain breaking changes).
   also validate when standard installer switches differ only by scope markers.
 - URL version continuity checks now preserve prerelease and build suffixes,
   avoiding false mapping conflicts when release paths contain the exact target version.
+- ZIP analysis now supports bounded Deflate64 payload reads and reports encrypted
+  or otherwise unsupported entries as the stable `ZIP004` domain diagnostic,
+  including the archive, entry path, and compression method, instead of crashing.
 
 ## [0.8.12] - 2026-08-05
 
