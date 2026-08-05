@@ -7,6 +7,8 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-08-05
+
 ### Added
 
 - A global `--result-json <path>` flag atomically writes a redacted,
@@ -219,7 +221,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.11...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.12...main
+[0.8.12]: https://github.com/b0t-at/winmatsch/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/b0t-at/winmatsch/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/b0t-at/winmatsch/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/b0t-at/winmatsch/compare/v0.8.8...v0.8.9
