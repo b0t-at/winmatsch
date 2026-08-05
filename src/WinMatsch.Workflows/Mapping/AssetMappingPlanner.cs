@@ -1346,7 +1346,8 @@ public static class AssetMappingPlanner
 
         if (evidence.Version is { } urlVersion
             && PackageVersion.TryCreate(urlVersion, out PackageVersion? parsed)
-            && !parsed!.IsEquivalentTo(resolution.Version!))
+            && !parsed!.IsEquivalentTo(resolution.Version!)
+            && !ContainsExactSuffixedTargetVersion(asset.DownloadUri, urlVersion, resolution.Version!.Value))
         {
             diagnostics.Add(new(
                 "MAP_VERSION_DISCONTINUITY",
@@ -1356,32 +1357,23 @@ public static class AssetMappingPlanner
         }
     }
 
+    private static bool ContainsExactSuffixedTargetVersion(
+        Uri uri,
+        string extractedVersion,
+        string targetVersion)
+    {
+        string normalizedExtracted = extractedVersion.Replace('_', '.');
+        string normalizedTarget = targetVersion.Replace('_', '.');
+        return normalizedTarget.Length > normalizedExtracted.Length
+            && normalizedTarget.StartsWith(normalizedExtracted, StringComparison.OrdinalIgnoreCase)
+            && normalizedTarget[normalizedExtracted.Length] is '-' or '+'
+            && PackageVersionResolver.ContainsPreferredUrlVersionToken(uri, targetVersion);
+    }
+
     private static bool ContainsVersionToken(Uri uri, string version)
     {
         string path = Uri.UnescapeDataString(uri.AbsolutePath);
-        string[] representations =
-        [
-            version,
-            version.Replace('.', '_'),
-            version.Replace('.', '-'),
-        ];
-        return representations.Any(candidate =>
-        {
-            int index = path.IndexOf(candidate, StringComparison.OrdinalIgnoreCase);
-            while (index >= 0)
-            {
-                int end = index + candidate.Length;
-                if ((index == 0 || !char.IsAsciiLetterOrDigit(path[index - 1]))
-                    && (end == path.Length || !char.IsAsciiLetterOrDigit(path[end])))
-                {
-                    return true;
-                }
-
-                index = path.IndexOf(candidate, index + 1, StringComparison.OrdinalIgnoreCase);
-            }
-
-            return false;
-        });
+        return PackageVersionResolver.ContainsVersionToken(path, version);
     }
 
     private static void AddMissingUrlOverrides(

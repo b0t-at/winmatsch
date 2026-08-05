@@ -52,6 +52,23 @@ public sealed record PackageVersionResolutionInput
 /// <summary>Resolves package versions by explicit, evidence-strength-ordered precedence.</summary>
 public static partial class PackageVersionResolver
 {
+    private const string UrlArtifactQualifierPattern =
+        @"(?:winarm64|win64a|aarch64|arm64|x86|x64|amd64|ia32|i386|i686|win32|win64|arm|win|windows|linux|macos|osx|neutral|universal|jre|jdk|java|runtime|setup|installer|install|portable|standalone|package)";
+    private const string UrlPrereleaseStartPattern =
+        @"(?:[0-9]+|(?:alpha|beta|preview|pre|rc|dev)[0-9]*)";
+    private const string UrlVersionIdentifierPattern =
+        @"(?!" + UrlArtifactQualifierPattern + @"(?![A-Za-z0-9]))[0-9A-Za-z]+";
+    private const string UrlVersionPattern =
+        @"(?<![A-Za-z0-9])v?(?<version>[0-9]+(?:[._][0-9]+)+(?:-" +
+        UrlPrereleaseStartPattern +
+        @"(?:[._-]" +
+        UrlVersionIdentifierPattern +
+        @")*)?(?:\+" +
+        UrlVersionIdentifierPattern +
+        @"(?:[._-]" +
+        UrlVersionIdentifierPattern +
+        @")*)?)(?![A-Za-z0-9])";
+
     public static PackageVersionResolution Resolve(PackageVersionResolutionInput input)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -236,28 +253,10 @@ public static partial class PackageVersionResolver
     public static UrlVersionEvidence AnalyzeUrlVersion(Uri uri)
     {
         ArgumentNullException.ThrowIfNull(uri);
-        string[] segments = uri.Segments
-            .Select(static segment => Uri.UnescapeDataString(segment).Trim('/'))
-            .Where(static segment => segment.Length > 0)
-            .ToArray();
-        string fileName = segments.LastOrDefault() ?? "";
-        string extension = Path.GetExtension(fileName);
-        if (extension.Length > 0)
-        {
-            fileName = fileName[..^extension.Length];
-        }
-
-        ImmutableArray<string> versions = FindContextualVersions(fileName);
-        if (versions.IsEmpty)
-        {
-            int download = Array.FindLastIndex(
-                segments,
-                static segment => string.Equals(segment, "download", StringComparison.OrdinalIgnoreCase));
-            if (download >= 0 && download + 1 < segments.Length)
-            {
-                versions = FindContextualVersions(segments[download + 1]);
-            }
-        }
+        string? source = FindUrlVersionSource(uri);
+        ImmutableArray<string> versions = source is null
+            ? []
+            : FindContextualVersions(source);
 
         if (versions.IsEmpty)
         {
@@ -283,6 +282,94 @@ public static partial class PackageVersionResolver
         return representatives.Count == 1
             ? new(representatives[0], false, [.. representatives])
             : new(null, representatives.Count > 1, [.. representatives]);
+    }
+
+    internal static bool ContainsPreferredUrlVersionToken(Uri uri, string version)
+    {
+        ArgumentNullException.ThrowIfNull(uri);
+        return FindUrlVersionSource(uri) is { } source
+            && ContainsVersionToken(source, version, rejectSuffixContinuation: true);
+    }
+
+    internal static bool ContainsVersionToken(
+        string value,
+        string version,
+        bool rejectSuffixContinuation = false)
+    {
+        string[] representations =
+        [
+            version,
+            version.Replace('.', '_'),
+            version.Replace('.', '-'),
+        ];
+        return representations.Any(candidate =>
+        {
+            int index = value.IndexOf(candidate, StringComparison.OrdinalIgnoreCase);
+            while (index >= 0)
+            {
+                int end = index + candidate.Length;
+                bool hasValidStartBoundary = index == 0
+                    || !char.IsAsciiLetterOrDigit(value[index - 1])
+                    || (value[index - 1] is 'v' or 'V'
+                        && (index == 1 || !char.IsAsciiLetterOrDigit(value[index - 2])));
+                if (hasValidStartBoundary
+                    && (end == value.Length || !char.IsAsciiLetterOrDigit(value[end]))
+                    && (!rejectSuffixContinuation
+                        || !HasVersionSuffixContinuation(value, end)))
+                {
+                    return true;
+                }
+
+                index = value.IndexOf(candidate, index + 1, StringComparison.OrdinalIgnoreCase);
+            }
+
+            return false;
+        });
+    }
+
+    private static bool HasVersionSuffixContinuation(string value, int end)
+    {
+        if (end >= value.Length || value[end] is not ('.' or '_' or '-'))
+        {
+            return false;
+        }
+
+        int tokenEnd = end + 1;
+        while (tokenEnd < value.Length && char.IsAsciiLetterOrDigit(value[tokenEnd]))
+        {
+            tokenEnd++;
+        }
+
+        string token = value[(end + 1)..tokenEnd];
+        return token.Length == 0 || !UrlArtifactQualifierRegex().IsMatch(token);
+    }
+
+    private static string? FindUrlVersionSource(Uri uri)
+    {
+        string[] segments = uri.Segments
+            .Select(static segment => Uri.UnescapeDataString(segment).Trim('/'))
+            .Where(static segment => segment.Length > 0)
+            .ToArray();
+        string fileName = segments.LastOrDefault() ?? "";
+        string extension = Path.GetExtension(fileName);
+        if (extension.Length > 0)
+        {
+            fileName = fileName[..^extension.Length];
+        }
+
+        if (!FindContextualVersions(fileName).IsEmpty)
+        {
+            return fileName;
+        }
+
+        int download = Array.FindLastIndex(
+            segments,
+            static segment => string.Equals(segment, "download", StringComparison.OrdinalIgnoreCase));
+        return download >= 0
+            && download + 1 < segments.Length
+            && !FindContextualVersions(segments[download + 1]).IsEmpty
+                ? segments[download + 1]
+                : null;
     }
 
     private static ImmutableArray<string> FindContextualVersions(string value)
@@ -508,10 +595,13 @@ public static partial class PackageVersionResolver
         return stripped.Length > 0;
     }
 
-    [GeneratedRegex(
-        @"(?<![A-Za-z0-9])v?(?<version>[0-9]+(?:[._][0-9]+)+(?:-(?:alpha|beta|preview|rc)[0-9]*)?)(?![A-Za-z0-9])",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(UrlVersionPattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex UrlVersionRegex();
+
+    [GeneratedRegex(
+        "^" + UrlArtifactQualifierPattern + "$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex UrlArtifactQualifierRegex();
 
     [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}(?:[T ].*)?$", RegexOptions.CultureInvariant)]
     private static partial Regex CalendarDateRegex();

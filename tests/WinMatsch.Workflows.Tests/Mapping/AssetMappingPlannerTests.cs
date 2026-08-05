@@ -951,17 +951,74 @@ public sealed class AssetMappingPlannerTests
         Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_VERSION_DISCONTINUITY");
     }
 
+    [Theory]
+    [InlineData("26.7.0-0", "v26.7.0-0")]
+    [InlineData("1.2.3-beta.1", "V1_2_3-BETA_1")]
+    [InlineData("1.2.3-rc2", "v1.2.3-rc2")]
+    [InlineData("1.2.3+build.5", "v1.2.3%2Bbuild.5")]
+    [InlineData("1.2.3-dev.4", "v1.2.3-dev.4")]
+    [InlineData("1.2.3-dev", "v1.2.3-dev_x64")]
+    public void Exact_suffixed_target_version_in_release_path_does_not_report_discontinuity(
+        string version,
+        string urlToken)
+    {
+        DiscoveredAsset asset = AtUrl(
+            Asset("Hoppscotch_win_x64.msi", InstallerType.Msi, Architecture.X64),
+            $"https://github.com/hoppscotch/releases/releases/download/{urlToken}/Hoppscotch_win_x64.msi");
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], version: version));
+
+        Assert.DoesNotContain(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code == "MAP_VERSION_DISCONTINUITY");
+    }
+
     [Fact]
-    public void Filename_version_mismatch_is_not_masked_by_release_path()
+    public void Different_release_path_version_still_reports_discontinuity()
+    {
+        DiscoveredAsset asset = AtUrl(
+            Asset("MRA.Installer.msi", InstallerType.Msi, Architecture.X64),
+            "https://github.com/jadquir/MRA/releases/download/0.111/MRA.Installer.msi");
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], version: "0.2"));
+
+        Assert.Contains(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code == "MAP_VERSION_DISCONTINUITY"
+                && diagnostic.Message.Contains("'0.111'", StringComparison.Ordinal)
+                && diagnostic.Message.Contains("'0.2'", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("v1.2.3-dev.4")]
+    [InlineData("v1.2.3-dev-4")]
+    public void Shorter_target_suffix_does_not_match_longer_url_suffix(string urlToken)
+    {
+        DiscoveredAsset asset = AtUrl(
+            Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64),
+            $"https://example.test/download/{urlToken}/tool-x64.exe");
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], version: "1.2.3-dev"));
+
+        Assert.Contains(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code == "MAP_VERSION_DISCONTINUITY");
+    }
+
+    [Theory]
+    [InlineData("2.0.0")]
+    [InlineData("2.0.0-beta.1")]
+    public void Filename_version_mismatch_is_not_masked_by_release_path(string version)
     {
         DiscoveredAsset asset = Asset("tool-1.5.0-x64.exe", InstallerType.Exe, Architecture.X64);
+        string url = $"https://example.test/download/{version}/tool-1.5.0-x64.exe";
         asset = asset with
         {
-            DownloadUri = new("https://example.test/download/2.0.0/tool-1.5.0-x64.exe"),
+            DownloadUri = new(url),
             Content = asset.Content! with
             {
-                InitialUrl = "https://example.test/download/2.0.0/tool-1.5.0-x64.exe",
-                FinalUrl = "https://example.test/download/2.0.0/tool-1.5.0-x64.exe",
+                InitialUrl = url,
+                FinalUrl = url,
             },
         };
         asset = asset with
@@ -972,7 +1029,7 @@ public sealed class AssetMappingPlannerTests
             },
         };
 
-        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], version: "2.0.0"));
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], version: version));
 
         Assert.False(plan.CanApply);
         Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_VERSION_DISCONTINUITY");
@@ -1774,6 +1831,21 @@ public sealed class AssetMappingPlannerTests
                     },
                 ],
             },
+        };
+    }
+
+    private static DiscoveredAsset AtUrl(DiscoveredAsset asset, string url)
+    {
+        Uri uri = new(url);
+        return asset with
+        {
+            DownloadUri = uri,
+            Content = asset.Content! with
+            {
+                InitialUrl = uri.AbsoluteUri,
+                FinalUrl = uri.AbsoluteUri,
+            },
+            Analysis = asset.Analysis! with { AnalyzedUrl = uri.AbsoluteUri },
         };
     }
 
