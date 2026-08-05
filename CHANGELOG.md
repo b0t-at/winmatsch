@@ -7,14 +7,21 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.16] - 2026-08-05
+
+### Fixed
+
+- ZIP analysis now safely defers rejection of irrelevant encrypted or unsupported
+  entries until an installer candidate is read, while required encrypted
+  installer content continues to fail closed with the `ZIP004` diagnostic.
+
 ## [0.8.15] - 2026-08-05
 
 ### Fixed
 
-- ZIP analysis now defers rejection of encrypted or unsupported entries until an
-  installer candidate is read. Irrelevant encrypted resources no longer block
-  valid archive analysis, while encrypted installer candidates continue to fail
-  closed with the `ZIP004` diagnostic.
+- ZIP analysis now hardens encrypted and unsupported ZIP entry handling while
+  preserving fail-closed `ZIP004` diagnostics for encrypted installer
+  candidates.
 
 ## [0.8.14] - 2026-08-05
 
@@ -269,7 +276,9 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.14...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.16...main
+[0.8.16]: https://github.com/b0t-at/winmatsch/compare/v0.8.15...v0.8.16
+[0.8.15]: https://github.com/b0t-at/winmatsch/compare/v0.8.14...v0.8.15
 [0.8.14]: https://github.com/b0t-at/winmatsch/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/b0t-at/winmatsch/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/b0t-at/winmatsch/compare/v0.8.11...v0.8.12
