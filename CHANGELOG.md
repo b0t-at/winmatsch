@@ -7,6 +7,15 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.15] - 2026-08-05
+
+### Fixed
+
+- ZIP analysis now defers rejection of encrypted or unsupported entries until an
+  installer candidate is read. Irrelevant encrypted resources no longer block
+  valid archive analysis, while encrypted installer candidates continue to fail
+  closed with the `ZIP004` diagnostic.
+
 ## [0.8.14] - 2026-08-05
 
 ### Fixed
