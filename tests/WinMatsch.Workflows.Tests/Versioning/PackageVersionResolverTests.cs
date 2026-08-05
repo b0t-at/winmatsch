@@ -123,6 +123,9 @@ public sealed class PackageVersionResolverTests
     [InlineData("https://example.test/tool-v1.2.3-portable-x64.exe", "1.2.3")]
     [InlineData("https://example.test/tool-v1.2.3-device-x64.exe", "1.2.3")]
     [InlineData("https://example.test/tool-v1.2.3-previewed-x64.exe", "1.2.3")]
+    [InlineData("https://example.test/tool-v1.2.3-rc1-qt6-x64.exe", "1.2.3-rc1")]
+    [InlineData("https://example.test/tool-v1.2.3-beta-gtk3-x64.exe", "1.2.3-beta")]
+    [InlineData("https://example.test/tool-v1.2.3-5-signed-x64.exe", "1.2.3-5")]
     public void Url_version_preserves_prerelease_and_build_suffixes(string url, string expected)
     {
         Assert.Equal(expected, PackageVersionResolver.ExtractUrlVersion(new Uri(url)));

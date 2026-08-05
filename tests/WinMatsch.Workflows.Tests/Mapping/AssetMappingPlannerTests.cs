@@ -973,6 +973,25 @@ public sealed class AssetMappingPlannerTests
             static diagnostic => diagnostic.Code == "MAP_VERSION_DISCONTINUITY");
     }
 
+    [Theory]
+    [InlineData("1.2.3-rc1", "v1.2.3-rc1-qt6")]
+    [InlineData("1.2.3-beta", "v1.2.3-beta-gtk3")]
+    [InlineData("1.2.3-5", "v1.2.3-5-signed")]
+    public void Prerelease_artifact_qualifier_does_not_report_discontinuity(
+        string version,
+        string urlToken)
+    {
+        DiscoveredAsset asset = AtUrl(
+            Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64),
+            $"https://example.test/download/{urlToken}/tool-x64.exe");
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], version: version));
+
+        Assert.DoesNotContain(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code == "MAP_VERSION_DISCONTINUITY");
+    }
+
     [Fact]
     public void Different_release_path_version_still_reports_discontinuity()
     {

@@ -54,15 +54,15 @@ public static partial class PackageVersionResolver
 {
     private const string UrlArtifactQualifierPattern =
         @"(?:winarm64|win64a|aarch64|arm64|x86|x64|amd64|ia32|i386|i686|win32|win64|arm|win|windows|linux|macos|osx|neutral|universal|jre|jdk|java|runtime|setup|installer|install|portable|standalone|package)";
-    private const string UrlPrereleaseStartPattern =
+    private const string UrlPrereleaseIdentifierPattern =
         @"(?:[0-9]+|(?:alpha|beta|preview|pre|rc|dev)[0-9]*)";
     private const string UrlVersionIdentifierPattern =
         @"(?!" + UrlArtifactQualifierPattern + @"(?![A-Za-z0-9]))[0-9A-Za-z]+";
     private const string UrlVersionPattern =
         @"(?<![A-Za-z0-9])v?(?<version>[0-9]+(?:[._][0-9]+)+(?:-" +
-        UrlPrereleaseStartPattern +
+        UrlPrereleaseIdentifierPattern +
         @"(?:[._-]" +
-        UrlVersionIdentifierPattern +
+        UrlPrereleaseIdentifierPattern +
         @")*)?(?:\+" +
         UrlVersionIdentifierPattern +
         @"(?:[._-]" +
