@@ -231,10 +231,15 @@ public sealed class WorkflowProductionCompositionTests
             downloader,
             new DirectWorkflowReleaseSource());
         string output = CreateDirectory();
-        var url = new Uri("https://example.test/setup.exe");
+        var previousUrl = new Uri("https://example.test/1.0.0/setup.exe");
+        var url = new Uri("https://example.test/2.0.0/setup.exe");
         try
         {
-            WritePrevious(output, scopedTwins: true);
+            WritePrevious(
+                output,
+                scopedTwins: true,
+                previousInstallerUrl: previousUrl.AbsoluteUri,
+                previousArchitecture: Architecture.X86);
 
             WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
             {
@@ -242,8 +247,60 @@ public sealed class WorkflowProductionCompositionTests
                 PackageIdentifier = new PackageIdentifier("Example.Composed"),
                 PreviousVersion = new PackageVersion("1.0.0"),
                 PackageVersion = "2.0.0",
-                AllowStableUrlContentChange = true,
+                Release = new(null, [url], []),
+            });
+
+            Assert.True(
+                result.Code == WorkflowResultCode.Succeeded,
+                string.Join(Environment.NewLine, result.Plan.Audit.Select(static entry => $"{entry.Code}: {entry.Message}")));
+            RawManifestDocument installer = Assert.Single(
+                result.Plan.AfterDocuments,
+                static document => document.RepositoryPath.EndsWith(".installer.yaml", StringComparison.Ordinal));
+            string yaml = Encoding.UTF8.GetString(installer.Content.AsSpan());
+            Assert.Contains("Custom: /CURRENTUSER", yaml, StringComparison.Ordinal);
+            Assert.Contains("Custom: /ALLUSERS", yaml, StringComparison.Ordinal);
+            Assert.Contains("DisplayName: User installation", yaml, StringComparison.Ordinal);
+            Assert.Contains("DisplayName: Machine installation", yaml, StringComparison.Ordinal);
+            Assert.Equal(2, yaml.Split($"InstallerUrl: {url.AbsoluteUri}", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Production_update_accepts_distinct_same_url_scope_overrides()
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+        });
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+            downloader,
+            new DirectWorkflowReleaseSource());
+        string output = CreateDirectory();
+        var previousUrl = new Uri("https://example.test/1.0.0/setup.exe");
+        var url = new Uri("https://example.test/2.0.0/setup.exe");
+        try
+        {
+            WritePrevious(output, scopedTwins: true, previousInstallerUrl: previousUrl.AbsoluteUri);
+
+            WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PreviousVersion = new PackageVersion("1.0.0"),
+                PackageVersion = "2.0.0",
                 Release = new(null, [url, url], []),
+                UrlOverrides =
+                [
+                    new(url, Architecture.X64, Scope.User, null),
+                    new(url, Architecture.X64, Scope.Machine, null),
+                ],
             });
 
             Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
@@ -253,6 +310,9 @@ public sealed class WorkflowProductionCompositionTests
             string yaml = Encoding.UTF8.GetString(installer.Content.AsSpan());
             Assert.Contains("Custom: /CURRENTUSER", yaml, StringComparison.Ordinal);
             Assert.Contains("Custom: /ALLUSERS", yaml, StringComparison.Ordinal);
+            Assert.Contains("DisplayName: User installation", yaml, StringComparison.Ordinal);
+            Assert.Contains("DisplayName: Machine installation", yaml, StringComparison.Ordinal);
+            Assert.Equal(2, yaml.Split($"InstallerUrl: {url.AbsoluteUri}", StringSplitOptions.None).Length - 1);
         }
         finally
         {
@@ -1941,7 +2001,9 @@ public sealed class WorkflowProductionCompositionTests
         string output,
         bool scopedTwins = false,
         bool staleDirectNestedState = false,
-        bool releaseAssetSiblings = false)
+        bool releaseAssetSiblings = false,
+        string previousInstallerUrl = "https://example.test/setup.exe",
+        Architecture previousArchitecture = Architecture.X64)
     {
         var identifier = new PackageIdentifier("Example.Composed");
         var version = new PackageVersion("1.0.0");
@@ -1962,8 +2024,8 @@ public sealed class WorkflowProductionCompositionTests
                 [
                     new Installer
                     {
-                        Architecture = Architecture.X64,
-                        InstallerUrl = "https://example.test/setup.exe",
+                        Architecture = previousArchitecture,
+                        InstallerUrl = previousInstallerUrl,
                         InstallerSha256 = new Sha256Hash(
                             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
                     },
@@ -1986,13 +2048,15 @@ public sealed class WorkflowProductionCompositionTests
             Installer first = Assert.Single(manifests.Installer.Installers!);
             first.Scope = Scope.User;
             first.InstallerSwitches = new InstallerSwitches { Custom = "/CURRENTUSER" };
+            first.AppsAndFeaturesEntries = [new AppsAndFeaturesEntry { DisplayName = "User installation" }];
             manifests.Installer.Installers.Add(new Installer
             {
-                Architecture = Architecture.X64,
+                Architecture = previousArchitecture,
                 Scope = Scope.Machine,
                 InstallerUrl = first.InstallerUrl,
                 InstallerSha256 = first.InstallerSha256,
                 InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" },
+                AppsAndFeaturesEntries = [new AppsAndFeaturesEntry { DisplayName = "Machine installation" }],
             });
         }
 

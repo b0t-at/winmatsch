@@ -16,6 +16,11 @@ minor versions may contain breaking changes).
   matching same-repository installer siblings from the target release before
   asking `MAP_REMOVED`. Completed mappings retain explicit audit provenance and
   pass through the normal download, analysis, hash, rule, and validation gates.
+- Updates now accept distinct same-URL architecture/scope overrides, inherit
+  intentional same-URL scope layouts from one resolved asset, and let a
+  qualified override absorb duplicate inferred candidates while preserving
+  each previous entry's switches and metadata. Same-URL user/machine twins
+  also validate when standard installer switches differ only by scope markers.
 
 ## [0.8.12] - 2026-08-05
 

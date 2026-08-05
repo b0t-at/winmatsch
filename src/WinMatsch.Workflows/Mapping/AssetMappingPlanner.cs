@@ -40,7 +40,7 @@ public static class AssetMappingPlanner
             .SelectMany(asset => BuildCandidates(asset, request, pack, diagnostics, questions))
             .ToArray();
 
-        AddMissingUrlOverrides(request, candidates, diagnostics, questions);
+        AddMissingUrlOverrides(request, diagnostics, questions);
         ApplySiblingCoverage(candidates, request.PreviousInstallers, diagnostics);
         DiagnoseContentIdentityConsistency(
             candidates,
@@ -549,17 +549,17 @@ public static class AssetMappingPlanner
         UrlOverride[] urlOverrides = request.UrlOverrides
             .Where(item => UriEquals(item.Url, asset.DownloadUri))
             .ToArray();
-        UrlOverride? urlOverride = urlOverrides.Length == 1 ? urlOverrides[0] : null;
-        if (urlOverrides.Length > 1)
+        bool ambiguousUrlOverrides = HasAmbiguousUrlOverrides(urlOverrides);
+        if (ambiguousUrlOverrides)
         {
             diagnostics.Add(new(
                 "URL_OVERRIDE_AMBIGUOUS",
                 AssetMappingDiagnosticSeverity.Error,
-                "Multiple explicit URL overrides target the same asset.",
+                "Explicit URL overrides for one asset have duplicate or conflicting qualifier tuples.",
                 asset.DownloadUri.AbsoluteUri));
             questions.Add(new(
                 "URL_OVERRIDE_AMBIGUOUS",
-                "Retain exactly one explicit URL override for this asset.",
+                "Retain distinct architecture and scope qualifier tuples for this asset.",
                 [],
                 asset.DownloadUri.AbsoluteUri));
         }
@@ -727,18 +727,119 @@ public static class AssetMappingPlanner
                     .Cast<AnalyzedInstallerShape?>(),
             ]
             : [null];
-        foreach (AnalyzedInstallerShape? shape in shapes)
+        if (ambiguousUrlOverrides)
         {
-            yield return BuildCandidateVariant(
-                asset,
-                shape,
-                urlOverride,
-                forced,
-                mappings,
-                diagnostics,
-                questions);
+            yield break;
+        }
+
+        UrlOverride?[] overrides = urlOverrides.Length == 0
+            ? [null]
+            : [.. urlOverrides.Cast<UrlOverride?>()];
+        foreach (UrlOverride? urlOverride in overrides)
+        {
+            Candidate[] variants =
+            [
+                .. shapes.Select(shape => BuildCandidateVariant(
+                    asset,
+                    shape,
+                    urlOverride,
+                    forced,
+                    mappings,
+                    diagnostics,
+                    questions)),
+            ];
+            IEnumerable<Candidate> selected = urlOverride is null
+                ? variants
+                : CollapseQualifiedVariants(variants, request.PreviousInstallers);
+            foreach (Candidate candidate in selected)
+            {
+                yield return candidate;
+            }
         }
     }
+
+    private static bool HasAmbiguousUrlOverrides(UrlOverride[] overrides)
+    {
+        if (overrides.Length <= 1)
+        {
+            return false;
+        }
+
+        bool hasDuplicateTuple = overrides
+            .GroupBy(static item => (item.Architecture, item.Scope))
+            .Any(static group => group.Count() > 1);
+        bool hasConflictingArchitecture = overrides
+            .GroupBy(static item => item.Scope)
+            .Any(group => group
+                .Select(static item => item.Architecture)
+                .Distinct()
+                .Count() > 1);
+        return hasDuplicateTuple || hasConflictingArchitecture;
+    }
+
+    private static IEnumerable<Candidate> CollapseQualifiedVariants(
+        IEnumerable<Candidate> variants,
+        ImmutableArray<PreviousInstallerEntry> previousInstallers)
+        => variants
+            .GroupBy(
+                static candidate =>
+                    (candidate.Architecture,
+                        candidate.Type,
+                        candidate.NestedType,
+                        candidate.Scope,
+                        candidate.InstallerLocale,
+                        candidate.DisplayVersion,
+                        candidate.Entry))
+            .SelectMany(group =>
+            {
+                Candidate[] ordered = group
+                    .OrderByDescending(candidate => PreviousLayoutMatchScore(candidate, previousInstallers))
+                    .ThenBy(static candidate => FormatNullableNestedShape(candidate.AnalyzedShape), StringComparer.Ordinal)
+                    .ToArray();
+                if (ordered.Length == 1
+                    || ordered
+                        .Select(static candidate => FormatNullableNestedShape(candidate.AnalyzedShape))
+                        .Distinct(StringComparer.Ordinal)
+                        .Count() == 1)
+                {
+                    return [ordered[0]];
+                }
+
+                int firstScore = PreviousLayoutMatchScore(ordered[0], previousInstallers);
+                int secondScore = PreviousLayoutMatchScore(ordered[1], previousInstallers);
+                return firstScore > secondScore
+                    ? [ordered[0]]
+                    : ordered;
+            });
+
+    private static int PreviousLayoutMatchScore(
+        Candidate candidate,
+        ImmutableArray<PreviousInstallerEntry> previousInstallers)
+        => previousInstallers
+            .Select(previous =>
+            {
+                int score = 0;
+                score += previous.Architecture == candidate.Architecture ? 16 : 0;
+                score += TypesCompatible(previous.InstallerType, candidate.Type) ? 8 : 0;
+                score += previous.NestedInstallerType == candidate.NestedType ? 4 : 0;
+                score += previous.Scope == candidate.Scope ? 2 : 0;
+                score += previous.InstallerLocale == candidate.InstallerLocale ? 1 : 0;
+                if (!previous.NestedInstallerFiles.IsEmpty
+                    && candidate.AnalyzedShape is { NestedInstallerFiles.IsEmpty: false } shape
+                    && previous.NestedInstallerFiles.SequenceEqual(shape.NestedInstallerFiles))
+                {
+                    score += 32;
+                }
+
+                return score;
+            })
+            .DefaultIfEmpty()
+            .Max();
+
+    private static string FormatNullableNestedShape(AnalyzedInstallerShape? shape)
+        => shape is null
+            ? ""
+            : FormatNestedShape(shape);
 
     private static Candidate BuildCandidateVariant(
         DiscoveredAsset asset,
@@ -1285,12 +1386,11 @@ public static class AssetMappingPlanner
 
     private static void AddMissingUrlOverrides(
         AssetMappingRequest request,
-        Candidate[] candidates,
         List<AssetMappingDiagnostic> diagnostics,
         List<AssetMappingQuestion> questions)
     {
         foreach (UrlOverride item in request.UrlOverrides.Where(
-                     item => candidates.All(candidate => !UriEquals(item.Url, candidate.Asset.DownloadUri))))
+                     item => request.Assets.All(asset => !UriEquals(item.Url, asset.DownloadUri))))
         {
             diagnostics.Add(new(
                 "URL_OVERRIDE_MISSING_EVIDENCE",
@@ -1448,8 +1548,10 @@ public static class AssetMappingPlanner
                      .Where(static group => group.Count() > 1))
         {
             PreviousInstallerEntry[] previousEntries = [.. group];
-            Candidate[] compatibleCandidates = candidates
+            Candidate[] sharedCandidates = candidates
                 .Where(static candidate => candidate.Entry is null)
+                .ToArray();
+            Candidate[] compatibleCandidates = sharedCandidates
                 .Where(candidate => previousEntries.Any(previous => IsCompatible(previous, candidate)))
                 .ToArray();
             IGrouping<string, Candidate>[] physicalAssets = compatibleCandidates

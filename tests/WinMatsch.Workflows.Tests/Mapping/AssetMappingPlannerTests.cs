@@ -1110,6 +1110,204 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
+    public void Distinct_same_url_scope_overrides_map_to_matching_previous_entries()
+    {
+        Uri oldShared = new("https://example.test/1.0.0/zero-install.exe");
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            Previous(0, oldShared.AbsoluteUri, Architecture.X86, InstallerType.Portable) with
+            {
+                Scope = Scope.User,
+            },
+            Previous(1, oldShared.AbsoluteUri, Architecture.X86, InstallerType.Portable) with
+            {
+                Scope = Scope.Machine,
+            },
+        ];
+        DiscoveredAsset asset = Asset("zero-install.exe", InstallerType.Portable, Architecture.X86);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], previous) with
+        {
+            UrlOverrides =
+            [
+                new(asset.DownloadUri, Architecture.X86, Scope.User, null),
+                new(asset.DownloadUri, Architecture.X86, Scope.Machine, null),
+            ],
+        });
+
+        Assert.True(plan.CanApply);
+        Assert.Collection(
+            plan.Decisions.OrderBy(static decision => decision.PreviousPosition),
+            decision =>
+            {
+                Assert.Equal(0, decision.PreviousPosition);
+                Assert.Equal(Scope.User, decision.Installer!.Scope);
+                Assert.Equal(asset.DownloadUri, decision.Installer.Url);
+            },
+            decision =>
+            {
+                Assert.Equal(1, decision.PreviousPosition);
+                Assert.Equal(Scope.Machine, decision.Installer!.Scope);
+                Assert.Equal(asset.DownloadUri, decision.Installer.Url);
+            });
+    }
+
+    [Fact]
+    public void Shared_url_scope_layout_is_inherited_from_one_plain_asset()
+    {
+        Uri oldShared = new("https://example.test/1.0.0/zero-install.exe");
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            Previous(0, oldShared.AbsoluteUri, Architecture.X86, InstallerType.Portable) with
+            {
+                Scope = Scope.User,
+            },
+            Previous(1, oldShared.AbsoluteUri, Architecture.X86, InstallerType.Portable) with
+            {
+                Scope = Scope.Machine,
+            },
+        ];
+        DiscoveredAsset asset = Asset("zero-install.exe", InstallerType.Portable, Architecture.X86);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], previous));
+
+        Assert.True(plan.CanApply);
+        Assert.Equal(
+            [Scope.User, Scope.Machine],
+            plan.Decisions.Select(static decision => decision.Installer!.Scope).Order());
+        Assert.All(plan.Decisions, decision => Assert.Equal(asset.DownloadUri, decision.Installer!.Url));
+    }
+
+    [Fact]
+    public void Duplicate_or_conflicting_same_url_override_tuples_remain_ambiguous()
+    {
+        DiscoveredAsset asset = Asset("zero-install.exe", InstallerType.Portable, Architecture.X86);
+        var x86User = new UrlOverride(asset.DownloadUri, Architecture.X86, Scope.User, null);
+        AssetMappingPlan duplicate = AssetMappingPlanner.CreatePlan(Request([asset]) with
+        {
+            UrlOverrides = [x86User, x86User],
+        });
+        AssetMappingPlan conflict = AssetMappingPlanner.CreatePlan(Request([asset]) with
+        {
+            UrlOverrides =
+            [
+                x86User,
+                new(asset.DownloadUri, Architecture.X64, Scope.User, null),
+            ],
+        });
+        AssetMappingPlan conflictingMetadata = AssetMappingPlanner.CreatePlan(Request([asset]) with
+        {
+            UrlOverrides =
+            [
+                x86User,
+                new(asset.DownloadUri, Architecture.X86, Scope.User, "2.0.0"),
+            ],
+        });
+
+        Assert.False(duplicate.CanApply);
+        Assert.Contains(
+            duplicate.Diagnostics,
+            static diagnostic => diagnostic.Code == "URL_OVERRIDE_AMBIGUOUS");
+        Assert.DoesNotContain(
+            duplicate.Diagnostics,
+            static diagnostic => diagnostic.Code == "URL_OVERRIDE_MISSING_EVIDENCE");
+        Assert.False(conflict.CanApply);
+        Assert.Contains(
+            conflict.Diagnostics,
+            static diagnostic => diagnostic.Code == "URL_OVERRIDE_AMBIGUOUS");
+        Assert.False(conflictingMetadata.CanApply);
+        Assert.Contains(
+            conflictingMetadata.Diagnostics,
+            static diagnostic => diagnostic.Code == "URL_OVERRIDE_AMBIGUOUS");
+    }
+
+    [Fact]
+    public void Qualified_override_absorbs_duplicate_inferred_shapes_for_plain_asset()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://example.test/1.0.0/F95Checker-Windows.zip",
+            Architecture.Neutral,
+            InstallerType.Zip) with
+        {
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new("F95Checker.exe", null)],
+        };
+        DiscoveredAsset asset = Asset(
+            "F95Checker-Windows.zip",
+            InstallerType.Zip,
+            Architecture.X64);
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                Format = DetectedInstallerFormat.Zip,
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Zip,
+                        NestedInstallerType = InstallerType.Portable,
+                        NestedInstallerFiles = [new("F95Checker.exe", null)],
+                    },
+                    new()
+                    {
+                        Architecture = Architecture.X64,
+                        InstallerType = InstallerType.Zip,
+                        NestedInstallerType = InstallerType.Portable,
+                        NestedInstallerFiles = [new("helper.exe", null)],
+                    },
+                ],
+                ArchiveEntries = ["F95Checker.exe", "helper.exe"],
+                NestedInstallerCandidates = ["F95Checker.exe", "helper.exe"],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], [previous]) with
+        {
+            UrlOverrides = [new(asset.DownloadUri, Architecture.Neutral, null, null)],
+        });
+
+        Assert.True(plan.CanApply);
+        AssetMappingDecision decision = Assert.Single(plan.Decisions);
+        Assert.Equal(Architecture.Neutral, decision.Installer!.Architecture);
+        Assert.Equal([new PlannedNestedInstallerFile("F95Checker.exe", null)], decision.Installer.NestedInstallerFiles);
+        Assert.DoesNotContain(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code == "MAP_DUPLICATE_INSTALLER_KEY");
+    }
+
+    [Fact]
+    public void Shared_url_layout_does_not_mask_incompatible_concrete_architecture()
+    {
+        Uri oldShared = new("https://example.test/1.0.0/zero-install.exe");
+        ImmutableArray<PreviousInstallerEntry> previous =
+        [
+            Previous(0, oldShared.AbsoluteUri, Architecture.X86, InstallerType.Portable) with
+            {
+                Scope = Scope.User,
+            },
+            Previous(1, oldShared.AbsoluteUri, Architecture.X86, InstallerType.Portable) with
+            {
+                Scope = Scope.Machine,
+            },
+        ];
+        DiscoveredAsset asset = Asset(
+            "zero-install.exe",
+            InstallerType.Portable,
+            Architecture.Arm64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], previous));
+
+        Assert.False(plan.CanApply);
+        Assert.All(
+            plan.Decisions.Where(static decision => decision.PreviousPosition is not null),
+            static decision => Assert.Null(decision.Installer));
+        Assert.Contains(plan.Diagnostics, static diagnostic => diagnostic.Code == "MAP_REMOVED");
+    }
+
+    [Fact]
     public void Entry_targeted_override_retires_other_shared_url_entry()
     {
         PackageIdentifier package = new("Vendor.Product");
