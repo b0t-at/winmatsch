@@ -258,15 +258,15 @@ internal static class ManifestSemanticValidator
             return false;
         }
 
-        Scope? firstMarker = ClassifyScopeSwitches(first);
-        Scope? secondMarker = ClassifyScopeSwitches(second);
-        return (firstMarker is null || firstMarker == first.Scope)
-            && (secondMarker is null || secondMarker == second.Scope)
-            && (firstMarker is not null || secondMarker is not null)
+        ScopeSwitchEvidence firstMarker = ClassifyScopeSwitches(first);
+        ScopeSwitchEvidence secondMarker = ClassifyScopeSwitches(second);
+        return ScopeEvidenceMatches(firstMarker, first.Scope.Value)
+            && ScopeEvidenceMatches(secondMarker, second.Scope.Value)
+            && (firstMarker != ScopeSwitchEvidence.None || secondMarker != ScopeSwitchEvidence.None)
             && WithoutScopeSwitches(first) == WithoutScopeSwitches(second);
     }
 
-    private static Scope? ClassifyScopeSwitches(InstallerSemantics semantics)
+    private static ScopeSwitchEvidence ClassifyScopeSwitches(InstallerSemantics semantics)
     {
         string[] values = SwitchValues(semantics)
             .Where(static value => !string.IsNullOrWhiteSpace(value))
@@ -274,8 +274,23 @@ internal static class ManifestSemanticValidator
             .ToArray();
         bool user = values.Any(value => _userScopeSwitchTokens.Any(token => ContainsSwitchToken(value, token)));
         bool machine = values.Any(value => _machineScopeSwitchTokens.Any(token => ContainsSwitchToken(value, token)));
-        return user == machine ? null : user ? Scope.User : Scope.Machine;
+        return (user, machine) switch
+        {
+            (false, false) => ScopeSwitchEvidence.None,
+            (true, false) => ScopeSwitchEvidence.User,
+            (false, true) => ScopeSwitchEvidence.Machine,
+            _ => ScopeSwitchEvidence.Conflicting,
+        };
     }
+
+    private static bool ScopeEvidenceMatches(ScopeSwitchEvidence evidence, Scope scope)
+        => evidence switch
+        {
+            ScopeSwitchEvidence.None => true,
+            ScopeSwitchEvidence.User => scope == Scope.User,
+            ScopeSwitchEvidence.Machine => scope == Scope.Machine,
+            _ => false,
+        };
 
     private static InstallerSemantics WithoutScopeSwitches(InstallerSemantics semantics)
         => semantics with
@@ -1088,6 +1103,14 @@ internal static class ManifestSemanticValidator
         string? Upgrade,
         string? Custom,
         string? Repair);
+
+    private enum ScopeSwitchEvidence
+    {
+        None,
+        User,
+        Machine,
+        Conflicting,
+    }
 
     private sealed record ComparableVersion(string Raw, PackageVersion? Parsed);
 
