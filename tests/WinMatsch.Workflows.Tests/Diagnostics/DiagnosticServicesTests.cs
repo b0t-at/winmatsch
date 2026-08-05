@@ -1,7 +1,9 @@
+using System.Collections.Immutable;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Diagnostics;
+using WinMatsch.Workflows.Operations;
 using Xunit;
 
 namespace WinMatsch.Workflows.Tests.Diagnostics;
@@ -146,6 +148,50 @@ public sealed class DiagnosticServicesTests
         Assert.Equal(["2.0.0", "2.0.0-rc"], result.Versions.Select(static value => value.Value));
         Assert.Equal(1, result.Skip);
         Assert.Equal(2, result.Limit);
+    }
+
+    [Fact]
+    public async Task Repository_source_skips_nested_version_directory_without_manifests()
+    {
+        PackageManifests manifests = CreateManifests();
+        var version = new PackageVersion("1.23.1");
+        manifests.Version.PackageVersion = version;
+        manifests.Installer.PackageVersion = version;
+        manifests.DefaultLocale.PackageVersion = version;
+        IReadOnlyDictionary<string, string> files = PackageManifestIO.SerializeFiles(manifests);
+        var client = new FakeGitHubRepositoryClient();
+        client.AddTree("root", Tree("manifests", "manifests-sha"));
+        client.AddTree("manifests-sha", Tree("e", "letter-sha"));
+        client.AddTree("letter-sha", Tree("Example", "publisher-sha"));
+        client.AddTree("publisher-sha", Tree("App", "package-sha"));
+        client.AddTree(
+            "package-sha",
+            Tree("2", "empty-v2"),
+            Tree("1.23.1", "v1.23.1"));
+        client.AddTree("empty-v2", Tree("2.0.0-alpha.1", "nested-version"));
+        client.AddTree(
+            "v1.23.1",
+            files.Keys.Select((name, index) => Blob(name, $"file-{index}")).ToArray());
+        string versionDirectory = ManifestPaths.GetVersionDirectory(
+            manifests.Version.PackageIdentifier!,
+            version);
+        foreach ((string name, string content) in files)
+        {
+            client.AddContent($"{versionDirectory}/{name}", content);
+        }
+
+        var source = new RepositoryManifestSnapshotSource(
+            new RepositoryDiagnosticService(client),
+            Repository);
+
+        ImmutableArray<PackageSnapshot> snapshots = await source.ListVersionsAsync(
+            ".",
+            manifests.Version.PackageIdentifier!,
+            CancellationToken.None);
+
+        PackageSnapshot snapshot = Assert.Single(snapshots);
+        Assert.Equal("1.23.1", snapshot.PackageVersion.Value);
+        Assert.True(snapshot.IsRemote);
     }
 
     private static RepositoryCoordinates Repository { get; } = new("owner", "repo");

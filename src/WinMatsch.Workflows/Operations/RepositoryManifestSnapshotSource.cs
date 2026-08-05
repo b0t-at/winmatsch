@@ -6,10 +6,15 @@ using WinMatsch.Workflows.Diagnostics;
 
 namespace WinMatsch.Workflows.Operations;
 
-public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
+public sealed class RepositoryManifestSnapshotSource :
+    IManifestSnapshotSource,
+    IManifestSnapshotSourceDiagnosticSource
 {
+    private const int LatestVersionCandidateLimit = 100;
     private readonly IRepositoryDiagnosticService _diagnostics;
     private readonly RepositoryCoordinates _repository;
+    private readonly Dictionary<(string Identifier, PackageVersion Version), string>
+        _missingDiagnostics = [];
     private readonly Dictionary<(string Identifier, PackageVersion Version), PackageSnapshot> _snapshots =
         [];
     private readonly HashSet<(string Identifier, PackageVersion Version)> _missing = [];
@@ -17,6 +22,8 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
     private readonly Dictionary<string, PackageVersion> _sourceVersions =
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, ImmutableArray<PackageSnapshot>> _versions =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _versionDiagnostics =
         new(StringComparer.Ordinal);
 
     public RepositoryManifestSnapshotSource(
@@ -52,7 +59,6 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
             return null;
         }
 
-        _sourceVersions[identifier] = packageVersion;
         try
         {
             PackageVersionResult result = await _diagnostics.GetPackageVersionAsync(
@@ -63,12 +69,14 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
                 cancellationToken).ConfigureAwait(false);
             PackageSnapshot snapshot = await CreateSnapshotAsync(result, cancellationToken)
                 .ConfigureAwait(false);
+            _sourceVersions[identifier] = packageVersion;
             _snapshots[(identifier, packageVersion)] = snapshot;
             return snapshot;
         }
-        catch (DiagnosticNotFoundException)
+        catch (DiagnosticNotFoundException exception)
         {
             _missing.Add((identifier, packageVersion));
+            _missingDiagnostics[(identifier, packageVersion)] = exception.Message;
             return null;
         }
     }
@@ -103,7 +111,7 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
                 _repository,
                 packageIdentifier,
                 skip: 0,
-                limit: 1,
+                limit: LatestVersionCandidateLimit,
                 cancellationToken).ConfigureAwait(false);
             if (versions.Versions.Count == 0)
             {
@@ -111,15 +119,32 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
                 return [];
             }
 
-            _sourceVersions[identifier] = versions.Versions[0];
-            PackageSnapshot? latest = await LoadAsync(
-                outputDirectory,
-                packageIdentifier,
-                versions.Versions[0],
-                cancellationToken).ConfigureAwait(false);
-            ImmutableArray<PackageSnapshot> resolved = latest is null ? [] : [latest];
-            _versions[identifier] = resolved;
-            return resolved;
+            foreach (PackageVersion candidate in versions.Versions)
+            {
+                PackageSnapshot? latest = await LoadAsync(
+                    outputDirectory,
+                    packageIdentifier,
+                    candidate,
+                    cancellationToken).ConfigureAwait(false);
+                if (latest is null)
+                {
+                    continue;
+                }
+
+                ImmutableArray<PackageSnapshot> resolved = [latest];
+                _versions[identifier] = resolved;
+                return resolved;
+            }
+
+            string candidates = string.Join(
+                ", ",
+                versions.Versions.Select(static version => version.Value));
+            _versionDiagnostics[identifier] =
+                $"Package '{identifier}' has {versions.Total} version directories, but none of "
+                + $"the {versions.Versions.Count} newest candidates checked contained a manifest "
+                + $"set. Candidates checked: {candidates}.";
+            _versions[identifier] = [];
+            return [];
         }
         catch (DiagnosticNotFoundException)
         {
@@ -127,6 +152,15 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
             return [];
         }
     }
+
+    string? IManifestSnapshotSourceDiagnosticSource.GetListVersionsDiagnostic(
+        PackageIdentifier packageIdentifier)
+        => _versionDiagnostics.GetValueOrDefault(packageIdentifier.Value);
+
+    string? IManifestSnapshotSourceDiagnosticSource.GetLoadDiagnostic(
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion)
+        => _missingDiagnostics.GetValueOrDefault((packageIdentifier.Value, packageVersion));
 
     private PackageVersion? GetSourceVersion(string packageIdentifier)
         => _sourceVersions.TryGetValue(packageIdentifier, out PackageVersion? sourceVersion)
@@ -185,7 +219,9 @@ public sealed class RepositoryManifestSnapshotSource : IManifestSnapshotSource
 
 public sealed class FallbackManifestSnapshotSource(
     IManifestSnapshotSource primary,
-    IManifestSnapshotSource fallback) : IManifestSnapshotSource
+    IManifestSnapshotSource fallback) :
+    IManifestSnapshotSource,
+    IManifestSnapshotSourceDiagnosticSource
 {
     public async Task<PackageSnapshot?> LoadAsync(
         string outputDirectory,
@@ -224,4 +260,19 @@ public sealed class FallbackManifestSnapshotSource(
             cancellationToken).ConfigureAwait(false);
         return [.. remote.OrderByDescending(static snapshot => snapshot.PackageVersion)];
     }
+
+    string? IManifestSnapshotSourceDiagnosticSource.GetListVersionsDiagnostic(
+        PackageIdentifier packageIdentifier)
+        => DiagnosticSource(fallback)?.GetListVersionsDiagnostic(packageIdentifier)
+            ?? DiagnosticSource(primary)?.GetListVersionsDiagnostic(packageIdentifier);
+
+    string? IManifestSnapshotSourceDiagnosticSource.GetLoadDiagnostic(
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion)
+        => DiagnosticSource(fallback)?.GetLoadDiagnostic(packageIdentifier, packageVersion)
+            ?? DiagnosticSource(primary)?.GetLoadDiagnostic(packageIdentifier, packageVersion);
+
+    private static IManifestSnapshotSourceDiagnosticSource? DiagnosticSource(
+        IManifestSnapshotSource source)
+        => source as IManifestSnapshotSourceDiagnosticSource;
 }

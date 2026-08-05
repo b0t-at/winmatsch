@@ -7,6 +7,12 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- Update source resolution now skips version directories that contain no manifest
+  set, falls back to the next valid source version, and reports the unusable
+  candidates when none can be loaded.
+
 ## [0.8.11] - 2026-08-05
 
 ### Fixed

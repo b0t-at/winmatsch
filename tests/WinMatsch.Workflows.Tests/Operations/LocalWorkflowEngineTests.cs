@@ -4,9 +4,11 @@ using WinMatsch.Analysis;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.Downloads;
+using WinMatsch.GitHub;
 using WinMatsch.Rules;
 using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Validation;
+using WinMatsch.Workflows.Diagnostics;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.Operations;
@@ -612,7 +614,9 @@ public sealed class LocalWorkflowEngineTests
             Documents = Documents(package, createdWith, lineEnding),
         };
         var source = new DictionarySnapshotSource(snapshot);
-        LocalWorkflowEngine engine = CreateEngine(source, new RecordingTransaction());
+        LocalWorkflowEngine engine = CreateEngine(
+            new FallbackManifestSnapshotSource(new DictionarySnapshotSource(), source),
+            new RecordingTransaction());
         DiscoveredAsset asset = Asset("1.0.0", "A");
 
         WorkflowOperationResult result = await engine.UpdateAsync(
@@ -646,6 +650,101 @@ public sealed class LocalWorkflowEngineTests
             result.Plan.Audit,
             static entry => entry.Code == "UPDATE_SOURCE_VERSION"
                 && entry.Message == "1.10");
+    }
+
+    [Fact]
+    public async Task Update_skips_empty_latest_repository_version_and_uses_next_candidate()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageVersionResult valid = RepositoryVersion(CreatePackage("1.23.1", "A"));
+        var diagnostics = new CandidateRepositoryDiagnosticService(
+            valid.Identifier,
+            [new PackageVersion("2"), valid.Version],
+            valid);
+        var source = new RepositoryManifestSnapshotSource(
+            diagnostics,
+            new RepositoryCoordinates("microsoft", "winget-pkgs"));
+        LocalWorkflowEngine engine = CreateEngine(
+            new FallbackManifestSnapshotSource(new DictionarySnapshotSource(), source),
+            new RecordingTransaction());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.24.0", "A")) with
+            {
+                PreviousVersion = null,
+                PackageVersion = "1.24.0",
+            });
+
+        Assert.NotEqual(WorkflowResultCode.InvalidRequest, result.Code);
+        Assert.NotEqual(WorkflowResultCode.NotFound, result.Code);
+        Assert.Contains(
+            result.Plan.Audit,
+            static entry => entry.Code == "UPDATE_SOURCE_VERSION"
+                && entry.Message == "1.23.1");
+        Assert.Equal(["2", "1.23.1"], diagnostics.RequestedVersions.Select(static value => value.Value));
+    }
+
+    [Fact]
+    public async Task Update_reports_version_directories_when_all_repository_candidates_are_empty()
+    {
+        using var temporary = new TemporaryDirectory();
+        var identifier = new PackageIdentifier("Example.App");
+        var diagnostics = new CandidateRepositoryDiagnosticService(
+            identifier,
+            [new PackageVersion("2"), new PackageVersion("1.23.1")]);
+        var source = new RepositoryManifestSnapshotSource(
+            diagnostics,
+            new RepositoryCoordinates("microsoft", "winget-pkgs"));
+        LocalWorkflowEngine engine = CreateEngine(
+            new FallbackManifestSnapshotSource(new DictionarySnapshotSource(), source),
+            new RecordingTransaction());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.24.0", "B")) with
+            {
+                PreviousVersion = null,
+                PackageVersion = "1.24.0",
+            });
+
+        Assert.Equal(WorkflowResultCode.InvalidRequest, result.Code);
+        string diagnostic = result.Plan.Validation.ToText();
+        Assert.Contains("has 2 version directories", diagnostic, StringComparison.Ordinal);
+        Assert.Contains(
+            "none of the 2 newest candidates checked contained a manifest set",
+            diagnostic,
+            StringComparison.Ordinal);
+        Assert.Contains("Candidates checked: 2, 1.23.1.", diagnostic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Update_with_explicit_empty_repository_version_reports_missing_manifests()
+    {
+        using var temporary = new TemporaryDirectory();
+        var identifier = new PackageIdentifier("Example.App");
+        var emptyVersion = new PackageVersion("2");
+        var diagnostics = new CandidateRepositoryDiagnosticService(
+            identifier,
+            [emptyVersion]);
+        var source = new RepositoryManifestSnapshotSource(
+            diagnostics,
+            new RepositoryCoordinates("microsoft", "winget-pkgs"),
+            emptyVersion);
+        LocalWorkflowEngine engine = CreateEngine(source, new RecordingTransaction());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.24.0", "B")) with
+            {
+                PreviousVersion = emptyVersion,
+                PackageVersion = "1.24.0",
+            });
+
+        Assert.Equal(WorkflowResultCode.NotFound, result.Code);
+        Assert.Contains(
+            "Package 'Example.App' version '2' contains no manifest files.",
+            result.Plan.Validation.ToText(),
+            StringComparison.Ordinal);
+        Assert.Equal(0, diagnostics.ListCalls);
+        Assert.Equal(["2"], diagnostics.RequestedVersions.Select(static value => value.Value));
     }
 
     [Fact]
@@ -1953,6 +2052,25 @@ public sealed class LocalWorkflowEngineTests
             Documents = Documents(package, null),
         };
 
+    private static PackageVersionResult RepositoryVersion(PackageManifests package)
+    {
+        string directory = ManifestPaths.GetVersionDirectory(
+            package.Version.PackageIdentifier!,
+            package.Version.PackageVersion!);
+        RepositoryManifestFile[] files =
+        [
+            .. PackageManifestIO.SerializeFiles(package).Select(pair =>
+                new RepositoryManifestFile($"{directory}/{pair.Key}", pair.Value)),
+        ];
+        return new(
+            new RepositoryCoordinates("microsoft", "winget-pkgs"),
+            "master",
+            package.Version.PackageIdentifier!,
+            package.Version.PackageVersion!,
+            Normalized: false,
+            files);
+    }
+
     private static ImmutableArray<RawManifestDocument> Documents(
         PackageManifests package,
         string? createdWith,
@@ -2041,6 +2159,56 @@ public sealed class LocalWorkflowEngineTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(
                 _snapshots.Where(snapshot => snapshot.PackageIdentifier.Equals(packageIdentifier)).ToImmutableArray());
+        }
+    }
+
+    private sealed class CandidateRepositoryDiagnosticService(
+        PackageIdentifier identifier,
+        IReadOnlyList<PackageVersion> candidates,
+        params PackageVersionResult[] available) : IRepositoryDiagnosticService
+    {
+        private readonly Dictionary<PackageVersion, PackageVersionResult> _available =
+            available.ToDictionary(static result => result.Version);
+
+        public int ListCalls { get; private set; }
+
+        public List<PackageVersion> RequestedVersions { get; } = [];
+
+        public Task<PackageVersionResult> GetPackageVersionAsync(
+            RepositoryCoordinates repository,
+            PackageIdentifier requestedIdentifier,
+            PackageVersion version,
+            bool normalize,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RequestedVersions.Add(version);
+            return requestedIdentifier.Equals(identifier)
+                && _available.TryGetValue(version, out PackageVersionResult? result)
+                    ? Task.FromResult(result)
+                    : Task.FromException<PackageVersionResult>(
+                        new DiagnosticNotFoundException(
+                            $"Package '{requestedIdentifier.Value}' version '{version.Value}' "
+                            + "contains no manifest files."));
+        }
+
+        public Task<PackageVersionsResult> ListVersionsAsync(
+            RepositoryCoordinates repository,
+            PackageIdentifier requestedIdentifier,
+            int skip,
+            int limit,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ListCalls++;
+            return Task.FromResult(new PackageVersionsResult(
+                repository,
+                "master",
+                requestedIdentifier,
+                skip,
+                limit,
+                candidates.Count,
+                [.. candidates.Skip(skip).Take(limit)]));
         }
     }
 

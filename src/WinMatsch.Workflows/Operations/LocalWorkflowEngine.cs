@@ -221,11 +221,14 @@ public sealed class LocalWorkflowEngine
         request = await ResolveUpdateSourceAsync(request, cancellationToken).ConfigureAwait(false);
         if (request.PreviousVersion is null)
         {
+            string message = (_manifests as IManifestSnapshotSourceDiagnosticSource)
+                    ?.GetListVersionsDiagnostic(request.PackageIdentifier)
+                ?? $"Package '{request.PackageIdentifier.Value}' has no source versions in the "
+                    + "output directory or configured manifest repository.";
             return InvalidResult(
                 "update",
                 request,
-                $"Package '{request.PackageIdentifier.Value}' has no source versions in the output "
-                + "directory or configured manifest repository.");
+                message);
         }
 
         return await ExecuteSnapshotOperationAsync(
@@ -272,11 +275,16 @@ public sealed class LocalWorkflowEngine
             cancellationToken).ConfigureAwait(false);
         if (previous is null)
         {
+            string? diagnostic = (_manifests as IManifestSnapshotSourceDiagnosticSource)
+                ?.GetLoadDiagnostic(
+                    request.PackageIdentifier,
+                    request.PreviousVersion!);
             return MissingResult(
                 "update",
                 request,
                 request.PackageIdentifier,
-                request.PreviousVersion!);
+                request.PreviousVersion!,
+                diagnostic);
         }
 
         if (previous.IsRemote && request.ReplacePreviousVersion)
@@ -2555,7 +2563,8 @@ public sealed class LocalWorkflowEngine
         string operation,
         WorkflowOperationRequest request,
         PackageIdentifier identifier,
-        PackageVersion version)
+        PackageVersion version,
+        string? diagnostic = null)
         => new()
         {
             Code = WorkflowResultCode.NotFound,
@@ -2569,7 +2578,10 @@ public sealed class LocalWorkflowEngine
                 [],
                 new ValidationReport(
                 [
-                    new("WF_NOT_FOUND", ValidationSeverity.Error, "The exact package version was not found."),
+                    new(
+                        "WF_NOT_FOUND",
+                        ValidationSeverity.Error,
+                        diagnostic ?? "The exact package version was not found."),
                 ]),
                 RuleRunSummary.Empty,
                 [],

@@ -42,6 +42,15 @@ public interface IManifestSnapshotSource
         CancellationToken cancellationToken);
 }
 
+internal interface IManifestSnapshotSourceDiagnosticSource
+{
+    public string? GetListVersionsDiagnostic(PackageIdentifier packageIdentifier);
+
+    public string? GetLoadDiagnostic(
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion);
+}
+
 public interface IWorkflowReleaseSource
 {
     public Task<ImmutableArray<DiscoveredAsset>> DiscoverAsync(
