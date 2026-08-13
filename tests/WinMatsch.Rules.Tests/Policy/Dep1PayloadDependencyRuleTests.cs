@@ -23,13 +23,15 @@ public class Dep1PayloadDependencyRuleTests
         DependencyEvidenceStatus status,
         Architecture? architecture = Architecture.X64,
         int? runtimeMajor = null,
-        string[]? signals = null) => new()
+        string[]? signals = null,
+        DotNetRuntimeFamily? runtimeFamily = null) => new()
         {
             PayloadPath = "app.exe",
             Kind = kind,
             Status = status,
             Architecture = architecture,
             RuntimeMajor = runtimeMajor,
+            RuntimeFamily = runtimeFamily,
             Signals = signals ?? [],
         };
 
@@ -145,9 +147,10 @@ public class Dep1PayloadDependencyRuleTests
     }
 
     [Fact]
-    public void Conflicting_dotnet_majors_are_never_stacked()
+    public void Stale_same_family_dotnet_pin_is_refreshed()
     {
-        // Detected .NET 8 next to a carried .NET 5 pin must not produce two mandatory runtimes.
+        // Detected .NET 8 next to a carried .NET 5 pin of the same family must replace the pin
+        // in place instead of stacking a second mandatory runtime.
         PackageManifests manifests = CreateManifests();
         manifests.Installer.Installers![0].Dependencies = new Dependencies
         {
@@ -160,7 +163,51 @@ public class Dep1PayloadDependencyRuleTests
         rule.Apply(context);
 
         PackageDependency dependency = Assert.Single(manifests.Installer.Installers![0].Dependencies!.PackageDependencies!);
-        Assert.Equal("Microsoft.DotNet.Runtime.5", dependency.PackageIdentifier?.Value);
+        Assert.Equal("Microsoft.DotNet.Runtime.8", dependency.PackageIdentifier?.Value);
+    }
+
+    [Fact]
+    public void Stale_root_dotnet_pin_is_refreshed_at_the_root()
+    {
+        // A pin the installer only inherits belongs to the root; rewriting it there keeps root
+        // and installer consistent instead of leaving a contradictory root value behind.
+        PackageManifests manifests = CreateManifests();
+        manifests.Installer.Dependencies = new Dependencies
+        {
+            PackageDependencies = [new PackageDependency { PackageIdentifier = new PackageIdentifier("Microsoft.DotNet.DesktopRuntime.8") }],
+        };
+        Dep1PayloadDependencyRule rule = CreateRule(Evidence(
+            DependencyEvidenceKind.DotNetRuntime,
+            DependencyEvidenceStatus.Detected,
+            runtimeMajor: 10,
+            runtimeFamily: DotNetRuntimeFamily.WindowsDesktop));
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        rule.Apply(context);
+
+        PackageDependency dependency = Assert.Single(manifests.Installer.Dependencies!.PackageDependencies!);
+        Assert.Equal("Microsoft.DotNet.DesktopRuntime.10", dependency.PackageIdentifier?.Value);
+        Assert.Null(manifests.Installer.Installers![0].Dependencies);
+    }
+
+    [Fact]
+    public void Conflicting_dotnet_families_are_never_stacked()
+    {
+        // Detected base .NET 8 next to a carried desktop runtime pin must not produce two
+        // mandatory runtimes; cross-family resolution needs review.
+        PackageManifests manifests = CreateManifests();
+        manifests.Installer.Installers![0].Dependencies = new Dependencies
+        {
+            PackageDependencies = [new PackageDependency { PackageIdentifier = new PackageIdentifier("Microsoft.DotNet.DesktopRuntime.5") }],
+        };
+        Dep1PayloadDependencyRule rule = CreateRule(
+            Evidence(DependencyEvidenceKind.DotNetRuntime, DependencyEvidenceStatus.Detected, runtimeMajor: 8));
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        rule.Apply(context);
+
+        PackageDependency dependency = Assert.Single(manifests.Installer.Installers![0].Dependencies!.PackageDependencies!);
+        Assert.Equal("Microsoft.DotNet.DesktopRuntime.5", dependency.PackageIdentifier?.Value);
         RuleFinding finding = Assert.Single(context.Findings);
         Assert.Contains("conflicts with the already-declared dependency", finding.Message, StringComparison.Ordinal);
     }

@@ -1,12 +1,14 @@
 using System.Collections.Immutable;
 using System.Runtime.ExceptionServices;
 using System.Text;
+using WinMatsch.Analysis.Dependencies;
 using WinMatsch.Cli.Commands.Diagnostics;
 using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.GitHub.Auth;
+using WinMatsch.Rules.Policy;
 using WinMatsch.Validation;
 using WinMatsch.Workflows;
 using WinMatsch.Workflows.Configuration;
@@ -805,6 +807,9 @@ internal sealed class ProductionMutationWorkflow(
                     StringComparison.Ordinal)),
             }),
         ];
+        PolicyEvidence policyEvidence = CarryDependencyAnalyses(
+            request.PolicyEvidence,
+            selectedSnapshots.Concat(completedSnapshots));
         return request switch
         {
             NewOperationRequest value => (value with
@@ -812,6 +817,7 @@ internal sealed class ProductionMutationWorkflow(
                 Assets = enriched,
                 InstallerArtifacts = installerArtifacts,
                 ArtifactDirectory = artifactDirectory,
+                PolicyEvidence = policyEvidence,
             }, artifactDirectory),
             UpdateOperationRequest value => (value with
             {
@@ -822,9 +828,43 @@ internal sealed class ProductionMutationWorkflow(
                 InstallerArtifacts = installerArtifacts,
                 ArtifactDirectory = artifactDirectory,
                 UsePreparedArtifactDirectory = true,
+                PolicyEvidence = policyEvidence,
             }, artifactDirectory),
             _ => (request, artifactDirectory),
         };
+    }
+
+    // Artifacts acquired here are not re-acquired by the engine, so the payload dependency
+    // analysis produced during download would be lost unless it travels with the request.
+    private static PolicyEvidence CarryDependencyAnalyses(
+        PolicyEvidence supplied,
+        IEnumerable<ArtifactSnapshot> snapshots)
+    {
+        var analyses = new Dictionary<string, PayloadDependencyAnalysis>(
+            supplied.DependencyAnalyses,
+            StringComparer.OrdinalIgnoreCase);
+        foreach (ArtifactSnapshot snapshot in snapshots)
+        {
+            if (snapshot.DependencyAnalysis is not null)
+            {
+                analyses[snapshot.Asset.DownloadUri.AbsoluteUri] = snapshot.DependencyAnalysis;
+            }
+        }
+
+        return analyses.Count == supplied.DependencyAnalyses.Count
+            ? supplied
+            : new PolicyEvidence
+            {
+                HttpsUpgradeConfirmations = supplied.HttpsUpgradeConfirmations,
+                ConfirmedUrls = supplied.ConfirmedUrls,
+                ExistingDisplayVersions = supplied.ExistingDisplayVersions,
+                DependencyAnalyses = analyses,
+                InstallerScopes = supplied.InstallerScopes,
+                SiblingImportUrls = supplied.SiblingImportUrls,
+                PipelineLogExcerpts = supplied.PipelineLogExcerpts,
+                SchemaHeaderComments = supplied.SchemaHeaderComments,
+                ReleaseDate = supplied.ReleaseDate,
+            };
     }
 
     private static string DefaultCacheDirectory()

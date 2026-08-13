@@ -8,6 +8,23 @@ public enum DependencyEvidenceKind
     VisualCppRuntime,
     DotNetRuntime,
 }
+
+/// <summary>
+/// The shared framework a .NET runtime configuration requests. The value selects the WinGet
+/// runtime package family; when several frameworks are declared the most specific one wins
+/// (a WPF/WinForms app also lists <c>Microsoft.NETCore.App</c>).
+/// </summary>
+public enum DotNetRuntimeFamily
+{
+    /// <summary>Only <c>Microsoft.NETCore.App</c>: the base runtime.</summary>
+    Base,
+
+    /// <summary><c>Microsoft.AspNetCore.App</c>.</summary>
+    AspNetCore,
+
+    /// <summary><c>Microsoft.WindowsDesktop.App</c>: the desktop runtime.</summary>
+    WindowsDesktop,
+}
 /// <summary>
 /// How strongly payload metadata supports a runtime dependency. These values describe evidence,
 /// not policy: callers must not treat <see cref="Inferred"/> or <see cref="Ambiguous"/> as a
@@ -49,6 +66,12 @@ public sealed class DependencyEvidence
 
     /// <summary>The .NET runtime major when metadata identifies one; null for VC++ evidence.</summary>
     public int? RuntimeMajor { get; init; }
+
+    /// <summary>
+    /// The shared framework the .NET runtime configuration requests, or null when no runtime
+    /// configuration was read.
+    /// </summary>
+    public DotNetRuntimeFamily? RuntimeFamily { get; init; }
 
     /// <summary>Normalized metadata signals supporting the status.</summary>
     public IReadOnlyList<string> Signals

@@ -112,7 +112,7 @@ public sealed partial class PayloadDependencyAnalyzer
             : $"outer-stub-only:{format}";
         var evidence = new List<DependencyEvidence>(CreatePeEvidence(
             payload,
-            runtimeConfig: null,
+            runtimeConfig: payloadIsDirect ? ReadBundledRuntimeConfig(stream, payloadPath) : null,
             nearbyHostFxr: null,
             allowAbsent: payloadIsDirect,
             additionalSignal: outerSignal));
@@ -137,6 +137,16 @@ public sealed partial class PayloadDependencyAnalyzer
         }
 
         return new PayloadDependencyAnalysis(evidence, diagnostics, isComplete);
+    }
+
+    private RuntimeConfigPayload? ReadBundledRuntimeConfig(Stream stream, string payloadPath)
+    {
+        byte[]? content = SingleFileBundleReader.TryReadRuntimeConfig(
+            stream,
+            _options.MaximumRuntimeConfigBytes);
+        return content is null
+            ? null
+            : new RuntimeConfigPayload($"{payloadPath}!bundle{RuntimeConfigSuffix}", ParseRuntimeConfig(content));
     }
 
     private static bool AddInnoPayloadEvidence(
@@ -482,6 +492,7 @@ public sealed partial class PayloadDependencyAnalyzer
             Kind = DependencyEvidenceKind.DotNetRuntime,
             Status = dotNetStatus,
             RuntimeMajor = runtimeMajor,
+            RuntimeFamily = runtime.Family,
             Signals = runtimeSignals,
         };
 
@@ -537,6 +548,7 @@ public sealed partial class PayloadDependencyAnalyzer
                 ? DependencyEvidenceStatus.Absent
                 : DependencyEvidenceStatus.Ambiguous,
             RuntimeMajor = inspection.RuntimeMajor,
+            RuntimeFamily = inspection.Family,
             Signals = inspection.Signals,
         };
     }
@@ -554,8 +566,9 @@ public sealed partial class PayloadDependencyAnalyzer
 
             var majors = new HashSet<int>();
             var signals = new List<string>();
-            AddFrameworkVersion(runtimeOptions, "framework", majors, signals);
-            AddFrameworkVersions(runtimeOptions, "frameworks", majors, signals);
+            var frameworks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddFrameworkVersion(runtimeOptions, "framework", majors, signals, frameworks);
+            AddFrameworkVersions(runtimeOptions, "frameworks", majors, signals, frameworks);
 
             if (signals.Any(static signal => signal.StartsWith(
                     "runtimeconfig:invalid-framework-version:",
@@ -575,7 +588,8 @@ public sealed partial class PayloadDependencyAnalyzer
                 return new RuntimeConfigInspection(
                     DependencyEvidenceStatus.Detected,
                     majors.Single(),
-                    signals);
+                    signals,
+                    ResolveFamily(frameworks));
             }
 
             if (runtimeOptions.TryGetProperty("tfm", out JsonElement tfmElement)
@@ -598,16 +612,24 @@ public sealed partial class PayloadDependencyAnalyzer
         }
     }
 
+    private static DotNetRuntimeFamily ResolveFamily(HashSet<string> frameworks)
+        => frameworks.Contains("Microsoft.WindowsDesktop.App")
+            ? DotNetRuntimeFamily.WindowsDesktop
+            : frameworks.Contains("Microsoft.AspNetCore.App")
+                ? DotNetRuntimeFamily.AspNetCore
+                : DotNetRuntimeFamily.Base;
+
     private static void AddFrameworkVersion(
         JsonElement runtimeOptions,
         string propertyName,
         HashSet<int> majors,
-        List<string> signals)
+        List<string> signals,
+        HashSet<string> frameworks)
     {
         if (runtimeOptions.TryGetProperty(propertyName, out JsonElement framework)
             && framework.ValueKind == JsonValueKind.Object)
         {
-            AddFramework(framework, majors, signals);
+            AddFramework(framework, majors, signals, frameworks);
         }
     }
 
@@ -615,19 +637,20 @@ public sealed partial class PayloadDependencyAnalyzer
         JsonElement runtimeOptions,
         string propertyName,
         HashSet<int> majors,
-        List<string> signals)
+        List<string> signals,
+        HashSet<string> frameworks)
     {
-        if (!runtimeOptions.TryGetProperty(propertyName, out JsonElement frameworks)
-            || frameworks.ValueKind != JsonValueKind.Array)
+        if (!runtimeOptions.TryGetProperty(propertyName, out JsonElement frameworksElement)
+            || frameworksElement.ValueKind != JsonValueKind.Array)
         {
             return;
         }
 
-        foreach (JsonElement framework in frameworks.EnumerateArray())
+        foreach (JsonElement framework in frameworksElement.EnumerateArray())
         {
             if (framework.ValueKind == JsonValueKind.Object)
             {
-                AddFramework(framework, majors, signals);
+                AddFramework(framework, majors, signals, frameworks);
             }
         }
     }
@@ -635,7 +658,8 @@ public sealed partial class PayloadDependencyAnalyzer
     private static void AddFramework(
         JsonElement framework,
         HashSet<int> majors,
-        List<string> signals)
+        List<string> signals,
+        HashSet<string> frameworks)
     {
         string? name = framework.TryGetProperty("name", out JsonElement nameElement)
             && nameElement.ValueKind == JsonValueKind.String
@@ -653,6 +677,11 @@ public sealed partial class PayloadDependencyAnalyzer
         }
 
         majors.Add(major);
+        if (name is not null)
+        {
+            frameworks.Add(name);
+        }
+
         signals.Add($"runtimeconfig:framework={name ?? "unknown"}@{version}");
     }
 
@@ -1014,7 +1043,8 @@ public sealed partial class PayloadDependencyAnalyzer
     private sealed record RuntimeConfigInspection(
         DependencyEvidenceStatus Status,
         int? RuntimeMajor,
-        IReadOnlyList<string> Signals)
+        IReadOnlyList<string> Signals,
+        DotNetRuntimeFamily? Family = null)
     {
         public static RuntimeConfigInspection Absent { get; } =
             new(DependencyEvidenceStatus.Absent, null, []);

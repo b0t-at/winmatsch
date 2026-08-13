@@ -7,6 +7,7 @@ using WinMatsch.Downloads;
 using WinMatsch.GitHub;
 using WinMatsch.Rules;
 using WinMatsch.Rules.OverridePacks;
+using WinMatsch.Rules.Policy;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Diagnostics;
 using WinMatsch.Workflows.Discovery;
@@ -253,6 +254,72 @@ public sealed class LocalWorkflowEngineTests
         Assert.True(preflight.FilesPresentAtVerifiedBoundary);
         Assert.Equal(6, processor.AcquiredUrls.Count);
         Assert.Equal(3, Directory.EnumerateFiles(preparedArtifacts).Count());
+    }
+
+    [Fact]
+    public async Task Release_date_falls_back_to_the_download_last_modified_header()
+    {
+        // A plain installer URL belongs to no discoverable release, so the Last-Modified header
+        // observed while downloading is the only publication evidence META-5 can recompute from.
+        using var temporary = new TemporaryDirectory();
+        PackageManifests previous = CreateContinuityPackage();
+        previous.Installer.Installers = [previous.Installer.Installers![0]];
+        previous.Installer.ReleaseDate = new DateOnly(2024, 1, 1);
+        var runner = new CapturingRuleRunner();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            runner,
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            clock: new FixedClock());
+        DiscoveredAsset selected = ContinuityAsset(
+            "VCMI-Windows-x64.exe",
+            Architecture.X64,
+            withEvidence: true) with
+        {
+            ReleasePublishedAt = null,
+        };
+        string preparedArtifacts = Path.Combine(temporary.Path, "prepared-artifacts");
+        Directory.CreateDirectory(preparedArtifacts);
+        string selectedPath = Path.Combine(preparedArtifacts, selected.AssetName);
+        await File.WriteAllBytesAsync(selectedPath, "installer"u8.ToArray());
+        var download = new DownloadResult
+        {
+            FilePath = selectedPath,
+            FileName = selected.AssetName,
+            Sha256 = selected.Content!.Identity.Sha256,
+            SizeInBytes = selected.Content.Identity.SizeInBytes,
+            RetrievedAt = selected.Content.RetrievedAt,
+            InitialUrl = selected.DownloadUri.AbsoluteUri,
+            FinalUrl = selected.DownloadUri.AbsoluteUri,
+            LastModified = new DateTimeOffset(2026, 8, 11, 13, 34, 34, TimeSpan.Zero),
+        };
+        var request = new UpdateOperationRequest
+        {
+            OutputDirectory = temporary.Path,
+            PackageIdentifier = new PackageIdentifier("vcmi.vcmi"),
+            PreviousVersion = new PackageVersion("1.7.3"),
+            PackageVersion = "1.7.4",
+            Assets = [selected],
+            Release = new(null, [selected.DownloadUri], []),
+            NetworkValidationMode = NetworkValidationMode.Skip,
+            ArtifactDirectory = preparedArtifacts,
+            UsePreparedArtifactDirectory = true,
+            InstallerArtifacts = [new(selected.DownloadUri.AbsoluteUri, download)],
+        };
+
+        WorkflowOperationResult result = await engine.UpdateAsync(request);
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.Equal(new DateOnly(2026, 8, 11), runner.Evidence?.ReleaseDate);
+        RawManifestDocument installerDocument = Assert.Single(
+            result.Plan.AfterDocuments,
+            static document => document.RepositoryPath.EndsWith(".installer.yaml", StringComparison.Ordinal));
+        InstallerManifest installer = ManifestYamlReader.ReadInstaller(
+            System.Text.Encoding.UTF8.GetString(installerDocument.Content.AsSpan()));
+
+        // The engine clears the carried value so META-5 owns the recomputation.
+        Assert.Null(installer.ReleaseDate);
     }
 
     [Fact]
@@ -2633,6 +2700,17 @@ public sealed class LocalWorkflowEngineTests
     {
         public WorkflowRuleResult Run(WorkflowRuleRequest request)
             => new(request.Manifests, RuleRunSummary.Empty);
+    }
+
+    private sealed class CapturingRuleRunner : IWorkflowRuleRunner
+    {
+        public PolicyEvidence? Evidence { get; private set; }
+
+        public WorkflowRuleResult Run(WorkflowRuleRequest request)
+        {
+            Evidence = request.PolicyEvidence;
+            return new(request.Manifests, RuleRunSummary.Empty);
+        }
     }
 
     private sealed class FindingRuleRunner(RuleRunSummary summary) : IWorkflowRuleRunner
