@@ -905,6 +905,7 @@ public sealed class LocalWorkflowEngine
                 candidate.Installer.Installers,
                 previousInstallers);
             ClearStaleRootNestedState(candidate.Installer);
+            ClearCarriedReleaseDate(candidate.Installer);
         }
 
         ImmutableArray<InstallerEvidence> installerEvidence =
@@ -919,6 +920,7 @@ public sealed class LocalWorkflowEngine
         PolicyEvidence policyEvidence = MergePolicyEvidence(
             operationRequest.PolicyEvidence,
             artifactSnapshots,
+            installerArtifacts,
             enrichedAssets,
             RetainedVersions(packageVersions, newVersion, update));
         WorkflowRuleResult rules = RunRules(
@@ -2112,6 +2114,23 @@ public sealed class LocalWorkflowEngine
         manifest.ArchiveBinariesDependOnPath = null;
     }
 
+    // ReleaseDate belongs to the version being released, so the value inherited from the previous
+    // version's template is always stale. Clearing it lets META-5 recompute it from release
+    // evidence, or report that no evidence was available, instead of shipping the old date.
+    private static void ClearCarriedReleaseDate(InstallerManifest manifest)
+    {
+        manifest.ReleaseDate = null;
+        if (manifest.Installers is not { } installers)
+        {
+            return;
+        }
+
+        foreach (Installer installer in installers)
+        {
+            installer.ReleaseDate = null;
+        }
+    }
+
     private static LocaleManifest CreateLocale(
         PackageIdentifier identifier,
         PackageVersion version,
@@ -2399,6 +2418,7 @@ public sealed class LocalWorkflowEngine
     private static PolicyEvidence MergePolicyEvidence(
         PolicyEvidence supplied,
         ImmutableArray<ArtifactSnapshot>.Builder artifacts,
+        ImmutableArray<InstallerArtifact>.Builder downloads,
         ImmutableArray<DiscoveredAsset>.Builder assets,
         ImmutableArray<PackageSnapshot> existingVersions)
     {
@@ -2431,13 +2451,27 @@ public sealed class LocalWorkflowEngine
             SiblingImportUrls = supplied.SiblingImportUrls,
             PipelineLogExcerpts = supplied.PipelineLogExcerpts,
             SchemaHeaderComments = supplied.SchemaHeaderComments,
-            ReleaseDate = assets
-                .Select(static asset => asset.ReleasePublishedAt)
-                .Where(static value => value is not null)
-                .OrderByDescending(static value => value)
-                .Select(static value => DateOnly.FromDateTime(value!.Value.UtcDateTime))
-                .FirstOrDefault(),
+            ReleaseDate = ResolveReleaseDate(assets, downloads),
         };
+    }
+
+    // Release metadata is the strongest publication evidence. When the caller supplied a plain
+    // installer URL that belongs to no discoverable release, the Last-Modified header observed
+    // while downloading the asset is the only remaining evidence.
+    private static DateOnly? ResolveReleaseDate(
+        ImmutableArray<DiscoveredAsset>.Builder assets,
+        ImmutableArray<InstallerArtifact>.Builder artifacts)
+    {
+        DateTimeOffset? published = assets
+            .Select(static asset => asset.ReleasePublishedAt)
+            .Where(static value => value is not null)
+            .Max()
+            ?? artifacts
+                .Select(static artifact => artifact.Download.LastModified)
+                .Where(static value => value is not null)
+                .Max();
+
+        return published is null ? null : DateOnly.FromDateTime(published.Value.UtcDateTime);
     }
 
     private static ImmutableArray<PackageSnapshot> RetainedVersions(

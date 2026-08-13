@@ -866,6 +866,34 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
+    public void Single_file_bundle_runtime_config_is_detected()
+    {
+        // Motivating regression: seerge.g-helper shipped a single-file .NET 10 desktop app whose
+        // runtimeconfig.json lives inside the bundle, so the payload looked runtime-free.
+        byte[] bundle = DependencyFixtures.BuildSingleFileBundle(
+            Machine.Amd64,
+            """
+            {
+              "runtimeOptions": {
+                "tfm": "net10.0",
+                "frameworks": [
+                  { "name": "Microsoft.NETCore.App", "version": "10.0.0" },
+                  { "name": "Microsoft.WindowsDesktop.App", "version": "10.0.0" }
+                ]
+              }
+            }
+            """);
+        using var stream = new MemoryStream(bundle);
+
+        PayloadDependencyAnalysis analysis = _analyzer.Analyze(stream, "bundled.exe");
+
+        DependencyEvidence evidence = Find(analysis, "bundled.exe", DependencyEvidenceKind.DotNetRuntime);
+        Assert.Equal(DependencyEvidenceStatus.Detected, evidence.Status);
+        Assert.Equal(10, evidence.RuntimeMajor);
+        Assert.Equal(DotNetRuntimeFamily.WindowsDesktop, evidence.RuntimeFamily);
+    }
+
+    [Fact]
     public void Two_hundred_megabyte_sparse_executable_uses_targeted_pe_reads()
     {
         using DependencyFixtures.SparsePrefixStream stream = DependencyFixtures.BuildSparsePeStream(

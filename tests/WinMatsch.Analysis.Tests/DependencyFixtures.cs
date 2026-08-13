@@ -16,6 +16,55 @@ internal static class DependencyFixtures
         builder.Serialize(output);
         return output.ToArray();
     }
+
+    /// <summary>
+    /// Appends a minimal .NET single-file bundle (header version 6) carrying
+    /// <paramref name="runtimeConfig"/> to a PE stub, mirroring the layout produced by
+    /// <c>PublishSingleFile</c>.
+    /// </summary>
+    public static byte[] BuildSingleFileBundle(Machine machine, string runtimeConfig, string[]? imports = null)
+    {
+        byte[] stub = BuildPe(machine, imports ?? ["KERNEL32.dll"]);
+        byte[] config = Encoding.UTF8.GetBytes(runtimeConfig);
+        var bundle = new MemoryStream();
+        bundle.Write(stub);
+
+        // Signature placeholder preceded by the little-endian header offset, as emitted into the
+        // apphost stub by the bundler.
+        long headerOffsetPosition = bundle.Position;
+        bundle.Write(new byte[sizeof(long)]);
+        bundle.Write(BundleSignature);
+        long configOffset = bundle.Position;
+        bundle.Write(config);
+
+        long headerOffset = bundle.Position;
+        var header = new List<byte>();
+        header.AddRange(BitConverter.GetBytes(6u));
+        header.AddRange(BitConverter.GetBytes(0u));
+        header.AddRange(BitConverter.GetBytes(0));
+        header.Add((byte)"bundle-id".Length);
+        header.AddRange(Encoding.UTF8.GetBytes("bundle-id"));
+        header.AddRange(BitConverter.GetBytes(0L));
+        header.AddRange(BitConverter.GetBytes(0L));
+        header.AddRange(BitConverter.GetBytes(configOffset));
+        header.AddRange(BitConverter.GetBytes((long)config.Length));
+        bundle.Write([.. header]);
+
+        byte[] bytes = bundle.ToArray();
+        BinaryPrimitives.WriteInt64LittleEndian(
+            bytes.AsSpan((int)headerOffsetPosition, sizeof(long)),
+            headerOffset);
+        return bytes;
+    }
+
+    private static ReadOnlySpan<byte> BundleSignature =>
+    [
+        0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38,
+        0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
+        0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18,
+        0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae,
+    ];
+
     public static MemoryStream BuildZip(params (string Path, byte[] Content)[] entries)
     {
         var stream = new MemoryStream();

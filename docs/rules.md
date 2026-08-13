@@ -88,7 +88,7 @@ normalization, observing the canonical shape.
 | `META-3` | Normalize GitHub license/copyright URLs to their stable `blob/HEAD` form. |
 | `META-4` | Sanitize release-notes formatting, bound their length, verify the ReleaseNotesUrl refers to the version. |
 | `META-5` | Carry still-valid locale fields forward from the previous version, or require an explicit drop override. |
-| `DEP-1` | Add architecture-matched runtime dependencies discovered from payload analysis evidence. |
+| `DEP-1` | Add architecture-matched runtime dependencies discovered from payload analysis evidence, and refresh a stale pin of the same .NET runtime family in place. |
 | `DEP-2` | Classify dependency-outage pipeline signatures as infrastructure issues rather than manifest errors. |
 | `PIPE-1` | Assert serializer invariants: LF-only line endings, single trailing newline. |
 | `PIPE-2` | Pin all manifests of a version to a single manifest schema version. |

@@ -7,6 +7,26 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.17] - 2026-08-13
+
+### Fixed
+
+- `.NET` single-file bundles are now inspected for their embedded
+  `runtimeconfig.json`, so bundled apps report their real runtime major and
+  family (base, ASP.NET Core, or Windows Desktop) instead of appearing
+  runtime-free.
+- `DEP-1` now recognizes every .NET runtime package family and refreshes a stale
+  pin of the same family in place — at the manifest root when the installer only
+  inherits it — instead of leaving an outdated runtime dependency behind. Pins
+  from a different family still require review.
+- Updates no longer carry the previous version's `ReleaseDate` forward; the
+  value is cleared so `META-5` recomputes it from release metadata, falling back
+  to the download's `Last-Modified` header when the installer URL belongs to no
+  discoverable release.
+- Payload dependency evidence gathered while pre-downloading artifacts now
+  reaches the rule pipeline, so `DEP-1` is no longer silent in `new` and
+  `update` runs.
+
 ## [0.8.16] - 2026-08-05
 
 ### Fixed
@@ -276,7 +296,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.16...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.17...main
+[0.8.17]: https://github.com/b0t-at/winmatsch/compare/v0.8.16...v0.8.17
 [0.8.16]: https://github.com/b0t-at/winmatsch/compare/v0.8.15...v0.8.16
 [0.8.15]: https://github.com/b0t-at/winmatsch/compare/v0.8.14...v0.8.15
 [0.8.14]: https://github.com/b0t-at/winmatsch/compare/v0.8.13...v0.8.14

@@ -8,16 +8,23 @@ namespace WinMatsch.Rules.Policy;
 /// <c>PayloadDependencyAnalyzer</c>, supplied via
 /// <see cref="PolicyEvidence.DependencyAnalyses"/>) to WinGet package dependencies whose
 /// architecture matches the installer entry. Inferred or Ambiguous evidence never becomes a
-/// mandatory dependency — it only produces an informational finding. When the previous version
-/// pinned a .NET runtime major that Detected evidence now contradicts, a finding requests
-/// verification instead of a silent identifier rewrite.
+/// mandatory dependency — it only produces an informational finding. The runtime package family
+/// follows the shared framework the payload requests (desktop, ASP.NET Core, or base). When the
+/// previous version pinned a different major of the same family, Detected evidence refreshes it
+/// and records the rewrite; a pin from another family is reported for review instead.
 /// </summary>
 public sealed class Dep1PayloadDependencyRule : IRule
 {
     private const string VcRedistPrefix = "Microsoft.VCRedist.2015+";
     private const string DotNetRuntimePrefix = "Microsoft.DotNet.Runtime.";
+    private const string DotNetDesktopRuntimePrefix = "Microsoft.DotNet.DesktopRuntime.";
+    private const string DotNetAspNetCorePrefix = "Microsoft.DotNet.AspNetCore.";
+
+    private static readonly string[] _dotNetRuntimePrefixes =
+        [DotNetDesktopRuntimePrefix, DotNetAspNetCorePrefix, DotNetRuntimePrefix];
 
     private readonly PolicyEvidence _evidence;
+    private string? _rootRuntimeRewrite;
 
     public Dep1PayloadDependencyRule(PolicyEvidence? evidence = null)
     {
@@ -36,6 +43,7 @@ public sealed class Dep1PayloadDependencyRule : IRule
     {
         ArgumentNullException.ThrowIfNull(context);
 
+        _rootRuntimeRewrite = null;
         InstallerManifest manifest = context.Manifests.Installer;
         if (manifest.Installers is not { } installers)
         {
@@ -113,12 +121,18 @@ public sealed class Dep1PayloadDependencyRule : IRule
         if (evidence.Kind == DependencyEvidenceKind.DotNetRuntime)
         {
             VerifyPreviousDotNetMajor(context, manifest, installer, index, evidence);
-            if (FindConflictingDotNetMajor(manifest, installer, evidence.RuntimeMajor) is { } conflicting)
+            if (TryRefreshDotNetRuntime(context, manifest, installer, index, identifier))
             {
-                // Appending would leave two mandatory runtime majors; the carried pin must be
-                // resolved by review (or an override), never by stacking a second dependency.
+                return;
+            }
+
+            if (FindConflictingDotNetRuntime(manifest, installer, identifier) is { } conflicting)
+            {
+                // Appending would leave two mandatory runtimes; a carried pin from another
+                // runtime family must be resolved by review (or an override), never by stacking
+                // a second dependency.
                 context.AddFinding(this, RuleSeverity.Warning,
-                    $"Detected .NET runtime major {evidence.RuntimeMajor} conflicts with the already-declared dependency '{conflicting}'; resolve the pinned major instead of adding a second mandatory runtime.",
+                    $"Detected .NET runtime dependency '{identifier}' conflicts with the already-declared dependency '{conflicting}'; resolve the declared runtime instead of adding a second mandatory runtime.",
                     $"Installers[{index}]");
                 return;
             }
@@ -127,27 +141,151 @@ public sealed class Dep1PayloadDependencyRule : IRule
         AddDependency(context, manifest, installer, index, identifier, evidence);
     }
 
-    /// <summary>An already-declared <c>Microsoft.DotNet.Runtime.*</c> dependency whose major differs, or null.</summary>
-    private static string? FindConflictingDotNetMajor(
+    /// <summary>
+    /// Replaces an already-declared dependency on the same runtime family whose major the payload
+    /// contradicts. The rewrite stays inside one family, is driven by Detected evidence read from
+    /// the payload's own runtime configuration, and is recorded as change evidence, so a carried
+    /// forward pin cannot silently outlive the runtime it described.
+    /// </summary>
+    private bool TryRefreshDotNetRuntime(
+        ManifestContext context,
         InstallerManifest manifest,
         Installer installer,
-        int? detectedMajor)
+        int index,
+        string identifier)
     {
-        if (detectedMajor is not { } major)
+        if (FindFamilyPrefix(identifier) is not { } prefix)
         {
-            return null;
+            return false;
         }
 
+        Dependencies? effective = EffectiveInstallerValues.GetDependencies(manifest, installer);
+        List<PackageDependency> declared = effective?.PackageDependencies ?? [];
+        int position = -1;
+        for (int i = 0; i < declared.Count; i++)
+        {
+            string? id = declared[i].PackageIdentifier?.Value;
+            if (id is not null
+                && id.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(id, identifier, StringComparison.OrdinalIgnoreCase))
+            {
+                position = i;
+                break;
+            }
+        }
+
+        if (position < 0)
+        {
+            return false;
+        }
+
+        string stale = declared[position].PackageIdentifier!.Value;
+
+        // A pin the installer merely inherits belongs to the manifest root; rewriting it there
+        // keeps root and installer consistent instead of leaving a contradictory root value.
+        if (installer.Dependencies is null
+            && TryRefreshRootDotNetRuntime(context, manifest, stale, identifier))
+        {
+            context.AddTrace(this,
+                $"Installers[{index}]: replaced package dependency '{stale}' with '{identifier}' from Detected payload evidence.");
+            return true;
+        }
+
+        // Creating a bare per-installer Dependencies object would mask the manifest-root
+        // defaults (WindowsFeatures, external deps, ...); clone the effective set first.
+        if (installer.Dependencies is null && effective is not null)
+        {
+            installer.Dependencies = ManifestValues.CloneDependencies(effective);
+        }
+
+        if (installer.Dependencies?.PackageDependencies is not { } target || position >= target.Count)
+        {
+            return false;
+        }
+
+        target[position] = new PackageDependency { PackageIdentifier = new PackageIdentifier(identifier) };
+        context.AddChangeEvidence(
+            this,
+            ManifestContext.GetInstallerManifestPath(context.Manifests),
+            $"Installers[{index}].Dependencies.PackageDependencies[{position}].PackageIdentifier",
+            $"Detected payload runtime configuration replaces the stale dependency '{stale}'",
+            RuleChangeConfidence.High);
+        context.AddTrace(this,
+            $"Installers[{index}]: replaced package dependency '{stale}' with '{identifier}' from Detected payload evidence.");
+        return true;
+    }
+
+    /// <summary>
+    /// Rewrites a stale runtime pin declared at the manifest root. Refused once another installer
+    /// already claimed the root pin for a different runtime major, so mixed payloads fall back to
+    /// per-installer dependencies instead of fighting over one shared value.
+    /// </summary>
+    private bool TryRefreshRootDotNetRuntime(
+        ManifestContext context,
+        InstallerManifest manifest,
+        string stale,
+        string identifier)
+    {
+        if (_rootRuntimeRewrite is not null
+            && !string.Equals(_rootRuntimeRewrite, identifier, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (manifest.Dependencies?.PackageDependencies is not { } root)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < root.Count; i++)
+        {
+            if (!string.Equals(root[i].PackageIdentifier?.Value, stale, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            root[i] = new PackageDependency { PackageIdentifier = new PackageIdentifier(identifier) };
+            _rootRuntimeRewrite = identifier;
+            context.AddChangeEvidence(
+                this,
+                ManifestContext.GetInstallerManifestPath(context.Manifests),
+                $"Dependencies.PackageDependencies[{i}].PackageIdentifier",
+                $"Detected payload runtime configuration replaces the stale dependency '{stale}'",
+                RuleChangeConfidence.High);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>An already-declared .NET runtime dependency from a different family, or null.</summary>
+    private static string? FindConflictingDotNetRuntime(
+        InstallerManifest manifest,
+        Installer installer,
+        string identifier)
+    {
         Dependencies? effective = EffectiveInstallerValues.GetDependencies(manifest, installer);
         foreach (PackageDependency dependency in effective?.PackageDependencies ?? [])
         {
             string? id = dependency.PackageIdentifier?.Value;
             if (id is not null
-                && id.StartsWith(DotNetRuntimePrefix, StringComparison.OrdinalIgnoreCase)
-                && int.TryParse(id.AsSpan(DotNetRuntimePrefix.Length), out int declaredMajor)
-                && declaredMajor != major)
+                && !string.Equals(id, identifier, StringComparison.OrdinalIgnoreCase)
+                && FindFamilyPrefix(id) is not null)
             {
                 return id;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? FindFamilyPrefix(string identifier)
+    {
+        foreach (string prefix in _dotNetRuntimePrefixes)
+        {
+            if (identifier.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return prefix;
             }
         }
 
@@ -168,7 +306,18 @@ public sealed class Dep1PayloadDependencyRule : IRule
                 };
                 return suffix is null ? null : $"{VcRedistPrefix}.{suffix}";
             case DependencyEvidenceKind.DotNetRuntime:
-                return evidence.RuntimeMajor is { } major ? $"{DotNetRuntimePrefix}{major}" : null;
+                if (evidence.RuntimeMajor is not { } major)
+                {
+                    return null;
+                }
+
+                string prefix = evidence.RuntimeFamily switch
+                {
+                    DotNetRuntimeFamily.WindowsDesktop => DotNetDesktopRuntimePrefix,
+                    DotNetRuntimeFamily.AspNetCore => DotNetAspNetCorePrefix,
+                    _ => DotNetRuntimePrefix,
+                };
+                return $"{prefix}{major}";
             default:
                 return null;
         }
@@ -245,12 +394,12 @@ public sealed class Dep1PayloadDependencyRule : IRule
         foreach (PackageDependency dependency in previousDependencies?.PackageDependencies ?? [])
         {
             string? id = dependency.PackageIdentifier?.Value;
-            if (id is null || !id.StartsWith(DotNetRuntimePrefix, StringComparison.OrdinalIgnoreCase))
+            if (id is null || FindFamilyPrefix(id) is not { } prefix)
             {
                 continue;
             }
 
-            if (int.TryParse(id.AsSpan(DotNetRuntimePrefix.Length), out int previousMajor)
+            if (int.TryParse(id.AsSpan(prefix.Length), out int previousMajor)
                 && previousMajor != detectedMajor)
             {
                 context.AddFinding(this, RuleSeverity.Warning,
