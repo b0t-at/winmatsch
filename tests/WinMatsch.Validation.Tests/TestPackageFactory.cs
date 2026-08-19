@@ -10,6 +10,7 @@ internal static class TestPackageFactory
     public const string Version = "2.0.0";
     public const string InstallerUrl = "https://example.com/setup.exe";
     public const string PublisherUrl = "https://example.com";
+    public const string LicenseUrl = "https://example.com/license";
     public const string Hash = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     public static PackageManifests CreateManifests()
@@ -50,6 +51,7 @@ internal static class TestPackageFactory
                 PublisherUrl = PublisherUrl,
                 PackageName = "Example App",
                 License = "MIT",
+                LicenseUrl = LicenseUrl,
                 ShortDescription = "Example application",
             },
             Locales = [],
@@ -168,6 +170,8 @@ internal sealed class FakePreflightNetwork : IPreflightNetwork
 
     public string? FailingProbeUrl { get; init; }
 
+    public string? TransientFailingProbeUrl { get; init; }
+
     public string? InvalidOperationProbeUrl { get; init; }
 
     public bool ReturnChangedContent { get; init; }
@@ -186,6 +190,11 @@ internal sealed class FakePreflightNetwork : IPreflightNetwork
         if (string.Equals(url, FailingProbeUrl, StringComparison.Ordinal))
         {
             throw new DownloadHttpException(System.Net.HttpStatusCode.NotFound, url);
+        }
+
+        if (string.Equals(url, TransientFailingProbeUrl, StringComparison.Ordinal))
+        {
+            throw new DownloadHttpException(System.Net.HttpStatusCode.Forbidden, url);
         }
 
         if (string.Equals(url, InvalidOperationProbeUrl, StringComparison.Ordinal))

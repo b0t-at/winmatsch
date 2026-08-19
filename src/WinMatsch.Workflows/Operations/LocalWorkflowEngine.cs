@@ -906,6 +906,7 @@ public sealed class LocalWorkflowEngine
                 previousInstallers);
             ClearStaleRootNestedState(candidate.Installer);
             ClearCarriedReleaseDate(candidate.Installer);
+            ClearCarriedReleaseNotes(candidate);
         }
 
         ImmutableArray<InstallerEvidence> installerEvidence =
@@ -930,30 +931,41 @@ public sealed class LocalWorkflowEngine
             installerEvidence,
             policyEvidence);
         candidate = rules.Manifests;
-        ImmutableArray<RawManifestDocument> beforeDocuments = existing?.Documents ?? [];
-        ImmutableArray<RawManifestDocument> after = Serialize(
-            candidate,
-            operationRequest.CreatedWith,
-            beforeDocuments);
-        ImmutableArray<WorkflowFileChange> changes = Diff(
-            beforeDocuments,
-            after,
-            toolGenerated: true);
-        if (update?.ReplacePreviousVersion == true
-            && !string.Equals(previous!.PackageVersion.Value, newVersion.Value, StringComparison.Ordinal))
+        if (previous is not null)
         {
-            changes =
-            [
-                .. previous.Documents.Select(static document =>
-                    new WorkflowFileChange(
-                        PlannedChangeKind.Delete,
-                        document.RepositoryPath,
-                        expectedState: ExpectedFileState.Present,
-                        expectedSha256: WorkflowFileChange.Hash(document.Content.AsSpan()),
-                        provenance: WorkflowChangeProvenance.ToolGenerated)),
-                .. changes,
-            ];
-            beforeDocuments = [.. previous.Documents, .. beforeDocuments];
+            ApplyAnalyzedMsixIdentity(candidate.Installer, artifactSnapshots);
+            SubstituteVersionInInstallLocations(
+                candidate.Installer,
+                previous.PackageVersion.Value,
+                newVersion.Value);
+        }
+
+        ImmutableArray<RawManifestDocument> beforeDocuments = [];
+        ImmutableArray<RawManifestDocument> after = [];
+        ImmutableArray<WorkflowFileChange> changes = [];
+        BuildDocuments();
+
+        void BuildDocuments()
+        {
+            beforeDocuments = existing?.Documents ?? [];
+            after = Serialize(candidate, operationRequest.CreatedWith, beforeDocuments);
+            changes = Diff(beforeDocuments, after, toolGenerated: true);
+            if (update?.ReplacePreviousVersion == true
+                && !string.Equals(previous!.PackageVersion.Value, newVersion.Value, StringComparison.Ordinal))
+            {
+                changes =
+                [
+                    .. previous.Documents.Select(static document =>
+                        new WorkflowFileChange(
+                            PlannedChangeKind.Delete,
+                            document.RepositoryPath,
+                            expectedState: ExpectedFileState.Present,
+                            expectedSha256: WorkflowFileChange.Hash(document.Content.AsSpan()),
+                            provenance: WorkflowChangeProvenance.ToolGenerated)),
+                    .. changes,
+                ];
+                beforeDocuments = [.. previous.Documents, .. beforeDocuments];
+            }
         }
 
         ImmutableArray<PackageSnapshot> retainedVersions = RetainedVersions(
@@ -971,6 +983,30 @@ public sealed class LocalWorkflowEngine
             installerArtifacts.ToImmutable(),
             existingVersionEvidence,
             cancellationToken).ConfigureAwait(false);
+        ImmutableArray<string> droppedDeadUrls = DropDeadOptionalMetadataUrls(candidate, validation);
+        if (!droppedDeadUrls.IsEmpty)
+        {
+            // The candidate changed after validation ran: re-serialize and validate the final
+            // documents so the plan and its findings describe what is actually submitted.
+            BuildDocuments();
+            validation = await ValidateAsync(
+                operationRequest,
+                beforeDocuments,
+                after,
+                changes,
+                installerArtifacts.ToImmutable(),
+                existingVersionEvidence,
+                cancellationToken).ConfigureAwait(false);
+            foreach (string droppedUrl in droppedDeadUrls)
+            {
+                validation = AddValidationFinding(validation, new ValidationFinding(
+                    "WF_DEAD_METADATA_URL_DROPPED",
+                    ValidationSeverity.Info,
+                    "An optional metadata URL returned a definitive HTTP 404/410 and was dropped before submission.",
+                    droppedUrl));
+            }
+        }
+
         validation = MergeRuleFindings(validation, rules.Summary);
         validation = AddStaleLearnedOverrideFinding(validation, rules.Summary);
         validation = AddLearnedStoreFindings(validation, learnedSnapshot);
@@ -2129,6 +2165,190 @@ public sealed class LocalWorkflowEngine
         {
             installer.ReleaseDate = null;
         }
+    }
+
+    // Release notes describe one specific release, so the body and URL inherited from the
+    // previous version's template are always stale (shipped bodies and deleted tag URLs have
+    // produced hard 404s). Clearing them makes PreserveOnUpdateRule's guarded copy — which
+    // refuses version-specific URLs — the only carry path.
+    internal static void ClearCarriedReleaseNotes(PackageManifests manifests)
+    {
+        manifests.DefaultLocale.ReleaseNotes = null;
+        manifests.DefaultLocale.ReleaseNotesUrl = null;
+        foreach (LocaleManifest locale in manifests.Locales)
+        {
+            locale.ReleaseNotes = null;
+            locale.ReleaseNotesUrl = null;
+        }
+    }
+
+    /// <summary>
+    /// Removes optional locale metadata URLs whose preflight probe returned a definitive
+    /// HTTP 404/410 (<see cref="PreflightGate.DeadMetadataUrlCode"/>): a known-dead optional
+    /// URL must be dropped rather than submitted, because the upstream validator hard-blocks
+    /// the pull request on it. Returns the URLs that were dropped.
+    /// </summary>
+    internal static ImmutableArray<string> DropDeadOptionalMetadataUrls(
+        PackageManifests candidate,
+        ValidationReport validation)
+    {
+        string[] deadUrls =
+        [
+            .. validation.Findings
+                .Where(static finding => finding.Code == PreflightGate.DeadMetadataUrlCode
+                    && !string.IsNullOrWhiteSpace(finding.Path))
+                .Select(static finding => finding.Path!)
+                .Distinct(StringComparer.OrdinalIgnoreCase),
+        ];
+        if (deadUrls.Length == 0)
+        {
+            return [];
+        }
+
+        var dropped = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (LocaleManifest locale in (LocaleManifest[])[candidate.DefaultLocale, .. candidate.Locales])
+        {
+            locale.PublisherUrl = DropIfDead(locale.PublisherUrl, deadUrls, dropped);
+            locale.PublisherSupportUrl = DropIfDead(locale.PublisherSupportUrl, deadUrls, dropped);
+            locale.PrivacyUrl = DropIfDead(locale.PrivacyUrl, deadUrls, dropped);
+            locale.PackageUrl = DropIfDead(locale.PackageUrl, deadUrls, dropped);
+            locale.LicenseUrl = DropIfDead(locale.LicenseUrl, deadUrls, dropped);
+            locale.CopyrightUrl = DropIfDead(locale.CopyrightUrl, deadUrls, dropped);
+            locale.ReleaseNotesUrl = DropIfDead(locale.ReleaseNotesUrl, deadUrls, dropped);
+            locale.PurchaseUrl = DropIfDead(locale.PurchaseUrl, deadUrls, dropped);
+        }
+
+        return [.. dropped];
+    }
+
+    private static string? DropIfDead(string? value, string[] deadUrls, SortedSet<string> dropped)
+    {
+        if (value is not null
+            && deadUrls.Contains(value, StringComparer.OrdinalIgnoreCase))
+        {
+            dropped.Add(value);
+            return null;
+        }
+
+        return value;
+    }
+
+    /// <summary>
+    /// MSIX/AppX identity: the SHA-256 of the package signature file changes with every
+    /// release, so the value cleared by <see cref="CreateInstallers"/> is recomputed from the
+    /// downloaded artifact's analysis rather than left absent.
+    /// </summary>
+    internal static void ApplyAnalyzedMsixIdentity(
+        InstallerManifest manifest,
+        ImmutableArray<ArtifactSnapshot>.Builder artifacts)
+    {
+        if (manifest.Installers is not { } installers || artifacts.Count == 0)
+        {
+            return;
+        }
+
+        foreach (Installer installer in installers)
+        {
+            if (installer.SignatureSha256 is not null || installer.InstallerUrl is null)
+            {
+                continue;
+            }
+
+            InstallerType? type = installer.InstallerType ?? manifest.InstallerType;
+            if (type is not (InstallerType.Msix or InstallerType.Appx))
+            {
+                continue;
+            }
+
+            ArtifactSnapshot? snapshot = artifacts.FirstOrDefault(artifact => string.Equals(
+                artifact.Asset.DownloadUri.AbsoluteUri,
+                installer.InstallerUrl,
+                StringComparison.OrdinalIgnoreCase));
+            Sha256Hash[] signatures =
+            [
+                .. (snapshot?.Analysis.Installers ?? [])
+                    .Select(static analyzed => analyzed.SignatureSha256)
+                    .OfType<Sha256Hash>()
+                    .Distinct(),
+            ];
+            if (signatures.Length == 1)
+            {
+                installer.SignatureSha256 = signatures[0];
+            }
+        }
+    }
+
+    /// <summary>
+    /// A DefaultInstallLocation carried from the previous version may embed that version in
+    /// its path; substitute bounded occurrences with the new version like other
+    /// version-embedding fields (nested installer paths, ARP display versions).
+    /// </summary>
+    internal static void SubstituteVersionInInstallLocations(
+        InstallerManifest manifest,
+        string previousVersion,
+        string newVersion)
+    {
+        if (string.IsNullOrEmpty(previousVersion)
+            || string.Equals(previousVersion, newVersion, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Substitute(manifest.InstallationMetadata);
+        foreach (Installer installer in manifest.Installers ?? [])
+        {
+            Substitute(installer.InstallationMetadata);
+        }
+
+        void Substitute(InstallationMetadata? metadata)
+        {
+            if (metadata?.DefaultInstallLocation is { } location)
+            {
+                metadata.DefaultInstallLocation = ReplaceBoundedVersionTokens(
+                    location,
+                    previousVersion,
+                    newVersion);
+            }
+        }
+    }
+
+    private static string ReplaceBoundedVersionTokens(string value, string oldVersion, string newVersion)
+    {
+        (string Old, string New)[] representations =
+        [
+            (oldVersion, newVersion),
+            ($"v{oldVersion}", $"v{newVersion}"),
+            (oldVersion.Replace('.', '_'), newVersion.Replace('.', '_')),
+            (oldVersion.Replace('.', '-'), newVersion.Replace('.', '-')),
+        ];
+        foreach ((string oldToken, string newToken) in representations)
+        {
+            var result = new System.Text.StringBuilder(value.Length);
+            int copiedUntil = 0;
+            int index = value.IndexOf(oldToken, StringComparison.OrdinalIgnoreCase);
+            while (index >= 0)
+            {
+                int end = index + oldToken.Length;
+                bool boundedBefore = index == 0 || !char.IsAsciiLetterOrDigit(value[index - 1]);
+                bool boundedAfter = end == value.Length || !char.IsAsciiLetterOrDigit(value[end]);
+                if (boundedBefore && boundedAfter)
+                {
+                    result.Append(value, copiedUntil, index - copiedUntil);
+                    result.Append(newToken);
+                    copiedUntil = end;
+                }
+
+                index = value.IndexOf(oldToken, index + 1, StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (copiedUntil > 0)
+            {
+                result.Append(value, copiedUntil, value.Length - copiedUntil);
+                value = result.ToString();
+            }
+        }
+
+        return value;
     }
 
     private static LocaleManifest CreateLocale(

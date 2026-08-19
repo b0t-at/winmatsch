@@ -9,6 +9,24 @@ namespace WinMatsch.Analysis.Tests;
 public class InnoProbeTests
 {
     [Fact]
+    public void Unknown_privilege_value_degrades_to_diagnostic_instead_of_crashing()
+    {
+        byte[] installer = InnoFixtures.BuildInstaller(
+            new InnoFixtures.Options { PrivilegesRequired = (InnoPrivilegeLevel)4 });
+
+        InstallerAnalysis analysis = Assert.IsType<InstallerAnalysis>(Probe(installer));
+        InnoSetupMetadata metadata = Assert.IsType<InnoSetupMetadata>(Inspect(installer));
+
+        Assert.Equal(InnoPrivilegeLevel.Unknown, metadata.PrivilegesRequired);
+        Installer installerEntry = Assert.Single(analysis.Installers);
+        Assert.Null(installerEntry.Scope);
+        Assert.Contains(
+            analysis.Diagnostics,
+            static diagnostic => diagnostic.Code == "INNO017"
+                && diagnostic.Message.Contains("privilege value 4", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Non_inno_pe_returns_null()
     {
         using MemoryStream stream = PeFixtures.BuildExeStream(Machine.I386);
@@ -334,9 +352,9 @@ public class InnoProbeTests
             });
         var probe = new InnoProbe(new InnoProbeOptions { MaximumLzmaDictionaryBytes = 8 * 1024 * 1024 });
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Probe(installer, probe));
+        AnalysisDiagnostic diagnostic = AssertDegradedInno(Probe(installer, probe));
 
-        Assert.Contains("dictionary size", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("dictionary size", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -584,9 +602,9 @@ public class InnoProbeTests
             new InnoFixtures.Options { CompiledCode = new byte[1024] });
         var probe = new InnoProbe(new InnoProbeOptions { MaximumCompiledCodeBytes = 128 });
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Probe(installer, probe));
+        AnalysisDiagnostic diagnostic = AssertDegradedInno(Probe(installer, probe));
 
-        Assert.Contains("compiled code", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("compiled code", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1098,31 +1116,31 @@ public class InnoProbeTests
     }
 
     [Fact]
-    public void Truncated_positive_inno_file_throws_clear_error()
+    public void Truncated_positive_inno_file_degrades_with_clear_diagnostic()
     {
         byte[] installer = InnoFixtures.BuildInstaller();
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Probe(installer[..^64]));
+        AnalysisDiagnostic diagnostic = AssertDegradedInno(Probe(installer[..^64]));
 
-        Assert.Contains("truncated", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("truncated", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void Corrupt_loader_checksum_throws()
+    public void Corrupt_loader_checksum_degrades_to_manual_analysis()
     {
         byte[] installer = InnoFixtures.BuildInstaller(
             new InnoFixtures.Options { CorruptLoaderChecksum = true });
 
-        Assert.Throws<InvalidDataException>(() => Probe(installer));
+        AssertDegradedInno(Probe(installer));
     }
 
     [Fact]
-    public void Corrupt_header_checksum_throws()
+    public void Corrupt_header_checksum_degrades_to_manual_analysis()
     {
         byte[] installer = InnoFixtures.BuildInstaller(
             new InnoFixtures.Options { CorruptHeaderChecksum = true });
 
-        Assert.Throws<InvalidDataException>(() => Probe(installer));
+        AssertDegradedInno(Probe(installer));
     }
 
     [Fact]
@@ -1132,9 +1150,9 @@ public class InnoProbeTests
             new InnoFixtures.Options { StoredHeaderSizeOverride = 1024 });
         var probe = new InnoProbe(new InnoProbeOptions { MaximumStoredHeaderBytes = 128 });
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Probe(installer, probe));
+        AnalysisDiagnostic diagnostic = AssertDegradedInno(Probe(installer, probe));
 
-        Assert.Contains("configured limit", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("configured limit", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1144,9 +1162,9 @@ public class InnoProbeTests
             new InnoFixtures.Options { FirstStringLengthOverride = 4096 });
         var probe = new InnoProbe(new InnoProbeOptions { MaximumStringBytes = 128 });
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => Probe(installer, probe));
+        AnalysisDiagnostic diagnostic = AssertDegradedInno(Probe(installer, probe));
 
-        Assert.Contains("allocation limit", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("allocation limit", diagnostic.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1165,6 +1183,18 @@ public class InnoProbeTests
         using var stream = new MemoryStream(installer);
         using var peFile = new PeFile(stream);
         return (probe ?? new InnoProbe()).Probe(peFile, stream);
+    }
+
+    /// <summary>Asserts the positively-identified Inno file degraded to an INNO016 manual-analysis result.</summary>
+    private static AnalysisDiagnostic AssertDegradedInno(InstallerAnalysis? analysis)
+    {
+        Assert.NotNull(analysis);
+        Assert.Equal(DetectedInstallerFormat.InnoSetup, analysis.Format);
+        Assert.Equal(InstallerType.Inno, Assert.Single(analysis.Installers).InstallerType);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("INNO016", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+        return diagnostic;
     }
 
     private static InnoSetupMetadata? Inspect(byte[] installer, InnoProbe? probe = null)

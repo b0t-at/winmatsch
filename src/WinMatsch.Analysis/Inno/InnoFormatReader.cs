@@ -587,7 +587,7 @@ internal static partial class InnoFormatReader
             1 => InnoPrivilegeLevel.PowerUser,
             2 => InnoPrivilegeLevel.Admin,
             3 => InnoPrivilegeLevel.Lowest,
-            _ => throw new InvalidDataException($"The Inno Setup privilege value {privilegeValue} is invalid."),
+            _ => InnoPrivilegeLevel.Unknown,
         };
 
         byte privilegeOverrides = version >= new Version(5, 7, 0) ? reader.ReadByte() : (byte)0;
@@ -622,6 +622,14 @@ internal static partial class InnoFormatReader
         }
 
         List<AnalysisDiagnostic> diagnostics = [];
+        if (privileges == InnoPrivilegeLevel.Unknown)
+        {
+            diagnostics.Add(new AnalysisDiagnostic(
+                "INNO017",
+                $"The Inno Setup privilege value {privilegeValue} is outside the documented range; "
+                    + "scope and elevation requirement were not derived. Verify them manually."));
+        }
+
         if (reader.HadDecodingReplacement)
         {
             diagnostics.Add(new AnalysisDiagnostic(

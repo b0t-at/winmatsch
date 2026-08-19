@@ -43,7 +43,43 @@ public sealed class BurnProbe : IExeFormatProbe
             return null;
         }
 
-        byte[]? manifestBytes = CabinetReader.ReadFile(ReadUxContainer(stream, header), "0");
+        byte[]? manifestBytes;
+        try
+        {
+            manifestBytes = CabinetReader.ReadFile(ReadUxContainer(stream, header), "0");
+        }
+        catch (InvalidDataException exception)
+        {
+            // The file is positively a Burn bundle, but its UX container cannot be read
+            // (e.g. LZX-compressed cabinets). Degrade to a manual-analysis diagnostic
+            // instead of failing the whole analysis.
+            VersionInfo stubVersion = peFile.VersionInfo;
+            return new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.Burn,
+                Installers =
+                [
+                    new Installer
+                    {
+                        Architecture = peFile.Architecture == Architecture.X86 ? null : peFile.Architecture,
+                        InstallerType = InstallerType.Burn,
+                        ElevationRequirement = peFile.RequestedElevation,
+                    },
+                ],
+                ProductName = stubVersion.ProductName,
+                ProductVersion = stubVersion.ProductVersion,
+                Publisher = stubVersion.CompanyName,
+                Copyright = stubVersion.LegalCopyright,
+                Diagnostics =
+                [
+                    new AnalysisDiagnostic(
+                        "BURN004",
+                        $"{exception.Message} The Burn UX container was not interpreted; verify the installer manually.",
+                        RequiresManualAnalysis: true),
+                ],
+            };
+        }
+
         if (manifestBytes is null)
         {
             throw new InvalidDataException("The Burn UX container does not contain the manifest file \"0\".");

@@ -11,38 +11,18 @@ public sealed record ArchitectureTokenEvidence(
     ImmutableArray<string> MatchedTokens,
     ImmutableArray<Architecture> Candidates);
 
-/// <summary>Classifies bounded architecture tokens without inventing neutral architecture.</summary>
+/// <summary>
+/// Classifies bounded architecture tokens without inventing neutral architecture. The token
+/// table is shared with the analysis-side detector via <see cref="ArchitectureTokens"/> so
+/// both components classify names identically.
+/// </summary>
 public static partial class ArchitectureTokenClassifier
 {
-    private static readonly TokenDefinition[] _tokens =
-    [
-        new(Architecture.Arm64, "winarm64", 400),
-        new(Architecture.Arm64, "win64a", 400),
-        new(Architecture.Arm64, "aarch64", 400),
-        new(Architecture.Arm64, "arm64", 400),
-        new(Architecture.X64, "x86_64", 300),
-        new(Architecture.X64, "64-bit", 300),
-        new(Architecture.X64, "amd64", 300),
-        new(Architecture.X64, "win64", 300),
-        new(Architecture.X64, "x64", 300),
-        new(Architecture.X64, "64bit", 300),
-        new(Architecture.X64, "_64", 300, SuffixToken: true),
-        new(Architecture.X86, "32-bit", 200),
-        new(Architecture.X86, "win32", 200),
-        new(Architecture.X86, "ia32", 200),
-        new(Architecture.X86, "i386", 200),
-        new(Architecture.X86, "x86", 200),
-        new(Architecture.X86, "386", 200),
-        new(Architecture.X86, "32bit", 200),
-        new(Architecture.X86, "_32", 200, SuffixToken: true),
-        new(Architecture.Arm, "arm", 100),
-    ];
-
     public static ArchitectureTokenEvidence Classify(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
         List<TokenMatch> matches = [];
-        foreach (TokenDefinition token in _tokens)
+        foreach (ArchitectureTokenDefinition token in ArchitectureTokens.All)
         {
             foreach (Match match in CreateRegex(token).Matches(value))
             {
@@ -67,7 +47,7 @@ public static partial class ArchitectureTokenClassifier
             [.. candidates]);
     }
 
-    private static Regex CreateRegex(TokenDefinition definition)
+    private static Regex CreateRegex(ArchitectureTokenDefinition definition)
     {
         string pattern = definition.SuffixToken
             ? $@"{Regex.Escape(definition.Token)}(?![A-Za-z0-9])"
@@ -103,11 +83,5 @@ public static partial class ArchitectureTokenClassifier
         }
     }
 
-    private sealed record TokenDefinition(
-        Architecture Architecture,
-        string Token,
-        int Priority,
-        bool SuffixToken = false);
-
-    private sealed record TokenMatch(TokenDefinition Definition, int Index, int Length);
+    private sealed record TokenMatch(ArchitectureTokenDefinition Definition, int Index, int Length);
 }

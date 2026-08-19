@@ -10,6 +10,12 @@ public enum AnalysisEvidenceOrigin
 {
     ContentAnalysis,
     MetadataFixture,
+
+    /// <summary>
+    /// Content analysis of the downloaded bytes threw; the evidence carries only a
+    /// manual-analysis diagnostic. Mapping must stop with a question instead of applying.
+    /// </summary>
+    FailedContentAnalysis,
 }
 
 /// <summary>Relative strength of one mapping or version conclusion.</summary>

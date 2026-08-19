@@ -672,6 +672,27 @@ public static class AssetMappingPlanner
                 asset.DownloadUri.AbsoluteUri));
         }
 
+        if (asset.Analysis?.Origin == AnalysisEvidenceOrigin.FailedContentAnalysis)
+        {
+            string detail = string.Join(
+                " ",
+                (asset.Analysis?.Diagnostics ?? [])
+                    .Where(static diagnostic => diagnostic.StartsWith("ANALYSIS001:", StringComparison.Ordinal))
+                    .Select(static diagnostic => diagnostic["ANALYSIS001:".Length..]));
+            diagnostics.Add(new(
+                "ANALYSIS_MANUAL_REQUIRED",
+                AssetMappingDiagnosticSeverity.Error,
+                string.IsNullOrWhiteSpace(detail)
+                    ? "Installer content analysis failed; the asset requires manual analysis."
+                    : detail,
+                asset.DownloadUri.AbsoluteUri));
+            questions.Add(new(
+                "ANALYSIS_MANUAL_REQUIRED",
+                "Analyze this installer manually and provide explicit installer facts before applying.",
+                [],
+                asset.DownloadUri.AbsoluteUri));
+        }
+
         if ((pack?.VanityUrls ?? []).Contains(asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal))
         {
             diagnostics.Add(new(
@@ -1343,12 +1364,12 @@ public static class AssetMappingPlanner
         PackageVersion targetVersion,
         List<AssetMappingDiagnostic> diagnostics)
     {
-        if (!ContainsVersionToken(previous.Url, previous.PackageVersion.Value))
+        if (!PackageVersionResolver.ContainsEquivalentVersionToken(previous.Url, previous.PackageVersion))
         {
             return;
         }
 
-        if (!ContainsVersionToken(candidate.Asset.DownloadUri, targetVersion.Value))
+        if (!PackageVersionResolver.ContainsEquivalentVersionToken(candidate.Asset.DownloadUri, targetVersion))
         {
             diagnostics.Add(new(
                 "MAP_VERSION_DISCONTINUITY",
@@ -1400,16 +1421,42 @@ public static class AssetMappingPlanner
     {
         string normalizedExtracted = extractedVersion.Replace('_', '.');
         string normalizedTarget = targetVersion.Replace('_', '.');
-        return normalizedTarget.Length > normalizedExtracted.Length
+        if (normalizedTarget.Length > normalizedExtracted.Length
             && normalizedTarget.StartsWith(normalizedExtracted, StringComparison.OrdinalIgnoreCase)
             && normalizedTarget[normalizedExtracted.Length] is '-' or '+'
-            && PackageVersionResolver.ContainsPreferredUrlVersionToken(uri, targetVersion);
+            && PackageVersionResolver.ContainsPreferredUrlVersionToken(uri, targetVersion))
+        {
+            return true;
+        }
+
+        // Reverse direction: the URL carries the exact target plus a short numeric vendor
+        // packaging revision (Converseen-0.15.2.7-1, meson-1.12.0-64). Only applies when the
+        // target itself has no prerelease/build suffix, so a URL "1.2.3-dev.4" can never be
+        // treated as continuous with target "1.2.3-dev".
+        return normalizedExtracted.Length > normalizedTarget.Length
+            && normalizedExtracted.StartsWith(normalizedTarget, StringComparison.OrdinalIgnoreCase)
+            && normalizedExtracted[normalizedTarget.Length] is '-' or '+'
+            && !normalizedTarget.Contains('-', StringComparison.Ordinal)
+            && !normalizedTarget.Contains('+', StringComparison.Ordinal)
+            && IsShortNumericRevision(normalizedExtracted.AsSpan(normalizedTarget.Length + 1));
     }
 
-    private static bool ContainsVersionToken(Uri uri, string version)
+    private static bool IsShortNumericRevision(ReadOnlySpan<char> value)
     {
-        string path = Uri.UnescapeDataString(uri.AbsolutePath);
-        return PackageVersionResolver.ContainsVersionToken(path, version);
+        if (value.Length is 0 or > 4)
+        {
+            return false;
+        }
+
+        foreach (char character in value)
+        {
+            if (!char.IsAsciiDigit(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static void AddMissingUrlOverrides(

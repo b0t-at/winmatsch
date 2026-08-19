@@ -10,6 +10,13 @@ namespace WinMatsch.Analysis;
 public sealed class ZipAnalyzer : IInstallerAnalyzer
 {
     private static readonly string[] _skippedFolderNames = ["__MACOSX", "resources"];
+
+    /// <summary>
+    /// Well-known .NET host support binaries that ship next to self-contained apps. They are
+    /// never the product payload and must not participate in portable alias derivation.
+    /// </summary>
+    private static readonly string[] _dotnetHostBinaryNames = ["createdump.exe", "apphost.exe", "singlefilehost.exe"];
+
     private static ReadOnlySpan<byte> CompoundFileMagic => [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
     public bool CanAnalyze(string fileName)
@@ -47,7 +54,7 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
             }
 
             InstallerType? nestedType = MapNestedInstallerType(path);
-            if (nestedType is null || IsInSkippedFolder(path))
+            if (nestedType is null || IsInSkippedFolder(path) || IsDotnetHostBinary(path))
             {
                 continue;
             }
@@ -135,6 +142,18 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
         };
     }
 
+    private static InstallerAnalysis CreateManualSelectionAnalysis(
+        IReadOnlyList<string> candidatePaths,
+        string code,
+        string message)
+        => new()
+        {
+            Format = DetectedInstallerFormat.Zip,
+            Installers = [new Installer { InstallerType = InstallerType.Zip }],
+            Zip = new ZipContents([.. candidatePaths]),
+            Diagnostics = [new AnalysisDiagnostic(code, message, RequiresManualAnalysis: true)],
+        };
+
     private static List<ResolvedCandidate> ResolveCandidate(Candidate candidate)
     {
         using Stream entryStream = candidate.Entry.Open();
@@ -210,8 +229,16 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
                         ValidatePortableAlias(alias, path);
                         if (!aliases.Add(alias))
                         {
-                            throw new InvalidDataException(
-                                $"Portable archive paths produce duplicate command alias '{alias}'. Manual alias selection is required.");
+                            // A collision means alias derivation cannot pick command names
+                            // safely (e.g. multi-TFM layouts shipping the same basename per
+                            // framework). Degrade to the manual-selection result instead of
+                            // failing the analysis: a previous manifest's pinned
+                            // NestedInstallerFiles can still disambiguate during mapping.
+                            return CreateManualSelectionAnalysis(
+                                candidatePaths,
+                                "ZIP006",
+                                $"Portable archive paths produce duplicate command alias '{alias}'. "
+                                    + "Manual alias selection is required; no candidate was guessed.");
                         }
                     }
 
@@ -445,6 +472,12 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
                 $"Archive path '{path}' cannot produce a safe portable command alias. Manual alias selection is required.");
         }
     }
+
+    private static bool IsDotnetHostBinary(string path)
+        => _dotnetHostBinaryNames.Any(name => string.Equals(
+            Path.GetFileName(path),
+            name,
+            StringComparison.OrdinalIgnoreCase));
 
     private static bool IsInSkippedFolder(string path)
     {

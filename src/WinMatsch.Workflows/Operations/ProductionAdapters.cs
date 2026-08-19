@@ -346,18 +346,33 @@ public sealed class InstallerWorkflowArtifactProcessor(
             artifactDirectory,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
-        InstallerAnalysis analysis = await Task.Run(
-            () => FileAnalyzer.AnalyzeFile(download.FilePath),
-            cancellationToken).ConfigureAwait(false);
+        InstallerAnalysis analysis;
         PayloadDependencyAnalysis? dependencies = null;
-        if (Path.GetExtension(download.FileName).Equals(".zip", StringComparison.OrdinalIgnoreCase)
-            || Path.GetExtension(download.FileName).Equals(".exe", StringComparison.OrdinalIgnoreCase))
+        AnalysisEvidenceOrigin origin = AnalysisEvidenceOrigin.ContentAnalysis;
+        try
         {
-            await using FileStream stream = File.OpenRead(download.FilePath);
-            dependencies = _dependencyAnalyzer.AnalyzeWithCancellation(
-                stream,
-                download.FileName,
-                cancellationToken);
+            analysis = await Task.Run(
+                () => FileAnalyzer.AnalyzeFile(download.FilePath),
+                cancellationToken).ConfigureAwait(false);
+            if (Path.GetExtension(download.FileName).Equals(".zip", StringComparison.OrdinalIgnoreCase)
+                || Path.GetExtension(download.FileName).Equals(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                await using FileStream stream = File.OpenRead(download.FilePath);
+                dependencies = _dependencyAnalyzer.AnalyzeWithCancellation(
+                    stream,
+                    download.FileName,
+                    cancellationToken);
+            }
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or AnalysisResourceLimitException)
+        {
+            // Deterministic analyzer refusals are "needs a human decision", not crashes:
+            // deliver them as a structured manual-analysis question (exit 4) instead of an
+            // unhandled failure the pipeline retries forever.
+            analysis = CreateManualAnalysisFallback(download.FileName, exception);
+            dependencies = null;
+            origin = AnalysisEvidenceOrigin.FailedContentAnalysis;
         }
 
         AssetContentEvidence content = AssetContentEvidence.FromDownload(download);
@@ -408,12 +423,48 @@ public sealed class InstallerWorkflowArtifactProcessor(
                 ],
             };
         }
+
+        if (origin != AnalysisEvidenceOrigin.ContentAnalysis)
+        {
+            analysisEvidence = analysisEvidence with { Origin = origin };
+        }
+
         return new()
         {
             Asset = asset with { Content = content, Analysis = analysisEvidence },
             Download = download,
             Analysis = analysis,
             DependencyAnalysis = dependencies,
+        };
+    }
+
+    /// <summary>The diagnostic code carried by evidence for assets whose content analysis failed.</summary>
+    internal const string ManualAnalysisDiagnosticCode = "ANALYSIS001";
+
+    private static InstallerAnalysis CreateManualAnalysisFallback(string fileName, Exception exception)
+    {
+        string extension = Path.GetExtension(fileName);
+        (DetectedInstallerFormat format, InstallerType? type) = extension.ToUpperInvariant() switch
+        {
+            ".MSI" => (DetectedInstallerFormat.Msi, (InstallerType?)InstallerType.Msi),
+            ".MSIX" => (DetectedInstallerFormat.Msix, InstallerType.Msix),
+            ".APPX" => (DetectedInstallerFormat.Msix, InstallerType.Appx),
+            ".MSIXBUNDLE" => (DetectedInstallerFormat.MsixBundle, InstallerType.Msix),
+            ".APPXBUNDLE" => (DetectedInstallerFormat.MsixBundle, InstallerType.Appx),
+            ".ZIP" => (DetectedInstallerFormat.Zip, InstallerType.Zip),
+            _ => (DetectedInstallerFormat.GenericInstallerExe, null),
+        };
+        return new InstallerAnalysis
+        {
+            Format = format,
+            Installers = [new Installer { InstallerType = type }],
+            Diagnostics =
+            [
+                new AnalysisDiagnostic(
+                    ManualAnalysisDiagnosticCode,
+                    $"Installer analysis failed and requires a manual decision: {exception.Message}",
+                    RequiresManualAnalysis: true),
+            ],
         };
     }
 }

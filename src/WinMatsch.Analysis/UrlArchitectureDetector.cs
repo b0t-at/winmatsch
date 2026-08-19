@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using WinMatsch.Core;
 
 namespace WinMatsch.Analysis;
@@ -6,14 +7,16 @@ namespace WinMatsch.Analysis;
 /// Detects the target architecture from tokens in an installer URL (or any file name). A
 /// token only matches when bounded by non-alphanumeric characters or the string edges, so
 /// "charm" does not match "arm" and "x640" does not match "x64". More specific groups win:
-/// arm64 over arm, and the x64 group (which contains "x86_64") over the x86 group.
+/// arm64 over arm, and the x64 group (which contains "x86_64") over the x86 group. The
+/// token table is shared with the mapping-side classifier via
+/// <see cref="ArchitectureTokens"/> so both components classify names identically.
 /// </summary>
 public static class UrlArchitectureDetector
 {
-    private static readonly string[] _arm64Tokens = ["arm64", "aarch64"];
-    private static readonly string[] _armTokens = ["arm"];
-    private static readonly string[] _x64Tokens = ["x86_64", "x86-64", "x64", "win64", "amd64", "64bit", "64-bit"];
-    private static readonly string[] _x86Tokens = ["x86", "win32", "ia32", "i386", "i686", "386", "686", "32bit", "32-bit"];
+    private static readonly ImmutableArray<ArchitectureTokenDefinition> _arm64Tokens = ArchitectureTokens.For(Architecture.Arm64);
+    private static readonly ImmutableArray<ArchitectureTokenDefinition> _armTokens = ArchitectureTokens.For(Architecture.Arm);
+    private static readonly ImmutableArray<ArchitectureTokenDefinition> _x64Tokens = ArchitectureTokens.For(Architecture.X64);
+    private static readonly ImmutableArray<ArchitectureTokenDefinition> _x86Tokens = ArchitectureTokens.For(Architecture.X86);
 
     /// <summary>Returns the architecture implied by the URL, or null when no token matches.</summary>
     public static Architecture? Detect(string url)
@@ -42,10 +45,11 @@ public static class UrlArchitectureDetector
         return null;
     }
 
-    private static bool ContainsToken(string url, string[] tokens)
+    private static bool ContainsToken(string url, ImmutableArray<ArchitectureTokenDefinition> tokens)
     {
-        foreach (string token in tokens)
+        foreach (ArchitectureTokenDefinition definition in tokens)
         {
+            string token = definition.Token;
             int start = 0;
             while (start <= url.Length - token.Length)
             {
@@ -56,7 +60,7 @@ public static class UrlArchitectureDetector
                 }
 
                 int end = index + token.Length;
-                bool boundedBefore = index == 0 || !char.IsAsciiLetterOrDigit(url[index - 1]);
+                bool boundedBefore = definition.SuffixToken || index == 0 || !char.IsAsciiLetterOrDigit(url[index - 1]);
                 bool boundedAfter = end == url.Length || !char.IsAsciiLetterOrDigit(url[end]);
                 if (boundedBefore && boundedAfter)
                 {

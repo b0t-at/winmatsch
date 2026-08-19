@@ -363,9 +363,84 @@ public class ZipAnalyzerTests
             ("a/tool.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)),
             ("b/tool.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
 
-        InvalidDataException exception = Assert.Throws<InvalidDataException>(() => _analyzer.Analyze(zip, "tools.zip"));
+        InstallerAnalysis analysis = _analyzer.Analyze(zip, "tools.zip");
 
-        Assert.Contains("duplicate command alias", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(InstallerType.Zip, installer.InstallerType);
+        Assert.Null(installer.NestedInstallerFiles);
+        Assert.NotNull(analysis.Zip);
+        Assert.Equal(["a/tool.exe", "b/tool.exe"], analysis.Zip.NestedInstallerCandidates);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("ZIP006", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+        Assert.Contains("duplicate command alias 'tool'", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Multi_target_framework_layouts_degrade_to_manual_selection_instead_of_failing()
+    {
+        using MemoryStream zip = BuildZip(
+            ("net47/ReportGenerator.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)),
+            ("net8.0/ReportGenerator.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(zip, "ReportGenerator_5.5.11.zip");
+
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("ZIP006", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+        Assert.Contains("'ReportGenerator'", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            ["net47/ReportGenerator.exe", "net8.0/ReportGenerator.exe"],
+            analysis.Zip!.NestedInstallerCandidates);
+    }
+
+    [Fact]
+    public void Dotnet_host_binaries_do_not_participate_in_portable_alias_derivation()
+    {
+        using MemoryStream zip = BuildZip(
+            ("app.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)),
+            ("createdump.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)),
+            ("apphost.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)),
+            ("singlefilehost.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(zip, "app.zip");
+
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(InstallerType.Portable, installer.NestedInstallerType);
+        Assert.Equal("app.exe", Assert.Single(installer.NestedInstallerFiles!).RelativeFilePath);
+    }
+
+    [Fact]
+    public void Oversized_non_candidate_entries_do_not_fail_analysis()
+    {
+        var stream = new MemoryStream();
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            ZipArchiveEntry exe = archive.CreateEntry("app.exe");
+            using (Stream entryStream = exe.Open())
+            {
+                entryStream.Write(PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64));
+            }
+
+            // A data file above the per-entry ceiling that is never an extraction candidate.
+            ZipArchiveEntry data = archive.CreateEntry("assets/data.bin", CompressionLevel.SmallestSize);
+            using (Stream entryStream = data.Open())
+            {
+                byte[] chunk = new byte[1024 * 1024];
+                for (long written = 0; written <= AnalysisLimits.DefaultMaxEntryBytes; written += chunk.Length)
+                {
+                    entryStream.Write(chunk);
+                }
+            }
+        }
+
+        stream.Position = 0;
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "app.zip");
+
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(InstallerType.Portable, installer.NestedInstallerType);
+        Assert.Equal("app.exe", Assert.Single(installer.NestedInstallerFiles!).RelativeFilePath);
     }
 
     [Fact]

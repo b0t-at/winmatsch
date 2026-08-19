@@ -156,13 +156,43 @@ public sealed class PreserveOnUpdateRule : IRule
         if (locale.ReleaseNotesUrl is null && previousLocale.ReleaseNotesUrl is { } releaseNotesUrl)
         {
             string? previousVersion = previous.Installer.PackageVersion?.Value;
-            bool versionSpecific = previousVersion is not null
-                && releaseNotesUrl.Contains(previousVersion, StringComparison.OrdinalIgnoreCase);
-            if (!versionSpecific)
+            if (!EmbedsVersion(releaseNotesUrl, previousVersion))
             {
                 locale.ReleaseNotesUrl = releaseNotesUrl;
                 context.AddTrace(this, "DefaultLocale: carried ReleaseNotesUrl over from the previous version (it does not embed the previous version).");
             }
+        }
+    }
+
+    /// <summary>
+    /// Whether the URL embeds the version in any common representation: verbatim, or with
+    /// trailing <c>.0</c> parts trimmed (a manifest version <c>0.14.1.0</c> is embedded by a
+    /// URL saying <c>0.14.1</c>). A leading <c>v</c> in the URL is covered by substring
+    /// matching. Variants shorter than one separator are not tested to avoid matching
+    /// unrelated digits.
+    /// </summary>
+    private static bool EmbedsVersion(string url, string? version)
+    {
+        if (string.IsNullOrEmpty(version))
+        {
+            return false;
+        }
+
+        string variant = version;
+        while (true)
+        {
+            if (url.Contains(variant, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!variant.EndsWith(".0", StringComparison.Ordinal)
+                || !variant[..^2].Contains('.', StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            variant = variant[..^2];
         }
     }
 
