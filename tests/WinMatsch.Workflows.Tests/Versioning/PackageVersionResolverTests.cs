@@ -165,6 +165,30 @@ public sealed class PackageVersionResolverTests
             new Uri("https://example.test/tool-windows-10.0-x64.exe")));
     }
 
+    [Theory]
+    [InlineData("https://example.test/download/6.2.0/AlbayanV6.2.0.exe", "6.2.0")]
+    [InlineData("https://example.test/AlbayanV6.2.0.exe", "6.2.0")]
+    [InlineData("https://example.test/Thetis-v2.10.3.14x64.zip", "2.10.3.14")]
+    [InlineData("https://example.test/meson-1.12.0-64.msi", "1.12.0")]
+    [InlineData("https://example.test/meson-1.12.0-32.msi", "1.12.0")]
+    [InlineData(
+        "https://github.com/urlscan/urlscan-cli/releases/download/v2026.08.18/urlscan-cli_Windows_x86_64.zip",
+        "2026.08.18")]
+    [InlineData("https://example.test/SQLite3.45.1.zip", "3.45.1")]
+    public void Glued_and_suffixed_url_versions_extract_the_full_token(string url, string expected)
+        => Assert.Equal(expected, PackageVersionResolver.ExtractUrlVersion(new Uri(url)));
+
+    [Fact]
+    public void Architecture_tokens_do_not_produce_phantom_version_candidates()
+    {
+        UrlVersionEvidence evidence = PackageVersionResolver.AnalyzeUrlVersion(
+            new Uri("https://example.test/2026.08.18/urlscan-cli_Windows_x86_64.zip"));
+
+        Assert.False(evidence.IsAmbiguous);
+        Assert.Null(evidence.Version);
+        Assert.Empty(evidence.Candidates);
+    }
+
     [Fact]
     public void Trustworthy_product_version_may_use_date_format()
     {

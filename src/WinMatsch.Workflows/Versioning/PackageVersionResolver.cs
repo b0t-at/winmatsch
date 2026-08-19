@@ -58,8 +58,22 @@ public static partial class PackageVersionResolver
         @"(?:[0-9]+|(?:alpha|beta|preview|pre|rc|dev)[0-9]*)";
     private const string UrlVersionIdentifierPattern =
         @"(?!" + UrlArtifactQualifierPattern + @"(?![A-Za-z0-9]))[0-9A-Za-z]+";
+
+    // A version may start at a normal non-alphanumeric boundary (optionally prefixed with
+    // "v"), directly after a product name glued to a "v" prefix ("AlbayanV6.2.0"), or at a
+    // letter-to-digit boundary when the core has at least three numeric parts (a bar that
+    // architecture tokens such as "x86_64" never reach).
+    private const string UrlVersionStartPattern =
+        @"(?:(?<![A-Za-z0-9])v?|(?<=[A-Za-z])v(?=[0-9])|(?<=[A-Za-z])(?=[0-9]+(?:[._][0-9]+){2,}))";
+
+    // A version may end at a non-alphanumeric boundary or directly before a glued, bounded
+    // architecture token ("Thetis-v2.10.3.14x64").
+    private const string UrlVersionEndPattern =
+        @"(?=$|[^0-9A-Za-z]|(?:winarm64|win64a|win64|win32|aarch64|arm64|arm|amd64|x86|x64|ia32|i386|i686)(?![0-9A-Za-z]))";
+
     private const string UrlVersionPattern =
-        @"(?<![A-Za-z0-9])v?(?<version>[0-9]+(?:[._][0-9]+)+(?:-" +
+        UrlVersionStartPattern +
+        @"(?<version>[0-9]+(?:[._][0-9]+)+(?:-" +
         UrlPrereleaseIdentifierPattern +
         @"(?:[._-]" +
         UrlPrereleaseIdentifierPattern +
@@ -67,7 +81,8 @@ public static partial class PackageVersionResolver
         UrlVersionIdentifierPattern +
         @"(?:[._-]" +
         UrlVersionIdentifierPattern +
-        @")*)?)(?![A-Za-z0-9])";
+        @")*)?)" +
+        UrlVersionEndPattern;
 
     public static PackageVersionResolution Resolve(PackageVersionResolutionInput input)
     {
@@ -253,42 +268,80 @@ public static partial class PackageVersionResolver
     public static UrlVersionEvidence AnalyzeUrlVersion(Uri uri)
     {
         ArgumentNullException.ThrowIfNull(uri);
-        string? source = FindUrlVersionSource(uri);
-        ImmutableArray<string> versions = source is null
-            ? []
-            : FindContextualVersions(source);
 
-        if (versions.IsEmpty)
+        // The file name is authoritative when it carries a usable version; the release-tag
+        // path segment is only a fallback so a tag can never mask a mismatched file name.
+        foreach (string source in FindUrlVersionSources(uri))
         {
-            return new(null, false, []);
-        }
-
-        var representatives = new List<string>();
-        foreach (string version in versions)
-        {
-            string normalized = NormalizeUrlVersion(version);
-            if (!PackageVersion.TryCreate(normalized, out PackageVersion? parsed)
-                || representatives.Any(existing =>
-                    PackageVersion.TryCreate(existing, out PackageVersion? existingVersion)
-                    && existingVersion!.IsEquivalentTo(parsed!)))
+            ImmutableArray<string> versions = FindContextualVersions(source);
+            if (versions.IsEmpty)
             {
                 continue;
             }
 
-            representatives.Add(normalized);
+            var representatives = new List<string>();
+            foreach (string version in versions)
+            {
+                string normalized = NormalizeUrlVersion(version);
+                if (!PackageVersion.TryCreate(normalized, out PackageVersion? parsed)
+                    || representatives.Any(existing =>
+                        PackageVersion.TryCreate(existing, out PackageVersion? existingVersion)
+                        && existingVersion!.IsEquivalentTo(parsed!)))
+                {
+                    continue;
+                }
+
+                representatives.Add(normalized);
+            }
+
+            if (representatives.Count == 0)
+            {
+                continue;
+            }
+
+            representatives.Sort(StringComparer.Ordinal);
+            return representatives.Count == 1
+                ? new(representatives[0], false, [.. representatives])
+                : new(null, true, [.. representatives]);
         }
 
-        representatives.Sort(StringComparer.Ordinal);
-        return representatives.Count == 1
-            ? new(representatives[0], false, [.. representatives])
-            : new(null, representatives.Count > 1, [.. representatives]);
+        return new(null, false, []);
     }
 
     internal static bool ContainsPreferredUrlVersionToken(Uri uri, string version)
     {
         ArgumentNullException.ThrowIfNull(uri);
-        return FindUrlVersionSource(uri) is { } source
-            && ContainsVersionToken(source, version, rejectSuffixContinuation: true);
+        return FindUrlVersionSources(uri).Any(source =>
+            ContainsVersionToken(source, version, rejectSuffixContinuation: true));
+    }
+
+    /// <summary>
+    /// Whether any path segment of the URL embeds the version — literally, or as a regex-
+    /// extracted token that is WinGet-equivalent to it (so <c>/v2026.08.18/</c> embeds
+    /// <c>2026.8.18</c> despite the zero padding).
+    /// </summary>
+    internal static bool ContainsEquivalentVersionToken(Uri uri, PackageVersion version)
+    {
+        ArgumentNullException.ThrowIfNull(uri);
+        ArgumentNullException.ThrowIfNull(version);
+        string path = Uri.UnescapeDataString(uri.AbsolutePath);
+        if (ContainsVersionToken(path, version.Value))
+        {
+            return true;
+        }
+
+        foreach (Match match in UrlVersionRegex().Matches(path).Cast<Match>())
+        {
+            if (PackageVersion.TryCreate(
+                    NormalizeUrlVersion(match.Groups["version"].Value),
+                    out PackageVersion? parsed)
+                && parsed!.IsEquivalentTo(version))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal static bool ContainsVersionToken(
@@ -344,7 +397,7 @@ public static partial class PackageVersionResolver
         return token.Length == 0 || !UrlArtifactQualifierRegex().IsMatch(token);
     }
 
-    private static string? FindUrlVersionSource(Uri uri)
+    private static IEnumerable<string> FindUrlVersionSources(Uri uri)
     {
         string[] segments = uri.Segments
             .Select(static segment => Uri.UnescapeDataString(segment).Trim('/'))
@@ -359,17 +412,18 @@ public static partial class PackageVersionResolver
 
         if (!FindContextualVersions(fileName).IsEmpty)
         {
-            return fileName;
+            yield return fileName;
         }
 
         int download = Array.FindLastIndex(
             segments,
             static segment => string.Equals(segment, "download", StringComparison.OrdinalIgnoreCase));
-        return download >= 0
+        if (download >= 0
             && download + 1 < segments.Length
-            && !FindContextualVersions(segments[download + 1]).IsEmpty
-                ? segments[download + 1]
-                : null;
+            && !FindContextualVersions(segments[download + 1]).IsEmpty)
+        {
+            yield return segments[download + 1];
+        }
     }
 
     private static ImmutableArray<string> FindContextualVersions(string value)
@@ -392,8 +446,11 @@ public static partial class PackageVersionResolver
 
     private static string NormalizeUrlVersion(string version)
     {
+        // Trailing bit-width tokens are architecture qualifiers, never version parts.
         if (version.EndsWith("_32", StringComparison.Ordinal)
-            || version.EndsWith("_64", StringComparison.Ordinal))
+            || version.EndsWith("_64", StringComparison.Ordinal)
+            || version.EndsWith("-32", StringComparison.Ordinal)
+            || version.EndsWith("-64", StringComparison.Ordinal))
         {
             version = version[..^3];
         }

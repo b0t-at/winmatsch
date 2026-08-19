@@ -1036,6 +1036,62 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Theory]
+    [InlineData("Converseen-0.15.2.7-1-win64-setup.msi", "0.15.2.7")]
+    [InlineData("meson-1.12.0-64.msi", "1.12.0")]
+    public void Vendor_revision_suffix_on_the_url_side_does_not_report_discontinuity(
+        string fileName,
+        string version)
+    {
+        DiscoveredAsset asset = Asset(fileName, InstallerType.Msi, Architecture.X64);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], version: version));
+
+        Assert.DoesNotContain(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code is "MAP_VERSION_DISCONTINUITY" or "MAP_VERSION_AMBIGUOUS");
+    }
+
+    [Fact]
+    public void Zero_padded_release_path_version_is_equivalent_for_continuity()
+    {
+        PreviousInstallerEntry previous = Previous(
+            0,
+            "https://github.com/urlscan/urlscan-cli/releases/download/v2026.08.17/urlscan-cli_Windows_x86_64.zip",
+            Architecture.X64,
+            InstallerType.Zip) with
+        {
+            PackageVersion = new("2026.8.17"),
+        };
+        DiscoveredAsset candidate = Asset("urlscan-cli_Windows_x86_64.zip", InstallerType.Zip, Architecture.X64);
+        candidate = AtUrl(
+            candidate,
+            "https://github.com/urlscan/urlscan-cli/releases/download/v2026.08.18/urlscan-cli_Windows_x86_64.zip");
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request(
+            [candidate],
+            [previous],
+            version: "2026.8.18"));
+
+        Assert.DoesNotContain(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code is "MAP_VERSION_DISCONTINUITY" or "MAP_VERSION_AMBIGUOUS");
+    }
+
+    [Fact]
+    public void Glued_product_name_version_matches_release_path_version()
+    {
+        DiscoveredAsset asset = AtUrl(
+            Asset("AlbayanV6.2.0.exe", InstallerType.Exe, Architecture.X64),
+            "https://example.test/download/6.2.0/AlbayanV6.2.0.exe");
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([asset], version: "6.2.0"));
+
+        Assert.DoesNotContain(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code is "MAP_VERSION_DISCONTINUITY" or "MAP_VERSION_AMBIGUOUS");
+    }
+
+    [Theory]
     [InlineData("v1.2.3-dev.4")]
     [InlineData("v1.2.3-dev-4")]
     public void Shorter_target_suffix_does_not_match_longer_url_suffix(string urlToken)
