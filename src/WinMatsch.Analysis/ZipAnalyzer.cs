@@ -236,7 +236,7 @@ public sealed class ZipAnalyzer : IInstallerAnalyzer
                             // NestedInstallerFiles can still disambiguate during mapping.
                             return CreateManualSelectionAnalysis(
                                 candidatePaths,
-                                "ZIP004",
+                                "ZIP006",
                                 $"Portable archive paths produce duplicate command alias '{alias}'. "
                                     + "Manual alias selection is required; no candidate was guessed.");
                         }

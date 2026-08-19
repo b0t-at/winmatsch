@@ -59,8 +59,8 @@ Untrusted binaries are parsed with hard bounds (all enforced centrally):
 | --- | --- |
 | Max archive entries | 10,000 |
 | Max archive path depth / length | 64 segments / 2,048 chars |
-| Max bytes per archive entry | 256 MB |
-| Max total expanded archive bytes | 1 GB |
+| Max bytes per archive entry | 256 MB (override: `WINMATSCH_MAX_ENTRY_BYTES`) |
+| Max total expanded archive bytes | 1 GB (override: `WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES`) |
 | Max nested archive depth | 4 |
 | Max PE sections | 96 |
 | Max PE resource bytes | 16 MB |
@@ -70,7 +70,11 @@ Untrusted binaries are parsed with hard bounds (all enforced centrally):
 Additional guards: declared entry sizes are verified against actual stream
 lengths (zip-bomb defense with overflow detection), nested archive depth is
 tracked per call chain, and known junk folders (`__MACOSX`, `resources`) are
-skipped in ZIP scans.
+skipped in ZIP scans. The per-entry byte ceiling applies only to entries that
+are actually read as extraction candidates, so an oversized data file that is
+never extracted cannot fail the analysis. Well-known .NET host support
+binaries (`createdump.exe`, `apphost.exe`, `singlefilehost.exe`) never
+participate in portable payload selection.
 
 ## Known unsupported variants and non-goals
 
@@ -81,11 +85,21 @@ skipped in ZIP scans.
   rejected rather than trusted by extension.
 - **Archive formats other than ZIP** (7z, RAR, cab-as-container) are not
   scanned for nested installers.
+- **Portable archives whose derived command aliases collide** (for example
+  multi-target-framework layouts shipping the same exe basename per framework)
+  degrade to a manual-selection result (`ZIP006`); a previous manifest's pinned
+  `NestedInstallerFiles` can still resolve them during mapping.
 - **Fully encrypted Inno headers** are identified as Inno but require manual
   analysis (`INNO013`) because header metadata cannot be decrypted without the
   setup password. File-only encryption does not prevent header inspection and
   reports unavailable payload evidence as `INNO014`; payload candidate-limit
-  exhaustion is reported separately as `INNO015`.
+  exhaustion is reported separately as `INNO015`. Header parse failures inside
+  the supported version range degrade to manual analysis (`INNO016`), and
+  privilege values outside the documented range surface as `INNO017` without
+  deriving scope or elevation.
+- **Burn bundles whose UX container cannot be read** (for example
+  LZX-compressed cabinets; only none/MSZIP are supported) degrade to manual
+  analysis (`BURN004`) instead of failing.
 - **Unknown self-extracting archive formats** fall back to generic EXE
   classification; recognized 7-Zip SFX and Advanced Installer wrappers receive
   bounded payload inspection.

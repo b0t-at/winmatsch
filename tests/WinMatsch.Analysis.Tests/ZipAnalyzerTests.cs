@@ -371,7 +371,7 @@ public class ZipAnalyzerTests
         Assert.NotNull(analysis.Zip);
         Assert.Equal(["a/tool.exe", "b/tool.exe"], analysis.Zip.NestedInstallerCandidates);
         AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
-        Assert.Equal("ZIP004", diagnostic.Code);
+        Assert.Equal("ZIP006", diagnostic.Code);
         Assert.True(diagnostic.RequiresManualAnalysis);
         Assert.Contains("duplicate command alias 'tool'", diagnostic.Message, StringComparison.Ordinal);
     }
@@ -386,7 +386,7 @@ public class ZipAnalyzerTests
         InstallerAnalysis analysis = _analyzer.Analyze(zip, "ReportGenerator_5.5.11.zip");
 
         AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
-        Assert.Equal("ZIP004", diagnostic.Code);
+        Assert.Equal("ZIP006", diagnostic.Code);
         Assert.True(diagnostic.RequiresManualAnalysis);
         Assert.Contains("'ReportGenerator'", diagnostic.Message, StringComparison.Ordinal);
         Assert.Equal(

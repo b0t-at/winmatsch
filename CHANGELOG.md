@@ -7,6 +7,55 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.18] - 2026-08-19
+
+### Fixed
+
+- The analysis-side URL architecture detector and the mapping-side token
+  classifier now share one token table in `WinMatsch.Core`, so filenames like
+  `ugene-53.1-win-x86-64.exe` classify identically on both sides instead of
+  producing a false `ARCH_CONFLICT` safety stop. The classifier gains
+  `x86-64`/`i686`/`686`; the detector gains `winarm64`/`win64a` and the
+  `_64`/`_32` suffix tokens.
+- Deterministic analyzer refusals now surface as structured needs-decision
+  questions (exit 4) instead of unhandled crashes the pipeline retries
+  forever: artifact acquisition converts `InvalidDataException` and resource
+  limit failures into an `ANALYSIS_MANUAL_REQUIRED` mapping question; portable
+  archives with colliding command aliases (multi-target-framework layouts)
+  degrade to a `ZIP006` manual-selection result; Inno header parse failures
+  degrade to `INNO016` and unknown privilege values to `INNO017`; Burn bundles
+  with unreadable UX containers (e.g. LZX cabinets) degrade to `BURN004`.
+- Well-known .NET host binaries (`createdump.exe`, `apphost.exe`,
+  `singlefilehost.exe`) no longer participate in portable payload selection,
+  and the per-entry archive byte ceiling applies only to entries that are
+  actually extracted. Both ceilings are now configurable via
+  `WINMATSCH_MAX_ENTRY_BYTES` and `WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES`.
+- Version continuity checks compare URL tokens with WinGet numeric
+  equivalence, tolerate short numeric vendor revisions on the URL side
+  (`Converseen-0.15.2.7-1`, `meson-1.12.0-64`), extract versions glued to the
+  product name (`AlbayanV6.2.0`) or to a trailing architecture token
+  (`Thetis-v2.10.3.14x64`), and fall back to the release-tag path segment when
+  the file name has no parseable version — eliminating recurring false
+  `MAP_VERSION_DISCONTINUITY`/`MAP_VERSION_AMBIGUOUS` stops for zero-padded
+  release paths such as `/v2026.08.18/`.
+- Stale metadata no longer ships on updates: carried `ReleaseNotes`/
+  `ReleaseNotesUrl` are cleared from cloned manifests (the guarded carry now
+  also matches trailing-`.0` version variants), license/copyright links are
+  rewritten to `blob/HEAD` only when the rewritten URL is confirmed reachable
+  (raw links keep their pinned ref in the HTML `blob` form otherwise),
+  optional metadata URLs that return a definitive HTTP 404/410 during
+  preflight are dropped before submission (`VLD5006` +
+  `WF_DEAD_METADATA_URL_DROPPED`), MSIX/AppX updates recompute
+  `SignatureSha256` from the analyzed artifact, and `DefaultInstallLocation`
+  is version-substituted like other version-embedding fields.
+
+### Changed
+
+- `THIRD-PARTY-NOTICES.txt` is now guarded by package identity instead of
+  exact version, so dependency bumps no longer fail CI; version numbers are
+  refreshed with the new `scripts/update-third-party-notices.py`, which the
+  release workflow enforces with `--check`.
+
 ## [0.8.17] - 2026-08-13
 
 ### Fixed
@@ -296,7 +345,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.17...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.18...main
+[0.8.18]: https://github.com/b0t-at/winmatsch/compare/v0.8.17...v0.8.18
 [0.8.17]: https://github.com/b0t-at/winmatsch/compare/v0.8.16...v0.8.17
 [0.8.16]: https://github.com/b0t-at/winmatsch/compare/v0.8.15...v0.8.16
 [0.8.15]: https://github.com/b0t-at/winmatsch/compare/v0.8.14...v0.8.15
