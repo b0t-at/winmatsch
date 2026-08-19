@@ -13,8 +13,8 @@ public sealed class SevenZipSfxProbe : IExeFormatProbe
 {
     private const int MaxEntries = AnalysisLimits.MaxArchiveEntries;
     private const int MaxExecutableEntries = 256;
-    private static readonly long MaxPayloadBytes = AnalysisLimits.MaxEntryBytes;
-    private static readonly long MaxExpandedBytes = AnalysisLimits.MaxExpandedArchiveBytes;
+    private static readonly long _maxPayloadBytes = AnalysisLimits.MaxEntryBytes;
+    private static readonly long _maxExpandedBytes = AnalysisLimits.MaxExpandedArchiveBytes;
     private const int MaxSignatureScanBytes = 1024 * 1024;
     private static readonly byte[] _sevenZipSignature = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
@@ -63,9 +63,9 @@ public sealed class SevenZipSfxProbe : IExeFormatProbe
                     break;
                 }
 
-                if (expandedBytes > MaxExpandedBytes)
+                if (expandedBytes > _maxExpandedBytes)
                 {
-                    limitReason = $"its declared expanded size exceeds {MaxExpandedBytes} bytes";
+                    limitReason = $"its declared expanded size exceeds {_maxExpandedBytes} bytes";
                     break;
                 }
 
@@ -73,7 +73,7 @@ public sealed class SevenZipSfxProbe : IExeFormatProbe
                     || entry.Key is not { } name
                     || !name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
                     || IsAuxiliaryInstallerExecutable(name)
-                    || entry.Size > MaxPayloadBytes)
+                    || entry.Size > _maxPayloadBytes)
                 {
                     continue;
                 }
@@ -89,7 +89,7 @@ public sealed class SevenZipSfxProbe : IExeFormatProbe
                     source,
                     entry.Size,
                     $"7-Zip self-extractor entry '{name}'",
-                    MaxPayloadBytes);
+                    _maxPayloadBytes);
                 using var payload = new MemoryStream(payloadBytes, writable: false);
                 PeImportInspection inspection = PeImportReader.Inspect(
                     payload,
