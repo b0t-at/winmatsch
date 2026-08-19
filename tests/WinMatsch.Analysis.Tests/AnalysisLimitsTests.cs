@@ -65,4 +65,29 @@ public class AnalysisLimitsTests
         Assert.Contains("ends before its declared size", corrupt.Message, StringComparison.Ordinal);
         Assert.Contains("allocation limit", exhausted.Message, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData(null, AnalysisLimits.DefaultMaxEntryBytes)]
+    [InlineData("", AnalysisLimits.DefaultMaxEntryBytes)]
+    [InlineData("not-a-number", AnalysisLimits.DefaultMaxEntryBytes)]
+    [InlineData("-5", AnalysisLimits.DefaultMaxEntryBytes)]
+    [InlineData("0", AnalysisLimits.DefaultMaxEntryBytes)]
+    [InlineData("536870912", 536870912L)]
+    public void Configured_limits_are_read_from_the_environment(string? value, long expected)
+    {
+        const string variable = "WINMATSCH_TEST_LIMIT_VARIABLE";
+        string? original = Environment.GetEnvironmentVariable(variable);
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, value);
+
+            Assert.Equal(
+                expected,
+                AnalysisLimits.ReadConfiguredLimit(variable, AnalysisLimits.DefaultMaxEntryBytes));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, original);
+        }
+    }
 }

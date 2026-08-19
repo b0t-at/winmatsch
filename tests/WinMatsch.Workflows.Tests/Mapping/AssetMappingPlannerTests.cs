@@ -89,6 +89,33 @@ public sealed class AssetMappingPlannerTests
     }
 
     [Fact]
+    public void Failed_content_analysis_blocks_apply_with_a_manual_analysis_question()
+    {
+        DiscoveredAsset candidate = Asset("tool-x64.exe", InstallerType.Exe, Architecture.X64);
+        candidate = candidate with
+        {
+            Analysis = candidate.Analysis! with
+            {
+                Origin = AnalysisEvidenceOrigin.FailedContentAnalysis,
+                Diagnostics =
+                [
+                    "ANALYSIS001:Installer analysis failed and requires a manual decision: "
+                        + "Portable archive paths produce duplicate command alias 'tool'.",
+                ],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(Request([candidate]));
+
+        Assert.False(plan.CanApply);
+        AssetMappingDiagnostic diagnostic = Assert.Single(
+            plan.Diagnostics,
+            static diagnostic => diagnostic.Code == "ANALYSIS_MANUAL_REQUIRED");
+        Assert.Contains("duplicate command alias 'tool'", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains(plan.UnresolvedQuestions, static question => question.Code == "ANALYSIS_MANUAL_REQUIRED");
+    }
+
+    [Fact]
     public void Nested_paths_are_rederived_from_bounded_contents_and_version_templated()
     {
         PreviousInstallerEntry previous = Previous(

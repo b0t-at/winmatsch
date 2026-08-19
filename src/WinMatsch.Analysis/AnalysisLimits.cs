@@ -1,17 +1,26 @@
+using System.Globalization;
 using System.IO.Compression;
 using System.Threading;
 
 namespace WinMatsch.Analysis;
 
-/// <summary>Resource ceilings shared by archive-backed analyzers.</summary>
+/// <summary>
+/// Resource ceilings shared by archive-backed analyzers. The entry and expanded-archive
+/// byte ceilings can be raised per environment via <c>WINMATSCH_MAX_ENTRY_BYTES</c> and
+/// <c>WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES</c> for packages whose payloads legitimately
+/// exceed the defaults.
+/// </summary>
 internal static class AnalysisLimits
 {
+    public const string MaxEntryBytesVariable = "WINMATSCH_MAX_ENTRY_BYTES";
+    public const string MaxExpandedArchiveBytesVariable = "WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES";
+
     public const int MaxArchiveEntries = 10_000;
     public const int MaxDependencyArchiveEntries = 4_096;
     public const int MaxArchivePathDepth = 64;
     public const int MaxArchivePathLength = 2_048;
-    public const long MaxEntryBytes = 256L * 1024 * 1024;
-    public const long MaxExpandedArchiveBytes = 1024L * 1024 * 1024;
+    public const long DefaultMaxEntryBytes = 256L * 1024 * 1024;
+    public const long DefaultMaxExpandedArchiveBytes = 1024L * 1024 * 1024;
     public const long MaxDependencyCentralDirectoryBytes = 16L * 1024 * 1024;
     public const int MaxNestedArchives = 4;
     public const int MaxPeSections = 96;
@@ -19,7 +28,23 @@ internal static class AnalysisLimits
     public const int MaxMsiStreamBytes = 64 * 1024 * 1024;
     public const int MaxNsisHeaderBytes = 64 * 1024 * 1024;
 
+    public static long MaxEntryBytes { get; } =
+        ReadConfiguredLimit(MaxEntryBytesVariable, DefaultMaxEntryBytes);
+
+    public static long MaxExpandedArchiveBytes { get; } =
+        ReadConfiguredLimit(MaxExpandedArchiveBytesVariable, DefaultMaxExpandedArchiveBytes);
+
     private static readonly AsyncLocal<int> _archiveDepth = new();
+
+    internal static long ReadConfiguredLimit(string variable, long defaultValue)
+    {
+        string? raw = Environment.GetEnvironmentVariable(variable);
+        return long.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out long parsed)
+            && parsed > 0
+            && parsed <= int.MaxValue
+            ? parsed
+            : defaultValue;
+    }
 
     public static IDisposable EnterArchive(string description)
     {
@@ -45,7 +70,15 @@ internal static class AnalysisLimits
         long total = 0;
         foreach (ZipArchiveEntry entry in archive.Entries)
         {
-            ValidateAllocation(entry.Length, $"{description} entry '{entry.FullName}'", MaxEntryBytes);
+            // The per-entry byte ceiling is enforced only when an entry is actually read as
+            // an extraction candidate; a large data file that is never extracted must not
+            // fail the whole analysis.
+            if (entry.Length < 0)
+            {
+                throw new InvalidDataException(
+                    $"{description} entry '{entry.FullName}' declares a negative size of {entry.Length} bytes.");
+            }
+
             try
             {
                 total = checked(total + entry.Length);
@@ -67,7 +100,12 @@ internal static class AnalysisLimits
         long total = 0;
         foreach (SupportedZipArchiveEntry entry in archive.Entries)
         {
-            ValidateAllocation(entry.Length, $"{description} entry '{entry.FullName}'", MaxEntryBytes);
+            if (entry.Length < 0)
+            {
+                throw new InvalidDataException(
+                    $"{description} entry '{entry.FullName}' declares a negative size of {entry.Length} bytes.");
+            }
+
             try
             {
                 total = checked(total + entry.Length);

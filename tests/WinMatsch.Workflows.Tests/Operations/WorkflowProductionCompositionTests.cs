@@ -113,6 +113,63 @@ public sealed class WorkflowProductionCompositionTests
     }
 
     [Fact]
+    public async Task Analyzer_refusals_surface_as_questions_instead_of_crashes()
+    {
+        // Two same-basename portable payloads collide on alias derivation (the multi-TFM
+        // layout, e.g. DanielPalme.ReportGenerator). This used to escape as a raw
+        // InvalidDataException (pipeline exit 1, retried forever); it must instead produce
+        // a structured needs-decision outcome.
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var zipStream = new MemoryStream();
+        using (var archive = new ZipArchive(zipStream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (string entry in (string[])["net47/tool.exe", "net8.0/tool.exe"])
+            {
+                using Stream entryStream = archive.CreateEntry(entry).Open();
+                entryStream.Write(executable);
+            }
+        }
+
+        byte[] zip = zipStream.ToArray();
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(zip),
+        });
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+            downloader,
+            new DirectWorkflowReleaseSource());
+        string output = CreateDirectory();
+        try
+        {
+            WritePrevious(output);
+
+            WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PreviousVersion = new PackageVersion("1.0.0"),
+                PackageVersion = "2.0.0",
+                Release = new(null, [new Uri("https://example.test/2.0.0/tools-x64.zip")], []),
+                NetworkValidationMode = NetworkValidationMode.Skip,
+            });
+
+            Assert.True(
+                result.Code == WorkflowResultCode.QuestionsRequired,
+                $"Expected QuestionsRequired but got {result.Code}: "
+                    + string.Join(
+                        "; ",
+                        result.Plan.Validation.Findings.Select(static finding => finding.Message)));
+            Assert.NotEmpty(result.Plan.Questions);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Invalid_optional_GitHub_release_data_preserves_map_removed_questions()
     {
         byte[] executable = await File.ReadAllBytesAsync(

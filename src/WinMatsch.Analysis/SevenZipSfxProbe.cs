@@ -13,8 +13,8 @@ public sealed class SevenZipSfxProbe : IExeFormatProbe
 {
     private const int MaxEntries = AnalysisLimits.MaxArchiveEntries;
     private const int MaxExecutableEntries = 256;
-    private const long MaxPayloadBytes = AnalysisLimits.MaxEntryBytes;
-    private const long MaxExpandedBytes = AnalysisLimits.MaxExpandedArchiveBytes;
+    private static readonly long MaxPayloadBytes = AnalysisLimits.MaxEntryBytes;
+    private static readonly long MaxExpandedBytes = AnalysisLimits.MaxExpandedArchiveBytes;
     private const int MaxSignatureScanBytes = 1024 * 1024;
     private static readonly byte[] _sevenZipSignature = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 

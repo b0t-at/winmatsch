@@ -299,19 +299,48 @@ public class BurnProbeTests
     }
 
     [Fact]
-    public void Truncated_attached_container_throws()
+    public void Truncated_attached_container_degrades_to_manual_analysis()
     {
         byte[] bundle = BurnFixtures.BuildBundle(BurnFixtures.ManifestXml());
 
-        Assert.Throws<InvalidDataException>(() => Probe(bundle[..^16]));
+        AssertDegradedBurn(Probe(bundle[..^16]));
     }
 
     [Fact]
-    public void Corrupt_ux_container_throws()
+    public void Corrupt_ux_container_degrades_to_manual_analysis()
     {
         byte[] bundle = BurnFixtures.BuildBundle(BurnFixtures.ManifestXml(), uxContainer: new byte[64]);
 
-        Assert.Throws<InvalidDataException>(() => Probe(bundle));
+        InstallerAnalysis? analysis = Probe(bundle);
+
+        AssertDegradedBurn(analysis);
+    }
+
+    [Fact]
+    public void Lzx_compressed_ux_container_degrades_to_manual_analysis()
+    {
+        byte[] cabinet = BurnFixtures.BuildCabinet(
+            [("0", "manifest bytes"u8.ToArray())],
+            compressionTypeOverride: 3);
+        byte[] bundle = BurnFixtures.BuildBundle(BurnFixtures.ManifestXml(), uxContainer: cabinet);
+
+        InstallerAnalysis? analysis = Probe(bundle);
+
+        AnalysisDiagnostic diagnostic = AssertDegradedBurn(analysis);
+        Assert.Contains("compression", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    private static AnalysisDiagnostic AssertDegradedBurn(InstallerAnalysis? analysis)
+    {
+        Assert.NotNull(analysis);
+        Assert.Equal(DetectedInstallerFormat.Burn, analysis.Format);
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(InstallerType.Burn, installer.InstallerType);
+        Assert.Null(installer.Architecture);
+        AnalysisDiagnostic diagnostic = Assert.Single(analysis.Diagnostics);
+        Assert.Equal("BURN004", diagnostic.Code);
+        Assert.True(diagnostic.RequiresManualAnalysis);
+        return diagnostic;
     }
 
     [Fact]

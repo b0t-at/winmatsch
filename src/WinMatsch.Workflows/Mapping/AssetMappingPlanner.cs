@@ -672,6 +672,27 @@ public static class AssetMappingPlanner
                 asset.DownloadUri.AbsoluteUri));
         }
 
+        if (asset.Analysis?.Origin == AnalysisEvidenceOrigin.FailedContentAnalysis)
+        {
+            string detail = string.Join(
+                " ",
+                (asset.Analysis?.Diagnostics ?? [])
+                    .Where(static diagnostic => diagnostic.StartsWith("ANALYSIS001:", StringComparison.Ordinal))
+                    .Select(static diagnostic => diagnostic["ANALYSIS001:".Length..]));
+            diagnostics.Add(new(
+                "ANALYSIS_MANUAL_REQUIRED",
+                AssetMappingDiagnosticSeverity.Error,
+                string.IsNullOrWhiteSpace(detail)
+                    ? "Installer content analysis failed; the asset requires manual analysis."
+                    : detail,
+                asset.DownloadUri.AbsoluteUri));
+            questions.Add(new(
+                "ANALYSIS_MANUAL_REQUIRED",
+                "Analyze this installer manually and provide explicit installer facts before applying.",
+                [],
+                asset.DownloadUri.AbsoluteUri));
+        }
+
         if ((pack?.VanityUrls ?? []).Contains(asset.DownloadUri.AbsoluteUri, StringComparer.Ordinal))
         {
             diagnostics.Add(new(

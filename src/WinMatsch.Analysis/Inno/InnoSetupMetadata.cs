@@ -8,6 +8,9 @@ public enum InnoPrivilegeLevel
     PowerUser,
     Admin,
     Lowest,
+
+    /// <summary>A privilege value outside the documented 0–3 range; scope and elevation are not derived.</summary>
+    Unknown,
 }
 
 public sealed record InnoLanguage(string? Name, uint LanguageId, uint CodePage, LanguageTag? Locale);

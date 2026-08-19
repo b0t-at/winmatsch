@@ -29,8 +29,14 @@ public sealed class InnoProbe : IExeFormatProbe
         {
             metadata = InspectForAnalysis(peFile, stream);
         }
-        catch (Exception exception) when (exception is UnsupportedInnoVersionException or UnsupportedInnoEncryptionException)
+        catch (Exception exception) when (
+            exception is UnsupportedInnoVersionException
+                or UnsupportedInnoEncryptionException
+                or InvalidDataException)
         {
+            string detail = exception.InnerException is { Message.Length: > 0 } inner
+                ? $"{exception.Message} {inner.Message}"
+                : exception.Message;
             VersionInfo unsupportedVersion = peFile.VersionInfo;
             return new InstallerAnalysis
             {
@@ -51,8 +57,13 @@ public sealed class InnoProbe : IExeFormatProbe
                 Diagnostics =
                 [
                     new AnalysisDiagnostic(
-                        exception is UnsupportedInnoEncryptionException ? "INNO013" : "INNO010",
-                        $"{exception.Message} Header metadata was not interpreted; verify the installer manually.",
+                        exception switch
+                        {
+                            UnsupportedInnoEncryptionException => "INNO013",
+                            UnsupportedInnoVersionException => "INNO010",
+                            _ => "INNO016",
+                        },
+                        $"{detail} Header metadata was not interpreted; verify the installer manually.",
                         RequiresManualAnalysis: true),
                 ],
             };
