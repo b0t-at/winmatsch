@@ -53,6 +53,9 @@ jobs:
       - name: Restore
         run: dotnet restore
 
+      - name: Verify third-party notice versions
+        run: python3 scripts/update-third-party-notices.py --check
+
       - name: Build
         run: dotnet build --no-restore --configuration Release
 

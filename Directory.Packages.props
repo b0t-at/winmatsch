@@ -8,11 +8,13 @@
   <!--
     Dependency policy (see CONTRIBUTING.md "Dependencies"):
       * Every shipped package must be permissively licensed (MIT/BSD/Apache-2.0/MPL-2.0),
-        trim- and AOT-analyzable, and listed in THIRD-PARTY-NOTICES.txt with its exact version.
+        trim- and AOT-analyzable, and listed in THIRD-PARTY-NOTICES.txt.
       * Prefer the latest stable version. A deliberate hold-back must carry a comment here
         naming the concrete blocker and how to re-evaluate it.
-      * The LicenseNoticeTests drift-guard fails the build when a pin here is missing
-        from THIRD-PARTY-NOTICES.txt.
+      * The LicenseNoticeTests drift-guard fails the build when a pin here has no
+        attribution entry in THIRD-PARTY-NOTICES.txt. Version numbers in the notice are
+        refreshed mechanically with scripts/update-third-party-notices.py (the release
+        workflow enforces freshness with the check flag), so dependency bumps stay green.
   -->
   <ItemGroup>
     <!-- Core -->

@@ -6,10 +6,13 @@ using Xunit;
 namespace WinMatsch.Validation.Tests;
 
 /// <summary>
-/// Guards THIRD-PARTY-NOTICES.txt against drift. The notice is checked against two
-/// independent sources of truth: the central version pins, and the restored dependency
-/// closure of the shipped CLI (so a *transitive* that appears or changes version is caught
-/// too, without anyone maintaining a list by hand).
+/// Guards THIRD-PARTY-NOTICES.txt against drift. Every shipped package — from the central
+/// version pins and from the restored dependency closure of the shipped CLI (so a
+/// *transitive* that appears is caught too) — must have an attribution entry. Attribution is
+/// checked by package identity, not exact version: adding a package requires human license
+/// review, while version refreshes are mechanical and owned by
+/// <c>scripts/update-third-party-notices.py</c> (enforced with <c>--check</c> by the release
+/// workflow), so dependency bumps do not fail CI.
 /// </summary>
 public sealed class LicenseNoticeTests
 {
@@ -66,7 +69,7 @@ public sealed class LicenseNoticeTests
     [Fact]
     public void Third_party_notice_covers_every_pinned_shipped_package()
     {
-        HashSet<string> noticed = ReadNoticedPackages();
+        HashSet<string> noticedIds = ReadNoticedPackageIds();
 
         foreach ((string id, string version) in ReadPinnedPackages())
         {
@@ -76,33 +79,33 @@ public sealed class LicenseNoticeTests
             }
 
             Assert.True(
-                noticed.Contains($"{id} {version}"),
-                $"THIRD-PARTY-NOTICES.txt does not attribute '{id} {version}'. Update the notice whenever a pinned version changes.");
+                noticedIds.Contains(id),
+                $"THIRD-PARTY-NOTICES.txt does not attribute '{id}' (pinned at {version}). "
+                + "Review its license and add an attribution entry; versions are refreshed by scripts/update-third-party-notices.py.");
         }
     }
 
     [Fact]
     public void Third_party_notice_covers_the_restored_cli_dependency_closure()
     {
-        HashSet<string> noticed = ReadNoticedPackages();
+        HashSet<string> noticedIds = ReadNoticedPackageIds();
         List<(string Id, string Version)> closure = ReadShippedClosure();
 
         Assert.NotEmpty(closure);
         foreach ((string id, string version) in closure)
         {
             Assert.True(
-                noticed.Contains($"{id} {version}"),
-                $"THIRD-PARTY-NOTICES.txt does not attribute '{id} {version}', which ships inside the CLI. "
-                + "Run 'dotnet list package --include-transitive', verify the license, and add it.");
+                noticedIds.Contains(id),
+                $"THIRD-PARTY-NOTICES.txt does not attribute '{id}' ({version}), which ships inside the CLI. "
+                + "Run 'dotnet list package --include-transitive', verify the license, and add it; "
+                + "versions are refreshed by scripts/update-third-party-notices.py.");
         }
     }
 
     [Fact]
     public void Every_pinned_package_is_classified_as_shipped_or_test_only()
     {
-        HashSet<string> noticedIds = ReadNoticedPackages()
-            .Select(static entry => entry[..entry.LastIndexOf(' ')])
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> noticedIds = ReadNoticedPackageIds();
 
         foreach ((string id, _) in ReadPinnedPackages())
         {
@@ -116,15 +119,15 @@ public sealed class LicenseNoticeTests
     }
 
     /// <summary>
-    /// Parses the notice into the set of "&lt;id&gt; &lt;version&gt;" attributions it makes.
-    /// Only whole lines that consist purely of a comma/"and"-separated list of
+    /// Parses the notice into the set of package identifiers it attributes. Only whole lines
+    /// that consist purely of a comma/"and"-separated list of
     /// <c>&lt;PackageId&gt; &lt;version&gt;</c> pairs count, so surrounding prose (license text,
     /// URLs, copyright lines) can never be mistaken for an attribution.
     /// </summary>
-    private static HashSet<string> ReadNoticedPackages()
+    private static HashSet<string> ReadNoticedPackageIds()
     {
         string[] lines = File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "THIRD-PARTY-NOTICES.txt"));
-        HashSet<string> entries = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> ids = new(StringComparer.OrdinalIgnoreCase);
         foreach (string line in lines)
         {
             string[] parts = line.Trim().Split(_attributionSeparators, StringSplitOptions.TrimEntries);
@@ -132,13 +135,13 @@ public sealed class LicenseNoticeTests
             {
                 foreach (string part in parts)
                 {
-                    entries.Add(part);
+                    ids.Add(part[..part.LastIndexOf(' ')]);
                 }
             }
         }
 
-        Assert.NotEmpty(entries);
-        return entries;
+        Assert.NotEmpty(ids);
+        return ids;
     }
 
     private static List<(string Id, string Version)> ReadPinnedPackages()

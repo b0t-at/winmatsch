@@ -67,11 +67,14 @@ trimming decision as much as a technical one.
 - **Currency.** Prefer the latest stable version. Any hold-back must carry a
   comment in `Directory.Packages.props` naming the concrete blocker and the
   condition that would let us move — "AOT" or "risky" alone is not a reason.
-- **Notices.** Update `THIRD-PARTY-NOTICES.txt` in the same commit as the
-  version change, including the pinned source commit for MPL-2.0 components.
-  `LicenseNoticeTests` cross-checks the notice against
-  `Directory.Packages.props` and fails when the two drift, and it also fails
-  when a new pin is neither noticed nor declared test-only.
+- **Notices.** New packages need a hand-written attribution entry in
+  `THIRD-PARTY-NOTICES.txt` (verified license, source, and — for MPL-2.0
+  components — the pinned source commit). Version numbers in the notice are
+  mechanical: refresh them with
+  `python3 scripts/update-third-party-notices.py` (the release workflow
+  enforces freshness with `--check`, so dependency bumps stay green in CI).
+  `LicenseNoticeTests` fails when a shipped package has no attribution entry
+  or when a pin is neither noticed nor declared test-only.
 
 ```bash
 dotnet list package --include-transitive        # full closure, incl. licenses to verify
