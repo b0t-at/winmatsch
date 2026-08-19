@@ -182,6 +182,22 @@ public class Wm0007PreserveOnUpdateTests
     }
 
     [Fact]
+    public void Release_notes_url_embedding_a_zero_trimmed_version_variant_is_not_carried_over()
+    {
+        // Motivating regression: NSClient's PackageVersion 0.14.1.0 vs a URL saying 0.14.1 —
+        // exact Contains missed the variant, so the stale tag URL shipped (PR #420383 class).
+        PackageManifests previous = TestManifests.Create(TestManifests.CreateInstaller());
+        previous.Installer.PackageVersion = new PackageVersion("0.14.1.0");
+        previous.DefaultLocale.ReleaseNotesUrl = "https://example.com/releases/tag/0.14.1";
+
+        PackageManifests manifests = TestManifests.Create(TestManifests.CreateInstaller());
+
+        _rule.Apply(TestManifests.CreateContext(manifests, previous: previous));
+
+        Assert.Null(manifests.DefaultLocale.ReleaseNotesUrl);
+    }
+
+    [Fact]
     public void No_op_without_previous_manifests()
     {
         Installer installer = TestManifests.CreateInstaller();

@@ -1,3 +1,4 @@
+using System.Net;
 using WinMatsch.Downloads;
 
 namespace WinMatsch.Validation;
@@ -115,15 +116,15 @@ public sealed class PreflightGate
             }
             catch (DownloadException exception)
             {
-                findings.Add(ProbeFailure(target, exception.Message));
+                findings.Add(ProbeFailure(target, exception));
             }
             catch (ArgumentException exception)
             {
-                findings.Add(ProbeFailure(target, exception.Message));
+                findings.Add(ProbeFailure(target, exception));
             }
             catch (InvalidOperationException exception)
             {
-                findings.Add(ProbeFailure(target, exception.Message));
+                findings.Add(ProbeFailure(target, exception));
             }
         }
     }
@@ -295,14 +296,39 @@ public sealed class PreflightGate
                 .ThenBy(static finding => finding.Path, StringComparer.Ordinal)
                 .ThenBy(static finding => finding.Message, StringComparer.Ordinal));
 
-    private static ValidationFinding ProbeFailure(UrlTarget target, string message)
-        => new(
-            target.Kind == UrlTargetKind.Installer ? "VLD5004" : "VLD5005",
-            target.Kind == UrlTargetKind.Installer
-                ? ValidationSeverity.Error
-                : ValidationSeverity.Warning,
-            $"{(target.Kind == UrlTargetKind.Installer ? "Installer" : "Metadata")} URL probe failed: {message}",
+    private static ValidationFinding ProbeFailure(UrlTarget target, Exception exception)
+    {
+        if (target.Kind == UrlTargetKind.Installer)
+        {
+            return new(
+                "VLD5004",
+                ValidationSeverity.Error,
+                $"Installer URL probe failed: {exception.Message}",
+                target.Url);
+        }
+
+        // A definitive 404/410 means the metadata URL is dead at the origin, not merely
+        // unreachable right now: the workflow drops the optional field instead of shipping a
+        // manifest the upstream validator will reject. Transient failures (403/429/5xx,
+        // network errors) stay ordinary warnings.
+        if (exception is DownloadHttpException { StatusCode: HttpStatusCode.NotFound or HttpStatusCode.Gone })
+        {
+            return new(
+                DeadMetadataUrlCode,
+                ValidationSeverity.Warning,
+                $"Metadata URL is definitively dead at the origin: {exception.Message}",
+                target.Url);
+        }
+
+        return new(
+            "VLD5005",
+            ValidationSeverity.Warning,
+            $"Metadata URL probe failed: {exception.Message}",
             target.Url);
+    }
+
+    /// <summary>The finding code for optional metadata URLs that returned a definitive HTTP 404/410.</summary>
+    public const string DeadMetadataUrlCode = "VLD5006";
 
     private static ValidationFinding Error(string code, string message, string? path = null)
         => new(code, ValidationSeverity.Error, message, path);

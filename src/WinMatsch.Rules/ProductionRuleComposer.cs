@@ -39,7 +39,7 @@ public static class ProductionRuleComposer
             new Scope4WrapperClassificationRule(),
             new Meta5FieldSetParityRule(runEvidence, packs),
             new Meta1HttpsUpgradeRule(runEvidence),
-            new Meta3GitHubLicenseUrlRule(),
+            new Meta3GitHubLicenseUrlRule(runEvidence),
             new Meta4ReleaseNotesBulletRule(),
             new Meta4ReleaseNotesSanitizeRule(runEvidence, sanitizeBullets: false),
             new Dep1PayloadDependencyRule(runEvidence),

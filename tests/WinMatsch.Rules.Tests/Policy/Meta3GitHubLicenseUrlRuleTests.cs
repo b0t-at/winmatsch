@@ -17,14 +17,18 @@ public class Meta3GitHubLicenseUrlRuleTests
     }
 
     [Fact]
-    public void Commit_pinned_blob_url_is_normalized_to_head()
+    public void Commit_pinned_blob_url_is_normalized_to_head_when_confirmed()
     {
         // Motivating regression: GitButler blob/7d01a53.../LICENSE.md -> stable link (#162317).
+        var rule = new Meta3GitHubLicenseUrlRule(new PolicyEvidence
+        {
+            ConfirmedUrls = ["https://github.com/gitbutlerapp/gitbutler/blob/HEAD/LICENSE.md"],
+        });
         PackageManifests manifests = CreateWithLicenseUrl(
             "https://github.com/gitbutlerapp/gitbutler/blob/7d01a53a15bcf5c0e0c4e0d5cbf4b0a1e4a01234/LICENSE.md");
         ManifestContext context = TestManifests.CreateContext(manifests);
 
-        _rule.Apply(context);
+        rule.Apply(context);
 
         Assert.Equal(
             "https://github.com/gitbutlerapp/gitbutler/blob/HEAD/LICENSE.md",
@@ -32,17 +36,51 @@ public class Meta3GitHubLicenseUrlRuleTests
     }
 
     [Fact]
-    public void Raw_githubusercontent_url_is_normalized_to_blob_head()
+    public void Commit_pinned_blob_url_is_kept_without_head_confirmation()
     {
-        // Motivating regression: Authme raw.githubusercontent.com/...main/LICENSE.md -> blob/HEAD (#197643).
+        // Motivating regression: nvQuickSite's tag-pinned license existed while blob/HEAD
+        // was a hard 404 (the file moved at HEAD); PR #419632 shipped the dead rewrite.
         PackageManifests manifests = CreateWithLicenseUrl(
-            "https://raw.githubusercontent.com/Levminer/authme/main/LICENSE.md");
+            "https://github.com/gitbutlerapp/gitbutler/blob/7d01a53a15bcf5c0e0c4e0d5cbf4b0a1e4a01234/LICENSE.md");
         ManifestContext context = TestManifests.CreateContext(manifests);
 
         _rule.Apply(context);
 
         Assert.Equal(
+            "https://github.com/gitbutlerapp/gitbutler/blob/7d01a53a15bcf5c0e0c4e0d5cbf4b0a1e4a01234/LICENSE.md",
+            manifests.DefaultLocale.LicenseUrl);
+    }
+
+    [Fact]
+    public void Raw_githubusercontent_url_is_normalized_to_blob_head_when_confirmed()
+    {
+        // Motivating regression: Authme raw.githubusercontent.com/...main/LICENSE.md -> blob/HEAD (#197643).
+        var rule = new Meta3GitHubLicenseUrlRule(new PolicyEvidence
+        {
+            ConfirmedUrls = ["https://github.com/Levminer/authme/blob/HEAD/LICENSE.md"],
+        });
+        PackageManifests manifests = CreateWithLicenseUrl(
+            "https://raw.githubusercontent.com/Levminer/authme/main/LICENSE.md");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        rule.Apply(context);
+
+        Assert.Equal(
             "https://github.com/Levminer/authme/blob/HEAD/LICENSE.md",
+            manifests.DefaultLocale.LicenseUrl);
+    }
+
+    [Fact]
+    public void Raw_githubusercontent_url_keeps_its_pinned_ref_without_head_confirmation()
+    {
+        PackageManifests manifests = CreateWithLicenseUrl(
+            "https://raw.githubusercontent.com/Levminer/authme/v1.2.3/LICENSE.md");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Equal(
+            "https://github.com/Levminer/authme/blob/v1.2.3/LICENSE.md",
             manifests.DefaultLocale.LicenseUrl);
     }
 
@@ -56,7 +94,7 @@ public class Meta3GitHubLicenseUrlRuleTests
 
         _rule.Apply(context);
 
-        Assert.Equal("https://github.com/owner/repo/blob/HEAD/COPYING", manifests.DefaultLocale.CopyrightUrl);
+        Assert.Equal("https://github.com/owner/repo/blob/v1.2.3/COPYING", manifests.DefaultLocale.CopyrightUrl);
     }
 
     [Fact]

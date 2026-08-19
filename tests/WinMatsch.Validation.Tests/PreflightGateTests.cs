@@ -73,12 +73,13 @@ public sealed class PreflightGateTests
             boundary);
 
         Assert.True(report.IsValid, report.ToText());
-        Assert.Equal(2, network.ProbeCount);
+        Assert.Equal(3, network.ProbeCount);
         Assert.Equal(1, network.RevalidationCount);
         Assert.Equal(1, boundary.InvocationCount);
         Assert.Equal(
             [
                 $"probe:{TestPackageFactory.PublisherUrl}",
+                $"probe:{TestPackageFactory.LicenseUrl}",
                 $"probe:{TestPackageFactory.InstallerUrl}",
                 $"revalidate:{TestPackageFactory.InstallerUrl}",
                 "boundary",
@@ -506,11 +507,35 @@ public sealed class PreflightGateTests
             }).ExecuteAsync(strict, strictBoundary);
 
         Assert.True(allowed.IsValid);
-        Assert.Contains(allowed.Findings, static finding => finding.Code == "VLD5005");
+        Assert.Contains(allowed.Findings, static finding => finding.Code == PreflightGate.DeadMetadataUrlCode);
         Assert.Equal(1, allowedBoundary.InvocationCount);
         Assert.True(blocked.IsValid);
         Assert.False(blocked.CanProceed(WarningPolicy.TreatAsErrors));
         Assert.Equal(0, strictBoundary.InvocationCount);
+    }
+
+    [Fact]
+    public async Task Dead_metadata_url_is_flagged_definitively_while_transient_failures_stay_generic()
+    {
+        var network = new FakePreflightNetwork
+        {
+            FailingProbeUrl = TestPackageFactory.PublisherUrl,
+            TransientFailingProbeUrl = TestPackageFactory.LicenseUrl,
+        };
+
+        ValidationReport report = await new PreflightGate(network)
+            .ValidateAsync(TestPackageFactory.CreateRequest());
+
+        ValidationFinding dead = Assert.Single(
+            report.Findings,
+            static finding => finding.Code == PreflightGate.DeadMetadataUrlCode);
+        Assert.Equal(ValidationSeverity.Warning, dead.Severity);
+        Assert.Equal(TestPackageFactory.PublisherUrl, dead.Path);
+        ValidationFinding transient = Assert.Single(
+            report.Findings,
+            static finding => finding.Code == "VLD5005");
+        Assert.Equal(ValidationSeverity.Warning, transient.Severity);
+        Assert.Equal(TestPackageFactory.LicenseUrl, transient.Path);
     }
 
     [Fact]
