@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Reflection.PortableExecutable;
 using System.Text;
 using WinMatsch.Analysis.Dependencies;
+using WinMatsch.Analysis.Inno;
 using WinMatsch.Core;
 using Xunit;
 
@@ -526,11 +527,11 @@ public class PayloadDependencyAnalyzerTests
     }
 
     [Fact]
-    public void Seventy_megabyte_compressed_entry_does_not_abort_archive_analysis()
+    public void Two_hundred_ninety_megabyte_compressed_entry_does_not_abort_archive_analysis()
     {
         using MemoryStream archive = DependencyFixtures.BuildCompressedZeroZip(
             "electron/app.exe",
-            70L * 1024 * 1024);
+            290L * 1024 * 1024);
 
         PayloadDependencyAnalysis analysis = _analyzer.Analyze(archive, "electron.zip");
 
@@ -1070,9 +1071,10 @@ public class PayloadDependencyAnalyzerTests
     [Fact]
     public void Inno_payload_candidate_exhaustion_marks_dependency_analysis_incomplete()
     {
+        int candidateCount = new InnoProbeOptions().MaximumPayloadCandidates + 1;
         byte[][] payloads =
         [
-            .. Enumerable.Range(0, 65)
+            .. Enumerable.Range(0, candidateCount)
                 .Select(_ => DependencyFixtures.BuildPe(Machine.Amd64)),
         ];
         byte[] installer = InnoFixtures.BuildInstaller(new InnoFixtures.Options

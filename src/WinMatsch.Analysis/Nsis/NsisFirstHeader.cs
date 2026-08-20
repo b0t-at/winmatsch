@@ -76,7 +76,7 @@ internal sealed class NsisFirstHeader
             uint flags = BinaryPrimitives.ReadUInt32LittleEndian(record);
             int headerSize = BinaryPrimitives.ReadInt32LittleEndian(record[20..]);
             uint followingDataSize = BinaryPrimitives.ReadUInt32LittleEndian(record[24..]);
-            if (headerSize is <= 0 or > AnalysisLimits.MaxNsisHeaderBytes)
+            if (headerSize <= 0 || headerSize > AnalysisLimits.MaxNsisHeaderBytes)
             {
                 throw new InvalidDataException(
                     $"The NSIS first header declares an implausible installer header size of {headerSize} bytes.");

@@ -10,7 +10,7 @@ using ExtendedZipArchive = SharpCompress.Archives.Zip.ZipArchive;
 namespace WinMatsch.Analysis;
 
 /// <summary>
-/// Opens a pre-bounded ZIP and adds Deflate64 reads without broadening the accepted method set.
+/// Opens a pre-bounded ZIP and adds Deflate64/LZMA reads without broadening the accepted method set.
 /// </summary>
 internal sealed class SupportedZipArchive : IDisposable
 {
@@ -20,6 +20,7 @@ internal sealed class SupportedZipArchive : IDisposable
     private const ushort Stored = 0;
     private const ushort Deflate = 8;
     private const ushort Deflate64 = 9;
+    private const ushort Lzma = 14;
     private const ushort WinZipAes = 99;
 
     private readonly DotNetZipArchive _archive;
@@ -59,12 +60,13 @@ internal sealed class SupportedZipArchive : IDisposable
                     validateAllEntryFeatures);
             }
 
-            if (directory.Any(static entry => entry.CompressionMethod == Deflate64))
+            if (directory.Any(static entry => RequiresExtendedReader(entry.CompressionMethod)))
             {
                 stream.Position = 0;
-                int deflate64Index = Enumerable.Range(0, directory.Count).First(
-                    index => directory[index].CompressionMethod == Deflate64);
-                string entryPath = _archive.Entries[deflate64Index].FullName;
+                int extendedIndex = Enumerable.Range(0, directory.Count).First(
+                    index => RequiresExtendedReader(directory[index].CompressionMethod));
+                string entryPath = _archive.Entries[extendedIndex].FullName;
+                ushort extendedMethod = directory[extendedIndex].CompressionMethod;
                 try
                 {
                     _extendedArchive = ExtendedZipArchive.OpenArchive(
@@ -76,8 +78,8 @@ internal sealed class SupportedZipArchive : IDisposable
                     throw InvalidEntry(
                         archiveName,
                         entryPath,
-                        Deflate64,
-                        "the Deflate64 archive metadata is malformed.",
+                        extendedMethod,
+                        $"the {CompressionMethodName(extendedMethod)} archive metadata is malformed.",
                         exception);
                 }
             }
@@ -93,7 +95,7 @@ internal sealed class SupportedZipArchive : IDisposable
             for (int index = 0; index < directory.Count; index++)
             {
                 DotNetZipArchiveEntry entry = _archive.Entries[index];
-                IArchiveEntry? extendedEntry = directory[index].CompressionMethod == Deflate64
+                IArchiveEntry? extendedEntry = RequiresExtendedReader(directory[index].CompressionMethod)
                     ? extendedEntries[index]
                     : null;
                 if (extendedEntry is not null)
@@ -130,6 +132,13 @@ internal sealed class SupportedZipArchive : IDisposable
         _extendedArchive?.Dispose();
         _archive.Dispose();
     }
+
+    /// <summary>
+    /// Whether a compression method requires the SharpCompress-backed extended reader:
+    /// .NET's built-in <see cref="DotNetZipArchive"/> cannot decode Deflate64 or LZMA entries.
+    /// </summary>
+    private static bool RequiresExtendedReader(ushort method)
+        => method is Deflate64 or Lzma;
 
     public static string CompressionMethodName(ushort method)
         => method switch
@@ -300,7 +309,7 @@ internal sealed class SupportedZipArchive : IDisposable
                 "masked ZIP header values");
         }
 
-        if (method is not Stored and not Deflate and not Deflate64)
+        if (method is not Stored and not Deflate and not Deflate64 and not Lzma)
         {
             throw new UnsupportedZipFeatureException(archiveName, entryPath, method, methodName);
         }
@@ -338,7 +347,7 @@ internal sealed class SupportedZipArchive : IDisposable
             || extendedEntry.CompressedSize != entry.CompressedLength)
         {
             throw new InvalidDataException(
-                $"{description} exposes inconsistent Deflate64 entry metadata across bounded ZIP readers.");
+                $"{description} exposes inconsistent extended-method (Deflate64/LZMA) entry metadata across bounded ZIP readers.");
         }
     }
 }
@@ -372,10 +381,11 @@ internal sealed class SupportedZipArchiveEntry(
 
         try
         {
-            return new ClassifiedDeflate64Stream(
+            return new ClassifiedExtendedEntryStream(
                 extendedEntry.OpenEntryStream(),
                 archiveName,
-                FullName);
+                FullName,
+                CompressionMethod);
         }
         catch (Exception exception) when (SupportedZipArchive.IsDecoderFailure(exception))
         {
@@ -389,16 +399,15 @@ internal sealed class SupportedZipArchiveEntry(
             FullName,
             CompressionMethod,
             SupportedZipArchive.CompressionMethodName(CompressionMethod),
-            "the Deflate64 entry data is malformed.",
+            $"the {SupportedZipArchive.CompressionMethodName(CompressionMethod)} entry data is malformed.",
             exception);
 
-    private sealed class ClassifiedDeflate64Stream(
+    private sealed class ClassifiedExtendedEntryStream(
         Stream source,
         string archiveName,
-        string entryPath) : Stream
+        string entryPath,
+        ushort compressionMethod) : Stream
     {
-        private const ushort CompressionMethod = 9;
-
         public override bool CanRead => source.CanRead;
 
         public override bool CanSeek => source.CanSeek;
@@ -498,9 +507,9 @@ internal sealed class SupportedZipArchiveEntry(
             => new(
                 archiveName,
                 entryPath,
-                CompressionMethod,
-                SupportedZipArchive.CompressionMethodName(CompressionMethod),
-                "the Deflate64 entry data is malformed.",
+                compressionMethod,
+                SupportedZipArchive.CompressionMethodName(compressionMethod),
+                $"the {SupportedZipArchive.CompressionMethodName(compressionMethod)} entry data is malformed.",
                 exception);
     }
 }

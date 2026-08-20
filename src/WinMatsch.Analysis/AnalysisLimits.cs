@@ -5,34 +5,43 @@ using System.Threading;
 namespace WinMatsch.Analysis;
 
 /// <summary>
-/// Resource ceilings shared by archive-backed analyzers. The entry and expanded-archive
-/// byte ceilings can be raised per environment via <c>WINMATSCH_MAX_ENTRY_BYTES</c> and
-/// <c>WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES</c> for packages whose payloads legitimately
-/// exceed the defaults.
+/// Resource ceilings shared by archive-backed analyzers. The entry, expanded-archive, MSI
+/// stream, and NSIS header byte ceilings can be raised per environment via
+/// <c>WINMATSCH_MAX_ENTRY_BYTES</c>, <c>WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES</c>,
+/// <c>WINMATSCH_MAX_MSI_STREAM_BYTES</c>, and <c>WINMATSCH_MAX_NSIS_HEADER_BYTES</c> for
+/// packages whose payloads legitimately exceed the defaults.
 /// </summary>
 internal static class AnalysisLimits
 {
     public const string MaxEntryBytesVariable = "WINMATSCH_MAX_ENTRY_BYTES";
     public const string MaxExpandedArchiveBytesVariable = "WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES";
+    public const string MaxMsiStreamBytesVariable = "WINMATSCH_MAX_MSI_STREAM_BYTES";
+    public const string MaxNsisHeaderBytesVariable = "WINMATSCH_MAX_NSIS_HEADER_BYTES";
 
     public const int MaxArchiveEntries = 10_000;
-    public const int MaxDependencyArchiveEntries = 4_096;
+    public const int MaxDependencyArchiveEntries = 8_192;
     public const int MaxArchivePathDepth = 64;
     public const int MaxArchivePathLength = 2_048;
     public const long DefaultMaxEntryBytes = 256L * 1024 * 1024;
     public const long DefaultMaxExpandedArchiveBytes = 1024L * 1024 * 1024;
-    public const long MaxDependencyCentralDirectoryBytes = 16L * 1024 * 1024;
+    public const long MaxDependencyCentralDirectoryBytes = 64L * 1024 * 1024;
     public const int MaxNestedArchives = 4;
     public const int MaxPeSections = 96;
     public const int MaxResourceBytes = 16 * 1024 * 1024;
-    public const int MaxMsiStreamBytes = 64 * 1024 * 1024;
-    public const int MaxNsisHeaderBytes = 64 * 1024 * 1024;
+    public const long DefaultMaxMsiStreamBytes = 256L * 1024 * 1024;
+    public const long DefaultMaxNsisHeaderBytes = 256L * 1024 * 1024;
 
     public static long MaxEntryBytes { get; } =
         ReadConfiguredLimit(MaxEntryBytesVariable, DefaultMaxEntryBytes);
 
     public static long MaxExpandedArchiveBytes { get; } =
         ReadConfiguredLimit(MaxExpandedArchiveBytesVariable, DefaultMaxExpandedArchiveBytes);
+
+    public static long MaxMsiStreamBytes { get; } =
+        ReadConfiguredLimit(MaxMsiStreamBytesVariable, DefaultMaxMsiStreamBytes);
+
+    public static long MaxNsisHeaderBytes { get; } =
+        ReadConfiguredLimit(MaxNsisHeaderBytesVariable, DefaultMaxNsisHeaderBytes);
 
     private static readonly AsyncLocal<int> _archiveDepth = new();
 

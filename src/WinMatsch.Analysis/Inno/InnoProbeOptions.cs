@@ -9,7 +9,7 @@ public sealed class InnoProbeOptions
 
     public int MaximumExpandedHeaderBytes { get; init; } = 32 * 1024 * 1024;
 
-    public int MaximumLzmaDictionaryBytes { get; init; } = 64 * 1024 * 1024;
+    public int MaximumLzmaDictionaryBytes { get; init; } = 256 * 1024 * 1024;
 
     public int MaximumStringBytes { get; init; } = 1024 * 1024;
 
@@ -19,15 +19,15 @@ public sealed class InnoProbeOptions
 
     public int MaximumLanguages { get; init; } = 256;
 
-    public int MaximumPayloadScanBytes { get; init; } = 64 * 1024 * 1024;
+    public int MaximumPayloadScanBytes { get; init; } = 512 * 1024 * 1024;
 
-    public int MaximumExpandedPayloadBytes { get; init; } = 128 * 1024 * 1024;
+    public int MaximumExpandedPayloadBytes { get; init; } = 512 * 1024 * 1024;
 
-    public int MaximumAggregatePayloadBytes { get; init; } = 192 * 1024 * 1024;
+    public int MaximumAggregatePayloadBytes { get; init; } = 1024 * 1024 * 1024;
 
-    public int MaximumPayloadMarkerAttempts { get; init; } = 64;
+    public int MaximumPayloadMarkerAttempts { get; init; } = 1024;
 
-    public int MaximumPayloadCandidates { get; init; } = 64;
+    public int MaximumPayloadCandidates { get; init; } = 1024;
 
     public int MaximumArchitectureExpressionCharacters { get; init; } = 4096;
 

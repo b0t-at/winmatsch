@@ -153,16 +153,22 @@ public sealed class PreserveOnUpdateRule : IRule
             context.AddTrace(this, "DefaultLocale: carried Icons over from the previous version.");
         }
 
-        if (locale.ReleaseNotesUrl is null && previousLocale.ReleaseNotesUrl is { } releaseNotesUrl)
+        if (locale.ReleaseNotesUrl is null
+            && WouldCarryReleaseNotesUrl(previousLocale.ReleaseNotesUrl, previous.Installer.PackageVersion?.Value))
         {
-            string? previousVersion = previous.Installer.PackageVersion?.Value;
-            if (!EmbedsVersion(releaseNotesUrl, previousVersion))
-            {
-                locale.ReleaseNotesUrl = releaseNotesUrl;
-                context.AddTrace(this, "DefaultLocale: carried ReleaseNotesUrl over from the previous version (it does not embed the previous version).");
-            }
+            locale.ReleaseNotesUrl = previousLocale.ReleaseNotesUrl;
+            context.AddTrace(this, "DefaultLocale: carried ReleaseNotesUrl over from the previous version (it does not embed the previous version).");
         }
     }
+
+    /// <summary>
+    /// Whether this rule would carry the previous version's ReleaseNotesUrl forward on update:
+    /// the previous value must exist and must not embed the previous package version (a
+    /// version-specific URL would be stale). Exposed so callers that pre-populate the field
+    /// from other evidence can defer to the hand-maintained, version-agnostic URL instead.
+    /// </summary>
+    public static bool WouldCarryReleaseNotesUrl(string? previousUrl, string? previousVersion)
+        => previousUrl is not null && !EmbedsVersion(previousUrl, previousVersion);
 
     /// <summary>
     /// Whether the URL embeds the version in any common representation: verbatim, or with

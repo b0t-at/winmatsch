@@ -57,7 +57,10 @@ public interface IPullRequestManifestEvidenceProvider
 public static class PullRequestManifestEvidenceLimits
 {
     public const int MaximumOpenPullRequests = 5_000;
-    public const int MaximumCandidates = 64;
+
+    // GitHub's search API hard-caps per_page at 100; SearchPullRequestsByTextAsync rejects any
+    // MaximumResults above that, so this must never exceed it.
+    public const int MaximumCandidates = 100;
     public const int MaximumContentFiles = 16;
     public const long MaximumContentBytes = 1_048_576;
 }

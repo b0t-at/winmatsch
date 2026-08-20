@@ -4,12 +4,12 @@ namespace WinMatsch.Analysis.Dependencies;
 public sealed class PayloadDependencyAnalyzerOptions
 {
     public const int DefaultMaximumArchiveEntries = AnalysisLimits.MaxDependencyArchiveEntries;
-    public const long DefaultMaximumPayloadBytes = 64L * 1024 * 1024;
-    public const long DefaultMaximumTotalPayloadBytes = 256L * 1024 * 1024;
-    public const long DefaultMaximumCompressedPayloadBytes = 64L * 1024 * 1024;
-    public const long DefaultMaximumTotalCompressedBytes = 256L * 1024 * 1024;
+    public const long DefaultMaximumPayloadBytes = 256L * 1024 * 1024;
+    public const long DefaultMaximumTotalPayloadBytes = 1024L * 1024 * 1024;
+    public const long DefaultMaximumCompressedPayloadBytes = 256L * 1024 * 1024;
+    public const long DefaultMaximumTotalCompressedBytes = 1024L * 1024 * 1024;
     public const long DefaultMaximumCentralDirectoryBytes = AnalysisLimits.MaxDependencyCentralDirectoryBytes;
-    public const int DefaultMaximumArchiveReadOperations = 16_384;
+    public const int DefaultMaximumArchiveReadOperations = 65_536;
     public const int DefaultMaximumRuntimeConfigBytes = 4 * 1024 * 1024;
     public const int DefaultMaximumImportDescriptors = 1024;
     public const int DefaultMaximumImportNameBytes = 260;

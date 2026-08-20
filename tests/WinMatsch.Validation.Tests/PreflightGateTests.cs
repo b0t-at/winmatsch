@@ -1015,7 +1015,7 @@ public sealed class PreflightGateTests
     }
 
     [Fact]
-    public async Task Changed_redirect_target_blocks_boundary_even_when_revalidation_reports_unchanged()
+    public async Task Changed_redirect_target_warns_but_does_not_block_boundary_when_content_is_unchanged()
     {
         var network = new FakePreflightNetwork
         {
@@ -1025,6 +1025,27 @@ public sealed class PreflightGateTests
 
         ValidationReport report = await new PreflightGate(network)
             .ExecuteAsync(TestPackageFactory.CreateRequest(), boundary);
+
+        ValidationFinding finding = Assert.Single(
+            report.Findings,
+            static finding => finding.Code == "VLD6011");
+        Assert.Equal(ValidationSeverity.Warning, finding.Severity);
+        Assert.Equal(1, boundary.InvocationCount);
+    }
+
+    [Fact]
+    public async Task Changed_redirect_target_still_blocks_boundary_under_treat_warnings_as_errors()
+    {
+        var network = new FakePreflightNetwork
+        {
+            RevalidatedFinalUrl = "https://cdn2.example.com/setup.exe",
+        };
+        var boundary = new FakeBoundary();
+        PreflightRequest request = TestPackageFactory.CreateRequest(
+            options: new PreflightOptions { WarningPolicy = WarningPolicy.TreatAsErrors });
+
+        ValidationReport report = await new PreflightGate(network)
+            .ExecuteAsync(request, boundary);
 
         Assert.Contains(report.Findings, static finding => finding.Code == "VLD6011");
         Assert.Equal(0, boundary.InvocationCount);

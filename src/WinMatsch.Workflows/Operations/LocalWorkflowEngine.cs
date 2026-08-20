@@ -722,18 +722,29 @@ public sealed class LocalWorkflowEngine
         ];
 
         ImmutableArray<WorkflowAuditEntry> releaseMetadataAudit = [];
-        if (create is not null && _releases is IWorkflowReleaseMetadataSource metadataSource)
+        WorkflowReleaseMetadata? releaseMetadata = null;
+        if (_releases is IWorkflowReleaseMetadataSource metadataSource)
         {
-            WorkflowReleaseMetadata releaseMetadata = await metadataSource.DiscoverMetadataAsync(
+            // Discovered on every create AND update: ReleaseNotes/ReleaseNotesUrl describe one
+            // specific release, so they must be re-fetched for the new version rather than only
+            // on first creation. ClearCarriedReleaseNotes always wipes both fields on update
+            // (the previous version's text/URL is stale by definition), and PreserveOnUpdateRule
+            // only restores a carried-over ReleaseNotesUrl when it is version-agnostic - without
+            // this discovery, a version bump would otherwise leave both fields permanently null.
+            releaseMetadata = await metadataSource.DiscoverMetadataAsync(
                 identifier,
                 release,
                 assets,
                 cancellationToken).ConfigureAwait(false);
-            create = create with
+            if (create is not null)
             {
-                Locale = MergeReleaseMetadata(create.Locale, releaseMetadata.Metadata),
-            };
-            operationRequest = create;
+                create = create with
+                {
+                    Locale = MergeReleaseMetadata(create.Locale, releaseMetadata.Metadata),
+                };
+                operationRequest = create;
+            }
+
             releaseMetadataAudit =
             [
                 .. releaseMetadata.Metadata.Provenance.Select(pair => new WorkflowAuditEntry(
@@ -907,6 +918,13 @@ public sealed class LocalWorkflowEngine
             ClearStaleRootNestedState(candidate.Installer);
             ClearCarriedReleaseDate(candidate.Installer);
             ClearCarriedReleaseNotes(candidate);
+            if (releaseMetadata is not null)
+            {
+                // Applied before RunRules so the discovered release body flows through the full
+                // rule pipeline (META-4 sanitization, override-pack removals) exactly like it
+                // does on create, instead of being injected raw into the final manifest.
+                FillDiscoveredReleaseNotes(candidate.DefaultLocale, previous, releaseMetadata.Metadata);
+            }
         }
 
         ImmutableArray<InstallerEvidence> installerEvidence =
@@ -2179,6 +2197,29 @@ public sealed class LocalWorkflowEngine
         {
             locale.ReleaseNotes = null;
             locale.ReleaseNotesUrl = null;
+        }
+    }
+
+    /// <summary>
+    /// Fills the default locale's ReleaseNotes/ReleaseNotesUrl from freshly discovered release
+    /// evidence for the target version. Runs before the rule pipeline so the discovered body is
+    /// sanitized (META-4) and remains subject to override-pack removals, exactly like on create.
+    /// ClearCarriedReleaseNotes has just wiped both fields; ReleaseNotes is always refilled from
+    /// evidence (WM0007 never carries notes forward), while ReleaseNotesUrl is only refilled
+    /// when WM0007 would not restore the previous hand-maintained, version-agnostic URL - that
+    /// preserved URL takes precedence over the discovered, version-specific one.
+    /// </summary>
+    private static void FillDiscoveredReleaseNotes(
+        DefaultLocaleManifest locale,
+        PackageSnapshot previous,
+        PackageLocaleMetadata discovered)
+    {
+        locale.ReleaseNotes ??= discovered.ReleaseNotes;
+        if (!PreserveOnUpdateRule.WouldCarryReleaseNotesUrl(
+                previous.Manifests.DefaultLocale.ReleaseNotesUrl,
+                previous.Manifests.Installer.PackageVersion?.Value))
+        {
+            locale.ReleaseNotesUrl ??= discovered.ReleaseNotesUrl;
         }
     }
 

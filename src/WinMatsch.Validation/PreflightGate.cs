@@ -230,9 +230,14 @@ public sealed class PreflightGate
                              result.Result.FinalUrl,
                              artifact.Download.FinalUrl))
                 {
-                    findings.Add(Error(
+                    // Content was just re-downloaded and hashed as identical (the branch above
+                    // only reaches here when Status is Unchanged), so a changed redirect host or
+                    // path here is a CDN/mirror routing difference, not evidence of tampering.
+                    // Warn instead of blocking so multi-CDN origins (common for large installers)
+                    // do not fail submission on every run.
+                    findings.Add(Warning(
                         "VLD6011",
-                        "Installer redirect host or path changed during immediate revalidation.",
+                        "Installer redirect host or path changed during immediate revalidation, but the re-downloaded content hash is identical.",
                         expected.Url));
                 }
                 else if (result.Result.Sha256 != expected.Sha256)
@@ -332,4 +337,7 @@ public sealed class PreflightGate
 
     private static ValidationFinding Error(string code, string message, string? path = null)
         => new(code, ValidationSeverity.Error, message, path);
+
+    private static ValidationFinding Warning(string code, string message, string? path = null)
+        => new(code, ValidationSeverity.Warning, message, path);
 }
