@@ -10,7 +10,7 @@ Source: https://github.com/aaubry/YamlDotNet
 Copyright (c) 2008-2014 Antoine Aubry and contributors
 License: MIT
 
-SharpCompress 0.50.3
+SharpCompress 0.50.4
 Source: https://github.com/adamhathcock/sharpcompress
 Copyright (c) 2014 Adam Hathcock
 License: MIT
@@ -20,7 +20,7 @@ Source: https://github.com/spectreconsole/spectre.console
 Copyright (c) 2020 Patrik Svensson, Phil Scott, Nils Andresen
 License: MIT
 
-System.CommandLine 2.0.10
+System.CommandLine 2.0.11
 Source: https://github.com/dotnet/command-line-api
 Copyright (c) Microsoft Corporation. All rights reserved.
 License: MIT
