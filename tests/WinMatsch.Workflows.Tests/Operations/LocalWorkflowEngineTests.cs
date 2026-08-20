@@ -159,6 +159,43 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Update_discovers_fresh_release_notes_for_the_new_version()
+    {
+        // Regression: DiscoverMetadataAsync used to run only for `create is not null`, so an
+        // update never re-fetched ReleaseNotes/ReleaseNotesUrl for the target release.
+        // ClearCarriedReleaseNotes always wipes the stale, version-specific previous values, and
+        // nothing filled them back in - every version bump for a package that had release notes
+        // shipped without them, which winget-pkgs' automated review flags as a manifest
+        // inconsistency (observed on b0t-at/winmatsch's PRs, e.g. bkryza.clang-uml 0.6.3).
+        using var temporary = new TemporaryDirectory();
+        PackageManifests previous = CreatePackage("1.0.0", "A");
+        previous.DefaultLocale.ReleaseNotes = "old notes";
+        previous.DefaultLocale.ReleaseNotesUrl = "https://github.com/example/app/releases/tag/v1.0.0";
+        var releaseSource = new MetadataReleaseSource();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            releases: releaseSource,
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("2.0.0", "A")) with { PackageVersion = "2.0.0" });
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        RawManifestDocument locale = Assert.Single(
+            result.Plan.AfterDocuments,
+            document => document.RepositoryPath.Contains(".locale.", StringComparison.Ordinal));
+        string yaml = System.Text.Encoding.UTF8.GetString(locale.Content.AsSpan());
+        Assert.Contains("ReleaseNotesUrl: https://github.com/example/app/releases/tag/v2.0.0", yaml, StringComparison.Ordinal);
+        Assert.Contains("Release notes", yaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("v1.0.0", yaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("old notes", yaml, StringComparison.Ordinal);
+        Assert.Equal(1, releaseSource.MetadataCalls);
+    }
+
+    [Fact]
     public async Task Update_auto_completes_release_asset_siblings_through_artifact_pipeline()
     {
         using var temporary = new TemporaryDirectory();
