@@ -197,6 +197,34 @@ public class ZipAnalyzerTests
     }
 
     [Fact]
+    public void Lzma_candidate_is_analyzed_with_bounded_extended_decoder()
+    {
+        using MemoryStream lzma = BuildLzmaZip(
+            ("app.exe", PeFixtures.BuildExe(machine: System.Reflection.PortableExecutable.Machine.Amd64)));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(lzma, "lzma.zip");
+
+        Installer installer = Assert.Single(analysis.Installers);
+        Assert.Equal(InstallerType.Portable, installer.NestedInstallerType);
+        Assert.Equal(Architecture.X64, installer.Architecture);
+    }
+
+    [Fact]
+    public void Malformed_lzma_data_reports_stable_domain_diagnostic()
+    {
+        using MemoryStream lzma = BuildLzmaZip(("payload/app.exe", PeFixtures.BuildExe()));
+        using MemoryStream malformed = CorruptEntryData(lzma);
+
+        InvalidZipEntryDataException exception = Assert.Throws<InvalidZipEntryDataException>(
+            () => _analyzer.Analyze(malformed, "malformed-lzma.zip"));
+
+        Assert.Equal("ZIP005", exception.Diagnostic.Code);
+        Assert.Equal("malformed-lzma.zip", exception.ArchiveName);
+        Assert.Equal("payload/app.exe", exception.EntryPath);
+        Assert.Contains("method 14 (LZMA)", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Encrypted_entry_reports_stable_archive_entry_and_method_diagnostic()
     {
         using MemoryStream plain = BuildZip(("payload/app.exe", PeFixtures.BuildExe()));
@@ -593,6 +621,28 @@ public class ZipAnalyzerTests
                     using Stream entryStream = entry.Open();
                     entryStream.Write(content);
                 }
+            }
+        }
+
+        stream.Position = 0;
+        return stream;
+    }
+
+    /// <summary>Builds a genuine LZMA-compressed (method 14) zip via SharpCompress's writer,
+    /// since .NET's built-in ZipArchive cannot write that method.</summary>
+    private static MemoryStream BuildLzmaZip(params (string Name, byte[] Content)[] entries)
+    {
+        var stream = new MemoryStream();
+        using (var writer = new SharpCompress.Writers.Zip.ZipWriter(
+            stream,
+            new SharpCompress.Writers.Zip.ZipWriterOptions(SharpCompress.Common.CompressionType.LZMA)
+            {
+                LeaveStreamOpen = true,
+            }))
+        {
+            foreach ((string name, byte[] content) in entries)
+            {
+                writer.Write(name, new MemoryStream(content), new SharpCompress.Writers.Zip.ZipWriterEntryOptions());
             }
         }
 
