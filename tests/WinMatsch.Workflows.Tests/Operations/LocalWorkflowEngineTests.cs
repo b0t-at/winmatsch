@@ -196,6 +196,70 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Update_discovered_release_notes_flow_through_the_rule_pipeline()
+    {
+        // Regression: the discovered release body used to be injected after RunRules, bypassing
+        // META-4 sanitization and override-pack removals that create-path notes go through. The
+        // fill must happen before the rule pipeline so rules can observe and transform it.
+        using var temporary = new TemporaryDirectory();
+        PackageManifests previous = CreatePackage("1.0.0", "A");
+        previous.DefaultLocale.ReleaseNotesUrl = "https://github.com/example/app/releases/tag/v1.0.0";
+        string? notesSeenByRules = null;
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            new MutatingRuleRunner(manifests =>
+            {
+                notesSeenByRules = manifests.DefaultLocale.ReleaseNotes;
+                manifests.DefaultLocale.ReleaseNotes = "Sanitized notes";
+            }),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            releases: new MetadataReleaseSource(),
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("2.0.0", "A")) with { PackageVersion = "2.0.0" });
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        Assert.Equal("Release notes", notesSeenByRules);
+        RawManifestDocument locale = Assert.Single(
+            result.Plan.AfterDocuments,
+            document => document.RepositoryPath.Contains(".locale.", StringComparison.Ordinal));
+        string yaml = System.Text.Encoding.UTF8.GetString(locale.Content.AsSpan());
+        Assert.Contains("Sanitized notes", yaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Update_defers_to_version_agnostic_previous_release_notes_url()
+    {
+        // A hand-maintained, version-agnostic ReleaseNotesUrl is WM0007's carry candidate; the
+        // discovered, version-specific release URL must not pre-empt it. The engine leaves the
+        // field null so PreserveOnUpdateRule (simulated here) restores the previous value.
+        using var temporary = new TemporaryDirectory();
+        PackageManifests previous = CreatePackage("1.0.0", "A");
+        previous.DefaultLocale.ReleaseNotesUrl = "https://example.com/changelog";
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            new MutatingRuleRunner(manifests =>
+                manifests.DefaultLocale.ReleaseNotesUrl ??= "https://example.com/changelog"),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            releases: new MetadataReleaseSource(),
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("2.0.0", "A")) with { PackageVersion = "2.0.0" });
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        RawManifestDocument locale = Assert.Single(
+            result.Plan.AfterDocuments,
+            document => document.RepositoryPath.Contains(".locale.", StringComparison.Ordinal));
+        string yaml = System.Text.Encoding.UTF8.GetString(locale.Content.AsSpan());
+        Assert.Contains("ReleaseNotesUrl: https://example.com/changelog", yaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("releases/tag/v2.0.0", yaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Update_auto_completes_release_asset_siblings_through_artifact_pipeline()
     {
         using var temporary = new TemporaryDirectory();

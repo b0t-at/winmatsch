@@ -918,6 +918,13 @@ public sealed class LocalWorkflowEngine
             ClearStaleRootNestedState(candidate.Installer);
             ClearCarriedReleaseDate(candidate.Installer);
             ClearCarriedReleaseNotes(candidate);
+            if (releaseMetadata is not null)
+            {
+                // Applied before RunRules so the discovered release body flows through the full
+                // rule pipeline (META-4 sanitization, override-pack removals) exactly like it
+                // does on create, instead of being injected raw into the final manifest.
+                FillDiscoveredReleaseNotes(candidate.DefaultLocale, previous, releaseMetadata.Metadata);
+            }
         }
 
         ImmutableArray<InstallerEvidence> installerEvidence =
@@ -944,11 +951,6 @@ public sealed class LocalWorkflowEngine
         candidate = rules.Manifests;
         if (previous is not null)
         {
-            if (releaseMetadata is not null)
-            {
-                FillDiscoveredReleaseNotes(candidate.DefaultLocale, releaseMetadata.Metadata);
-            }
-
             ApplyAnalyzedMsixIdentity(candidate.Installer, artifactSnapshots);
             SubstituteVersionInInstallLocations(
                 candidate.Installer,
@@ -2200,20 +2202,25 @@ public sealed class LocalWorkflowEngine
 
     /// <summary>
     /// Fills the default locale's ReleaseNotes/ReleaseNotesUrl from freshly discovered release
-    /// evidence for the target version, but only where a value is still missing. On update,
-    /// ClearCarriedReleaseNotes always wipes both fields and PreserveOnUpdateRule restores
-    /// ReleaseNotesUrl only when the previous value is version-agnostic; without this fill-in,
-    /// a version-specific carried URL (the common case for GitHub Releases) would stay null on
-    /// every subsequent update even though fresh evidence for the new release is available. On
-    /// create, this is a no-op because MergeReleaseMetadata already applied the same evidence
-    /// to the locale before the manifest was built.
+    /// evidence for the target version. Runs before the rule pipeline so the discovered body is
+    /// sanitized (META-4) and remains subject to override-pack removals, exactly like on create.
+    /// ClearCarriedReleaseNotes has just wiped both fields; ReleaseNotes is always refilled from
+    /// evidence (WM0007 never carries notes forward), while ReleaseNotesUrl is only refilled
+    /// when WM0007 would not restore the previous hand-maintained, version-agnostic URL - that
+    /// preserved URL takes precedence over the discovered, version-specific one.
     /// </summary>
     private static void FillDiscoveredReleaseNotes(
         DefaultLocaleManifest locale,
+        PackageSnapshot previous,
         PackageLocaleMetadata discovered)
     {
         locale.ReleaseNotes ??= discovered.ReleaseNotes;
-        locale.ReleaseNotesUrl ??= discovered.ReleaseNotesUrl;
+        if (!PreserveOnUpdateRule.WouldCarryReleaseNotesUrl(
+                previous.Manifests.DefaultLocale.ReleaseNotesUrl,
+                previous.Manifests.Installer.PackageVersion?.Value))
+        {
+            locale.ReleaseNotesUrl ??= discovered.ReleaseNotesUrl;
+        }
     }
 
     /// <summary>
