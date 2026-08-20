@@ -58,14 +58,27 @@ Untrusted binaries are parsed with hard bounds (all enforced centrally):
 | Limit | Value |
 | --- | --- |
 | Max archive entries | 10,000 |
+| Max dependency-analyzer archive entries | 8,192 |
 | Max archive path depth / length | 64 segments / 2,048 chars |
 | Max bytes per archive entry | 256 MB (override: `WINMATSCH_MAX_ENTRY_BYTES`) |
 | Max total expanded archive bytes | 1 GB (override: `WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES`) |
 | Max nested archive depth | 4 |
 | Max PE sections | 96 |
 | Max PE resource bytes | 16 MB |
-| Max MSI stream bytes | 64 MB |
-| Max NSIS header bytes | 64 MB |
+| Max MSI stream bytes | 256 MB (override: `WINMATSCH_MAX_MSI_STREAM_BYTES`) |
+| Max NSIS header bytes | 256 MB (override: `WINMATSCH_MAX_NSIS_HEADER_BYTES`) |
+| Max dependency-analyzer central directory bytes | 64 MB |
+| Max dependency-analyzer payload bytes (per entry) | 256 MB |
+| Max dependency-analyzer total payload bytes | 1 GB |
+| Max dependency-analyzer compressed payload bytes (per entry) | 256 MB |
+| Max dependency-analyzer total compressed bytes | 1 GB |
+| Max dependency-analyzer archive read operations | 65,536 |
+| Inno Setup aggregate payload-inspection budget | 1 GB |
+| Inno Setup expanded payload bytes | 512 MB |
+| Inno Setup LZMA dictionary bytes | 256 MB |
+| Inno Setup payload scan bytes | 512 MB |
+| Inno Setup payload marker attempts | 1,024 |
+| Inno Setup payload candidates | 1,024 |
 
 Additional guards: declared entry sizes are verified against actual stream
 lengths (zip-bomb defense with overflow detection), nested archive depth is

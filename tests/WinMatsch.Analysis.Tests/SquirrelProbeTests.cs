@@ -304,8 +304,8 @@ public class SquirrelProbeTests
     public void Nested_zip_central_directory_size_is_bounded_before_entries_materialize()
     {
         byte[] nupkg = DependencyFixtures.BuildZipWithEntryCount(
-            entryCount: 300,
-            entryNameLength: 60_000).ToArray();
+            entryCount: 1500,
+            entryNameLength: 61_000).ToArray();
 
         AnalysisResourceLimitException error = Assert.Throws<AnalysisResourceLimitException>(
             () => Probe(SquirrelFixtures.BuildClassicSetup(nupkg)));

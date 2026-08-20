@@ -499,7 +499,7 @@ public sealed class GitHubLifecycleWorkflowTests
         {
             AutoConfigureCanonicalPullRequestEvidence = false,
         };
-        for (int index = 1; index <= 65; index++)
+        for (int index = 1; index <= PullRequestManifestEvidenceLimits.MaximumCandidates + 1; index++)
         {
             int number = 10_000 + index;
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
@@ -518,7 +518,7 @@ public sealed class GitHubLifecycleWorkflowTests
             plan,
             client.PullRequests,
             CancellationToken.None));
-        Assert.Equal([65], client.PullRequestFileBatchSizes);
+        Assert.Equal([PullRequestManifestEvidenceLimits.MaximumCandidates + 1], client.PullRequestFileBatchSizes);
     }
 
     [Fact]
@@ -530,7 +530,7 @@ public sealed class GitHubLifecycleWorkflowTests
             AutoConfigureCanonicalPullRequestEvidence = false,
         };
         client.PullRequestRescreenNumbers.Add(rescreenPullRequestNumber);
-        for (int index = 1; index <= 65; index++)
+        for (int index = 1; index <= PullRequestManifestEvidenceLimits.MaximumCandidates + 1; index++)
         {
             int number = 10_000 + index;
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
@@ -560,7 +560,7 @@ public sealed class GitHubLifecycleWorkflowTests
             CancellationToken.None));
 
         Assert.Equal(rescreenPullRequestNumber, candidate.Number);
-        Assert.Equal([65, 1], client.PullRequestFileBatchSizes);
+        Assert.Equal([PullRequestManifestEvidenceLimits.MaximumCandidates + 1, 1], client.PullRequestFileBatchSizes);
     }
 
     [Fact]
@@ -573,7 +573,7 @@ public sealed class GitHubLifecycleWorkflowTests
         };
         client.PullRequestScreeningStateOverrides[reopenedPullRequestNumber] =
             PullRequestState.Closed;
-        for (int index = 1; index <= 65; index++)
+        for (int index = 1; index <= PullRequestManifestEvidenceLimits.MaximumCandidates + 1; index++)
         {
             int number = 10_000 + index;
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
@@ -603,7 +603,7 @@ public sealed class GitHubLifecycleWorkflowTests
             CancellationToken.None));
 
         Assert.Equal(reopenedPullRequestNumber, candidate.Number);
-        Assert.Equal([65, 1], client.PullRequestFileBatchSizes);
+        Assert.Equal([PullRequestManifestEvidenceLimits.MaximumCandidates + 1, 1], client.PullRequestFileBatchSizes);
     }
 
     [Fact]
@@ -617,7 +617,7 @@ public sealed class GitHubLifecycleWorkflowTests
         };
         client.PullRequestScreeningHeadOverrides[revertedPullRequestNumber] =
             intermediateHead;
-        for (int index = 1; index <= 65; index++)
+        for (int index = 1; index <= PullRequestManifestEvidenceLimits.MaximumCandidates + 1; index++)
         {
             int number = 10_000 + index;
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
@@ -647,7 +647,7 @@ public sealed class GitHubLifecycleWorkflowTests
             CancellationToken.None));
 
         Assert.Equal(revertedPullRequestNumber, candidate.Number);
-        Assert.Equal([65, 1], client.PullRequestFileBatchSizes);
+        Assert.Equal([PullRequestManifestEvidenceLimits.MaximumCandidates + 1, 1], client.PullRequestFileBatchSizes);
     }
 
     [Fact]
@@ -660,7 +660,7 @@ public sealed class GitHubLifecycleWorkflowTests
         };
         client.PullRequestScreeningTitleOverrides[promotedPullRequestNumber] =
             "Update version: Example.App version 2.0.0";
-        for (int index = 1; index <= 65; index++)
+        for (int index = 1; index <= PullRequestManifestEvidenceLimits.MaximumCandidates + 1; index++)
         {
             int number = 10_000 + index;
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
@@ -694,7 +694,7 @@ public sealed class GitHubLifecycleWorkflowTests
             "Update version: Example.App version 2.0.0";
         client.PullRequestScreeningBaseOverrides[retargetedPullRequestNumber] =
             "release";
-        for (int index = 1; index <= 65; index++)
+        for (int index = 1; index <= PullRequestManifestEvidenceLimits.MaximumCandidates + 1; index++)
         {
             int number = 10_000 + index;
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
@@ -765,7 +765,7 @@ public sealed class GitHubLifecycleWorkflowTests
         client.SetPullRequestChangedFiles(
             cachedPathPullRequestNumber,
             GitHubLifecycleTestSupport.Plan().FileChanges[0].RepositoryPath);
-        for (int index = 1; index <= 64; index++)
+        for (int index = 1; index <= PullRequestManifestEvidenceLimits.MaximumCandidates; index++)
         {
             int number = 20_000 + index;
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
@@ -869,7 +869,7 @@ public sealed class GitHubLifecycleWorkflowTests
         {
             AutoConfigureCanonicalPullRequestEvidence = false,
         };
-        for (int index = 1; index <= 65; index++)
+        for (int index = 1; index <= PullRequestManifestEvidenceLimits.MaximumCandidates + 1; index++)
         {
             int number = 10_000 + index;
             client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(number) with
