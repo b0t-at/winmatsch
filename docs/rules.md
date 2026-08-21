@@ -76,13 +76,13 @@ normalization, observing the canonical shape.
 
 | ID | Purpose |
 |---|---|
-| `ARP-1` | Template old version tokens in ARP DisplayName/DisplayVersion on updates; prefers installer evidence; warns on unreplaceable tokens. |
+| `ARP-1` | Template old version tokens in ARP DisplayName/DisplayVersion on updates; prefers installer evidence; warns on unreplaceable tokens. Also refreshes declared installer identity (ProductCode/PackageFamilyName) from analysis unconditionally, independent of whether the version string changed. |
 | `ARP-2` | Remove ARP DisplayVersion values that equal PackageVersion or are already declared elsewhere. |
 | `ARP-3` | Drop garbage from ARP/installation metadata: unexpanded `%VAR%` variables, `ms-resource:` references, non-printable characters, temp paths. |
 | `ARP-4` | Require ARP entry shape parity with the previously merged version, or an explicit override annotation. |
 | `SCOPE-1` | Assign per-installer scope to same-URL switch twins (`/CURRENTUSER` vs `/ALLUSERS`), keeping the root scope null. |
 | `SCOPE-2` | Set installer scope from trusted installer-metadata evidence only — never guessed. |
-| `SCOPE-3` | Trim or drop blank installer switches; flag switches carried across installer-family changes. |
+| `SCOPE-3` | Trim or drop blank installer switches; flag switches carried across installer-family changes; flag `Custom` switch values that embed a network address. |
 | `SCOPE-4` | Correct `msi`/`wix` classifications to the analyzer's detected outer wrapper. |
 | `META-1` | Upgrade `http://` metadata URLs to `https://` when a workflow probe confirmed the HTTPS variant. |
 | `META-3` | Normalize GitHub license/copyright URLs to their stable `blob/HEAD` form. |

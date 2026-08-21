@@ -135,6 +135,27 @@ public class Scope3SwitchHygieneRuleTests
     }
 
     [Fact]
+    public void Custom_switch_containing_a_url_is_flagged()
+    {
+        // Motivating regression: Datadog.dd-trace-dotnet copied the MSI public property
+        // DD_DOTNET_LINK="https://docs.datadoghq.com/..." verbatim into Custom, which trips
+        // winget's policy against network addresses in installer switches (PR #420312).
+        Installer installer = TestManifests.CreateInstaller();
+        installer.InstallerSwitches = new InstallerSwitches
+        {
+            Custom = "DD_DOTNET_LINK=\"https://docs.datadoghq.com/tracing/setup/dotnet/\"",
+        };
+        PackageManifests manifests = TestManifests.Create(installer);
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        RuleFinding finding = Assert.Single(context.Findings);
+        Assert.Equal(RuleCatalogueIds.Scope3, finding.RuleId);
+        Assert.Contains("network address", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Log_only_mode_proposes_without_mutating()
     {
         Installer installer = TestManifests.CreateInstaller();

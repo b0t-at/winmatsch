@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using WinMatsch.Core;
 
 namespace WinMatsch.Rules.Policy;
@@ -8,9 +9,13 @@ namespace WinMatsch.Rules.Policy;
 /// a switches mapping that becomes entirely empty is removed. Additionally, when the installer
 /// family (effective InstallerType) changed for a matching entry since the previous version but
 /// the switches were carried over verbatim, the carry is flagged for re-detection instead of
-/// being silently trusted (the Fork <c>/s</c> → <c>--silent</c> class of bug).
+/// being silently trusted (the Fork <c>/s</c> → <c>--silent</c> class of bug). <c>Custom</c> is
+/// also checked for embedded network addresses: MSI public properties are sometimes copied
+/// verbatim into <c>Custom</c> (e.g. a docs-link property such as <c>DD_DOTNET_LINK</c>), and a
+/// switch value containing a URL trips winget's policy — it is flagged rather than silently
+/// dropped, since a genuine <c>PROPERTY=https://...</c> install-time argument may be intentional.
 /// </summary>
-public sealed class Scope3SwitchHygieneRule : IRule
+public sealed partial class Scope3SwitchHygieneRule : IRule
 {
     public string Id => RuleCatalogueIds.Scope3;
 
@@ -67,6 +72,26 @@ public sealed class Scope3SwitchHygieneRule : IRule
         switches.Upgrade = Clean(context, switches.Upgrade, location, fieldPrefix, nameof(switches.Upgrade));
         switches.Custom = Clean(context, switches.Custom, location, fieldPrefix, nameof(switches.Custom));
         switches.Repair = Clean(context, switches.Repair, location, fieldPrefix, nameof(switches.Repair));
+        FlagNetworkAddressInCustom(context, switches.Custom, location, fieldPrefix);
+    }
+
+    private void FlagNetworkAddressInCustom(ManifestContext context, string? custom, string location, string fieldPrefix)
+    {
+        if (custom is null)
+        {
+            return;
+        }
+
+        Match match = NetworkAddress().Match(custom);
+        if (!match.Success)
+        {
+            return;
+        }
+
+        context.AddFinding(this, RuleSeverity.Warning,
+            $"InstallerSwitches.Custom contains what looks like a network address ('{match.Value}'). MSI public properties are sometimes copied verbatim into Custom (e.g. a docs-link property); a switch value embedding a URL trips winget's policy — review and drop or replace it.",
+            $"{fieldPrefix}InstallerSwitches.Custom");
+        context.AddTrace(this, $"{location}: InstallerSwitches.Custom appears to embed a network address.");
     }
 
     private string? Clean(ManifestContext context, string? value, string location, string fieldPrefix, string switchName)
@@ -162,4 +187,7 @@ public sealed class Scope3SwitchHygieneRule : IRule
                 $"Installers[{index}]");
         }
     }
+
+    [GeneratedRegex(@"[a-z][a-z0-9+.\-]*://\S+", RegexOptions.IgnoreCase)]
+    private static partial Regex NetworkAddress();
 }

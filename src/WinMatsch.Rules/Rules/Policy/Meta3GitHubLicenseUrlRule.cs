@@ -97,6 +97,11 @@ public sealed partial class Meta3GitHubLicenseUrlRule : IRule
     [GeneratedRegex(@"^https?://github\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/blob/(?<sha>[0-9a-fA-F]{40})/(?<path>.+)$")]
     private static partial Regex ShaPinnedBlob();
 
-    [GeneratedRegex(@"^https?://raw\.githubusercontent\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/(?<ref>[^/]+)/(?<path>.+)$")]
+    // The ref segment can be a plain branch/tag/sha (one path segment) or the fully-qualified
+    // "refs/heads/<name>"/"refs/tags/<name>" form, whose name itself may contain slashes (e.g.
+    // "refs/heads/release/1.0"). Without the qualified alternatives first, the single-segment
+    // fallback greedily claims only "refs" as the ref and leaves "heads/main" glued to the
+    // start of <path>, which duplicates HEAD/heads/main when the blob/HEAD form is built.
+    [GeneratedRegex(@"^https?://raw\.githubusercontent\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/(?:refs/(?:heads|tags)/(?<ref>.+?)|(?<ref>[^/]+))/(?<path>.+)$")]
     private static partial Regex RawGitHubUserContent();
 }

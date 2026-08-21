@@ -10,7 +10,10 @@ namespace WinMatsch.Rules.Policy;
 /// When installer analysis evidence proposes an unambiguous ARP value for the same installer,
 /// that value is preferred over string templating. A value carried verbatim from the previous
 /// version that still embeds some <em>other</em> version-looking token (static/unreplaceable)
-/// is reported for review instead of being guessed at.
+/// is reported for review instead of being guessed at. Declared installer identity
+/// (ProductCode/PackageFamilyName) is refreshed from analysis unconditionally, independent of
+/// the version-template guard: identity carried forward by PreserveOnUpdateRule must not stay
+/// stale just because the declared package version string did not change.
 /// </summary>
 public sealed class Arp1VersionTemplateRule : IRule
 {
@@ -27,6 +30,22 @@ public sealed class Arp1VersionTemplateRule : IRule
         ArgumentNullException.ThrowIfNull(context);
 
         InstallerManifest manifest = context.Manifests.Installer;
+
+        // Declared installer identity (ProductCode/PackageFamilyName) is re-derived from fresh
+        // analysis evidence whenever it is available, independent of whether the declared
+        // package version string changed. A rebuilt installer (e.g. a re-signed MSIX) can carry
+        // a new identity at the same declared version, and identity carried forward from the
+        // previous version by PreserveOnUpdateRule must not be left stale just because the
+        // version-template guard below returns early.
+        if (manifest.Installers is { } installersForIdentity)
+        {
+            for (int i = 0; i < installersForIdentity.Count; i++)
+            {
+                Installer installer = installersForIdentity[i];
+                RefreshInstallerIdentity(context, installer, FindAnalysisInstaller(context, manifest, installer), i);
+            }
+        }
+
         string? oldVersion = context.Previous?.Installer.PackageVersion?.Value;
         string? newVersion = manifest.PackageVersion?.Value;
         if (oldVersion is null || newVersion is null
@@ -49,7 +68,6 @@ public sealed class Arp1VersionTemplateRule : IRule
         {
             Installer installer = installers[i];
             Installer? analysisInstaller = FindAnalysisInstaller(context, manifest, installer);
-            RefreshInstallerIdentity(context, installer, analysisInstaller, i);
             if (installer.AppsAndFeaturesEntries is not { } entries)
             {
                 continue;

@@ -195,6 +195,43 @@ public sealed class RepositoryReleaseMetadataSourceTests
     }
 
     [Fact]
+    public async Task Workflow_metadata_re_derives_copyright_url_from_license_url()
+    {
+        // Regression: CopyrightUrl had no independent GitHub source and was only ever carried
+        // forward from the previous version by PreserveOnUpdateRule/Meta5FieldSetParityRule,
+        // going stale even as LicenseUrl was correctly re-derived every discovery pass
+        // (nvQuickSite PR #419632, Harmonoid PR #420140).
+        var repositoryMetadata = new RepositoryReleaseMetadata
+        {
+            Availability = RepositoryMetadataAvailability.Available,
+            License = "MIT",
+            LicenseUrl = new Uri("https://github.com/example/app/blob/HEAD/LICENSE"),
+            Provenance = "fixture",
+        };
+        var source = new GitHubWorkflowReleaseSource(
+            new FakeGitHubClient(),
+            _repository,
+            new StaticMetadataSource(repositoryMetadata));
+
+        WorkflowReleaseMetadata metadata = await source.DiscoverMetadataAsync(
+            new PackageIdentifier("Example.App"),
+            new ReleaseRequest(null, [], []),
+            [],
+            CancellationToken.None);
+
+        Assert.Equal(
+            "https://github.com/example/app/blob/HEAD/LICENSE",
+            metadata.Metadata.LicenseUrl);
+        Assert.Equal(
+            "https://github.com/example/app/blob/HEAD/LICENSE",
+            metadata.Metadata.CopyrightUrl);
+        Assert.Contains(
+            "license_url",
+            metadata.Metadata.Provenance[nameof(PackageLocaleMetadata.CopyrightUrl)],
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Unresolved_release_derives_release_notes_url_from_download_urls()
     {
         // Tag-only releases, discovery outages under allowUnavailable, and caller-supplied
