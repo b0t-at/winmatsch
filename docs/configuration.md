@@ -1,21 +1,21 @@
 # Configuration reference
 
-winmatsch resolves every setting through a fixed precedence chain. Each key
+binmatch resolves every setting through a fixed precedence chain. Each key
 falls through independently, so you can mix sources freely.
 
 ```
-command line  >  environment (WINMATSCH_*)  >  user YAML file  >  built-in defaults
+command line  >  environment (BINMATCH_*)  >  user YAML file  >  built-in defaults
 ```
 
-`winmatsch config show` prints the effective value of every key together with
+`binmatch config show` prints the effective value of every key together with
 the layer it came from.
 
 **Tokens are never configuration.** There is no config key for the GitHub
 token; see the [security guide](security.md).
 
 GitHub endpoints are intentionally not stored in the YAML configuration file.
-Use `--github-api-url` / `WINMATSCH_GITHUB_API_URL` and, only when necessary,
-`--github-graphql-url` / `WINMATSCH_GITHUB_GRAPHQL_URL`. The GraphQL endpoint
+Use `--github-api-url` / `BINMATCH_GITHUB_API_URL` and, only when necessary,
+`--github-graphql-url` / `BINMATCH_GITHUB_GRAPHQL_URL`. The GraphQL endpoint
 must share the REST endpoint authority. See
 [GitHub endpoints and GitHub Enterprise](commands.md#github-endpoints-and-github-enterprise).
 
@@ -23,17 +23,17 @@ must share the REST endpoint authority. See
 
 | Key | Type | Allowed values | Default | CLI option | Environment variable |
 |---|---|---|---|---|---|
-| `repository` | string | `owner/name` | `microsoft/winget-pkgs` | `--repo` | `WINMATSCH_REPOSITORY` |
-| `concurrentDownloads` | int | ≥ 1 | `2` | `--concurrent-downloads` | `WINMATSCH_CONCURRENT_DOWNLOADS` |
-| `rules.enabled` | string list | rule IDs | empty | — | `WINMATSCH_RULES_ENABLED` (comma-separated) |
-| `rules.disabled` | string list | rule IDs | empty | — | `WINMATSCH_RULES_DISABLED` (comma-separated) |
-| `cache.enabled` | bool | `true` / `false` | `true` | — | `WINMATSCH_CACHE_ENABLED` |
-| `cache.directory` | string | filesystem path | platform default (below) | — | `WINMATSCH_CACHE_DIRECTORY` |
-| `overrideStore` | string | filesystem path | platform default (`winmatsch/overrides`) | `--override-store` | `WINMATSCH_OVERRIDE_STORE_DIRECTORY` |
-| `freshnessDelay` | timespan | `d.hh:mm:ss` / `hh:mm:ss`, ≥ 0 | `04:00:00` | — | `WINMATSCH_FRESHNESS_DELAY` |
-| `output.format` | enum | `text`, `json` | `text` | `--format` | `WINMATSCH_OUTPUT_FORMAT` |
-| `output.directory` | string | filesystem path | current directory | `--output` | `WINMATSCH_OUTPUT_DIRECTORY` |
-| `interaction` | enum | `auto`, `always`, `never` | `auto` | `--interaction` | `WINMATSCH_INTERACTION` |
+| `repository` | string | `owner/name` | `microsoft/winget-pkgs` | `--repo` | `BINMATCH_REPOSITORY` |
+| `concurrentDownloads` | int | ≥ 1 | `2` | `--concurrent-downloads` | `BINMATCH_CONCURRENT_DOWNLOADS` |
+| `rules.enabled` | string list | rule IDs | empty | — | `BINMATCH_RULES_ENABLED` (comma-separated) |
+| `rules.disabled` | string list | rule IDs | empty | — | `BINMATCH_RULES_DISABLED` (comma-separated) |
+| `cache.enabled` | bool | `true` / `false` | `true` | — | `BINMATCH_CACHE_ENABLED` |
+| `cache.directory` | string | filesystem path | platform default (below) | — | `BINMATCH_CACHE_DIRECTORY` |
+| `overrideStore` | string | filesystem path | platform default (`binmatch/overrides`) | `--override-store` | `BINMATCH_OVERRIDE_STORE_DIRECTORY` |
+| `freshnessDelay` | timespan | `d.hh:mm:ss` / `hh:mm:ss`, ≥ 0 | `04:00:00` | — | `BINMATCH_FRESHNESS_DELAY` |
+| `output.format` | enum | `text`, `json` | `text` | `--format` | `BINMATCH_OUTPUT_FORMAT` |
+| `output.directory` | string | filesystem path | current directory | `--output` | `BINMATCH_OUTPUT_DIRECTORY` |
+| `interaction` | enum | `auto`, `always`, `never` | `auto` | `--interaction` | `BINMATCH_INTERACTION` |
 
 ### Key semantics
 
@@ -56,7 +56,7 @@ must share the REST endpoint authority. See
   shipped default is four hours; set `00:00:00` to opt out explicitly:
 
   ```bash
-  winmatsch config set freshnessDelay 00:00:00
+  binmatch config set freshnessDelay 00:00:00
   ```
 
   Independently of this delay, installer bytes are re-hashed immediately
@@ -73,12 +73,12 @@ The user configuration file is YAML, named `config.yaml`.
 
 | OS | Default path |
 |---|---|
-| Linux / macOS | `$XDG_CONFIG_HOME/winmatsch/config.yaml` if `XDG_CONFIG_HOME` is set, else `~/.config/winmatsch/config.yaml` |
-| Windows | `%XDG_CONFIG_HOME%\winmatsch\config.yaml` if `XDG_CONFIG_HOME` is set (it is honored on every platform), else `%USERPROFILE%\.config\winmatsch\config.yaml` |
+| Linux / macOS | `$XDG_CONFIG_HOME/binmatch/config.yaml` if `XDG_CONFIG_HOME` is set, else `~/.config/binmatch/config.yaml` |
+| Windows | `%XDG_CONFIG_HOME%\binmatch\config.yaml` if `XDG_CONFIG_HOME` is set (it is honored on every platform), else `%USERPROFILE%\.config\binmatch\config.yaml` |
 
 `--config <file>` selects an explicit file; unlike the default path, an
 explicit path **must exist** (otherwise the invocation fails). A missing
-default file is fine and simply contributes nothing. `winmatsch config path`
+default file is fine and simply contributes nothing. `binmatch config path`
 prints the path in effect.
 
 ## File format
@@ -87,7 +87,7 @@ prints the path in effect.
 repository: "microsoft/winget-pkgs"
 concurrentDownloads: 4
 freshnessDelay: "1.00:00:00"
-overrideStore: "/var/lib/winmatsch/overrides"
+overrideStore: "/var/lib/binmatch/overrides"
 interaction: "auto"
 rules:
   enabled:
@@ -96,24 +96,24 @@ rules:
     - "WM0101"
 cache:
   enabled: true
-  directory: "/var/cache/winmatsch"
+  directory: "/var/cache/binmatch"
 output:
   format: "text"
   directory: "./manifests"
 ```
 
-Prefer editing through `winmatsch config set` / `unset`: values are validated
+Prefer editing through `binmatch config set` / `unset`: values are validated
 with the same rules the CLI applies at startup, and writes are **atomic** —
 content goes to a temporary file (mode `rw-------` on Unix) which is then
 renamed into place, so a crash can never leave a truncated config file.
 
 ```bash
-winmatsch config set concurrentDownloads 4
-winmatsch config set rules.disabled WM0101
-winmatsch config unset freshnessDelay
+binmatch config set concurrentDownloads 4
+binmatch config set rules.disabled WM0101
+binmatch config unset freshnessDelay
 ```
 
-An unreadable or invalid configuration file (or malformed `WINMATSCH_*`
+An unreadable or invalid configuration file (or malformed `BINMATCH_*`
 variable) fails the invocation with exit code 3.
 
 ## Interaction modes
@@ -139,8 +139,8 @@ metadata so repeated runs do not re-download identical bytes.
 
 | OS | Default directory |
 |---|---|
-| Windows | `%LOCALAPPDATA%\winmatsch\downloads` |
-| Linux / macOS | `~/.local/share/winmatsch/downloads` (.NET `LocalApplicationData`) |
+| Windows | `%LOCALAPPDATA%\binmatch\downloads` |
+| Linux / macOS | `~/.local/share/binmatch/downloads` (.NET `LocalApplicationData`) |
 
 Properties:
 
@@ -152,5 +152,5 @@ Properties:
   and 5 GB, evicting least-recently-used entries first.
 - Concurrent access is safe across threads, instances, and processes (a lock
   file serializes writers).
-- `winmatsch cache list | inspect | clear | prune` manage the cache; `clear`
+- `binmatch cache list | inspect | clear | prune` manage the cache; `clear`
   and `prune` are destructive and honor `--dry-run` and `--yes`.

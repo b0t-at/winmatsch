@@ -149,7 +149,7 @@ SummaryInformation `Creating Application` field identifies the more-specific
 authoring technology: O&O SafeErase reports `Windows Installer XML Toolset
 (3.14.1.8722)`, and Scout reports `WiX Toolset (5.0.2.0)`. Both `msi` and `wix`
 are valid WinGet installer types; the WinGet client places them in the same MSI
-compatibility set and applies MSI properties to both. WinMatsch therefore keeps
+compatibility set and applies MSI properties to both. BinMatch therefore keeps
 the specific `wix` evidence but treats an existing generic `msi` declaration as
 structurally compatible rather than forcing a manifest rewrite.
 
@@ -198,7 +198,7 @@ None.
 Each artifact can be rerun with the same current build:
 
 ```text
-src/WinMatsch.Cli/bin/Debug/net10.0/winmatsch.exe analyze <InstallerUrl> --format json --interaction never
+src/BinMatch.Cli/bin/Debug/net10.0/binmatch.exe analyze <InstallerUrl> --format json --interaction never
 ```
 
 The per-PR table is the complete selected sample. All results above describe only this run and this analyzer build.

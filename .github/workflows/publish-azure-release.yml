@@ -91,12 +91,12 @@ jobs:
         run: |
           set -euo pipefail
           expected_binaries=(
-            "winmatsch-$RELEASE_TAG-win-x64.exe"
-            "winmatsch-$RELEASE_TAG-win-arm64.exe"
-            "winmatsch-$RELEASE_TAG-linux-x64"
-            "winmatsch-$RELEASE_TAG-linux-arm64"
-            "winmatsch-$RELEASE_TAG-osx-x64"
-            "winmatsch-$RELEASE_TAG-osx-arm64"
+            "binmatch-$RELEASE_TAG-win-x64.exe"
+            "binmatch-$RELEASE_TAG-win-arm64.exe"
+            "binmatch-$RELEASE_TAG-linux-x64"
+            "binmatch-$RELEASE_TAG-linux-arm64"
+            "binmatch-$RELEASE_TAG-osx-x64"
+            "binmatch-$RELEASE_TAG-osx-arm64"
           )
           expected_assets=(
             "${expected_binaries[@]}"
@@ -177,7 +177,7 @@ jobs:
             echo "::warning::Front Door purge secrets not configured; edge caches serve stale pages for up to five minutes after publish."
           fi
           if [[ "${AZURE_AFD_ENDPOINT:-}" == *.* ]]; then
-            echo "::error::AZURE_AFD_ENDPOINT must be the endpoint resource name (e.g. 'WinMatsch'), not the hostname '<name>-<hash>.z0X.azurefd.net'."
+            echo "::error::AZURE_AFD_ENDPOINT must be the endpoint resource name (e.g. 'BinMatch'), not the hostname '<name>-<hash>.z0X.azurefd.net'."
             exit 1
           fi
 

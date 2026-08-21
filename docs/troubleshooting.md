@@ -5,15 +5,15 @@
 | Code | Category | First things to check |
 |---|---|---|
 | `1` | Internal error | This is a bug; the message is on stderr. Please file an issue with the command line (redact secrets) and output. |
-| `2` | Usage | `winmatsch <command> --help` — an option name or value is wrong. |
-| `3` | Configuration | `winmatsch config show` reports every effective value and its source; check `WINMATSCH_*` variables and the YAML file for malformed values. |
+| `2` | Usage | `binmatch <command> --help` — an option name or value is wrong. |
+| `3` | Configuration | `binmatch config show` reports every effective value and its source; check `BINMATCH_*` variables and the YAML file for malformed values. |
 | `4` | Missing input | The command needed input but could not prompt (CI, `--interaction never`, or `--format json`). Supply the value as an option/environment/config, or add `--yes` for confirmations. |
 | `5` | Operation failed | Domain failure: validation findings, resource not found, remote rejection. Details are in the output (`validation` array in JSON). |
 | `130` | Cancelled | Ctrl+C or propagated cancellation. |
 
 ## Validation failures
 
-- Run `winmatsch validate <path> --format json` and inspect the `validation`
+- Run `binmatch validate <path> --format json` and inspect the `validation`
   array; each finding has a code, severity, message, and manifest path.
 - Warnings block only under `--warnings-as-errors`.
 - `--offline` skips optional live metadata checks (useful without network),
@@ -45,7 +45,7 @@ Symptoms: `token add` fails, or `token status` reports no storage backend.
 ## "Installer bytes changed behind a stable URL"
 
 The cache stores the hash of every downloaded payload. If the same URL later
-serves different bytes, winmatsch refuses to proceed silently:
+serves different bytes, binmatch refuses to proceed silently:
 
 - If the vendor really replaced the file, re-run with
   `--allow-stable-url-change` to approve it.
@@ -78,7 +78,7 @@ reviews. `--yes` does not cover this gate. Use `--override-store` (or
 ## Interrupted local writes
 
 A crash, power loss, or `kill` during a local write leaves a hidden
-`.winmatsch-transaction-*` directory in the output/repository root. This is
+`.binmatch-transaction-*` directory in the output/repository root. This is
 expected and self-healing: the next apply run for the same package recovers it —
 rolling the staged changes back, or forward when the manifests were already
 committed — before it stages anything new. A plan run (`--dry-run`) never
@@ -100,10 +100,10 @@ recovers, because it never writes. See
 ## Cache problems
 
 ```bash
-winmatsch cache list            # entries with integrity + lifetime state
-winmatsch cache inspect <url>   # one entry in detail
-winmatsch cache prune --yes     # drop stale/corrupt entries
-winmatsch cache clear --yes     # nuke everything
+binmatch cache list            # entries with integrity + lifetime state
+binmatch cache inspect <url>   # one entry in detail
+binmatch cache prune --yes     # drop stale/corrupt entries
+binmatch cache clear --yes     # nuke everything
 ```
 
 Cache corruption is self-healing: payloads failing their integrity check are
@@ -146,6 +146,6 @@ the issue closed as by-design:
 
 ## Still stuck?
 
-Open an issue at <https://github.com/b0t-at/winmatsch/issues> with the
+Open an issue at <https://github.com/b0t-at/binmatch/issues> with the
 command (secrets redacted), the exit code, and stderr output. For suspected
 security problems use [SECURITY.md](../SECURITY.md) instead.

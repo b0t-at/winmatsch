@@ -1,11 +1,11 @@
 # Command reference
 
 This reference matches the `--help` output of the built executable. When in
-doubt, `winmatsch <command> --help` is the source of truth; the CLI test
+doubt, `binmatch <command> --help` is the source of truth; the CLI test
 suite exercises every command's help output to keep the surface stable.
 
 ```text
-winmatsch [command] [options]
+binmatch [command] [options]
 ```
 
 - [Global options](#global-options)
@@ -36,7 +36,7 @@ through to the next layer. See the
 | `--dry-run` | flag | Plan mode: validate and show what would change without mutating anything. |
 | `--interaction` | `auto` \| `always` \| `never` | Prompting policy (default: `auto`). |
 | `--no-color` | flag | Disable ANSI color (the `NO_COLOR` environment variable is also honored). |
-| `--config` | file | Path to the user configuration file (default: `~/.config/winmatsch/config.yaml`). |
+| `--config` | file | Path to the user configuration file (default: `~/.config/binmatch/config.yaml`). |
 | `--token` | token | GitHub token. Precedence: `--token` > `GITHUB_TOKEN` > OS keyring. Never echoed. Prefer `token add --stdin` or `GITHUB_TOKEN` over passing a secret as a process argument. |
 | `--result-json` | path | Atomically write one machine-readable terminal outcome object to this file on success or controlled failure. |
 | `--github-api-url` | URL | GitHub REST API base URL. For GHES, use `https://host/api/v3/`. |
@@ -55,27 +55,27 @@ what would be removed. Exit code 0 means the plan is valid.
 
 | Variable | Effect |
 |---|---|
-| `WINMATSCH_REPOSITORY` | Configuration: target repository (`owner/name`). |
-| `WINMATSCH_CONCURRENT_DOWNLOADS` | Configuration: max parallel downloads (integer ≥ 1). |
-| `WINMATSCH_RULES_ENABLED` | Configuration: comma-separated rule IDs forced to *apply*. |
-| `WINMATSCH_RULES_DISABLED` | Configuration: comma-separated rule IDs forced to *disabled*. |
-| `WINMATSCH_CACHE_ENABLED` | Configuration: `true`/`false`, enable the download cache. |
-| `WINMATSCH_CACHE_DIRECTORY` | Configuration: custom cache directory. |
-| `WINMATSCH_OVERRIDE_STORE_DIRECTORY` | Configuration: learned override store directory. |
-| `WINMATSCH_FRESHNESS_DELAY` | Configuration: `d.hh:mm:ss` or `hh:mm:ss` minimum release age before submission. |
-| `WINMATSCH_OUTPUT_FORMAT` | Configuration: `text` or `json`. |
-| `WINMATSCH_OUTPUT_DIRECTORY` | Configuration: output directory. |
-| `WINMATSCH_INTERACTION` | Configuration: `auto`, `always`, or `never`. |
-| `WINMATSCH_GITHUB_API_URL` | GitHub REST API base URL; CLI `--github-api-url` wins. |
-| `WINMATSCH_GITHUB_GRAPHQL_URL` | Explicit GraphQL endpoint; must share the REST endpoint authority. |
+| `BINMATCH_REPOSITORY` | Configuration: target repository (`owner/name`). |
+| `BINMATCH_CONCURRENT_DOWNLOADS` | Configuration: max parallel downloads (integer ≥ 1). |
+| `BINMATCH_RULES_ENABLED` | Configuration: comma-separated rule IDs forced to *apply*. |
+| `BINMATCH_RULES_DISABLED` | Configuration: comma-separated rule IDs forced to *disabled*. |
+| `BINMATCH_CACHE_ENABLED` | Configuration: `true`/`false`, enable the download cache. |
+| `BINMATCH_CACHE_DIRECTORY` | Configuration: custom cache directory. |
+| `BINMATCH_OVERRIDE_STORE_DIRECTORY` | Configuration: learned override store directory. |
+| `BINMATCH_FRESHNESS_DELAY` | Configuration: `d.hh:mm:ss` or `hh:mm:ss` minimum release age before submission. |
+| `BINMATCH_OUTPUT_FORMAT` | Configuration: `text` or `json`. |
+| `BINMATCH_OUTPUT_DIRECTORY` | Configuration: output directory. |
+| `BINMATCH_INTERACTION` | Configuration: `auto`, `always`, or `never`. |
+| `BINMATCH_GITHUB_API_URL` | GitHub REST API base URL; CLI `--github-api-url` wins. |
+| `BINMATCH_GITHUB_GRAPHQL_URL` | Explicit GraphQL endpoint; must share the REST endpoint authority. |
 | `DRY_RUN` | Boolean plan-mode fallback. `--dry-run` explicitly wins when present. |
 | `GITHUB_TOKEN` | GitHub token; used when `--token` is not given, before the OS keyring. |
 | `NO_COLOR` | Any non-empty value disables ANSI color ([no-color.org](https://no-color.org)). |
 | `CI`, `GITHUB_ACTIONS`, `TF_BUILD` | Truthy values (`1`, `true`, `yes`) mark the session as CI: `auto` interaction stops prompting. |
 | `XDG_CONFIG_HOME` | Overrides the base directory of the default config path. |
 
-Empty or whitespace-only `WINMATSCH_*` values are treated as unset. A
-malformed value (for example a non-numeric `WINMATSCH_CONCURRENT_DOWNLOADS`)
+Empty or whitespace-only `BINMATCH_*` values are treated as unset. A
+malformed value (for example a non-numeric `BINMATCH_CONCURRENT_DOWNLOADS`)
 fails the invocation with exit code 3.
 
 `DRY_RUN=true` (`1`, `yes`, or `on`) selects plan mode and `DRY_RUN=false`
@@ -86,8 +86,8 @@ the environment. Approval flags deliberately have no environment equivalents.
 
 The CLI defaults to `https://api.github.com/`. For GitHub Enterprise Server,
 pass `--github-api-url https://host/api/v3/` or set
-`WINMATSCH_GITHUB_API_URL`; the CLI safely derives `/api/graphql`. An explicit
-`--github-graphql-url` / `WINMATSCH_GITHUB_GRAPHQL_URL` must share the REST
+`BINMATCH_GITHUB_API_URL`; the CLI safely derives `/api/graphql`. An explicit
+`--github-graphql-url` / `BINMATCH_GITHUB_GRAPHQL_URL` must share the REST
 endpoint's scheme, host, and port. Both endpoints must be absolute HTTP(S)
 URLs without user info, query, or fragment, so a token cannot be redirected to
 another authority. `--repo` still selects the repository, not the host.
@@ -102,7 +102,7 @@ without parsing output.
 | `0` | Success. In plan mode (`--dry-run`) this means the plan is valid. |
 | `1` | Unexpected internal error (a bug or unclassified failure). Message on stderr. |
 | `2` | Usage error: unknown command/option, malformed option value. |
-| `3` | Configuration error: malformed `WINMATSCH_*` variable, unreadable or invalid config file, contradictory settings. |
+| `3` | Configuration error: malformed `BINMATCH_*` variable, unreadable or invalid config file, contradictory settings. |
 | `4` | Missing input: required input was not provided and prompting is unavailable (non-interactive session, `--interaction never`, or JSON output). |
 | `5` | Operation failed for a domain reason: validation failed, resource not found, remote rejection. |
 | `130` | Cancelled (Ctrl+C), following the POSIX 128+SIGINT convention. |
@@ -208,7 +208,7 @@ byte-stable for identical inputs, and terminated by a single trailing newline.
 The envelope carries **no `schemaVersion` (or any other version) key**, by
 design: the shape below is the contract for the whole 0.x series, and any
 breaking change to it is a breaking release, so consumers pin on the tool
-version from `winmatsch --version` rather than on an in-document field. Fields
+version from `binmatch --version` rather than on an in-document field. Fields
 may be *added* in minor releases; consumers must ignore unknown fields. Do not
 confuse this with the WinGet *manifest* schema version (`ManifestVersion`,
 currently `1.12.0`), which is a property of generated manifests, not of the
@@ -284,7 +284,7 @@ defense in depth; do not put secrets into URLs or manifest fields.
 - **Partial remote state.** Remote submission is a sequence (fork → branch →
   commit → pull request). If it is interrupted, the `remote.state` object
   reports exactly which steps completed and `outcomeUncertain: true` when the
-  tool could not verify the final state. WinMatsch retains the submission
+  tool could not verify the final state. BinMatch retains the submission
   journal and **does not automatically retry** that uncertain mutation.
   Verified branch/commit/PR boundaries can resume; uncertain boundaries require
   human reconciliation.
@@ -318,7 +318,7 @@ Private repositories require `--token`, `GITHUB_TOKEN`, or a keyring entry.
 ### analyze
 
 ```text
-winmatsch analyze <source> [options]
+binmatch analyze <source> [options]
 ```
 
 Analyze an installer without generating or changing manifests. `<source>` is
@@ -330,7 +330,7 @@ elevation, …) and the evidence each value came from. See the
 ### validate
 
 ```text
-winmatsch validate <paths>... [options]
+binmatch validate <paths>... [options]
 ```
 
 Validate a local multi-file manifest set (a manifest directory, or one or
@@ -346,7 +346,7 @@ Exit code 5 when validation fails.
 ### show
 
 ```text
-winmatsch show <package> <version> [options]
+binmatch show <package> <version> [options]
 ```
 
 Read one exact package version from the configured repository. Package
@@ -359,7 +359,7 @@ identifier and version must match repository casing exactly.
 ### list-versions
 
 ```text
-winmatsch list-versions <package> [options]
+binmatch list-versions <package> [options]
 ```
 
 List versions of one package from the configured repository.
@@ -429,7 +429,7 @@ options: `--locale`, `--publisher`, `--publisher-url`,
 ### new
 
 ```text
-winmatsch new [<package>] [options]
+binmatch new [<package>] [options]
 ```
 
 Create and validate a new package version. Prompts for missing inputs in
@@ -439,7 +439,7 @@ exit code 4.
 ### update
 
 ```text
-winmatsch update [<package> [<previousVersion>]] [options]
+binmatch update [<package> [<previousVersion>]] [options]
 ```
 
 Update an existing exact package version. Carries hand-maintained fields
@@ -447,7 +447,7 @@ forward from the previous version (rule `WM0007`) and templates
 version-bearing ARP fields (`ARP-1`).
 
 `previousVersion` selects the exact manifest used as the update template. If it
-is omitted, winmatsch uses the highest package version under `--output`, or the
+is omitted, binmatch uses the highest package version under `--output`, or the
 highest version from the configured repository's default branch when no local
 version exists. The repository defaults to `microsoft/winget-pkgs`. Supplying
 the source explicitly is useful when intentionally basing an update on an older
@@ -465,7 +465,7 @@ access. Remote submission always requires a token.
 ### remove
 
 ```text
-winmatsch remove [<package> [<version>]] [options]
+binmatch remove [<package> [<version>]] [options]
 ```
 
 Remove one exact package version. Destructive: requires approval (`--yes` in
@@ -474,7 +474,7 @@ non-interactive sessions).
 ### submit
 
 ```text
-winmatsch submit [<path>] [options]
+binmatch submit [<path>] [options]
 ```
 
 Validate and optionally submit existing raw manifests (a manifest file or
@@ -487,7 +487,7 @@ directory you already have on disk).
 ### new-locale
 
 ```text
-winmatsch new-locale [<package> [<version> [<locale>]]] [options]
+binmatch new-locale [<package> [<version> [<locale>]]] [options]
 ```
 
 Create one exact locale manifest (`<locale>` uses exact BCP-47 casing, e.g.
@@ -496,7 +496,7 @@ Create one exact locale manifest (`<locale>` uses exact BCP-47 casing, e.g.
 ### update-locale
 
 ```text
-winmatsch update-locale [<package> [<version> [<locale>]]] [options]
+binmatch update-locale [<package> [<version> [<locale>]]] [options]
 ```
 
 Update one exact locale manifest.
@@ -508,7 +508,7 @@ These commands operate on your fork and your tool-created pull requests.
 ### sync
 
 ```text
-winmatsch sync [options]
+binmatch sync [options]
 ```
 
 Synchronize the fork's default branch with the upstream repository. Plans
@@ -522,7 +522,7 @@ first; applying requires confirmation and never force-updates user commits.
 ### cleanup
 
 ```text
-winmatsch cleanup [options]
+binmatch cleanup [options]
 ```
 
 Inspect stale tool-created branches whose pull requests are closed. GitHub
@@ -532,13 +532,13 @@ manual escalation; unknown or user branches are never touched.
 | Option | Description |
 |---|---|
 | `--fork <owner/name>` | Fork repository (default: `<authenticated user>/<upstream name>`). |
-| `--branch-prefix <prefix>` | Tool branch prefix considered for cleanup (default: `winmatsch/`). Branches outside this prefix are never candidates. |
+| `--branch-prefix <prefix>` | Tool branch prefix considered for cleanup (default: `binmatch/`). Branches outside this prefix are never candidates. |
 | `--yes` | Confirm mutating actions without prompting. |
 
 ### complete
 
 ```text
-winmatsch complete [options]
+binmatch complete [options]
 ```
 
 Inspect the lifecycle of open tool-created pull requests and report the
@@ -553,7 +553,7 @@ recommended action for each.
 ### submissions
 
 ```text
-winmatsch submissions
+binmatch submissions
 ```
 
 List pending local-to-GitHub submission journals, including CAS revision,
@@ -576,7 +576,7 @@ ever posted on its own.
 ### remove-dead-versions (hidden)
 
 ```text
-winmatsch remove-dead-versions <package> <versions>... [--yes]
+binmatch remove-dead-versions <package> <versions>... [--yes]
 ```
 
 Hidden command (not listed in `--help`, and `remove-dead-versions --help`
@@ -630,12 +630,12 @@ Inspect and maintain the persistent download cache. See
 ### completion
 
 ```text
-winmatsch completion <bash|fish|powershell|zsh>
+binmatch completion <bash|fish|powershell|zsh>
 ```
 
 Write a static shell completion script to standard output, e.g.:
 
 ```bash
-winmatsch completion bash > /etc/bash_completion.d/winmatsch
-winmatsch completion zsh  > "${fpath[1]}/_winmatsch"
+binmatch completion bash > /etc/bash_completion.d/binmatch
+binmatch completion zsh  > "${fpath[1]}/_binmatch"
 ```

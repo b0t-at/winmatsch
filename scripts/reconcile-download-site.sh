@@ -30,8 +30,8 @@ warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 REPOSITORY="${GITHUB_REPOSITORY:-}"
-ACCOUNT="${WINMATSCH_STORAGE_ACCOUNT:-}"
-CONTAINER="${WINMATSCH_WEB_CONTAINER:-\$web}"
+ACCOUNT="${BINMATCH_STORAGE_ACCOUNT:-}"
+CONTAINER="${BINMATCH_WEB_CONTAINER:-\$web}"
 EXCLUDE_TAG=""
 ARCHIVE_PREFIX="archive"
 ARCHIVE_TIER="Archive"
@@ -56,7 +56,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$REPOSITORY" ] || die "--repository (or GITHUB_REPOSITORY) is required"
-[ -n "$ACCOUNT" ] || die "--account (or WINMATSCH_STORAGE_ACCOUNT) is required"
+[ -n "$ACCOUNT" ] || die "--account (or BINMATCH_STORAGE_ACCOUNT) is required"
 [ -n "${GH_TOKEN:-}" ] || die "GH_TOKEN is required"
 [[ "$REPOSITORY" =~ ^[^/]+/[^/]+$ ]] || die "repository must have OWNER/REPO form"
 if [ -n "$EXCLUDE_TAG" ]; then
@@ -312,7 +312,7 @@ build_expected_latest_names() {
     fi
     jq -r --arg version "$DESIRED_LATEST" '
         .versions[] | select(.version == $version) | .artifacts[] |
-        "winmatsch-" + .rid + (if .os == "windows" then ".exe" else "" end)
+        "binmatch-" + .rid + (if .os == "windows" then ".exe" else "" end)
     ' "$UPDATED_MANIFEST"
     printf '%s\n' LICENSE THIRD-PARTY-NOTICES.txt index.html SHA256SUMS.txt version.txt latest.json
 }
@@ -363,7 +363,7 @@ if [ "$LATEST_NEEDS_REFRESH" -eq 1 ] && [ -n "$DESIRED_LATEST" ]; then
               --file "$local_path" --name "latest/$name" --overwrite
               --content-type "$type" --content-cache 'public, max-age=300, must-revalidate'
               --no-progress)
-        [[ "$name" == winmatsch-* ]] && args+=(--content-disposition attachment)
+        [[ "$name" == binmatch-* ]] && args+=(--content-disposition attachment)
         log "  /latest/$name"
         az storage blob upload "${AZ_AUTH[@]}" "${args[@]}" --output none
     done < <(find "$LATEST_DIR" -mindepth 1 -maxdepth 1 -type f | LC_ALL=C sort)

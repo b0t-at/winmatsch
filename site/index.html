@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <meta name="description" content="Download winmatsch — automated WinGet manifest updates. Prebuilt binaries for Windows, Linux and macOS.">
-    <title>winmatsch downloads</title>
+    <meta name="description" content="Download binmatch — automated WinGet manifest updates. Prebuilt binaries for Windows, Linux and macOS.">
+    <title>binmatch downloads</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232563eb'/%3E%3Ctext x='8' y='12' font-size='10' font-family='monospace' fill='white' text-anchor='middle'%3Ew%3C/text%3E%3C/svg%3E">
     <style>
         :root {
@@ -145,12 +145,12 @@
 </head>
 <body>
     <header>
-        <a class="brand" href="/">winmatsch</a>
+        <a class="brand" href="/">binmatch</a>
         <span class="muted hide-sm">downloads</span>
         <nav>
             <a href="/latest/">latest</a>
-            <a href="https://github.com/b0t-at/winmatsch" rel="noopener">GitHub</a>
-            <a href="https://github.com/b0t-at/winmatsch#readme" rel="noopener">Docs</a>
+            <a href="https://github.com/b0t-at/binmatch" rel="noopener">GitHub</a>
+            <a href="https://github.com/b0t-at/binmatch#readme" rel="noopener">Docs</a>
         </nav>
     </header>
     <main id="app">
@@ -165,7 +165,7 @@
     "use strict";
     (function () {
         var MANIFEST_URL = "/versions.json";
-        var REPO_URL = "https://github.com/b0t-at/winmatsch";
+        var REPO_URL = "https://github.com/b0t-at/binmatch";
         var OS_ORDER = ["windows", "linux", "macos"];
         var OS_LABEL = { windows: "Windows", linux: "Linux", macos: "macOS" };
         var app = document.getElementById("app");
@@ -226,7 +226,7 @@
 
         function stableName(artifact) {
             var ext = artifact.os === "windows" ? ".exe" : "";
-            return "winmatsch-" + artifact.rid + ext;
+            return "binmatch-" + artifact.rid + ext;
         }
 
         function groupByOs(artifacts) {
@@ -431,7 +431,7 @@
             }
             if (win) {
                 var wName = opts.stable ? stableName(win) : win.name;
-                var wOutput = "winmatsch.exe";
+                var wOutput = "binmatch.exe";
                 html += '<div class="os-group">Windows (PowerShell)</div>' + snippetHtml("snippet-win", [
                     "Invoke-WebRequest " + dir + wName + " -OutFile " + wOutput,
                     "(Get-FileHash .\\" + wOutput + ").Hash  # compare with SHA256SUMS.txt",
@@ -461,7 +461,7 @@
 
         function renderVersionPage(manifest, entry, detected, opts) {
             opts = opts || {};
-            var title = "winmatsch v" + normVer(entry.version);
+            var title = "binmatch v" + normVer(entry.version);
             document.title = title + (opts.stable ? " (latest)" : "") + " · downloads";
             var html = "<h1>" + esc(title) + versionBadges(manifest, entry) + "</h1>" +
                 '<p class="sub">Released ' + fmtDate(entry.date) +
@@ -487,10 +487,10 @@
         }
 
         function renderHome(manifest, detected) {
-            document.title = "winmatsch downloads";
+            document.title = "binmatch downloads";
             var latest = latestEntry(manifest);
             var versions = manifest.versions || [];
-            var html = "<h1>winmatsch</h1>" +
+            var html = "<h1>binmatch</h1>" +
                 '<p class="sub">Automated WinGet package manifest updates — one static binary, no runtime required.</p>';
             if (latest) {
                 html += '<div class="card"><h2 style="margin-top:0">Latest release: v' + esc(normVer(latest.version)) +
@@ -528,8 +528,8 @@
                 if (quickWindows) {
                     var quickWindowsName = stableName(quickWindows);
                     html += '<div class="os-group">Windows (PowerShell)</div>' + snippetHtml("qi-win", [
-                        "Invoke-WebRequest " + location.origin + "/latest/" + quickWindowsName + " -OutFile winmatsch.exe",
-                        ".\\winmatsch.exe --version"
+                        "Invoke-WebRequest " + location.origin + "/latest/" + quickWindowsName + " -OutFile binmatch.exe",
+                        ".\\binmatch.exe --version"
                     ]);
                 }
                 html += '<p class="small muted">Architecture selection is a best guess — see every build on the ' +
@@ -558,7 +558,7 @@
         }
 
         function renderNotFound(manifest, path) {
-            document.title = "Not found · winmatsch downloads";
+            document.title = "Not found · binmatch downloads";
             var html = "<h1>404 — nothing here</h1>" +
                 '<p class="sub">No file or release page at <code>' + esc(path) + "</code>.</p>" +
                 '<p><a class="btn" href="/">Browse all versions</a> &nbsp; <a class="btn ghost" href="/latest/">Go to latest</a></p>';
@@ -574,7 +574,7 @@
         }
 
         function renderManifestError(err) {
-            app.innerHTML = "<h1>winmatsch downloads</h1>" +
+            app.innerHTML = "<h1>binmatch downloads</h1>" +
                 '<div class="banner">Could not load <code>/versions.json</code> (' + esc(err && err.message) + "). " +
                 "If this site was just deployed, the first release may not have been published yet.</div>" +
                 '<p>Releases are also available on <a href="' + esc(REPO_URL) + '/releases" rel="noopener">GitHub</a>.</p>';

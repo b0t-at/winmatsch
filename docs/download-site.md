@@ -1,7 +1,7 @@
 # Download site (Azure Blob Storage + Front Door)
 
-The release workflow writes the complete winmatsch download site into the
-configured Azure Blob container (`winmatsch` in the current deployment). It is
+The release workflow writes the complete binmatch download site into the
+configured Azure Blob container (`binmatch` in the current deployment). It is
 designed to sit behind **Azure Front Door** with that container mounted at the
 origin root. There is no web server and no compute: every URL is either a blob
 or a page rendered client-side from a JSON manifest.
@@ -13,13 +13,13 @@ or a page rendered client-side from a JSON manifest.
 | `/` | Version browser: latest release, quick-install snippets, all versions | short (300 s) |
 | `/versions.json` | Machine-readable manifest of all releases (see schema below) | short (300 s) |
 | `/latest/` | Human page for the newest stable release | short (300 s) |
-| `/latest/winmatsch-<rid>[.exe]` | Newest stable binary under a **stable, unversioned name** | short (300 s) |
+| `/latest/binmatch-<rid>[.exe]` | Newest stable binary under a **stable, unversioned name** | short (300 s) |
 | `/latest/version.txt` | Plain-text version number (for scripts) | short (300 s) |
 | `/latest/latest.json` | Newest release metadata incl. stable URLs | short (300 s) |
 | `/latest/SHA256SUMS.txt` | Checksums rewritten for the unversioned names | short (300 s) |
 | `/v<version>/` | Human page for one release (e.g. `/v0.9.0/`) | short (300 s) |
 | `/<version>/` | Front Door alias for the same human release page (e.g. `/0.9.0/`); no duplicate storage folder | short (300 s) |
-| `/v<version>/winmatsch-v<version>-<rid>[.exe]` | Canonical immutable binary, exact release-asset name | immutable (1 y) |
+| `/v<version>/binmatch-v<version>-<rid>[.exe]` | Canonical immutable binary, exact release-asset name | immutable (1 y) |
 | `/v<version>/SHA256SUMS.txt`, `LICENSE`, `THIRD-PARTY-NOTICES.txt` | Release documents | immutable (1 y) |
 
 RIDs: `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`,
@@ -27,11 +27,11 @@ RIDs: `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`,
 
 ```sh
 # Always the newest stable release, stable URL:
-curl -fLO https://<host>/latest/winmatsch-linux-x64
+curl -fLO https://<host>/latest/binmatch-linux-x64
 curl -fsSL https://<host>/latest/SHA256SUMS.txt | sha256sum -c --ignore-missing
 
 # Pin an exact version (immutable):
-curl -fLO https://<host>/v0.9.0/winmatsch-v0.9.0-linux-x64
+curl -fLO https://<host>/v0.9.0/binmatch-v0.9.0-linux-x64
 
 # What is the newest version?
 curl -fsSL https://<host>/latest/version.txt
@@ -66,7 +66,7 @@ curl -fsSL https://<host>/latest/version.txt
 ```json
 {
   "schemaVersion": 1,
-  "project": "winmatsch",
+  "project": "binmatch",
   "updated": "2026-08-03T12:00:00Z",
   "latest": "0.9.0",
   "versions": [
@@ -77,14 +77,14 @@ curl -fsSL https://<host>/latest/version.txt
       "prerelease": false,
       "path": "/v0.9.0/",
       "sha256sums": "/v0.9.0/SHA256SUMS.txt",
-      "notes": "https://github.com/b0t-at/winmatsch/releases/tag/v0.9.0",
+      "notes": "https://github.com/b0t-at/binmatch/releases/tag/v0.9.0",
       "artifacts": [
         {
-          "name": "winmatsch-v0.9.0-win-x64.exe",
+          "name": "binmatch-v0.9.0-win-x64.exe",
           "rid": "win-x64",
           "os": "windows",
           "arch": "x64",
-          "url": "/v0.9.0/winmatsch-v0.9.0-win-x64.exe",
+          "url": "/v0.9.0/binmatch-v0.9.0-win-x64.exe",
           "sizeBytes": 12345678,
           "sha256": "…64 hex chars…"
         }
@@ -107,7 +107,7 @@ scripts/publish-download-site.sh \
     --version v0.9.0 \
     --dist dist/ \
     --account <storage-account> \
-    --container winmatsch
+    --container binmatch
 ```
 
 The script (bash + python3 + az; no jq required):
@@ -194,7 +194,7 @@ long-running-operation acknowledgement. The publisher and synchronizer instead
 check the endpoint's `/versions.json` every 10 seconds until its JSON matches
 the uploaded manifest, with a 12-minute timeout. `AZURE_AFD_ENDPOINT` is the
 endpoint *resource name* (e.g.
-`WinMatsch`), not the `<name>-<hash>.z0X.azurefd.net` hostname — validation
+`BinMatch`), not the `<name>-<hash>.z0X.azurefd.net` hostname — validation
 rejects values containing a dot. Without the trio the workflow only warns:
 edge PoPs then keep serving cached pages until the five-minute origin TTL
 expires. A rejected purge request or propagation timeout fails the workflow
@@ -204,8 +204,8 @@ run — rerun it after fixing RBAC; republishing the same version is idempotent.
 
 - **Origin:** `<account>.blob.core.windows.net`, HTTPS `443`, with the same
   value as the origin host header and certificate-name validation enabled.
-  Use origin path `/winmatsch`.
-- **Health probe:** `HEAD /winmatsch/index.html` over HTTPS.
+  Use origin path `/binmatch`.
+- **Health probe:** `HEAD /binmatch/index.html` over HTTPS.
 - **Route:** pattern `/*`, forwarding protocol **HTTPS only**, caching and
   compression enabled, query strings ignored, cache behavior **Honor origin**.
   The publisher already sends five-minute cache headers for mutable pages and
@@ -236,7 +236,7 @@ run — rerun it after fixing RBAC; republishing the same version is idempotent.
   `X-Frame-Options: DENY`, and, once the final custom domain is fixed,
   `Strict-Transport-Security: max-age=31536000; includeSubDomains`.
 
-The public URL must not include the `winmatsch` container segment because the
+The public URL must not include the `binmatch` container segment because the
 page and manifest intentionally use root-relative links.
 
 ## Storage alternatives and operations
@@ -263,10 +263,10 @@ page and manifest intentionally use root-relative links.
 mkdir -p /tmp/dist && cd /tmp/dist
 for rid in win-x64 win-arm64 linux-x64 linux-arm64 osx-x64 osx-arm64; do
   ext=""; [ "${rid#win-}" != "$rid" ] && ext=".exe"
-  head -c 1024 /dev/urandom > "winmatsch-v0.1.0-$rid$ext"
+  head -c 1024 /dev/urandom > "binmatch-v0.1.0-$rid$ext"
 done
 printf 'license' > LICENSE; printf 'tpn' > THIRD-PARTY-NOTICES.txt
-sha256sum winmatsch-* LICENSE THIRD-PARTY-NOTICES.txt > SHA256SUMS.txt
+sha256sum binmatch-* LICENSE THIRD-PARTY-NOTICES.txt > SHA256SUMS.txt
 cd -
 
 scripts/publish-download-site.sh --version v0.1.0 --dist /tmp/dist \

@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 SCHEMA_VERSION = 1
-PROJECT = "winmatsch"
+PROJECT = "binmatch"
 
 _SEMVER_RE = re.compile(
     r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
@@ -234,7 +234,7 @@ def stage_latest(args: argparse.Namespace) -> None:
         if digest.lower() != artifact["sha256"].lower():
             raise ValueError(f"latest source artifact digest mismatch: {source}")
         extension = ".exe" if artifact["os"] == "windows" else ""
-        stable_name = f"winmatsch-{artifact['rid']}{extension}"
+        stable_name = f"binmatch-{artifact['rid']}{extension}"
         shutil.copy2(source, args.out / stable_name)
         checksum_lines.append(f"{digest}  {stable_name}")
         stable_artifacts.append({**artifact, "name": stable_name, "url": f"/latest/{stable_name}"})

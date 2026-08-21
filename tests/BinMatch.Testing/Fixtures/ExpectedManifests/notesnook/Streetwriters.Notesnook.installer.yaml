@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Created with binmatch synthetic regression fixture
+
+PackageIdentifier: Streetwriters.Notesnook
+PackageVersion: 3.2.4
+Installers:
+- InstallerLocale: en-US
+  Architecture: x64
+  InstallerType: nullsoft
+  Scope: machine
+  InstallerUrl: https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64.exe
+  InstallerSha256: FFF9085ED1CC12E8A25503848D13E92B1D479B790C2A352E361D384940D58067
+- Architecture: x64
+  InstallerType: portable
+  InstallerUrl: https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_x64_portable.exe
+  InstallerSha256: 74911C9560100A8D9E824C26CD53C0205B6580202FC847D898E4A96A5F8B478C
+- InstallerLocale: en-US
+  Architecture: arm64
+  InstallerType: nullsoft
+  Scope: machine
+  InstallerUrl: https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64.exe
+  InstallerSha256: 878938D34ED02D07C5BBBAEAE82AB4E0AF707607D7A9781F91CCBDF1BB0F59CC
+- Architecture: arm64
+  InstallerType: portable
+  InstallerUrl: https://github.com/streetwriters/notesnook/releases/download/v3.2.4/notesnook_win_arm64_portable.exe
+  InstallerSha256: 6955AA31045FCD75687FF3851BC3EDCEE15E6CA62480F2F9ED0B919047C9B024
+ManifestType: installer
+ManifestVersion: 1.12.0

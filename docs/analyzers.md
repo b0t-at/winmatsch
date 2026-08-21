@@ -1,6 +1,6 @@
 # Analyzer guide
 
-`winmatsch analyze` (and every mutation workflow) inspects installer binaries
+`binmatch analyze` (and every mutation workflow) inspects installer binaries
 to extract manifest evidence. All analyzers are clean-room implementations
 based on public format documentation; no third-party parser source was
 copied. Parsing is defensive throughout — see [limits](#limits-and-safety).
@@ -60,13 +60,13 @@ Untrusted binaries are parsed with hard bounds (all enforced centrally):
 | Max archive entries | 10,000 |
 | Max dependency-analyzer archive entries | 8,192 |
 | Max archive path depth / length | 64 segments / 2,048 chars |
-| Max bytes per archive entry | 256 MB (override: `WINMATSCH_MAX_ENTRY_BYTES`) |
-| Max total expanded archive bytes | 1 GB (override: `WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES`) |
+| Max bytes per archive entry | 256 MB (override: `BINMATCH_MAX_ENTRY_BYTES`) |
+| Max total expanded archive bytes | 1 GB (override: `BINMATCH_MAX_EXPANDED_ARCHIVE_BYTES`) |
 | Max nested archive depth | 4 |
 | Max PE sections | 96 |
 | Max PE resource bytes | 16 MB |
-| Max MSI stream bytes | 256 MB (override: `WINMATSCH_MAX_MSI_STREAM_BYTES`) |
-| Max NSIS header bytes | 256 MB (override: `WINMATSCH_MAX_NSIS_HEADER_BYTES`) |
+| Max MSI stream bytes | 256 MB (override: `BINMATCH_MAX_MSI_STREAM_BYTES`) |
+| Max NSIS header bytes | 256 MB (override: `BINMATCH_MAX_NSIS_HEADER_BYTES`) |
 | Max dependency-analyzer central directory bytes | 64 MB |
 | Max dependency-analyzer payload bytes (per entry) | 256 MB |
 | Max dependency-analyzer total payload bytes | 1 GB |
@@ -91,7 +91,7 @@ participate in portable payload selection.
 
 ## Known unsupported variants and non-goals
 
-- **Executing installers.** winmatsch never runs an installer, in a sandbox
+- **Executing installers.** binmatch never runs an installer, in a sandbox
   or otherwise; only static analysis is performed.
 - **Encrypted or password-protected archives** are not extracted.
 - **ZIP members that look installable but fail magic-byte validation** are

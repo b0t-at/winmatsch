@@ -6,7 +6,7 @@ require human license review; only the version tokens are mechanical. This scrip
 them from two sources of truth:
 
   * Directory.Packages.props - the central version pins.
-  * src/WinMatsch.Cli/obj/project.assets.json (when present, i.e. after a restore) - the
+  * src/BinMatch.Cli/obj/project.assets.json (when present, i.e. after a restore) - the
     shipped dependency closure, so transitive packages such as Spectre.Console.Ansi are
     refreshed too.
 
@@ -29,7 +29,7 @@ from pathlib import Path
 
 NOTICE_FILE = "THIRD-PARTY-NOTICES.txt"
 PINS_FILE = "Directory.Packages.props"
-ASSETS_FILE = Path("src") / "WinMatsch.Cli" / "obj" / "project.assets.json"
+ASSETS_FILE = Path("src") / "BinMatch.Cli" / "obj" / "project.assets.json"
 
 # Mirrors LicenseNoticeTests: packages that never ship to users.
 TEST_ONLY_PACKAGES = {

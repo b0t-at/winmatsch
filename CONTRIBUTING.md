@@ -1,4 +1,4 @@
-# Contributing to winmatsch
+# Contributing to binmatch
 
 Thanks for considering a contribution! This document covers local setup and
 the expectations for changes.
@@ -36,7 +36,7 @@ Never point live mutation tests at `microsoft/winget-pkgs`.
   through the interaction abstraction.
 - **Fixture policy.** Never commit third-party installer binaries. Tests use
   synthetic fixtures, JSON descriptors, and recorded HTTP interactions
-  (`tests/WinMatsch.Testing`).
+  (`tests/BinMatch.Testing`).
 - **Clean-room rule.** Do not port or copy source from existing installer
   parsers or manifest tools. Analyzers are implemented from public format
   documentation.

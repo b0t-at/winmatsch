@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish a winmatsch release and download index to an Azure Blob container.
+# Publish a binmatch release and download index to an Azure Blob container.
 #
 # Layout produced in the selected container (see docs/download-site.md):
 #   /index.html /404.html /versions.json          short-TTL entry points
@@ -23,7 +23,7 @@ Required:
   --version VER          Release version (tag form v0.9.0 or plain 0.9.0)
   --dist DIR             Directory with release artifacts (the 6 binaries,
                          SHA256SUMS.txt, LICENSE, THIRD-PARTY-NOTICES.txt)
-  --account NAME         Storage account name (or env WINMATSCH_STORAGE_ACCOUNT)
+  --account NAME         Storage account name (or env BINMATCH_STORAGE_ACCOUNT)
                          [not required with --dry-run]
 
 Options:
@@ -48,8 +48,8 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- arguments
 
-VERSION="" DIST="" ACCOUNT="${WINMATSCH_STORAGE_ACCOUNT:-}"
-CONTAINER="${WINMATSCH_WEB_CONTAINER:-\$web}"
+VERSION="" DIST="" ACCOUNT="${BINMATCH_STORAGE_ACCOUNT:-}"
+CONTAINER="${BINMATCH_WEB_CONTAINER:-\$web}"
 DATE="" PRERELEASE=0 NOTES_URL="" MANIFEST_IN="" STAGING="" DRY_RUN=0 SKIP_LATEST=0
 AFD_RG="" AFD_PROFILE="" AFD_ENDPOINT=""
 COUNT_NEW=0 COUNT_EXISTING=0 COUNT_MUTABLE=0
@@ -80,7 +80,7 @@ done
 [ -n "$DIST" ]    || { usage >&2; die "--dist is required"; }
 [ -d "$DIST" ]    || die "dist directory not found: $DIST"
 if [ "$DRY_RUN" -eq 0 ] && [ -z "$ACCOUNT" ]; then
-    die "--account (or WINMATSCH_STORAGE_ACCOUNT) is required unless --dry-run"
+    die "--account (or BINMATCH_STORAGE_ACCOUNT) is required unless --dry-run"
 fi
 if [ "$DRY_RUN" -eq 0 ] && [ -n "$MANIFEST_IN" ]; then
     die "--manifest-in is only supported with --dry-run; live updates must use the current blob ETag"
@@ -106,7 +106,7 @@ WAIT_FOR_MANIFEST="$SCRIPT_DIR/wait-for-front-door-manifest.sh"
 VER="${VERSION#v}"; VER="${VER#V}"
 TAG="v$VER"
 DATE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-NOTES_URL="${NOTES_URL:-https://github.com/b0t-at/winmatsch/releases/tag/$TAG}"
+NOTES_URL="${NOTES_URL:-https://github.com/b0t-at/binmatch/releases/tag/$TAG}"
 
 if [ -z "$STAGING" ]; then
     STAGING="$(mktemp -d)"
@@ -129,7 +129,7 @@ SUMS="$DIST/SHA256SUMS.txt"
 binary_name() {
     local rid="$1" ext=""
     case "$rid" in win-*) ext=".exe" ;; esac
-    printf 'winmatsch-%s-%s%s\n' "$TAG" "$rid" "$ext"
+    printf 'binmatch-%s-%s%s\n' "$TAG" "$rid" "$ext"
 }
 
 log "Verifying release artifacts in $DIST"
@@ -196,7 +196,7 @@ rid_meta = {
 }
 artifacts = []
 for rid, (os_name, arch) in rid_meta.items():
-    name = f"winmatsch-{tag}-{rid}" + (".exe" if rid.startswith("win-") else "")
+    name = f"binmatch-{tag}-{rid}" + (".exe" if rid.startswith("win-") else "")
     path = os.path.join(dist, name)
     sha = sums.get(name) or hashlib.sha256(open(path, "rb").read()).hexdigest()
     artifacts.append({
@@ -262,7 +262,7 @@ if [ "$SKIP_LATEST" -eq 0 ] && [ -n "$LATEST" ] && [ "$LATEST" = "$VER" ]; then
     for rid in "${RIDS[@]}"; do
         ext=""
         case "$rid" in win-*) ext=".exe" ;; esac
-        cp "$DIST/$(binary_name "$rid")" "$LDIR/winmatsch-$rid$ext"
+        cp "$DIST/$(binary_name "$rid")" "$LDIR/binmatch-$rid$ext"
     done
     cp "$DIST/LICENSE" "$DIST/THIRD-PARTY-NOTICES.txt" "$LDIR/"
     cp "$SITE_INDEX" "$LDIR/index.html"
@@ -274,7 +274,7 @@ manifest = json.load(open(os.path.join(staging, "versions.json"), encoding="utf-
 entry = next(v for v in manifest["versions"] if v["version"] == ver)
 lines, stable_artifacts = [], []
 for a in entry["artifacts"]:
-    stable = f"winmatsch-{a['rid']}" + (".exe" if a["os"] == "windows" else "")
+    stable = f"binmatch-{a['rid']}" + (".exe" if a["os"] == "windows" else "")
     lines.append(f"{a['sha256']}  {stable}")
     stable_artifacts.append({**a, "name": stable, "url": f"/latest/{stable}"})
 latest_dir = os.path.join(staging, "latest")
@@ -307,7 +307,7 @@ headers_for() {
         *.html)           type="text/html; charset=utf-8" ;;
         *.json)           type="application/json; charset=utf-8" ;;
         *.txt|LICENSE)    type="text/plain; charset=utf-8" ;;
-        winmatsch-*)      type="application/octet-stream"; dispo="attachment" ;;
+        binmatch-*)      type="application/octet-stream"; dispo="attachment" ;;
         *)                type="application/octet-stream" ;;
     esac
     case "$path" in
@@ -372,9 +372,9 @@ def human(n):
 OS_LABEL = {"windows": "Windows", "linux": "Linux", "macos": "macOS"}
 lines = []
 if mode == "dry-run":
-    lines.append(f"## \N{TEST TUBE} winmatsch {tag} — dry-run upload plan")
+    lines.append(f"## \N{TEST TUBE} binmatch {tag} — dry-run upload plan")
 else:
-    lines.append(f"## \N{PACKAGE} winmatsch {tag} published to the download site")
+    lines.append(f"## \N{PACKAGE} binmatch {tag} published to the download site")
 lines += ["", "| | |", "| --- | --- |"]
 
 channel = "pre-release" if env("SUM_PRERELEASE") == "1" or "-" in ver else "stable"

@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 SCHEMA_VERSION = 1
-PROJECT = "winmatsch"
+PROJECT = "binmatch"
 
 _SEMVER_RE = re.compile(
     r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"

@@ -8,7 +8,7 @@
   (optionally `-<prerelease>`), e.g. `v0.2.0`. The release workflow rejects
   malformed tags.
 - The tag version is stamped into the executable (`-p:Version`), so
-  `winmatsch --version` of a release artifact prints the tag version plus
+  `binmatch --version` of a release artifact prints the tag version plus
   the commit SHA. Untagged builds print the `VersionPrefix` plus SHA.
 - Update `VersionPrefix` together with tagging so source builds after the
   release report the right version.
@@ -30,7 +30,7 @@ The build path is triggered by pushing a `v*` tag:
    (`--version` must equal the tag version exactly, ignoring the `+<sha>`
    suffix; `--help`, `analyze --help`, `completion bash`, `config path`),
    then copies the raw executable to a deterministic release name
-   `winmatsch-<tag>-<rid>` (`.exe` on Windows) — no zip/tar.gz wrapping.
+   `binmatch-<tag>-<rid>` (`.exe` on Windows) — no zip/tar.gz wrapping.
 3. **Release** (once): downloads all six binaries, **fails if any expected
    binary is missing**, adds the shared `LICENSE` and
    `THIRD-PARTY-NOTICES.txt` (published once, not per-platform, since they
@@ -78,13 +78,13 @@ The container layout is intentionally append-oriented and CDN-friendly:
 │  ├── latest.json
 │  ├── version.txt
 │  ├── SHA256SUMS.txt
-│  └── winmatsch-<rid>[.exe]
+│  └── binmatch-<rid>[.exe]
 └── v0.8.0/
    ├── index.html
    ├── SHA256SUMS.txt
    ├── LICENSE
    ├── THIRD-PARTY-NOTICES.txt
-   └── winmatsch-v0.8.0-<rid>[.exe]
+   └── binmatch-v0.8.0-<rid>[.exe]
 ```
 
 - `v<version>/` is the stable, version-qualified download namespace.
@@ -123,19 +123,19 @@ contract is documented in [download-site.md](download-site.md).
 6. **Watch the tag workflow.** The gate, six publish jobs, and draft-release
    job must succeed; any missing artifact fails the run by design.
 7. **Verify the draft.** Download at least one binary, check
-   `SHA256SUMS.txt`, run `winmatsch --version`, `--help`, and
-   `winmatsch analyze` against a local file.
+   `SHA256SUMS.txt`, run `binmatch --version`, `--help`, and
+   `binmatch analyze` against a local file.
 8. **Optional live E2E.** Opt-in live verification against the dedicated
-   test repository only (`WINMATSCH_E2E_TEST_REPOSITORY` /
-   `WINMATSCH_E2E_LIVE_MUTATION=1` with the hard-allowlisted
-   `b0t-at/winmatsch-e2e`); never against `microsoft/winget-pkgs`.
+   test repository only (`BINMATCH_E2E_TEST_REPOSITORY` /
+   `BINMATCH_E2E_LIVE_MUTATION=1` with the hard-allowlisted
+   `b0t-at/binmatch-e2e`); never against `microsoft/winget-pkgs`.
 9. **Publish the draft release.** This triggers the separate Azure publication
    workflow; verify that its job updates the catalog successfully.
    For a release that predates the Azure job, use **Run workflow** with its
    published tag.
 10. **Self-submission (post-1.0 goal).** Once the project is stable enough
-    to publish to WinGet, use winmatsch itself:
-    `winmatsch new <Publisher>.winmatsch --version <version> --urls <release binary URL> --submit`.
+    to publish to WinGet, use binmatch itself:
+    `binmatch new <Publisher>.binmatch --version <version> --urls <release binary URL> --submit`.
 
 ## Rollback and recovery
 
@@ -159,4 +159,4 @@ The project deliberately stays 0.x until:
 - [ ] The command surface has been stable for at least one release cycle.
 - [ ] Live E2E against the test repository is part of the pre-release
       routine.
-- [ ] winmatsch is itself published to WinGet via self-submission.
+- [ ] binmatch is itself published to WinGet via self-submission.
