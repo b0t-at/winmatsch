@@ -7,6 +7,36 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.21] - 2026-08-21
+
+### Fixed
+
+- The `raw.githubusercontent.com` ref-capturing regex in `Meta3GitHubLicenseUrlRule`
+  only consumed one path segment, so a fully-qualified ref like
+  `refs/heads/main/EULA.md` left `heads/main` glued to the file path, producing
+  a duplicated `blob/HEAD/heads/main/EULA.md` (TrellisLab.Trellis, winget-pkgs
+  PR #419103). The regex now recognizes the fully-qualified `refs/heads/<name>`
+  and `refs/tags/<name>` forms.
+- `CopyrightUrl` is now re-derived from the GitHub license API on every
+  discovery pass, the same way `LicenseUrl` already was, instead of only ever
+  being carried forward from a stale previous version (nvisionative.nvQuickSite
+  PR #419632, Harmonoid.Harmonoid PR #420140).
+- `Arp1VersionTemplateRule` now refreshes declared installer identity
+  (`ProductCode`/`PackageFamilyName`) unconditionally whenever analysis
+  evidence is available, instead of only when the declared version string
+  changed — a rebuilt installer (e.g. a re-signed MSIX) at an unchanged
+  declared version previously kept the *previous* version's identity
+  (Saturneric.GpgFrontend PR #420295).
+- `Scope3SwitchHygieneRule` now flags `InstallerSwitches.Custom` values that
+  embed what looks like a URL (e.g. an MSI public property such as
+  `DD_DOTNET_LINK="https://..."` copied in verbatim), which trips winget's
+  network-address switch policy (Datadog.dd-trace-dotnet PR #420312).
+- `Meta3GitHubLicenseUrlRule` now also recognizes and normalizes GitHub's
+  undocumented `github.com/{owner}/{repo}/raw/{ref}/{path}` shorthand (distinct
+  from `raw.githubusercontent.com`, which was already handled) to the stable
+  `blob` form, instead of leaving it unrecognized and passed through unchanged
+  indefinitely (ZacharyL2.KeyEcho, winget-pkgs PR #419628).
+
 ## [0.8.20] - 2026-08-21
 
 ### Fixed
@@ -372,7 +402,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.20...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.21...main
+[0.8.21]: https://github.com/b0t-at/winmatsch/compare/v0.8.20...v0.8.21
 [0.8.20]: https://github.com/b0t-at/winmatsch/compare/v0.8.19...v0.8.20
 [0.8.19]: https://github.com/b0t-at/winmatsch/compare/v0.8.18...v0.8.19
 [0.8.18]: https://github.com/b0t-at/winmatsch/compare/v0.8.17...v0.8.18
