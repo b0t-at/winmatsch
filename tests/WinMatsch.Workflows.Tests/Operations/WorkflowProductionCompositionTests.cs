@@ -219,6 +219,141 @@ public sealed class WorkflowProductionCompositionTests
     }
 
     [Fact]
+    public async Task Production_update_reuses_release_list_and_fills_release_notes()
+    {
+        // Regression: DiscoverAsync (installer asset resolution) and DiscoverMetadataAsync
+        // (release-notes lookup) each independently fetched the full release list, so a
+        // single update spent twice the GitHub API/rate-limit budget it needed for no
+        // benefit. Confirms the fetch is now reused for both, and that the release body
+        // actually reaches the produced manifest as ReleaseNotes - winget-pkgs PR #421163
+        // and #422294 both shipped manifests with the installer resolved correctly but
+        // ReleaseNotes silently empty.
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+        });
+        var client = new FakeGitHubClient
+        {
+            Releases =
+            [
+                new GitHubRelease(
+                    200,
+                    "2.0.0",
+                    "2.0.0",
+                    "Notable fixes in this release.",
+                    new Uri("https://github.com/vcmi/vcmi/releases/tag/2.0.0"),
+                    IsDraft: false,
+                    IsPrerelease: false,
+                    DateTimeOffset.UnixEpoch,
+                    [
+                        new ReleaseAsset(
+                            2000,
+                            "setup.exe",
+                            AssetUrl("2.0.0", "setup.exe"),
+                            "application/octet-stream",
+                            executable.Length,
+                            0,
+                            DateTimeOffset.UnixEpoch),
+                    ]),
+            ],
+        };
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"),
+            allowUnavailable: true);
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(downloader, source);
+        string output = CreateDirectory();
+        try
+        {
+            WritePrevious(output);
+
+            WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PreviousVersion = new PackageVersion("1.0.0"),
+                PackageVersion = "2.0.0",
+                AllowStructuralRewrite = true,
+                AllowStableUrlContentChange = true,
+                Release = new(null, [AssetUrl("2.0.0", "setup.exe")], []),
+            });
+
+            Assert.True(
+                result.Code == WorkflowResultCode.Succeeded,
+                string.Join(
+                    Environment.NewLine,
+                    [$"Code: {result.Code}", .. result.Plan.Validation.Findings.Select(static finding =>
+                            $"{finding.Code}: {finding.Message}"), .. result.Plan.Questions.Select(static question =>
+                            $"{question.Code}: {question.Prompt}")]));
+            Assert.Equal(1, client.GetReleasesCalls);
+            string locale = Encoding.UTF8.GetString(
+                Assert.Single(
+                    result.Plan.AfterDocuments,
+                    static document => document.RepositoryPath.EndsWith(
+                        "Example.Composed.locale.en-US.yaml",
+                        StringComparison.Ordinal)).Content.AsSpan());
+            Assert.Contains("ReleaseNotes: Notable fixes in this release.", locale, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Production_update_release_rate_limit_fails_instead_of_silently_dropping_release_notes()
+    {
+        // Rate limiting is transient (it clears on retry), unlike a repository that
+        // genuinely has no API-visible releases - the case allowUnavailable exists for.
+        // Silently falling back to a direct-URL asset on a rate limit would still resolve
+        // the installer (the immutable download URL needs no API call) but would
+        // permanently lose ReleaseNotes for this version, with no diagnostic. The update
+        // must instead fail visibly so the caller can retry once the limit resets.
+        var client = new FakeGitHubClient
+        {
+            OnGetReleases = static (_, _) => throw new GitHubApiException(
+                "rate limited",
+                HttpStatusCode.Forbidden,
+                requestId: null,
+                errorKind: GitHubApiErrorKind.RateLimited),
+        };
+        var source = new GitHubWorkflowReleaseSource(
+            client,
+            new RepositoryCoordinates("vcmi", "vcmi"),
+            allowUnavailable: true);
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(executable),
+        });
+        using var downloader = new InstallerDownloader(handler);
+        LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(downloader, source);
+        string output = CreateDirectory();
+        try
+        {
+            WritePrevious(output);
+
+            await Assert.ThrowsAsync<GitHubApiException>(() => engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = new PackageIdentifier("Example.Composed"),
+                PreviousVersion = new PackageVersion("1.0.0"),
+                PackageVersion = "2.0.0",
+                Release = new(null, [AssetUrl("2.0.0", "setup.exe")], []),
+                NetworkValidationMode = NetworkValidationMode.Skip,
+            }));
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Unresolved_caller_release_asset_disables_continuity_candidates()
     {
         var client = new FakeGitHubClient

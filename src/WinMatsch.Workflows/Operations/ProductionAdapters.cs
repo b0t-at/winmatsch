@@ -33,6 +33,14 @@ public sealed class GitHubWorkflowReleaseSource(
     private readonly IGitHubRepositoryClient _client = client ?? throw new ArgumentNullException(nameof(client));
     private RepositoryReleaseMetadata? _cachedMetadata;
 
+    // Populated by DiscoverAsync so DiscoverMetadataAsync's release-notes lookup (run
+    // immediately afterwards, for the same repository, within the same create/update
+    // operation) can reuse it instead of issuing a second GetReleasesAsync call. Without
+    // this, every update fetched the release list twice - once to resolve the installer
+    // asset, once again purely to read the matching release's body/notes - doubling GitHub
+    // API/rate-limit exposure per package for no benefit.
+    private IReadOnlyList<GitHubRelease>? _cachedReleases;
+
     public async Task<WorkflowReleaseAssets> DiscoverAsync(
         PackageIdentifier packageIdentifier,
         ReleaseRequest request,
@@ -44,6 +52,23 @@ public sealed class GitHubWorkflowReleaseSource(
         {
             releases = await _client.GetReleasesAsync(repository, cancellationToken)
                 .ConfigureAwait(false);
+            _cachedReleases = releases;
+        }
+        catch (GitHubApiException exception)
+            when (exception.ErrorKind == GitHubApiErrorKind.RateLimited)
+        {
+            // Unlike a repository that genuinely has no API-visible releases (a private
+            // repo, or one that only tags without publishing releases - the cases
+            // allowUnavailable exists for), rate limiting is transient and clears on retry.
+            // Silently falling back to direct-URL assets here would still resolve the
+            // installer correctly (the immutable download URL needs no API call) but would
+            // permanently lose this version's ReleaseNotes/body, because nothing re-attempts
+            // the release fetch later. That produced manifests that passed validation but
+            // were missing ReleaseNotes with zero diagnostic (winget-pkgs PR #421163,
+            // #422294). Propagate instead so the caller fails this update visibly and can
+            // retry once the rate limit resets, rather than silently committing an
+            // incomplete manifest.
+            throw;
         }
         catch (Exception) when (
             allowUnavailable
@@ -143,9 +168,8 @@ public sealed class GitHubWorkflowReleaseSource(
             .ToArray();
         if (releaseIds.Length == 1)
         {
-            IReadOnlyList<GitHubRelease> releases = await _client.GetReleasesAsync(
-                repository,
-                cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<GitHubRelease> releases = _cachedReleases
+                ?? await _client.GetReleasesAsync(repository, cancellationToken).ConfigureAwait(false);
             release = releases.SingleOrDefault(candidate => candidate.Id == releaseIds[0]);
         }
 
