@@ -4,9 +4,10 @@ using WinMatsch.Core;
 namespace WinMatsch.Rules.Policy;
 
 /// <summary>
-/// META-3: normalizes GitHub license/copyright URLs. <c>raw.githubusercontent.com</c> links
-/// (which render as plain text) are rewritten to the HTML <c>blob</c> form, preserving the
-/// pinned ref so the link keeps resolving even when the file moved at HEAD. Rewrites to the
+/// META-3: normalizes GitHub license/copyright URLs. <c>raw.githubusercontent.com</c> links and
+/// the <c>github.com/{owner}/{repo}/raw/{ref}/{path}</c> shorthand (which both render as plain
+/// text) are rewritten to the HTML <c>blob</c> form, preserving the pinned ref so the link keeps
+/// resolving even when the file moved at HEAD. Rewrites to the
 /// stable <c>blob/HEAD</c> form happen only when the resulting URL is confirmed reachable via
 /// <see cref="PolicyEvidence.ConfirmedUrls"/> — policy rules have no live API access, and an
 /// unverified HEAD rewrite has shipped hard 404s (a pinned file that was moved or deleted at
@@ -91,6 +92,22 @@ public sealed partial class Meta3GitHubLicenseUrlRule : IRule
             return $"https://github.com/{raw.Groups["owner"].Value}/{raw.Groups["repo"].Value}/blob/{raw.Groups["ref"].Value}/{raw.Groups["path"].Value}";
         }
 
+        // "github.com/{owner}/{repo}/raw/{ref}/{path}" is an undocumented GitHub shorthand that
+        // redirects to the raw file content - it works, but it is not the canonical HTML
+        // rendering form used for License/CopyrightUrl elsewhere, so normalize it the same way
+        // as the raw.githubusercontent.com form above.
+        Match rawShorthand = GitHubRawShorthand().Match(url);
+        if (rawShorthand.Success)
+        {
+            string head = $"https://github.com/{rawShorthand.Groups["owner"].Value}/{rawShorthand.Groups["repo"].Value}/blob/HEAD/{rawShorthand.Groups["path"].Value}";
+            if (_evidence.IsUrlConfirmed(head))
+            {
+                return head;
+            }
+
+            return $"https://github.com/{rawShorthand.Groups["owner"].Value}/{rawShorthand.Groups["repo"].Value}/blob/{rawShorthand.Groups["ref"].Value}/{rawShorthand.Groups["path"].Value}";
+        }
+
         return null;
     }
 
@@ -104,4 +121,10 @@ public sealed partial class Meta3GitHubLicenseUrlRule : IRule
     // start of <path>, which duplicates HEAD/heads/main when the blob/HEAD form is built.
     [GeneratedRegex(@"^https?://raw\.githubusercontent\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/(?:refs/(?:heads|tags)/(?<ref>.+?)|(?<ref>[^/]+))/(?<path>.+)$")]
     private static partial Regex RawGitHubUserContent();
+
+    // Same ref-shape rules as RawGitHubUserContent (plain segment vs. fully-qualified
+    // "refs/heads/<name>"/"refs/tags/<name>"), but for the "github.com/.../raw/..." shorthand
+    // instead of the raw.githubusercontent.com host.
+    [GeneratedRegex(@"^https?://github\.com/(?<owner>[^/]+)/(?<repo>[^/]+)/raw/(?:refs/(?:heads|tags)/(?<ref>.+?)|(?<ref>[^/]+))/(?<path>.+)$")]
+    private static partial Regex GitHubRawShorthand();
 }
