@@ -230,6 +230,40 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Update_replaces_a_release_tag_url_lagging_behind_the_previous_version()
+    {
+        // Regression: Microsoft.WSL.PreRelease (winget-pkgs PR #421624) — the previous
+        // manifest's ReleaseNotesUrl said releases/tag/2.7.0 while the previous version was
+        // 2.7.12. The version-embedding check alone treated that URL as version-agnostic, so
+        // the stale release-tag page was carried forward instead of the discovered URL.
+        using var temporary = new TemporaryDirectory();
+        PackageManifests previous = CreatePackage("2.7.12", "A");
+        previous.DefaultLocale.ReleaseNotesUrl = "https://github.com/example/app/releases/tag/2.7.0";
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            new PassThroughRuleRunner(),
+            new CapturingPreflight(),
+            new RecordingTransaction(),
+            releases: new MetadataReleaseSource(),
+            clock: new FixedClock());
+
+        WorkflowOperationResult result = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("2.9.4", "A")) with
+            {
+                PreviousVersion = new PackageVersion("2.7.12"),
+                PackageVersion = "2.9.4",
+            });
+
+        Assert.Equal(WorkflowResultCode.Succeeded, result.Code);
+        RawManifestDocument locale = Assert.Single(
+            result.Plan.AfterDocuments,
+            document => document.RepositoryPath.Contains(".locale.", StringComparison.Ordinal));
+        string yaml = System.Text.Encoding.UTF8.GetString(locale.Content.AsSpan());
+        Assert.Contains("ReleaseNotesUrl: https://github.com/example/app/releases/tag/v2.0.0", yaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("releases/tag/2.7.0", yaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Update_defers_to_version_agnostic_previous_release_notes_url()
     {
         // A hand-maintained, version-agnostic ReleaseNotesUrl is WM0007's carry candidate; the

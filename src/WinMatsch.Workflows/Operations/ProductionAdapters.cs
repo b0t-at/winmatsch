@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -169,6 +170,16 @@ public sealed class GitHubWorkflowReleaseSource(
         {
             provenance[nameof(PackageLocaleMetadata.ReleaseNotesUrl)] = $"github-release:{release!.Id}:html_url";
         }
+        else if (TryDeriveReleaseTagUri(assets, out Uri? derivedReleaseTagUri, out string? derivedTag))
+        {
+            // The release could not be resolved through the API (tag-only release, discovery
+            // outage under allowUnavailable, or a caller-supplied direct URL), but the immutable
+            // download URLs still pin the repository and tag - the canonical release page is
+            // derivable from them.
+            releaseNotesUrl = derivedReleaseTagUri.AbsoluteUri;
+            provenance[nameof(PackageLocaleMetadata.ReleaseNotesUrl)] =
+                $"download-url:{derivedTag}:releases-tag";
+        }
 
         if (repositoryMetadata.License is not null)
         {
@@ -245,6 +256,55 @@ public sealed class GitHubWorkflowReleaseSource(
         RepositoryReleaseMetadata loaded = await source.GetAsync(repository, cancellationToken)
             .ConfigureAwait(false);
         return Interlocked.CompareExchange(ref _cachedMetadata, loaded, comparand: null) ?? loaded;
+    }
+
+    /// <summary>
+    /// Derives the canonical <c>/releases/tag/&lt;tag&gt;</c> page from the assets' immutable
+    /// GitHub release download URLs when every parseable URL agrees on one repository and tag.
+    /// Mutable <c>/releases/latest/download/</c> aliases carry no tag and are ignored.
+    /// </summary>
+    private static bool TryDeriveReleaseTagUri(
+        ImmutableArray<DiscoveredAsset> assets,
+        [NotNullWhen(true)] out Uri? releaseTagUri,
+        [NotNullWhen(true)] out string? releaseTag)
+    {
+        releaseTagUri = null;
+        releaseTag = null;
+        GitHubReleaseAssetIdentity? identity = null;
+        foreach (DiscoveredAsset asset in assets)
+        {
+            if (asset.DownloadUri.AbsolutePath.Contains(
+                    "/releases/latest/download/",
+                    StringComparison.OrdinalIgnoreCase)
+                || !GitHubReleaseAssetIdentity.TryParse(asset.DownloadUri, out GitHubReleaseAssetIdentity parsed))
+            {
+                continue;
+            }
+
+            if (identity is null)
+            {
+                identity = parsed;
+                continue;
+            }
+
+            if (!identity.IsSameRepository(parsed)
+                || !string.Equals(identity.ReleaseTag, parsed.ReleaseTag, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        if (identity is null)
+        {
+            return false;
+        }
+
+        releaseTag = identity.ReleaseTag;
+        releaseTagUri = new Uri(
+            $"https://{identity.Authority}/{Uri.EscapeDataString(identity.Repository.Owner)}"
+            + $"/{Uri.EscapeDataString(identity.Repository.Name)}/releases/tag"
+            + $"/{Uri.EscapeDataString(identity.ReleaseTag)}");
+        return true;
     }
 
     private static Uri? TryRepositoryUri(Uri? releaseUri)

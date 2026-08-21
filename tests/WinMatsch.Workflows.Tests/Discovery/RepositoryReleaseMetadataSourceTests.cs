@@ -194,6 +194,74 @@ public sealed class RepositoryReleaseMetadataSourceTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Unresolved_release_derives_release_notes_url_from_download_urls()
+    {
+        // Tag-only releases, discovery outages under allowUnavailable, and caller-supplied
+        // direct URLs all leave the release object unresolved; the immutable download URLs
+        // still pin the repository and tag, so the canonical release page is derived from them.
+        var source = new GitHubWorkflowReleaseSource(new FakeGitHubClient(), _repository);
+
+        WorkflowReleaseMetadata metadata = await source.DiscoverMetadataAsync(
+            new PackageIdentifier("Example.App"),
+            new ReleaseRequest(null, [], []),
+            [
+                DirectAsset(1, "https://github.com/example/app/releases/download/2.9.4/app.x64.msi"),
+                DirectAsset(2, "https://github.com/example/app/releases/download/2.9.4/app.arm64.msi"),
+            ],
+            CancellationToken.None);
+
+        Assert.Equal(
+            "https://github.com/example/app/releases/tag/2.9.4",
+            metadata.Metadata.ReleaseNotesUrl);
+        Assert.Equal(
+            "download-url:2.9.4:releases-tag",
+            metadata.Metadata.Provenance[nameof(PackageLocaleMetadata.ReleaseNotesUrl)]);
+        Assert.Null(metadata.Metadata.ReleaseNotes);
+    }
+
+    [Fact]
+    public async Task Disagreeing_or_mutable_download_urls_derive_no_release_notes_url()
+    {
+        var source = new GitHubWorkflowReleaseSource(new FakeGitHubClient(), _repository);
+
+        WorkflowReleaseMetadata mixedTags = await source.DiscoverMetadataAsync(
+            new PackageIdentifier("Example.App"),
+            new ReleaseRequest(null, [], []),
+            [
+                DirectAsset(1, "https://github.com/example/app/releases/download/1.0.0/app.x64.msi"),
+                DirectAsset(2, "https://github.com/example/app/releases/download/2.0.0/app.arm64.msi"),
+            ],
+            CancellationToken.None);
+        WorkflowReleaseMetadata latestAlias = await source.DiscoverMetadataAsync(
+            new PackageIdentifier("Example.App"),
+            new ReleaseRequest(null, [], []),
+            [DirectAsset(1, "https://github.com/example/app/releases/latest/download/app.x64.msi")],
+            CancellationToken.None);
+
+        Assert.Null(mixedTags.Metadata.ReleaseNotesUrl);
+        Assert.Null(latestAlias.Metadata.ReleaseNotesUrl);
+    }
+
+    private static DiscoveredAsset DirectAsset(long assetId, string downloadUrl)
+    {
+        var uri = new Uri(downloadUrl);
+        return new DiscoveredAsset
+        {
+            ReleaseId = 0,
+            ReleaseTag = "",
+            ReleaseName = "direct URL",
+            ReleaseUri = uri,
+            IsPrerelease = false,
+            AssetId = assetId,
+            AssetName = uri.Segments[^1],
+            DownloadUri = uri,
+            DeclaredContentType = "application/octet-stream",
+            DeclaredSize = 0,
+            AssetCreatedAt = DateTimeOffset.UnixEpoch,
+        };
+    }
+
     private sealed class StaticMetadataSource(
         RepositoryReleaseMetadata metadata) : IRepositoryReleaseMetadataSource
     {

@@ -7,6 +7,33 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.20] - 2026-08-21
+
+### Fixed
+
+- A `ReleaseNotesUrl` pointing at a release-tag page (`/releases/tag/…`) is no
+  longer carried forward on update, even when the embedded tag does not match
+  the previous package version — a tag that lagged behind the manifest version
+  once was previously carried forever (Microsoft.WSL.PreRelease, winget-pkgs
+  PR #421624 shipped `releases/tag/2.7.0` in the 2.9.4 manifest). When the
+  release object cannot be resolved through the API (tag-only releases,
+  discovery outages, caller-supplied direct URLs), the fresh `ReleaseNotesUrl`
+  is now derived from the immutable `releases/download/<tag>/…` installer
+  URLs instead of being left empty.
+
+## [0.8.19] - 2026-08-20
+
+### Fixed
+
+- Raised analysis resource limits for real-world installers, added LZMA ZIP
+  support, and release-notes refresh on update: `ReleaseNotes`/
+  `ReleaseNotesUrl` are re-discovered from the target release on every update
+  instead of only on first creation (#57).
+
+### Changed
+
+- Bumped SharpCompress and System.CommandLine (#55).
+
 ## [0.8.18] - 2026-08-19
 
 ### Fixed
@@ -345,7 +372,9 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.18...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.20...main
+[0.8.20]: https://github.com/b0t-at/winmatsch/compare/v0.8.19...v0.8.20
+[0.8.19]: https://github.com/b0t-at/winmatsch/compare/v0.8.18...v0.8.19
 [0.8.18]: https://github.com/b0t-at/winmatsch/compare/v0.8.17...v0.8.18
 [0.8.17]: https://github.com/b0t-at/winmatsch/compare/v0.8.16...v0.8.17
 [0.8.16]: https://github.com/b0t-at/winmatsch/compare/v0.8.15...v0.8.16
