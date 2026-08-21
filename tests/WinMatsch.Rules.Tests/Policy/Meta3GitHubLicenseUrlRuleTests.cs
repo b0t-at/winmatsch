@@ -85,6 +85,105 @@ public class Meta3GitHubLicenseUrlRuleTests
     }
 
     [Fact]
+    public void Raw_githubusercontent_refs_heads_url_normalizes_without_duplicating_the_ref_segment()
+    {
+        // Motivating regression: trellis-lab/trellis raw.githubusercontent.com/.../refs/heads/main/EULA.md
+        // was rewritten to blob/HEAD/heads/main/EULA.md because the ref-capturing regex only
+        // consumed the single "refs" segment, leaving "heads/main" glued to the front of <path>
+        // (PR #419103).
+        var rule = new Meta3GitHubLicenseUrlRule(new PolicyEvidence
+        {
+            ConfirmedUrls = ["https://github.com/trellis-lab/trellis/blob/HEAD/EULA.md"],
+        });
+        PackageManifests manifests = CreateWithLicenseUrl(
+            "https://raw.githubusercontent.com/trellis-lab/trellis/refs/heads/main/EULA.md");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        rule.Apply(context);
+
+        Assert.Equal(
+            "https://github.com/trellis-lab/trellis/blob/HEAD/EULA.md",
+            manifests.DefaultLocale.LicenseUrl);
+    }
+
+    [Fact]
+    public void Raw_githubusercontent_refs_heads_url_keeps_its_pinned_ref_without_head_confirmation()
+    {
+        PackageManifests manifests = CreateWithLicenseUrl(
+            "https://raw.githubusercontent.com/trellis-lab/trellis/refs/heads/main/EULA.md");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Equal(
+            "https://github.com/trellis-lab/trellis/blob/main/EULA.md",
+            manifests.DefaultLocale.LicenseUrl);
+    }
+
+    [Fact]
+    public void Raw_githubusercontent_refs_tags_url_keeps_its_pinned_ref_without_head_confirmation()
+    {
+        PackageManifests manifests = CreateWithLicenseUrl(
+            "https://raw.githubusercontent.com/owner/repo/refs/tags/v1.2.3/LICENSE.md");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Equal(
+            "https://github.com/owner/repo/blob/v1.2.3/LICENSE.md",
+            manifests.DefaultLocale.LicenseUrl);
+    }
+
+    [Fact]
+    public void GitHub_raw_shorthand_url_is_normalized_to_blob_head_when_confirmed()
+    {
+        // Motivating regression: ZacharyL2/KeyEcho github.com/.../raw/refs/heads/main/LICENSE
+        // (PR #419628) - the "github.com/{owner}/{repo}/raw/{ref}/{path}" shorthand redirects
+        // to raw content but was never recognized/normalized by this rule at all.
+        var rule = new Meta3GitHubLicenseUrlRule(new PolicyEvidence
+        {
+            ConfirmedUrls = ["https://github.com/ZacharyL2/KeyEcho/blob/HEAD/LICENSE"],
+        });
+        PackageManifests manifests = CreateWithLicenseUrl(
+            "https://github.com/ZacharyL2/KeyEcho/raw/refs/heads/main/LICENSE");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        rule.Apply(context);
+
+        Assert.Equal(
+            "https://github.com/ZacharyL2/KeyEcho/blob/HEAD/LICENSE",
+            manifests.DefaultLocale.LicenseUrl);
+    }
+
+    [Fact]
+    public void GitHub_raw_shorthand_url_keeps_its_pinned_ref_without_head_confirmation()
+    {
+        PackageManifests manifests = CreateWithLicenseUrl(
+            "https://github.com/ZacharyL2/KeyEcho/raw/refs/heads/main/LICENSE");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Equal(
+            "https://github.com/ZacharyL2/KeyEcho/blob/main/LICENSE",
+            manifests.DefaultLocale.LicenseUrl);
+    }
+
+    [Fact]
+    public void GitHub_raw_shorthand_url_with_plain_ref_keeps_its_pinned_ref_without_head_confirmation()
+    {
+        PackageManifests manifests = CreateWithLicenseUrl(
+            "https://github.com/owner/repo/raw/v1.2.3/LICENSE.md");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Equal(
+            "https://github.com/owner/repo/blob/v1.2.3/LICENSE.md",
+            manifests.DefaultLocale.LicenseUrl);
+    }
+
+    [Fact]
     public void Copyright_url_is_normalized_too()
     {
         PackageManifests manifests = CreateWithLicenseUrl(

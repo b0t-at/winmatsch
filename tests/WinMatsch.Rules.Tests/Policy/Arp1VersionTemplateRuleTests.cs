@@ -139,6 +139,42 @@ public class Arp1VersionTemplateRuleTests
     }
 
     [Fact]
+    public void Analyzer_refreshes_declared_identity_even_when_the_version_string_is_unchanged()
+    {
+        // Regression: identity refresh used to be gated behind the same guard as ARP version
+        // templating, so a rebuilt installer (e.g. a re-signed MSIX) that keeps the same
+        // declared version never had its stale carried-forward PackageFamilyName/ProductCode
+        // corrected (Saturneric.GpgFrontend PR #420295 - installer identity carried the
+        // previous version's PackageFamilyName despite a new MSIX being analyzed).
+        (PackageManifests current, PackageManifests previous) = CreateUpdate("2.2.2", "2.2.2");
+        Installer installer = current.Installer.Installers![0];
+        installer.ProductCode = "OldProduct";
+        installer.PackageFamilyName = "com.bktus.GpgFrontend_2.1.12.0_x64__a50et950gfh2w";
+        var evidence = new InstallerEvidence
+        {
+            InstallerUrl = installer.InstallerUrl!,
+            Analysis = new InstallerAnalysis
+            {
+                Format = DetectedInstallerFormat.Msix,
+                Installers =
+                [
+                    new Installer
+                    {
+                        ProductCode = "NewProduct",
+                        PackageFamilyName = "com.bktus.GpgFrontend_2.2.2.0_x64__a50et950gfh2w",
+                    },
+                ],
+            },
+        };
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous, evidence: [evidence]);
+
+        _rule.Apply(context);
+
+        Assert.Equal("NewProduct", installer.ProductCode);
+        Assert.Equal("com.bktus.GpgFrontend_2.2.2.0_x64__a50et950gfh2w", installer.PackageFamilyName);
+    }
+
+    [Fact]
     public void Singleton_analysis_entry_is_not_broadcast_across_multiple_arp_entries()
     {
         (PackageManifests current, PackageManifests previous) = CreateUpdate(

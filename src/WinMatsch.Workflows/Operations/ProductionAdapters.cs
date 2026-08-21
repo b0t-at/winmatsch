@@ -189,6 +189,11 @@ public sealed class GitHubWorkflowReleaseSource(
         if (repositoryMetadata.LicenseUrl is not null)
         {
             provenance[nameof(PackageLocaleMetadata.LicenseUrl)] = $"{repositoryMetadata.Provenance}:license_url";
+            // CopyrightUrl has no independent GitHub source; the license file is the
+            // authoritative copyright reference, so it is re-derived from the same URL every
+            // discovery pass rather than only ever being carried forward from a stale previous
+            // version (see PreserveOnUpdateRule / Meta5FieldSetParityRule).
+            provenance[nameof(PackageLocaleMetadata.CopyrightUrl)] = $"{repositoryMetadata.Provenance}:license_url";
         }
 
         if (!repositoryMetadata.Topics.IsEmpty)
@@ -218,6 +223,7 @@ public sealed class GitHubWorkflowReleaseSource(
                 PackageUrl = repositoryUrl?.AbsoluteUri,
                 License = repositoryMetadata.License,
                 LicenseUrl = repositoryMetadata.LicenseUrl?.AbsoluteUri,
+                CopyrightUrl = repositoryMetadata.LicenseUrl?.AbsoluteUri,
                 Tags =
                 [
                     .. repositoryMetadata.Topics
