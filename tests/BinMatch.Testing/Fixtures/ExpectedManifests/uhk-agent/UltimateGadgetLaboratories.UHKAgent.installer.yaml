@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Created with binmatch synthetic regression fixture
+
+PackageIdentifier: UltimateGadgetLaboratories.UHKAgent
+PackageVersion: 5.0.0
+InstallerLocale: en-US
+InstallerType: nullsoft
+Scope: machine
+Installers:
+- Architecture: x86
+  InstallerUrl: https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win-ia32.exe
+  InstallerSha256: 4AA02DB5201C3949EBF0A057450E70B7028C09C22D4E07915F3F97B7951898E8
+- Architecture: x64
+  InstallerUrl: https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win-x64.exe
+  InstallerSha256: D5FB81D679CA87CBBD375FBEE58D61D1F009AE0C5D8262840A742C553EE54D6F
+- Architecture: neutral
+  InstallerUrl: https://github.com/UltimateHackingKeyboard/agent/releases/download/v5.0.0/UHK.Agent-5.0.0-win.exe
+  InstallerSha256: 594F1054EF1101FBAE6C96421C1DECF1F15278BF0183CC3C51A2FE14DAE3F31D
+ManifestType: installer
+ManifestVersion: 1.12.0

@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Created with binmatch synthetic regression fixture
+
+PackageIdentifier: JohnMacFarlane.Pandoc
+PackageVersion: 3.6.2
+InstallerType: wix
+Installers:
+- Architecture: x64
+  Scope: user
+  InstallerUrl: https://github.com/jgm/pandoc/releases/download/3.6.2/pandoc-3.6.2-windows-x86_64.msi
+  InstallerSha256: 79E5CAAB1E41DF43EB9050AD506C0B510C8D7D6AD1A5B83FAEB05D2592715E86
+  InstallerSwitches:
+    Custom: ALLUSERS=2
+- Architecture: x64
+  Scope: machine
+  InstallerUrl: https://github.com/jgm/pandoc/releases/download/3.6.2/pandoc-3.6.2-windows-x86_64.msi
+  InstallerSha256: 79E5CAAB1E41DF43EB9050AD506C0B510C8D7D6AD1A5B83FAEB05D2592715E86
+  InstallerSwitches:
+    Custom: ALLUSERS=1
+ManifestType: installer
+ManifestVersion: 1.12.0

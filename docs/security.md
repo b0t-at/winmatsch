@@ -8,7 +8,7 @@ A token is resolved in this order; the first source that yields one wins:
 
 1. `--token` on the command line,
 2. the `GITHUB_TOKEN` environment variable,
-3. the OS keyring (managed with `winmatsch token add|remove|status`).
+3. the OS keyring (managed with `binmatch token add|remove|status`).
 
 If none is found, commands that need GitHub access fail with a clear message;
 read-only local commands (`analyze`, `validate`, `cache`, `config`,
@@ -18,8 +18,8 @@ read-only local commands (`analyze`, `validate`, `cache`, `config`,
 
 | Platform | Backend |
 |---|---|
-| Windows | Windows Credential Manager (generic credential `winmatsch:github`) |
-| macOS | login Keychain via the Security framework (service `winmatsch`, account `github`) |
+| Windows | Windows Credential Manager (generic credential `binmatch:github`) |
+| macOS | login Keychain via the Security framework (service `binmatch`, account `github`) |
 | Linux | freedesktop Secret Service via the `secret-tool` binary; the secret travels only over stdin/stdout, never as a process argument |
 
 When no keyring backend is available (e.g. `secret-tool` missing, headless
@@ -29,7 +29,7 @@ instead. Secret buffers are zeroed after use where the platform allows it.
 
 ### Recommendations and least privilege
 
-- Prefer `winmatsch token add --stdin` (pipe the token) or `GITHUB_TOKEN`.
+- Prefer `binmatch token add --stdin` (pipe the token) or `GITHUB_TOKEN`.
   Avoid `--token <value>`: process arguments can leak via shell history and
   process listings. The tool itself never echoes the value either way.
 - Use a **fine-grained personal access token** restricted to the minimum:
@@ -95,12 +95,12 @@ arguments in the first place.
 
 ## What this tool does *not* protect against
 
-For honesty's sake: winmatsch validates integrity, not trustworthiness. It
+For honesty's sake: binmatch validates integrity, not trustworthiness. It
 does not sandbox-execute installers, does not scan for malware, and cannot
 verify that a publisher's URL serves benign content. Review what you submit.
 
 ## Reporting vulnerabilities
 
 Please report suspected vulnerabilities privately via
-[GitHub security advisories](https://github.com/b0t-at/winmatsch/security/advisories/new)
+[GitHub security advisories](https://github.com/b0t-at/binmatch/security/advisories/new)
 rather than public issues. See [SECURITY.md](../SECURITY.md).

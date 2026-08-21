@@ -130,7 +130,7 @@ class ManageReleaseVersionsTests(unittest.TestCase):
             version_directory = root / "version"
             latest_directory = root / "latest"
             version_directory.mkdir()
-            binary = version_directory / "winmatsch-v1.0.0-win-x64.exe"
+            binary = version_directory / "binmatch-v1.0.0-win-x64.exe"
             binary.write_bytes(b"release binary")
             for name in ("LICENSE", "THIRD-PARTY-NOTICES.txt", "index.html"):
                 (version_directory / name).write_text(name, encoding="utf-8")
@@ -158,10 +158,10 @@ class ManageReleaseVersionsTests(unittest.TestCase):
                 )
             )
 
-            stable_binary = latest_directory / "winmatsch-win-x64.exe"
+            stable_binary = latest_directory / "binmatch-win-x64.exe"
             latest_json = json.loads((latest_directory / "latest.json").read_text(encoding="utf-8"))
             self.assertEqual(binary.read_bytes(), stable_binary.read_bytes())
-            self.assertEqual("/latest/winmatsch-win-x64.exe", latest_json["artifacts"][0]["url"])
+            self.assertEqual("/latest/binmatch-win-x64.exe", latest_json["artifacts"][0]["url"])
             self.assertEqual("1.0.0\n", (latest_directory / "version.txt").read_text(encoding="utf-8"))
 
     @staticmethod
@@ -170,14 +170,14 @@ class ManageReleaseVersionsTests(unittest.TestCase):
             "tagName": f"v{version}",
             "isPrerelease": "-" in version,
             "publishedAt": "2026-08-03T12:00:00Z",
-            "url": f"https://github.com/b0t-at/winmatsch/releases/tag/v{version}",
+            "url": f"https://github.com/b0t-at/binmatch/releases/tag/v{version}",
         }
 
     @staticmethod
     def _manifest(versions: list[str], latest: str | None) -> dict:
         return {
             "schemaVersion": 1,
-            "project": "winmatsch",
+            "project": "binmatch",
             "updated": "2026-08-03T12:00:00Z",
             "latest": latest,
             "versions": [
@@ -188,7 +188,7 @@ class ManageReleaseVersionsTests(unittest.TestCase):
                     "prerelease": "-" in version,
                     "path": f"/v{version}/",
                     "sha256sums": f"/v{version}/SHA256SUMS.txt",
-                    "notes": f"https://github.com/b0t-at/winmatsch/releases/tag/v{version}",
+                    "notes": f"https://github.com/b0t-at/binmatch/releases/tag/v{version}",
                     "artifacts": [],
                 }
                 for version in versions

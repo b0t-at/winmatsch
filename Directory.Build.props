@@ -16,13 +16,13 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Product>winmatsch</Product>
-    <Authors>winmatsch contributors</Authors>
-    <Copyright>Copyright (c) 2026 winmatsch contributors</Copyright>
+    <Product>binmatch</Product>
+    <Authors>binmatch contributors</Authors>
+    <Copyright>Copyright (c) 2026 binmatch contributors</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/b0t-at/winmatsch</RepositoryUrl>
-    <PackageProjectUrl>https://github.com/b0t-at/winmatsch</PackageProjectUrl>
-    <VersionPrefix>0.8.20</VersionPrefix>
+    <RepositoryUrl>https://github.com/b0t-at/binmatch</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/b0t-at/binmatch</PackageProjectUrl>
+    <VersionPrefix>1.0.0</VersionPrefix>
   </PropertyGroup>
 
 </Project>

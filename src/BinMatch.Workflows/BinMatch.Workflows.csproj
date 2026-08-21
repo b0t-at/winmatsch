@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Application workflows that coordinate manifest generation, validation, repository operations, and dry-run plans.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BinMatch.Analysis\BinMatch.Analysis.csproj" />
+    <ProjectReference Include="..\BinMatch.Core\BinMatch.Core.csproj" />
+    <ProjectReference Include="..\BinMatch.Downloads\BinMatch.Downloads.csproj" />
+    <ProjectReference Include="..\BinMatch.GitHub\BinMatch.GitHub.csproj" />
+    <ProjectReference Include="..\BinMatch.Rules\BinMatch.Rules.csproj" />
+    <ProjectReference Include="..\BinMatch.Validation\BinMatch.Validation.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="BinMatch.Workflows.Tests" />
+  </ItemGroup>
+
+</Project>

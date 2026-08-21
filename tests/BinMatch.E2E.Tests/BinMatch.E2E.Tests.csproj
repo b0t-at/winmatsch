@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\BinMatch.Cli\BinMatch.Cli.csproj" />
+    <ProjectReference Include="..\..\src\BinMatch.Workflows\BinMatch.Workflows.csproj" />
+    <ProjectReference Include="..\BinMatch.Analysis.Tests\BinMatch.Analysis.Tests.csproj" />
+    <ProjectReference Include="..\BinMatch.Testing\BinMatch.Testing.csproj" />
+    <ProjectReference Include="..\BinMatch.Workflows.Tests\BinMatch.Workflows.Tests.csproj" />
+  </ItemGroup>
+
+</Project>

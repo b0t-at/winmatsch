@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Created with binmatch synthetic regression fixture
+
+PackageIdentifier: Waytech.CloudDrive2
+PackageVersion: 0.9.8
+InstallerType: inno
+AppsAndFeaturesEntries:
+- DisplayName: CloudDrive2 0.9.8
+  ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-X64-0.9.8.exe
+  InstallerSha256: DD951E8F8C8F79C83D0E19D429262891AADAB6DB6540295BA7E318ADC6CC3EFC
+- Architecture: arm64
+  InstallerUrl: https://github.com/cloud-fs/cloud-fs.github.io/releases/download/v0.9.8/CloudDrive2Setup-Arm64-0.9.8.exe
+  InstallerSha256: A6A16EACD828951B99BAC7E774E38D8D3CDCC98129D402C960F8E546D81D070A
+ManifestType: installer
+ManifestVersion: 1.12.0

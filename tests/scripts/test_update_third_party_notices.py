@@ -59,11 +59,11 @@ ASSETS = """{
 
 class UpdateThirdPartyNoticesTests(unittest.TestCase):
     def _create_root(self, notice: str = NOTICE, with_assets: bool = True) -> Path:
-        root = Path(tempfile.mkdtemp(prefix="winmatsch-notices-"))
+        root = Path(tempfile.mkdtemp(prefix="binmatch-notices-"))
         (root / "Directory.Packages.props").write_text(PINS, encoding="utf-8")
         (root / "THIRD-PARTY-NOTICES.txt").write_text(notice, encoding="utf-8")
         if with_assets:
-            assets = root / "src" / "WinMatsch.Cli" / "obj"
+            assets = root / "src" / "BinMatch.Cli" / "obj"
             assets.mkdir(parents=True)
             (assets / "project.assets.json").write_text(ASSETS, encoding="utf-8")
         return root

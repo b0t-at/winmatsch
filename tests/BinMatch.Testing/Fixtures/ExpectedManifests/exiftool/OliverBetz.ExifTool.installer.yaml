@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Created with binmatch synthetic regression fixture
+
+PackageIdentifier: OliverBetz.ExifTool
+PackageVersion: "12.87"
+InstallerType: inno
+Installers:
+- Architecture: x86
+  Scope: user
+  InstallerUrl: https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_32.exe
+  InstallerSha256: 09EEB77328507F7A46BBFA2C0C9C5525CA159E7CB2CAB633A1CD06E12152BD44
+  InstallerSwitches:
+    Custom: /CURRENTUSER
+  AppsAndFeaturesEntries:
+  - DisplayName: OliverBetz.ExifTool 12.87
+    ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+- Architecture: x86
+  Scope: machine
+  InstallerUrl: https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_32.exe
+  InstallerSha256: 09EEB77328507F7A46BBFA2C0C9C5525CA159E7CB2CAB633A1CD06E12152BD44
+  InstallerSwitches:
+    Custom: /ALLUSERS
+  AppsAndFeaturesEntries:
+  - DisplayName: OliverBetz.ExifTool 12.87
+    ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+- Architecture: x64
+  Scope: user
+  InstallerUrl: https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_64.exe
+  InstallerSha256: 15110F97FE7B2A102B37C623B3AF0099FCE78FA08D8A9C0C15F2A09C14B20900
+  InstallerSwitches:
+    Custom: /CURRENTUSER
+  AppsAndFeaturesEntries:
+  - DisplayName: OliverBetz.ExifTool 12.87
+    ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+- Architecture: x64
+  Scope: machine
+  InstallerUrl: https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/ExifTool_install_12.87_64.exe
+  InstallerSha256: 15110F97FE7B2A102B37C623B3AF0099FCE78FA08D8A9C0C15F2A09C14B20900
+  InstallerSwitches:
+    Custom: /ALLUSERS
+  AppsAndFeaturesEntries:
+  - DisplayName: OliverBetz.ExifTool 12.87
+    ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"
+ManifestType: installer
+ManifestVersion: 1.12.0

@@ -39,7 +39,7 @@ minor versions may contain breaking changes).
 ### Fixed
 
 - The analysis-side URL architecture detector and the mapping-side token
-  classifier now share one token table in `WinMatsch.Core`, so filenames like
+  classifier now share one token table in `BinMatch.Core`, so filenames like
   `ugene-53.1-win-x86-64.exe` classify identically on both sides instead of
   producing a false `ARCH_CONFLICT` safety stop. The classifier gains
   `x86-64`/`i686`/`686`; the detector gains `winarm64`/`win64a` and the
@@ -56,7 +56,7 @@ minor versions may contain breaking changes).
   `singlefilehost.exe`) no longer participate in portable payload selection,
   and the per-entry archive byte ceiling applies only to entries that are
   actually extracted. Both ceilings are now configurable via
-  `WINMATSCH_MAX_ENTRY_BYTES` and `WINMATSCH_MAX_EXPANDED_ARCHIVE_BYTES`.
+  `BINMATCH_MAX_ENTRY_BYTES` and `BINMATCH_MAX_EXPANDED_ARCHIVE_BYTES`.
 - Version continuity checks compare URL tokens with WinGet numeric
   equivalence, tolerate short numeric vendor revisions on the URL side
   (`Converseen-0.15.2.7-1`, `meson-1.12.0-64`), extract versions glued to the
@@ -319,7 +319,7 @@ minor versions may contain breaking changes).
 ### Changed
 
 - Release assets are now published as raw, portable per-platform binaries
-  (e.g. `winmatsch-<tag>-win-x64.exe`, `winmatsch-<tag>-linux-x64`) instead
+  (e.g. `binmatch-<tag>-win-x64.exe`, `binmatch-<tag>-linux-x64`) instead
   of `.zip`/`.tar.gz` archives, so binaries can be downloaded and run
   directly with no extraction step. `LICENSE` and `THIRD-PARTY-NOTICES.txt`
   are published once per release as shared assets (identical across all
@@ -328,7 +328,7 @@ minor versions may contain breaking changes).
   all six assets by 32–35% while preserving self-contained execution. The
   release workflow also enforces a 20 MiB per-binary size budget.
 - Windows download snippets consistently save the selected architecture build
-  as `winmatsch.exe` and use that local name for verification and execution.
+  as `binmatch.exe` and use that local name for verification and execution.
 
 ## [0.8.0] - 2026-08-03
 
@@ -358,7 +358,7 @@ Initial development toward a first release. Implemented so far:
 
 - Updated YamlDotNet to 18.1.0 (from 16.3.0) and OpenMcdf to 3.2.0 (from
   3.1.4). YamlDotNet 18.x adds a default YAML recursion ceiling of 130 —
-  well above winmatsch's own manifest depth budgets (64 for manifests, 32 for
+  well above binmatch's own manifest depth budgets (64 for manifests, 32 for
   override packs), so parser behavior is unchanged for valid input while
   hostile deeply nested input now fails earlier.
 
@@ -372,25 +372,25 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.20...main
-[0.8.20]: https://github.com/b0t-at/winmatsch/compare/v0.8.19...v0.8.20
-[0.8.19]: https://github.com/b0t-at/winmatsch/compare/v0.8.18...v0.8.19
-[0.8.18]: https://github.com/b0t-at/winmatsch/compare/v0.8.17...v0.8.18
-[0.8.17]: https://github.com/b0t-at/winmatsch/compare/v0.8.16...v0.8.17
-[0.8.16]: https://github.com/b0t-at/winmatsch/compare/v0.8.15...v0.8.16
-[0.8.15]: https://github.com/b0t-at/winmatsch/compare/v0.8.14...v0.8.15
-[0.8.14]: https://github.com/b0t-at/winmatsch/compare/v0.8.13...v0.8.14
-[0.8.13]: https://github.com/b0t-at/winmatsch/compare/v0.8.12...v0.8.13
-[0.8.12]: https://github.com/b0t-at/winmatsch/compare/v0.8.11...v0.8.12
-[0.8.11]: https://github.com/b0t-at/winmatsch/compare/v0.8.10...v0.8.11
-[0.8.10]: https://github.com/b0t-at/winmatsch/compare/v0.8.9...v0.8.10
-[0.8.9]: https://github.com/b0t-at/winmatsch/compare/v0.8.8...v0.8.9
-[0.8.8]: https://github.com/b0t-at/winmatsch/compare/v0.8.7...v0.8.8
-[0.8.7]: https://github.com/b0t-at/winmatsch/compare/v0.8.6...v0.8.7
-[0.8.6]: https://github.com/b0t-at/winmatsch/compare/v0.8.5...v0.8.6
-[0.8.5]: https://github.com/b0t-at/winmatsch/compare/v0.8.4...v0.8.5
-[0.8.4]: https://github.com/b0t-at/winmatsch/compare/v0.8.3...v0.8.4
-[0.8.3]: https://github.com/b0t-at/winmatsch/compare/v0.8.2...v0.8.3
-[0.8.2]: https://github.com/b0t-at/winmatsch/compare/v0.8.1...v0.8.2
-[0.8.1]: https://github.com/b0t-at/winmatsch/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/b0t-at/winmatsch/releases/tag/v0.8.0
+[Unreleased]: https://github.com/b0t-at/binmatch/compare/v0.8.20...main
+[0.8.20]: https://github.com/b0t-at/binmatch/compare/v0.8.19...v0.8.20
+[0.8.19]: https://github.com/b0t-at/binmatch/compare/v0.8.18...v0.8.19
+[0.8.18]: https://github.com/b0t-at/binmatch/compare/v0.8.17...v0.8.18
+[0.8.17]: https://github.com/b0t-at/binmatch/compare/v0.8.16...v0.8.17
+[0.8.16]: https://github.com/b0t-at/binmatch/compare/v0.8.15...v0.8.16
+[0.8.15]: https://github.com/b0t-at/binmatch/compare/v0.8.14...v0.8.15
+[0.8.14]: https://github.com/b0t-at/binmatch/compare/v0.8.13...v0.8.14
+[0.8.13]: https://github.com/b0t-at/binmatch/compare/v0.8.12...v0.8.13
+[0.8.12]: https://github.com/b0t-at/binmatch/compare/v0.8.11...v0.8.12
+[0.8.11]: https://github.com/b0t-at/binmatch/compare/v0.8.10...v0.8.11
+[0.8.10]: https://github.com/b0t-at/binmatch/compare/v0.8.9...v0.8.10
+[0.8.9]: https://github.com/b0t-at/binmatch/compare/v0.8.8...v0.8.9
+[0.8.8]: https://github.com/b0t-at/binmatch/compare/v0.8.7...v0.8.8
+[0.8.7]: https://github.com/b0t-at/binmatch/compare/v0.8.6...v0.8.7
+[0.8.6]: https://github.com/b0t-at/binmatch/compare/v0.8.5...v0.8.6
+[0.8.5]: https://github.com/b0t-at/binmatch/compare/v0.8.4...v0.8.5
+[0.8.4]: https://github.com/b0t-at/binmatch/compare/v0.8.3...v0.8.4
+[0.8.3]: https://github.com/b0t-at/binmatch/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/b0t-at/binmatch/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/b0t-at/binmatch/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/b0t-at/binmatch/releases/tag/v0.8.0

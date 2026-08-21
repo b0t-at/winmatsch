@@ -1,0 +1,26 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BinMatch.Analysis/BinMatch.Analysis.csproj" />
+    <Project Path="src/BinMatch.Cli/BinMatch.Cli.csproj" />
+    <Project Path="src/BinMatch.Core/BinMatch.Core.csproj" />
+    <Project Path="src/BinMatch.Downloads/BinMatch.Downloads.csproj" />
+    <Project Path="src/BinMatch.GitHub/BinMatch.GitHub.csproj" />
+    <Project Path="src/BinMatch.Rules/BinMatch.Rules.csproj" />
+    <Project Path="src/BinMatch.Validation/BinMatch.Validation.csproj" />
+    <Project Path="src/BinMatch.Workflows/BinMatch.Workflows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BinMatch.Analysis.Tests/BinMatch.Analysis.Tests.csproj" />
+    <Project Path="tests/BinMatch.Cli.Tests/BinMatch.Cli.Tests.csproj" />
+    <Project Path="tests/BinMatch.Core.Tests/BinMatch.Core.Tests.csproj" />
+    <Project Path="tests/BinMatch.Downloads.Tests/BinMatch.Downloads.Tests.csproj" />
+    <Project Path="tests/BinMatch.Downloads.LockHost/BinMatch.Downloads.LockHost.csproj" />
+    <Project Path="tests/BinMatch.E2E.Tests/BinMatch.E2E.Tests.csproj" />
+    <Project Path="tests/BinMatch.GitHub.Tests/BinMatch.GitHub.Tests.csproj" />
+    <Project Path="tests/BinMatch.Rules.Tests/BinMatch.Rules.Tests.csproj" />
+    <Project Path="tests/BinMatch.Testing/BinMatch.Testing.csproj" />
+    <Project Path="tests/BinMatch.Testing.Tests/BinMatch.Testing.Tests.csproj" />
+    <Project Path="tests/BinMatch.Validation.Tests/BinMatch.Validation.Tests.csproj" />
+    <Project Path="tests/BinMatch.Workflows.Tests/BinMatch.Workflows.Tests.csproj" />
+  </Folder>
+</Solution>

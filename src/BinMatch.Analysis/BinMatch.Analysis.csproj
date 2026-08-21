@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Installer analysis: detects installer formats and harvests installer metadata (architecture, version strings, nested payloads) from binaries to seed WinGet manifests.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenMcdf" />
+    <PackageReference Include="SharpCompress" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BinMatch.Core\BinMatch.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="BinMatch.Analysis.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -31,8 +31,8 @@ jobs:
       - name: Verify CLI project exists
         shell: bash
         run: |
-          if [[ ! -f src/WinMatsch.Cli/WinMatsch.Cli.csproj ]]; then
-            echo "::error::src/WinMatsch.Cli/WinMatsch.Cli.csproj is missing; refusing to release."
+          if [[ ! -f src/BinMatch.Cli/BinMatch.Cli.csproj ]]; then
+            echo "::error::src/BinMatch.Cli/BinMatch.Cli.csproj is missing; refusing to release."
             exit 1
           fi
 
@@ -60,10 +60,10 @@ jobs:
         run: dotnet build --no-restore --configuration Release
 
       - name: Test
-        run: dotnet test --no-build --configuration Release --filter "FullyQualifiedName!~WinMatsch.E2E.Tests" --logger "console;verbosity=normal"
+        run: dotnet test --no-build --configuration Release --filter "FullyQualifiedName!~BinMatch.E2E.Tests" --logger "console;verbosity=normal"
 
       - name: Hermetic end-to-end tests
-        run: dotnet test tests/WinMatsch.E2E.Tests/WinMatsch.E2E.Tests.csproj --no-build --configuration Release --logger "console;verbosity=normal"
+        run: dotnet test tests/BinMatch.E2E.Tests/BinMatch.E2E.Tests.csproj --no-build --configuration Release --logger "console;verbosity=normal"
 
   publish:
     name: Publish (${{ matrix.rid }})
@@ -108,8 +108,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f src/WinMatsch.Cli/WinMatsch.Cli.csproj
-          dotnet publish src/WinMatsch.Cli/WinMatsch.Cli.csproj \
+          test -f src/BinMatch.Cli/BinMatch.Cli.csproj
+          dotnet publish src/BinMatch.Cli/BinMatch.Cli.csproj \
             --configuration Release \
             --runtime "$RID" \
             --self-contained \
@@ -126,8 +126,8 @@ jobs:
           set -euo pipefail
           dir="publish/$RID"
           case "$RID" in
-            win-*) exe="$dir/winmatsch.exe" ;;
-            *)     exe="$dir/winmatsch" ;;
+            win-*) exe="$dir/binmatch.exe" ;;
+            *)     exe="$dir/binmatch" ;;
           esac
           for f in "$exe" "$dir/LICENSE" "$dir/THIRD-PARTY-NOTICES.txt"; do
             if [[ ! -f "$f" ]]; then
@@ -148,11 +148,11 @@ jobs:
         run: |
           set -euo pipefail
           case "$RID" in
-            win-*) exe="publish/$RID/winmatsch.exe" ;;
-            *)     exe="publish/$RID/winmatsch" ;;
+            win-*) exe="publish/$RID/binmatch.exe" ;;
+            *)     exe="publish/$RID/binmatch" ;;
           esac
           version=$("$exe" --version)
-          echo "winmatsch --version: $version"
+          echo "binmatch --version: $version"
           if [[ "${version%%+*}" != "${GITHUB_REF_NAME#v}" ]]; then
             echo "::error::Executable version '$version' does not match tag version '${GITHUB_REF_NAME#v}'."
             exit 1
@@ -169,18 +169,18 @@ jobs:
           mkdir -p dist
           case "$RID" in
             win-*)
-              cp "publish/$RID/winmatsch.exe" "dist/winmatsch-${GITHUB_REF_NAME}-${RID}.exe"
+              cp "publish/$RID/binmatch.exe" "dist/binmatch-${GITHUB_REF_NAME}-${RID}.exe"
               ;;
             *)
-              cp "publish/$RID/winmatsch" "dist/winmatsch-${GITHUB_REF_NAME}-${RID}"
-              chmod +x "dist/winmatsch-${GITHUB_REF_NAME}-${RID}"
+              cp "publish/$RID/binmatch" "dist/binmatch-${GITHUB_REF_NAME}-${RID}"
+              chmod +x "dist/binmatch-${GITHUB_REF_NAME}-${RID}"
               ;;
           esac
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: winmatsch-${{ matrix.rid }}
+          name: binmatch-${{ matrix.rid }}
           path: dist/*
           if-no-files-found: error
 
@@ -210,12 +210,12 @@ jobs:
           cp LICENSE THIRD-PARTY-NOTICES.txt dist/
           cd dist
           expected=(
-            "winmatsch-$GITHUB_REF_NAME-win-x64.exe"
-            "winmatsch-$GITHUB_REF_NAME-win-arm64.exe"
-            "winmatsch-$GITHUB_REF_NAME-linux-x64"
-            "winmatsch-$GITHUB_REF_NAME-linux-arm64"
-            "winmatsch-$GITHUB_REF_NAME-osx-x64"
-            "winmatsch-$GITHUB_REF_NAME-osx-arm64"
+            "binmatch-$GITHUB_REF_NAME-win-x64.exe"
+            "binmatch-$GITHUB_REF_NAME-win-arm64.exe"
+            "binmatch-$GITHUB_REF_NAME-linux-x64"
+            "binmatch-$GITHUB_REF_NAME-linux-arm64"
+            "binmatch-$GITHUB_REF_NAME-osx-x64"
+            "binmatch-$GITHUB_REF_NAME-osx-arm64"
           )
           for f in "${expected[@]}"; do
             if [[ ! -f "$f" ]]; then

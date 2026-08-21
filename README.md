@@ -1,6 +1,6 @@
-# winmatsch
+# binmatch
 
-**winmatsch** is a cross-platform command-line tool that automates
+**binmatch** is a cross-platform command-line tool that automates
 [WinGet](https://github.com/microsoft/winget-pkgs) package manifests. It
 downloads an installer, analyzes what is actually inside it (MSI, MSIX/AppX,
 NSIS, Inno Setup, WiX Burn, Advanced Installer, Squirrel, ZIP, plain PE),
@@ -13,7 +13,7 @@ official manifest schemas, and — only when you explicitly ask — submits it t
 > shipped a v1 release; interfaces may still change before 1.0. See the
 > [release guide](docs/release.md) for the v1 checklist.
 
-## Why winmatsch
+## Why binmatch
 
 - **Evidence-based manifests.** Fields are derived from what the installer
   binary actually declares (MSI property tables, MSIX identity, PE version
@@ -65,20 +65,20 @@ nothing to extract) — download it and run it directly. `LICENSE` and
 ## Install
 
 Download the binary for your platform from the
-[releases page](https://github.com/b0t-at/winmatsch/releases), verify it
+[releases page](https://github.com/b0t-at/binmatch/releases), verify it
 against `SHA256SUMS.txt`, and run it:
 
 ```bash
 # Linux / macOS
-curl -LO https://github.com/b0t-at/winmatsch/releases/download/v<version>/winmatsch-v<version>-linux-x64
-chmod +x winmatsch-v<version>-linux-x64
-./winmatsch-v<version>-linux-x64 --version
+curl -LO https://github.com/b0t-at/binmatch/releases/download/v<version>/binmatch-v<version>-linux-x64
+chmod +x binmatch-v<version>-linux-x64
+./binmatch-v<version>-linux-x64 --version
 ```
 
 ```powershell
 # Windows
-Invoke-WebRequest https://github.com/b0t-at/winmatsch/releases/download/v<version>/winmatsch-v<version>-win-x64.exe -OutFile winmatsch.exe
-.\winmatsch.exe --version
+Invoke-WebRequest https://github.com/b0t-at/binmatch/releases/download/v<version>/binmatch-v<version>-win-x64.exe -OutFile binmatch.exe
+.\binmatch.exe --version
 ```
 
 ### Build from source
@@ -86,10 +86,10 @@ Invoke-WebRequest https://github.com/b0t-at/winmatsch/releases/download/v<versio
 Prerequisites: the .NET SDK version pinned in [`global.json`](global.json).
 
 ```bash
-git clone https://github.com/b0t-at/winmatsch.git
-cd winmatsch
+git clone https://github.com/b0t-at/binmatch.git
+cd binmatch
 dotnet build --configuration Release
-dotnet run --project src/WinMatsch.Cli -- --help
+dotnet run --project src/BinMatch.Cli -- --help
 ```
 
 ## Quick start
@@ -97,21 +97,21 @@ dotnet run --project src/WinMatsch.Cli -- --help
 ### Analyze an installer (read-only, no token needed)
 
 ```bash
-winmatsch analyze ./MyApp-Setup.exe
-winmatsch analyze https://example.com/MyApp-1.2.3.msi
+binmatch analyze ./MyApp-Setup.exe
+binmatch analyze https://example.com/MyApp-1.2.3.msi
 ```
 
 ### Validate a local manifest set (read-only)
 
 ```bash
-winmatsch validate ./manifests/m/MyPublisher/MyApp/1.2.3
-winmatsch validate --offline installer.yaml locale.en-US.yaml version.yaml
+binmatch validate ./manifests/m/MyPublisher/MyApp/1.2.3
+binmatch validate --offline installer.yaml locale.en-US.yaml version.yaml
 ```
 
 ### Plan an update without touching anything
 
 ```bash
-winmatsch update MyPublisher.MyApp 1.2.3 \
+binmatch update MyPublisher.MyApp 1.2.3 \
   --urls https://example.com/MyApp-1.2.3-x64.msi \
   --dry-run
 ```
@@ -119,7 +119,7 @@ winmatsch update MyPublisher.MyApp 1.2.3 \
 ### Generate manifests locally
 
 ```bash
-winmatsch new MyPublisher.MyApp \
+binmatch new MyPublisher.MyApp \
   --version 1.2.3 \
   --urls https://example.com/MyApp-1.2.3-x64.msi \
   --output ./out
@@ -129,9 +129,9 @@ winmatsch new MyPublisher.MyApp \
 
 ```bash
 # one-time token setup: pipe the token into the OS keyring, e.g. from gh
-gh auth token | winmatsch token add --stdin
+gh auth token | binmatch token add --stdin
 
-winmatsch update MyPublisher.MyApp 1.2.3 \
+binmatch update MyPublisher.MyApp 1.2.3 \
   --urls https://example.com/MyApp-1.2.3-x64.msi \
   --submit --yes
 ```
@@ -139,9 +139,9 @@ winmatsch update MyPublisher.MyApp 1.2.3 \
 ### Script it with JSON
 
 ```bash
-winmatsch analyze ./MyApp.msi --format json | jq .
-winmatsch update MyPublisher.MyApp 1.2.3 --urls <url> --dry-run --format json
-winmatsch update MyPublisher.MyApp 1.2.3 --urls <url> --result-json ./result.json
+binmatch analyze ./MyApp.msi --format json | jq .
+binmatch update MyPublisher.MyApp 1.2.3 --urls <url> --dry-run --format json
+binmatch update MyPublisher.MyApp 1.2.3 --urls <url> --result-json ./result.json
 ```
 
 `--format json` never prompts; missing required input fails with exit code 4
@@ -152,14 +152,14 @@ See the [exit codes and JSON contracts](docs/commands.md#exit-codes).
 ## Configuration and tokens
 
 Configuration follows a strict precedence:
-**command line > `WINMATSCH_*` environment variables > user YAML file > built-in defaults.**
-The user file lives at `~/.config/winmatsch/config.yaml` (respecting
-`XDG_CONFIG_HOME`; `%USERPROFILE%\.config\winmatsch\config.yaml` on Windows):
+**command line > `BINMATCH_*` environment variables > user YAML file > built-in defaults.**
+The user file lives at `~/.config/binmatch/config.yaml` (respecting
+`XDG_CONFIG_HOME`; `%USERPROFILE%\.config\binmatch\config.yaml` on Windows):
 
 ```bash
-winmatsch config set repository microsoft/winget-pkgs
-winmatsch config show      # every value with its source
-winmatsch config path
+binmatch config set repository microsoft/winget-pkgs
+binmatch config show      # every value with its source
+binmatch config path
 ```
 
 GitHub tokens are **never** stored in the configuration file. Precedence:
@@ -185,7 +185,7 @@ Keychain, or freedesktop Secret Service via `secret-tool`). See the
 
 ## License
 
-winmatsch is licensed under the [MIT License](LICENSE). Bundled third-party
+binmatch is licensed under the [MIT License](LICENSE). Bundled third-party
 components are listed in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
 The installer-format analyzers are clean-room implementations based on public
 format documentation; no third-party parser source was copied.

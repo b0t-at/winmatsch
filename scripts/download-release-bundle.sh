@@ -40,12 +40,12 @@ trap 'rm -rf "$WORK"' EXIT
 EXPECTED="$WORK/expected.txt"
 {
     printf '%s\n' \
-        "winmatsch-$TAG-win-x64.exe" \
-        "winmatsch-$TAG-win-arm64.exe" \
-        "winmatsch-$TAG-linux-x64" \
-        "winmatsch-$TAG-linux-arm64" \
-        "winmatsch-$TAG-osx-x64" \
-        "winmatsch-$TAG-osx-arm64" \
+        "binmatch-$TAG-win-x64.exe" \
+        "binmatch-$TAG-win-arm64.exe" \
+        "binmatch-$TAG-linux-x64" \
+        "binmatch-$TAG-linux-arm64" \
+        "binmatch-$TAG-osx-x64" \
+        "binmatch-$TAG-osx-arm64" \
         LICENSE THIRD-PARTY-NOTICES.txt SHA256SUMS.txt
 } | LC_ALL=C sort >"$EXPECTED"
 

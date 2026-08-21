@@ -1,6 +1,6 @@
 # Rules and overrides
 
-winmatsch shapes every generated manifest with a deterministic rule pipeline.
+binmatch shapes every generated manifest with a deterministic rule pipeline.
 Each rule has a stable ID, a category, and a mode; every change a rule makes
 is recorded with a before/after audit trail and the evidence it was based on.
 
@@ -20,7 +20,7 @@ The mode of each rule is resolved per invocation, highest precedence first:
 2. **Override pack** — the `rules:` map of a package override pack.
 3. **User configuration** — `rules.enabled` (forces *apply*) and
    `rules.disabled` (forces *disabled*) in the config file or the
-   `WINMATSCH_RULES_ENABLED` / `WINMATSCH_RULES_DISABLED` environment
+   `BINMATCH_RULES_ENABLED` / `BINMATCH_RULES_DISABLED` environment
    variables.
 4. **Default** — `--default-rule-mode` (itself defaulting to `apply`).
 
@@ -103,14 +103,14 @@ standalone rules; do not reference them in overrides.
 ### Line endings and file shape
 
 New manifests use **LF** line endings, no BOM, and exactly one trailing
-newline. When replacing an existing manifest, winmatsch preserves that file's
+newline. When replacing an existing manifest, binmatch preserves that file's
 LF or CRLF convention while retaining the single-trailing-newline contract.
 The writer is still a canonicalizing emitter, not a general-purpose YAML
 round-tripper: it imposes its own field order, indentation, scalar styles, and
 schema header. Formatting other than the existing line-ending convention is
 normalized:
 
-- A version whose upstream files are already in winmatsch's canonical shape
+- A version whose upstream files are already in binmatch's canonical shape
   (LF, canonical ordering and quoting — the common case for manifests this
   tool generated) round-trips byte-for-byte, so an update diff shows only the
   fields that actually changed.
@@ -269,8 +269,8 @@ false confidence. Checked-in built-in packs are never modified at runtime.
 
 Approving a review on a terminal is durable. Apply mode writes the approved
 human value into a per-user **learned override pack** in the override store
-(`--override-store`, `overrideStore`, or `WINMATSCH_OVERRIDE_STORE_DIRECTORY`;
-default `winmatsch/overrides` under the platform's local application data).
+(`--override-store`, `overrideStore`, or `BINMATCH_OVERRIDE_STORE_DIRECTORY`;
+default `binmatch/overrides` under the platform's local application data).
 The store holds one canonical `<PACKAGEIDENTIFIER>.yaml` per package and, when
 an existing canonical pack is replaced, a `.bak` of the prior verified content.
 Plan mode (`--dry-run`) never writes.
