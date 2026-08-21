@@ -14,7 +14,8 @@ namespace WinMatsch.Rules;
 /// <c>PublisherSupportUrl</c>, <c>PrivacyUrl</c>, <c>PackageUrl</c>, <c>License</c>,
 /// <c>LicenseUrl</c>, <c>Copyright</c>, <c>CopyrightUrl</c>, <c>ShortDescription</c>,
 /// <c>Description</c>, <c>Tags</c>, <c>Documentations</c>, <c>Icons</c>, <c>PurchaseUrl</c> and
-/// <c>InstallationNotes</c>. <c>ReleaseNotesUrl</c> is copied only when the previous value does
+/// <c>InstallationNotes</c>. <c>ReleaseNotesUrl</c> is copied only when the previous value is
+/// not a release-tag URL (<c>/releases/tag/</c> always names one specific release) and does
 /// not embed the previous package version (a version-specific URL would be stale).
 /// <c>ReleaseNotes</c> and <c>Agreements</c> are never copied: notes are always
 /// version-specific, and agreements must be re-verified rather than silently carried
@@ -163,12 +164,26 @@ public sealed class PreserveOnUpdateRule : IRule
 
     /// <summary>
     /// Whether this rule would carry the previous version's ReleaseNotesUrl forward on update:
-    /// the previous value must exist and must not embed the previous package version (a
-    /// version-specific URL would be stale). Exposed so callers that pre-populate the field
-    /// from other evidence can defer to the hand-maintained, version-agnostic URL instead.
+    /// the previous value must exist, must not be a release-tag URL, and must not embed the
+    /// previous package version (a version-specific URL would be stale). Exposed so callers
+    /// that pre-populate the field from other evidence can defer to the hand-maintained,
+    /// version-agnostic URL instead.
     /// </summary>
     public static bool WouldCarryReleaseNotesUrl(string? previousUrl, string? previousVersion)
-        => previousUrl is not null && !EmbedsVersion(previousUrl, previousVersion);
+        => previousUrl is not null
+            && !IsReleaseTagUrl(previousUrl)
+            && !EmbedsVersion(previousUrl, previousVersion);
+
+    /// <summary>
+    /// Whether the URL is a GitHub-style release-tag page (<c>/releases/tag/&lt;tag&gt;</c>).
+    /// Such a URL always describes exactly one release, so it is stale on update even when the
+    /// embedded tag does not match the previous package version — a tag that lagged behind the
+    /// manifest version once (observed on Microsoft.WSL.PreRelease, winget-pkgs PR #421624:
+    /// <c>releases/tag/2.7.0</c> carried into the 2.9.4 manifest because it did not embed the
+    /// previous version 2.7.12) would otherwise be carried forever.
+    /// </summary>
+    private static bool IsReleaseTagUrl(string url)
+        => url.Contains("/releases/tag/", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Whether the URL embeds the version in any common representation: verbatim, or with

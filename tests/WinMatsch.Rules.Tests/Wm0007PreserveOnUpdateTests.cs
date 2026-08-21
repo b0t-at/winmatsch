@@ -198,6 +198,24 @@ public class Wm0007PreserveOnUpdateTests
     }
 
     [Fact]
+    public void Release_tag_url_lagging_behind_the_previous_version_is_not_carried_over()
+    {
+        // Motivating regression: Microsoft.WSL.PreRelease (winget-pkgs PR #421624) — the
+        // previous manifest said releases/tag/2.7.0 while the previous version was 2.7.12, so
+        // the version check alone considered the URL version-agnostic and carried the stale
+        // release-tag page into every future update.
+        PackageManifests previous = TestManifests.Create(TestManifests.CreateInstaller());
+        previous.Installer.PackageVersion = new PackageVersion("2.7.12");
+        previous.DefaultLocale.ReleaseNotesUrl = "https://github.com/microsoft/WSL/releases/tag/2.7.0";
+
+        PackageManifests manifests = TestManifests.Create(TestManifests.CreateInstaller());
+
+        _rule.Apply(TestManifests.CreateContext(manifests, previous: previous));
+
+        Assert.Null(manifests.DefaultLocale.ReleaseNotesUrl);
+    }
+
+    [Fact]
     public void No_op_without_previous_manifests()
     {
         Installer installer = TestManifests.CreateInstaller();
