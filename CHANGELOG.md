@@ -7,6 +7,25 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.22] - 2026-08-22
+
+### Fixed
+
+- `GitHubWorkflowReleaseSource.DiscoverAsync` silently swallowed *any*
+  exception when falling back to direct-URL assets (the automated `update`
+  path), including transient GitHub rate-limiting. That fallback resolves
+  installers fine (their download URLs are immutable) but permanently drops
+  `ReleaseNotes` for the version, while `ReleaseNotesUrl` still gets derived
+  from the URL — manifests passed validation but silently shipped with no
+  release notes (Longbridge.LongbridgeTerminal, winget-pkgs PR #421163).
+  Rate-limit failures now propagate so the caller can retry instead of
+  committing an incomplete manifest; other unavailability (private repos,
+  tag-only releases) still falls back as before.
+- The release list fetched to resolve installer assets is now reused for the
+  release-notes lookup instead of being fetched a second, independently
+  failable time for the same repository — halving GitHub API/rate-limit
+  exposure per package update.
+
 ## [0.8.21] - 2026-08-21
 
 ### Fixed
