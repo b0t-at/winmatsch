@@ -7,6 +7,8 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.23] - 2026-09-03
+
 ### Added
 
 - `SCOPE-5`: installer switches that accept a licence or EULA on the user's
@@ -470,7 +472,9 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.21...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.23...main
+[0.8.23]: https://github.com/b0t-at/winmatsch/compare/v0.8.22...v0.8.23
+[0.8.22]: https://github.com/b0t-at/winmatsch/compare/v0.8.21...v0.8.22
 [0.8.21]: https://github.com/b0t-at/winmatsch/compare/v0.8.20...v0.8.21
 [0.8.20]: https://github.com/b0t-at/winmatsch/compare/v0.8.19...v0.8.20
 [0.8.19]: https://github.com/b0t-at/winmatsch/compare/v0.8.18...v0.8.19
