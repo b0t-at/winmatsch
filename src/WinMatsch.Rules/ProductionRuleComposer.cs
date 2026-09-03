@@ -51,6 +51,7 @@ public static class ProductionRuleComposer
             // Finding-only policy rules run after every mutation; PIPE-1 is the final policy guard.
             new Arp4ShapeParityRule(packs),
             new Dep2DependencyOutageRule(runEvidence),
+            new Scope5LicenseAcceptanceAgreementRule(),
             new Pipe3IdentityImmutabilityRule(),
             new Pipe1SerializerInvariantsRule(),
 

@@ -41,6 +41,7 @@ public class PolicyCatalogueBoundaryTests
     {
         RuleCatalogueIds.Arp1, RuleCatalogueIds.Arp2, RuleCatalogueIds.Arp3, RuleCatalogueIds.Arp4,
         RuleCatalogueIds.Scope1, RuleCatalogueIds.Scope2, RuleCatalogueIds.Scope3, RuleCatalogueIds.Scope4,
+        RuleCatalogueIds.Scope5,
         RuleCatalogueIds.Meta1, RuleCatalogueIds.Meta3, RuleCatalogueIds.Meta4, RuleCatalogueIds.Meta5,
         RuleCatalogueIds.Dep1, RuleCatalogueIds.Dep2,
         RuleCatalogueIds.Pipe1, RuleCatalogueIds.Pipe2, RuleCatalogueIds.Pipe3,

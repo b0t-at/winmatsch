@@ -14,14 +14,16 @@ public static class WorkflowProductionComposition
         IWorkflowReleaseSource? releaseSource = null,
         IWorkflowClock? clock = null,
         OverridePackStoreOptions? overridePackStoreOptions = null,
-        string trustedGitHubHost = "github.com")
+        string trustedGitHubHost = "github.com",
+        IUpstreamVerdictSource? upstreamVerdicts = null)
         => CreateLocalEngine(
             downloader,
             releaseSource,
             clock,
             overridePackStoreOptions,
             fallbackManifestSource: null,
-            trustedGitHubHost: trustedGitHubHost);
+            trustedGitHubHost: trustedGitHubHost,
+            upstreamVerdicts: upstreamVerdicts);
 
     public static LocalWorkflowEngine CreateLocalEngine(
         InstallerDownloader downloader,
@@ -29,7 +31,8 @@ public static class WorkflowProductionComposition
         IWorkflowClock? clock,
         OverridePackStoreOptions? overridePackStoreOptions,
         IManifestSnapshotSource? fallbackManifestSource,
-        string trustedGitHubHost = "github.com")
+        string trustedGitHubHost = "github.com",
+        IUpstreamVerdictSource? upstreamVerdicts = null)
     {
         ArgumentNullException.ThrowIfNull(downloader);
         var originalSubmissions = new FileOriginalSubmissionStore();
@@ -53,7 +56,8 @@ public static class WorkflowProductionComposition
             clock,
             new FileOverridePackStore(overridePackStoreOptions ?? OverridePackStoreOptions.CreateDefault()),
             planLocks: null,
-            trustedGitHubHost: trustedGitHubHost);
+            trustedGitHubHost: trustedGitHubHost,
+            upstreamVerdicts: upstreamVerdicts);
     }
 
     public static GitHubLifecycleWorkflow CreateGitHubLifecycle(

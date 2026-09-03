@@ -108,11 +108,19 @@ public sealed class PreflightGate
             return;
         }
 
+        bool anyProbeSucceeded = false;
+        var unreachableOrigins = new List<(UrlTarget Target, DownloadException Exception)>();
         foreach (UrlTarget target in urls)
         {
             try
             {
                 _ = await _network.ProbeAsync(target.Url, cancellationToken).ConfigureAwait(false);
+                anyProbeSucceeded = true;
+            }
+            catch (DownloadException exception) when (
+                target.Kind == UrlTargetKind.Metadata && IsOriginUnreachable(exception))
+            {
+                unreachableOrigins.Add((target, exception));
             }
             catch (DownloadException exception)
             {
@@ -127,7 +135,42 @@ public sealed class PreflightGate
                 findings.Add(ProbeFailure(target, exception));
             }
         }
+
+        // A host that does not resolve or cannot complete a TLS handshake fails upstream URL
+        // validation exactly like a 404 (yhay81.sqrail, OmniEdge.OmniEdgeCLI, RoniLehto.LMath),
+        // but only counts as dead when another origin answered in the same run; when nothing
+        // resolves the network itself is suspect and the failure stays transient.
+        foreach ((UrlTarget target, DownloadException exception) in unreachableOrigins)
+        {
+            string detail = exception.InnerException?.Message ?? exception.Message;
+            findings.Add(anyProbeSucceeded
+                ? new ValidationFinding(
+                    DeadMetadataUrlCode,
+                    ValidationSeverity.Warning,
+                    $"Metadata URL origin cannot be resolved or negotiated while other origins respond; treated as dead: {detail}",
+                    target.Url)
+                : new ValidationFinding(
+                    "VLD5005",
+                    ValidationSeverity.Warning,
+                    $"Metadata URL probe failed: {detail}",
+                    target.Url));
+        }
     }
+
+    /// <summary>
+    /// The downloader retries name-resolution and TLS failures as transient and then wraps the
+    /// last <see cref="HttpRequestException"/>; those two failure kinds are origin-side and
+    /// permanent from the upstream validator's point of view.
+    /// </summary>
+    private static bool IsOriginUnreachable(DownloadException exception)
+        => exception is DownloadNetworkException
+        {
+            InnerException: HttpRequestException
+            {
+                HttpRequestError: HttpRequestError.NameResolutionError
+                    or HttpRequestError.SecureConnectionError,
+            },
+        };
 
     private async Task RevalidateArtifactsAsync(
         IReadOnlyList<ExpectedInstallerHash> expectedHashes,
@@ -332,7 +375,10 @@ public sealed class PreflightGate
             target.Url);
     }
 
-    /// <summary>The finding code for optional metadata URLs that returned a definitive HTTP 404/410.</summary>
+    /// <summary>
+    /// The finding code for optional metadata URLs that are definitively dead: a HTTP 404/410, or
+    /// an origin that does not resolve or cannot negotiate TLS while other origins respond.
+    /// </summary>
     public const string DeadMetadataUrlCode = "VLD5006";
 
     private static ValidationFinding Error(string code, string message, string? path = null)

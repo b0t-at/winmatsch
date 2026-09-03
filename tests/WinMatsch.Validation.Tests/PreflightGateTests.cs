@@ -539,6 +539,127 @@ public sealed class PreflightGateTests
     }
 
     [Fact]
+    public async Task Unresolvable_metadata_origin_is_dead_when_other_origins_respond()
+    {
+        var network = new FakePreflightNetwork
+        {
+            UnreachableProbeUrl = TestPackageFactory.PublisherUrl,
+        };
+
+        ValidationReport report = await new PreflightGate(network)
+            .ValidateAsync(TestPackageFactory.CreateRequest());
+
+        ValidationFinding dead = Assert.Single(
+            report.Findings,
+            static finding => finding.Code == PreflightGate.DeadMetadataUrlCode);
+        Assert.Equal(ValidationSeverity.Warning, dead.Severity);
+        Assert.Equal(TestPackageFactory.PublisherUrl, dead.Path);
+        Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD5005");
+    }
+
+    [Fact]
+    public async Task Unresolvable_origins_stay_transient_when_no_probe_succeeds()
+    {
+        var network = new FakePreflightNetwork
+        {
+            AllProbesUnreachable = true,
+        };
+
+        ValidationReport report = await new PreflightGate(network)
+            .ValidateAsync(TestPackageFactory.CreateRequest());
+
+        Assert.DoesNotContain(
+            report.Findings,
+            static finding => finding.Code == PreflightGate.DeadMetadataUrlCode);
+        Assert.Contains(report.Findings, static finding => finding.Code == "VLD5004");
+        Assert.Contains(
+            report.Findings,
+            static finding => finding.Code == "VLD5005" && finding.Path == TestPackageFactory.PublisherUrl);
+    }
+
+    [Fact]
+    public async Task Version_equivalent_to_an_existing_version_is_rejected()
+    {
+        PackageManifests manifests = TestPackageFactory.CreateManifests();
+        SetIdentity(manifests, "SteamDatabase.SteamTokenDumper", "2026.8.20");
+
+        ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+            .ValidateAsync(TestPackageFactory.CreateRequest(
+                manifests,
+                existingVersions:
+                [
+                    new ExistingVersionSnapshot("2025.12.17", []),
+                    new ExistingVersionSnapshot("2026.08.20", []),
+                ]));
+
+        ValidationFinding finding = Assert.Single(report.Findings, static finding => finding.Code == "VLD2301");
+        Assert.Equal(ValidationSeverity.Error, finding.Severity);
+        Assert.Contains("2026.08.20", finding.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD2302");
+    }
+
+    [Fact]
+    public async Task Version_outside_a_pinned_identifier_stream_is_rejected()
+    {
+        PackageManifests manifests = TestPackageFactory.CreateManifests();
+        SetIdentity(manifests, "OpenJS.Electron.41", "43.4.0");
+
+        ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+            .ValidateAsync(TestPackageFactory.CreateRequest(
+                manifests,
+                existingVersions:
+                [
+                    new ExistingVersionSnapshot("41.0.0", []),
+                    new ExistingVersionSnapshot("41.1.2", []),
+                ]));
+
+        ValidationFinding finding = Assert.Single(report.Findings, static finding => finding.Code == "VLD2302");
+        Assert.Equal(ValidationSeverity.Error, finding.Severity);
+        Assert.Contains("OpenJS.Electron.41", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("OpenJS.Electron.41", "41.2.0", "41.0.0", "41.1.2")]
+    [InlineData("LookupFoundation.RevitLookup.2021", "2021.1.5", "2021.0.3", "2021.1.4")]
+    [InlineData("Python.Python.3.12", "3.13.0", "3.12.0", "3.12.1")]
+    [InlineData("Example.App", "3.0.0", "1.0.0", "2.0.0")]
+    [InlineData("Example.App", "2.0.1", "1.0.0", "2.0.0")]
+    public async Task Versions_inside_a_stream_or_without_a_pin_pass(
+        string identifier,
+        string version,
+        string existingA,
+        string existingB)
+    {
+        PackageManifests manifests = TestPackageFactory.CreateManifests();
+        SetIdentity(manifests, identifier, version);
+
+        ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+            .ValidateAsync(TestPackageFactory.CreateRequest(
+                manifests,
+                existingVersions:
+                [
+                    new ExistingVersionSnapshot(existingA, []),
+                    new ExistingVersionSnapshot(existingB, []),
+                ]));
+
+        Assert.DoesNotContain(
+            report.Findings,
+            static finding => finding.Code is "VLD2301" or "VLD2302");
+    }
+
+    private static void SetIdentity(PackageManifests manifests, string identifier, string version)
+    {
+        var packageIdentifier = new PackageIdentifier(identifier);
+        var packageVersion = new PackageVersion(version);
+        manifests.Version.PackageIdentifier = packageIdentifier;
+        manifests.Version.PackageVersion = packageVersion;
+        manifests.Installer.PackageIdentifier = packageIdentifier;
+        manifests.Installer.PackageVersion = packageVersion;
+        manifests.DefaultLocale.PackageIdentifier = packageIdentifier;
+        manifests.DefaultLocale.PackageVersion = packageVersion;
+    }
+
+    [Fact]
     public async Task Installer_probe_failure_is_always_hard_blocking()
     {
         var network = new FakePreflightNetwork

@@ -158,6 +158,12 @@ public sealed class RedactingGitHubRepositoryClient : IGitHubRepositoryClient
         CancellationToken cancellationToken = default)
         => _inner.SearchPullRequestsByTextAsync(repository, search, cancellationToken);
 
+    public Task<IReadOnlyList<CodeSearchMatch>> SearchCodeAsync(
+        RepositoryCoordinates repository,
+        CodeSearch search,
+        CancellationToken cancellationToken = default)
+        => _inner.SearchCodeAsync(repository, search, cancellationToken);
+
     public Task<PullRequestInfo> CreatePullRequestAsync(
         RepositoryCoordinates repository,
         CreatePullRequestRequest request,

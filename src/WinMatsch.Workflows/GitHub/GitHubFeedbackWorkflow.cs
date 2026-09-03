@@ -1,12 +1,61 @@
 using System.Collections.Immutable;
+using System.Text.RegularExpressions;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.Operations;
 
 namespace WinMatsch.Workflows.GitHub;
 
-public sealed class GitHubFeedbackWorkflow
+public sealed partial class GitHubFeedbackWorkflow
 {
+    // Label vocabulary of the winget-pkgs validator (wingetvalidator-prod) and policy service,
+    // grouped by what the bot should do next. A blocking verdict outranks a manual-validation
+    // marker when both are present (a Defender hit on a portable exe carries both).
+    private static readonly string[] _hashMismatchLabels =
+        ["Error-Hash-Mismatch", "Validation-Hash-Verification-Failed"];
+
+    private static readonly string[] _duplicateLabels =
+        ["Possible-Duplicate", "Resolution-Duplicate"];
+
+    private static readonly string[] _scannerLabels =
+        ["Validation-Defender-Error", "Binary-Validation-Error", "Validation-Virus-Scan-Error"];
+
+    private static readonly string[] _certificateLabels =
+        ["Validation-Certificate-Root"];
+
+    private static readonly string[] _urlLabels =
+        ["URL-Validation-Error", "Validation-404-Error", "Validation-HTTP-Error", "Validation-Forbidden-URL-Error"];
+
+    private static readonly string[] _installerUnavailableLabels =
+        ["Error-Installer-Availability"];
+
+    private static readonly string[] _installationFailureLabels =
+    [
+        "Validation-Unattended-Failed",
+        "Validation-Installation-Error",
+        "Validation-Shell-Execute",
+        "Validation-Uninstall-Error",
+        "Installation-Verification-Error",
+        "Installation-Validation-Error",
+        "Installer-Error",
+        "Blocking-Issue",
+        "DriverInstall",
+        "Validation-Missing-Dependency",
+        "Validation-MSIX-Dependency",
+        "Validation-VCRuntime-Dependency",
+    ];
+
+    private static readonly string[] _transientLabels =
+        ["Retry-1", "Validation-Retry", "Error-Analysis-Timeout"];
+
+    private static readonly string[] _manualValidationLabels =
+    [
+        "Validation-Executable-Error",
+        "Validation-No-Executables",
+        "Validation-Domain",
+        "Validation-Agreement-Domain",
+    ];
+
     private readonly IGitHubRepositoryClient _gitHub;
     private readonly GitHubLifecycleWorkflow _submissions;
     private readonly IApprovedRepairPlanner _repairs;
@@ -246,6 +295,26 @@ public sealed class GitHubFeedbackWorkflow
                     }
 
                     break;
+                case FeedbackClassification.AwaitingManualValidation:
+                    statuses.Add(Status(
+                        observation,
+                        PullRequestLifecycleAction.Wait,
+                        "Upstream automated validation passed; a moderator must validate the executable by hand. Keep the PR open and do not supersede it for a patch release."));
+                    break;
+                case FeedbackClassification.ScannerBlocked:
+                case FeedbackClassification.UntrustedCertificate:
+                case FeedbackClassification.UrlValidationError:
+                case FeedbackClassification.InstallerUnavailable:
+                case FeedbackClassification.InstallationFailure:
+                    statuses.Add(Status(
+                        observation,
+                        PullRequestLifecycleAction.EscalateToHuman,
+                        BlockingVerdictReason(classification)));
+                    diagnostics.Add(new(
+                        "GH3211",
+                        $"Upstream validation blocked PR #{observation.PullRequest.Number} ({classification}); resubmitting the same manifest reproduces the failure."));
+                    workState = FeedbackWorkState.Escalated;
+                    break;
                 case FeedbackClassification.Unknown:
                     bool stale = _clock.UtcNow - observation.PullRequest.UpdatedAt >= policy.StaleEscalationWindow;
                     statuses.Add(Status(
@@ -275,6 +344,11 @@ public sealed class GitHubFeedbackWorkflow
                         candidate.PullRequestNumber == observation.PullRequest.Number);
                 try
                 {
+                    _ = TryGetAssociation(
+                        observation.PullRequest.Body,
+                        out string? packageIdentifier,
+                        out string? packageVersion,
+                        out _);
                     await _stateStore.PersistAsync(
                         new(
                             upstream.ToString(),
@@ -284,7 +358,10 @@ public sealed class GitHubFeedbackWorkflow
                             _clock.UtcNow,
                             retry?.RetryAfter,
                             retry?.LearnedOverrideSignal,
-                            status.Reason),
+                            status.Reason,
+                            packageIdentifier,
+                            packageVersion,
+                            CollectValidatorUrls(observation, policy)),
                         CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception exception) when (
@@ -420,6 +497,11 @@ public sealed class GitHubFeedbackWorkflow
         FeedbackPolicy? policy = null)
     {
         policy ??= new FeedbackPolicy();
+        if (ClassifyUpstreamLabels(observation.Labels) is { } upstream)
+        {
+            return upstream;
+        }
+
         IEnumerable<string> evidence = observation.Labels
             .Where(policy.TrustedLabels.Contains)
             .Concat(observation.Comments
@@ -427,7 +509,8 @@ public sealed class GitHubFeedbackWorkflow
                 .Select(static comment => comment.Body));
         string combined = string.Join('\n', evidence).ToLowerInvariant().Replace('-', ' ');
         if (combined.Contains("duplicate entry", StringComparison.Ordinal)
-            || combined.Contains("duplicate manifest", StringComparison.Ordinal))
+            || combined.Contains("duplicate manifest", StringComparison.Ordinal)
+            || combined.Contains("duplicate package entry", StringComparison.Ordinal))
         {
             return FeedbackClassification.DuplicateEntry;
         }
@@ -436,6 +519,17 @@ public sealed class GitHubFeedbackWorkflow
             || combined.Contains("installer hash", StringComparison.Ordinal))
         {
             return FeedbackClassification.HashMismatch;
+        }
+
+        if (combined.Contains("esrp scan", StringComparison.Ordinal)
+            || combined.Contains("installers scan test", StringComparison.Ordinal))
+        {
+            return FeedbackClassification.ScannerBlocked;
+        }
+
+        if (combined.Contains("url validation error", StringComparison.Ordinal))
+        {
+            return FeedbackClassification.UrlValidationError;
         }
 
         if (combined.Contains("dependency infrastructure", StringComparison.Ordinal)
@@ -455,6 +549,116 @@ public sealed class GitHubFeedbackWorkflow
             ? FeedbackClassification.None
             : FeedbackClassification.Unknown;
     }
+
+    /// <summary>
+    /// Maps the labels the winget-pkgs validator applies to a classification, or null when no
+    /// known label is present so the comment-signature path decides.
+    /// </summary>
+    private static FeedbackClassification? ClassifyUpstreamLabels(ImmutableArray<string> labels)
+    {
+        if (labels.IsDefaultOrEmpty)
+        {
+            return null;
+        }
+
+        if (HasAny(labels, _hashMismatchLabels))
+        {
+            return FeedbackClassification.HashMismatch;
+        }
+
+        if (HasAny(labels, _duplicateLabels))
+        {
+            return FeedbackClassification.DuplicateEntry;
+        }
+
+        if (HasAny(labels, _scannerLabels))
+        {
+            return FeedbackClassification.ScannerBlocked;
+        }
+
+        if (HasAny(labels, _certificateLabels))
+        {
+            return FeedbackClassification.UntrustedCertificate;
+        }
+
+        if (HasAny(labels, _urlLabels))
+        {
+            return FeedbackClassification.UrlValidationError;
+        }
+
+        if (HasAny(labels, _installerUnavailableLabels))
+        {
+            return FeedbackClassification.InstallerUnavailable;
+        }
+
+        if (HasAny(labels, _installationFailureLabels))
+        {
+            return FeedbackClassification.InstallationFailure;
+        }
+
+        if (HasAny(labels, _transientLabels)
+            || labels.Any(static label => label.StartsWith("Internal-Error", StringComparison.OrdinalIgnoreCase)))
+        {
+            return FeedbackClassification.TransientInternalError;
+        }
+
+        if (HasAny(labels, _manualValidationLabels))
+        {
+            return FeedbackClassification.AwaitingManualValidation;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The URLs the winget-pkgs validator listed in a "Url Validation Error" comment, so a later
+    /// submission can be refused while it still carries any of them.
+    /// </summary>
+    private static IReadOnlyList<string> CollectValidatorUrls(
+        PullRequestObservation observation,
+        FeedbackPolicy policy)
+    {
+        var urls = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (PullRequestCommentObservation comment in observation.Comments)
+        {
+            if (!policy.TrustedCommentAuthors.Contains(comment.Author)
+                || !comment.Body.Contains("url validation error", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (Match match in ValidatorUrl().Matches(comment.Body))
+            {
+                urls.Add(match.Value.TrimEnd('.', ',', ';', ')'));
+            }
+        }
+
+        return [.. urls];
+    }
+
+    [GeneratedRegex(@"https?://[^\s<>""')\]]+", RegexOptions.IgnoreCase)]
+    private static partial Regex ValidatorUrl();
+
+    private static bool HasAny(ImmutableArray<string> labels, string[] candidates)
+        => labels.Any(label => Array.Exists(
+            candidates,
+            candidate => string.Equals(candidate, label, StringComparison.OrdinalIgnoreCase)));
+
+    private static string BlockingVerdictReason(FeedbackClassification classification)
+        => classification switch
+        {
+            FeedbackClassification.ScannerBlocked =>
+                "Defender or the ESRP installer scan blocked the binaries; resubmitting the same files fails again. Quarantine the package until the scanner verdict changes or upstream ships new binaries.",
+            FeedbackClassification.UntrustedCertificate =>
+                "The installer signature does not chain to a trusted root; every resubmission fails until upstream re-signs. Quarantine the package.",
+            FeedbackClassification.UrlValidationError =>
+                "One or more manifest URLs failed upstream validation; drop or replace the URLs named in the validator comment before resubmitting.",
+            FeedbackClassification.InstallerUnavailable =>
+                "The installer URL was unavailable during upstream validation; re-verify the release assets and hash before resubmitting.",
+            FeedbackClassification.InstallationFailure =>
+                "The installer failed upstream installation testing (unattended, shell-execute, driver or dependency); human-verified switches are required before resubmitting.",
+            _ => throw new ArgumentOutOfRangeException(nameof(classification), classification, null),
+        };
 
     private static PullRequestLifecycleStatus Status(
         PullRequestObservation observation,

@@ -387,6 +387,7 @@ cache entries.
 | `--created-with <name>` | Tool name written to generated manifest headers. |
 | `--created-with-url <url>` | Tool HTTP(S) URL written with generated manifest provenance. |
 | `--skip-pr-check` | Skip only the early duplicate pull-request check. |
+| `--ignore-upstream-verdict` | Plan although the feedback store holds a blocking winget-pkgs verdict for the package; see `WF_UPSTREAM_VERDICT` below. |
 | `--prtitle <title>` | Custom pull-request title. |
 | `--yes` | Explicitly approve destructive actions, fork creation, and submission. |
 | `--edit` | Edit an isolated temporary manifest copy and rerun full preflight. |
@@ -549,6 +550,42 @@ recommended action for each.
 | `--fork <owner/name>` | Fork repository (default: `<authenticated user>/<upstream name>`). |
 | `--apply-safe` | After inspection, apply only known-safe responses (fixed keep-alive comments for transient infrastructure failures). Requires confirmation; never posts arbitrary comments and never repairs manifests. |
 | `--yes` | Confirm mutating actions without prompting. |
+
+Feedback is classified from the labels the `winget-pkgs` validator actually
+applies (comment signatures from `wingetvalidator-prod`, `wingetbot` and the
+policy service are the fallback):
+
+| Upstream labels | Classification | Recommended action |
+|---|---|---|
+| `Error-Hash-Mismatch`, `Validation-Hash-Verification-Failed` | hash mismatch | allowlisted approved repair |
+| `Possible-Duplicate`, `Resolution-Duplicate` | duplicate entry | allowlisted approved repair |
+| `Validation-Defender-Error`, `Binary-Validation-Error` | scanner blocked | escalate (`GH3211`); resubmitting the same binaries fails again |
+| `Validation-Certificate-Root` | untrusted certificate | escalate (`GH3211`) |
+| `URL-Validation-Error` and its 404/HTTP/forbidden variants | URL validation error | escalate (`GH3211`); drop the URLs the validator named |
+| `Error-Installer-Availability` | installer unavailable | escalate (`GH3211`) |
+| `Validation-Unattended-Failed`, `Validation-Installation-Error`, `Validation-Shell-Execute`, `Blocking-Issue`, `DriverInstall` | installation failure | escalate (`GH3211`) |
+| `Internal-Error*`, `Retry-1`, `Validation-Retry` | transient internal error | rerun checks |
+| `Validation-Executable-Error`, `Validation-No-Executables` (with `Azure-Pipeline-Passed`) | awaiting manual validation | wait; do not supersede for a patch release |
+
+A blocking verdict outranks the manual-validation marker when both are present.
+Escalations are persisted as `Escalated` work items together with the package
+identity from the pull-request body and, for URL failures, the URLs the
+validator named; the wait state is only reported.
+
+`new` and `update` consult those escalations before planning. A plan that
+repeats the rejected version (or an equivalent spelling), still carries a URL
+the validator rejected, keeps the installer type, scope and switches of a
+version that failed installation testing, or follows an untrusted-certificate
+verdict fails validation with `WF_UPSTREAM_VERDICT`. Scanner and
+installer-availability verdicts only block the rejected version itself.
+`--ignore-upstream-verdict` bypasses the gate once the cause is fixed.
+
+`--submit` additionally asks GitHub code search which manifests already carry
+each installer hash, so a package that moved to another identifier trips
+`GH1011` locally instead of a `Possible-Duplicate` closure upstream; when the
+search is unavailable the submission proceeds and records audit entry
+`GH1017`. Duplicate pull-request discovery treats a title or manifest path whose
+version is an equivalent spelling of the planned version as the same submission.
 
 ### submissions
 

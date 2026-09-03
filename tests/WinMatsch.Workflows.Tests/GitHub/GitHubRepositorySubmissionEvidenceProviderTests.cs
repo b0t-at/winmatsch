@@ -3,12 +3,73 @@ using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.GitHub;
+using WinMatsch.Workflows.Operations;
 using Xunit;
 
 namespace WinMatsch.Workflows.Tests.GitHub;
 
 public sealed class GitHubRepositorySubmissionEvidenceProviderTests
 {
+    [Fact]
+    public async Task Code_search_reports_installer_hashes_published_under_another_identifier()
+    {
+        var client = new FakeGitHubClient();
+        ConfigureTrees(client);
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            GitHubRepositorySubmissionEvidenceProvider.PolicyPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            Encoding.UTF8.GetBytes("{}"));
+        string hash = new('C', 64);
+        GitHubSubmissionRequest request = RequestWithInstaller(hash);
+        client.CodeSearchMatches[hash] =
+        [
+            new("manifests/s/StacksLabs/Clarinet/3.23.1/StacksLabs.Clarinet.installer.yaml", "abc"),
+            new("manifests/e/Example/App/2.0.0/Example.App.installer.yaml", "def"),
+            new("README.md", "ghi"),
+        ];
+
+        RepositorySubmissionEvidence evidence =
+            await new GitHubRepositorySubmissionEvidenceProvider(client).GetEvidenceAsync(
+                request,
+                GitHubLifecycleTestSupport.UpstreamSha,
+                CancellationToken.None);
+
+        RepositoryInstallerEvidence moved = Assert.Single(
+            evidence.InstallerEvidence,
+            item => item.PackageIdentifier == new PackageIdentifier("StacksLabs.Clarinet"));
+        Assert.Equal(hash, moved.InstallerSha256);
+        Assert.Equal("3.23.1", moved.PackageVersion.Value);
+        Assert.DoesNotContain(
+            evidence.InstallerEvidence,
+            static item => item.ManifestPath.EndsWith("Example.App.installer.yaml", StringComparison.Ordinal));
+        Assert.Empty(evidence.Notes);
+    }
+
+    [Fact]
+    public async Task Unavailable_code_search_only_adds_a_note()
+    {
+        var client = new FakeGitHubClient
+        {
+            CodeSearchFailure = new GitHubApiException("GitHub code search returned incomplete results."),
+        };
+        ConfigureTrees(client);
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            GitHubRepositorySubmissionEvidenceProvider.PolicyPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            Encoding.UTF8.GetBytes("{}"));
+
+        RepositorySubmissionEvidence evidence =
+            await new GitHubRepositorySubmissionEvidenceProvider(client).GetEvidenceAsync(
+                RequestWithInstaller(new string('D', 64)),
+                GitHubLifecycleTestSupport.UpstreamSha,
+                CancellationToken.None);
+
+        string note = Assert.Single(evidence.Notes);
+        Assert.Contains("installer-hash search", note, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Reads_policy_and_sibling_hashes_from_pinned_upstream_sha()
     {
@@ -281,5 +342,33 @@ public sealed class GitHubRepositorySubmissionEvidenceProviderTests
             ],
         };
         return Encoding.UTF8.GetBytes(ManifestYamlWriter.Serialize(manifest));
+    }
+
+    private static GitHubSubmissionRequest RequestWithInstaller(string sha256)
+    {
+        const string installerUrl = "https://example.invalid/app.exe";
+        LocalOperationPlan plan = GitHubLifecycleTestSupport.Plan();
+        return GitHubLifecycleTestSupport.Request() with
+        {
+            LocalPlan = plan with
+            {
+                Preflight = plan.Preflight with
+                {
+                    InstallerArtifacts =
+                    [
+                        new(installerUrl, new WinMatsch.Downloads.DownloadResult
+                        {
+                            FilePath = "app.exe",
+                            FileName = "app.exe",
+                            Sha256 = new Sha256Hash(sha256),
+                            SizeInBytes = 1,
+                            RetrievedAt = DateTimeOffset.UtcNow,
+                            InitialUrl = installerUrl,
+                            FinalUrl = installerUrl,
+                        }),
+                    ],
+                },
+            },
+        };
     }
 }

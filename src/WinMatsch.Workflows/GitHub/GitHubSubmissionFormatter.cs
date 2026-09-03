@@ -39,6 +39,45 @@ public static partial class GitHubSubmissionFormatter
         return false;
     }
 
+    /// <summary>
+    /// Like <see cref="IsCanonicalTitleFor(string, PackageIdentifier, PackageVersion)"/>, but also
+    /// accepts a title whose version is a different spelling of the same WinGet version
+    /// (<c>2026.8.20</c> for <c>2026.08.20</c>), which winget-pkgs treats as the same submission.
+    /// </summary>
+    public static bool IsCanonicalTitleForEquivalentVersion(
+        string title,
+        PackageIdentifier packageIdentifier,
+        PackageVersion packageVersion)
+    {
+        ArgumentNullException.ThrowIfNull(title);
+        ArgumentNullException.ThrowIfNull(packageIdentifier);
+        ArgumentNullException.ThrowIfNull(packageVersion);
+        if (IsCanonicalTitleFor(title, packageIdentifier, packageVersion))
+        {
+            return true;
+        }
+
+        foreach (GitHubManifestOperation operation in Enum.GetValues<GitHubManifestOperation>())
+        {
+            string prefix = $"{GetCanonicalPrefix(operation)} {packageIdentifier.Value} version ";
+            if (!title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string remainder = title[prefix.Length..];
+            int suffix = remainder.IndexOf(" - ", StringComparison.Ordinal);
+            string token = (suffix < 0 ? remainder : remainder[..suffix]).Trim();
+            if (PackageVersion.TryCreate(token, out PackageVersion? parsed)
+                && parsed!.IsEquivalentTo(packageVersion))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static bool IsCanonicalTitleFor(
         GitHubManifestOperation operation,
         string title,

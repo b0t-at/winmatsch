@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
@@ -45,6 +46,7 @@ internal static class ManifestSemanticValidator
             request.InstallerArtifacts,
             findings);
         ValidateArpOverlap(manifests, request.ExistingVersions, findings);
+        ValidateVersionIdentity(identifier, version, expectedDirectory, request.ExistingVersions, findings);
 
         IReadOnlyList<UrlTarget> urls = CollectUrls(manifests);
         IReadOnlyList<ExpectedInstallerHash> hashes = CollectInstallerHashes(manifests.Installer);
@@ -1084,6 +1086,92 @@ internal static class ManifestSemanticValidator
                 .Distinct()
                 .OrderBy(static item => item.Url, StringComparer.Ordinal),
         ];
+    }
+
+    /// <summary>
+    /// Rejects a version string that collides with an existing version under WinGet ordering
+    /// (<c>2026.8.20</c> beside <c>2026.08.20</c> is the same version to winget, so the second
+    /// spelling is a duplicate submission) and a version that leaves the stream a numerically
+    /// pinned identifier declares (<c>OpenJS.Electron.41</c> must not receive 43.4.0). The stream
+    /// check only fires when every existing version starts with the pinned number, so identifiers
+    /// whose trailing digits are not a version prefix (<c>Python.Python.3.12</c>) are left alone.
+    /// </summary>
+    private static void ValidateVersionIdentity(
+        PackageIdentifier identifier,
+        PackageVersion version,
+        string expectedDirectory,
+        IReadOnlyList<ExistingVersionSnapshot> existingVersions,
+        List<ValidationFinding> findings)
+    {
+        var existing = new List<PackageVersion>();
+        foreach (ExistingVersionSnapshot snapshot in existingVersions)
+        {
+            if (string.Equals(snapshot.PackageVersion, version.Value, StringComparison.Ordinal)
+                || !PackageVersion.TryCreate(snapshot.PackageVersion, out PackageVersion? parsed))
+            {
+                continue;
+            }
+
+            existing.Add(parsed!);
+        }
+
+        PackageVersion? equivalent = existing
+            .OrderBy(static item => item.Value, StringComparer.Ordinal)
+            .FirstOrDefault(item => version.IsEquivalentTo(item));
+        if (equivalent is not null)
+        {
+            findings.Add(Error(
+                "VLD2301",
+                $"Package version '{version.Value}' is equivalent to existing version '{equivalent.Value}' under WinGet version ordering; reuse that spelling or submit a genuinely different version.",
+                expectedDirectory));
+        }
+
+        string[] segments = identifier.Value.Split('.');
+        string pin = segments[^1];
+        if (segments.Length < 2
+            || existing.Count == 0
+            || !IsAsciiDigits(pin)
+            || !TryGetLeadingInteger(pin, out long pinnedStream))
+        {
+            return;
+        }
+
+        foreach (PackageVersion candidate in existing)
+        {
+            if (!TryGetLeadingInteger(candidate.Value, out long stream) || stream != pinnedStream)
+            {
+                return;
+            }
+        }
+
+        if (TryGetLeadingInteger(version.Value, out long requested) && requested != pinnedStream)
+        {
+            findings.Add(Error(
+                "VLD2302",
+                $"Package identifier '{identifier.Value}' pins version stream {pinnedStream} (every existing version starts with it), but '{version.Value}' starts with {requested}; that release belongs to a different identifier.",
+                expectedDirectory));
+        }
+    }
+
+    private static bool IsAsciiDigits(string value)
+        => value.Length > 0 && value.All(char.IsAsciiDigit);
+
+    private static bool TryGetLeadingInteger(string value, out long result)
+    {
+        ReadOnlySpan<char> span = value.AsSpan().Trim();
+        int length = 0;
+        while (length < span.Length && char.IsAsciiDigit(span[length]))
+        {
+            length++;
+        }
+
+        if (length == 0)
+        {
+            result = 0;
+            return false;
+        }
+
+        return long.TryParse(span[..length], NumberStyles.None, CultureInfo.InvariantCulture, out result);
     }
 
     private static ValidationFinding Error(string code, string message, string? path = null)

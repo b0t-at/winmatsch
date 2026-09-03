@@ -19,6 +19,8 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
     private const int MaximumTruncatedPullRequestFileFallbacks = 16;
     private const int MaximumPathScreeningRestCompletions = 64;
     private const int MaximumPullRequestTextSearchResults = 100;
+    private const int MaximumCodeSearchResults = 100;
+    private const int MaximumCodeSearchTermLength = 128;
     private const int MaximumPullRequestTextSearchTerms = 5;
     private const int MaximumPullRequestTextSearchTermLength = 128;
 
@@ -856,6 +858,59 @@ public sealed class GitHubRepositoryClient : IGitHubRepositoryClient
                     .OrderByDescending(static pullRequest => pullRequest.UpdatedAt)
                     .First()),
         ];
+    }
+
+    public async Task<IReadOnlyList<CodeSearchMatch>> SearchCodeAsync(
+        RepositoryCoordinates repository,
+        CodeSearch search,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(search);
+        if (string.IsNullOrWhiteSpace(search.Term)
+            || search.Term.Length > MaximumCodeSearchTermLength
+            || search.Term.Any(static character => char.IsWhiteSpace(character) || character == '"'))
+        {
+            throw new ArgumentException(
+                $"Code search requires one non-empty token without whitespace or quotes of at most {MaximumCodeSearchTermLength} characters.",
+                nameof(search));
+        }
+
+        if (search.MaximumResults is <= 0 or > MaximumCodeSearchResults)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(search),
+                $"Code search supports between 1 and {MaximumCodeSearchResults} results.");
+        }
+
+        string query = $"{QuoteSearchValue(search.Term)} in:file repo:{repository}";
+        string relativePath =
+            $"search/code?per_page={search.MaximumResults.ToString(CultureInfo.InvariantCulture)}" +
+            $"&q={Escape(query)}";
+        RestCodeSearchResponseDto response = await _transport.GetAsync(
+            relativePath,
+            GitHubJsonContext.Default.RestCodeSearchResponseDto,
+            cancellationToken).ConfigureAwait(false);
+        if (response.IncompleteResults)
+        {
+            throw new GitHubApiException("GitHub code search returned incomplete results.");
+        }
+
+        if (response.TotalCount < 0 || response.Items is null)
+        {
+            throw new GitHubApiException("GitHub code search returned an invalid response.");
+        }
+
+        var matches = new List<CodeSearchMatch>(response.Items.Count);
+        foreach (RestCodeSearchItemDto item in response.Items)
+        {
+            if (!string.IsNullOrWhiteSpace(item.Path))
+            {
+                matches.Add(new(item.Path, item.Sha ?? string.Empty));
+            }
+        }
+
+        return matches;
     }
 
     public async Task<IReadOnlyList<PullRequestInfo>> SearchPullRequestsByTextAsync(

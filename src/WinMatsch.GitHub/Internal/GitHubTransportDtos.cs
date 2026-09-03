@@ -291,6 +291,26 @@ internal sealed class RestIssueSearchResponseDto
     public List<RestIssueSearchItemDto>? Items { get; set; }
 }
 
+internal sealed class RestCodeSearchResponseDto
+{
+    [JsonPropertyName("total_count")]
+    public int TotalCount { get; set; }
+
+    [JsonPropertyName("incomplete_results")]
+    public bool IncompleteResults { get; set; }
+
+    public List<RestCodeSearchItemDto>? Items { get; set; }
+}
+
+internal sealed class RestCodeSearchItemDto
+{
+    public string? Name { get; set; }
+
+    public string? Path { get; set; }
+
+    public string? Sha { get; set; }
+}
+
 internal sealed class RestIssueSearchItemDto
 {
     public long Number { get; set; }

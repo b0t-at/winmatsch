@@ -1,3 +1,4 @@
+using WinMatsch.Core;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
@@ -125,4 +126,19 @@ public sealed class GitHubSubmissionFormatterTests
         Assert.True(GitHubSubmissionFormatter.HasOperationMetadata(body));
         Assert.False(GitHubSubmissionFormatter.TryGetOperation(body, out _));
     }
+
+    [Theory]
+    [InlineData("Update version: Example.App version 2.0", true)]
+    [InlineData("New version: Example.App version 2.0.0.0 - custom note", true)]
+    [InlineData("Update version: Example.App version 2.0.0", true)]
+    [InlineData("Update version: Example.App version 2.0.1", false)]
+    [InlineData("Update version: Example.Other version 2.0.0", false)]
+    [InlineData("Random title mentioning Example.App version 2.0", false)]
+    public void Equivalent_version_titles_are_recognised(string title, bool expected)
+        => Assert.Equal(
+            expected,
+            GitHubSubmissionFormatter.IsCanonicalTitleForEquivalentVersion(
+                title,
+                new PackageIdentifier("Example.App"),
+                new PackageVersion("2.0.0")));
 }

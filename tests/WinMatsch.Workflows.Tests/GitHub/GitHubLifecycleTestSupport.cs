@@ -244,6 +244,30 @@ internal sealed class FakeGitHubClient : IGitHubRepositoryClient
 
     public bool AutoConfigureCanonicalPullRequestEvidence { get; set; } = true;
 
+    public Dictionary<string, IReadOnlyList<CodeSearchMatch>> CodeSearchMatches { get; } =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public Exception? CodeSearchFailure { get; set; }
+
+    public Task<IReadOnlyList<CodeSearchMatch>> SearchCodeAsync(
+        RepositoryCoordinates repository,
+        CodeSearch search,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (CodeSearchFailure is not null)
+        {
+            return Task.FromException<IReadOnlyList<CodeSearchMatch>>(CodeSearchFailure);
+        }
+
+        IReadOnlyList<CodeSearchMatch> matches = CodeSearchMatches.TryGetValue(
+            search.Term,
+            out IReadOnlyList<CodeSearchMatch>? found)
+            ? found
+            : Array.Empty<CodeSearchMatch>();
+        return Task.FromResult(matches);
+    }
+
     public string PullRequestHeadSha { get; set; } = GitHubLifecycleTestSupport.CommitSha;
 
     public string PullRequestMergeBaseSha { get; set; } = GitHubLifecycleTestSupport.UpstreamSha;

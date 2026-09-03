@@ -141,6 +141,24 @@ public enum FeedbackClassification
     DependencyInfrastructureOutage,
     TransientInternalError,
     Unknown,
+
+    /// <summary>Defender or the ESRP installer scan blocked the binaries; the same bytes fail again.</summary>
+    ScannerBlocked,
+
+    /// <summary>The installer signature does not chain to a trusted root (<c>Validation-Certificate-Root</c>).</summary>
+    UntrustedCertificate,
+
+    /// <summary>One or more manifest URLs failed upstream validation (<c>URL-Validation-Error</c>).</summary>
+    UrlValidationError,
+
+    /// <summary>The installer could not be downloaded during upstream validation (<c>Error-Installer-Availability</c>).</summary>
+    InstallerUnavailable,
+
+    /// <summary>Installation testing failed: unattended, shell-execute, driver or dependency (<c>Validation-Unattended-Failed</c> and siblings).</summary>
+    InstallationFailure,
+
+    /// <summary>The pipeline passed and a moderator must validate the executable by hand (<c>Validation-Executable-Error</c>, <c>Validation-No-Executables</c>).</summary>
+    AwaitingManualValidation,
 }
 
 public sealed record FeedbackPolicy
@@ -153,7 +171,12 @@ public sealed record FeedbackPolicy
         ImmutableHashSet.Create(
             StringComparer.OrdinalIgnoreCase,
             "wingetbot",
+            "wingetbot[bot]",
             "winget-bot",
+            "wingetvalidator-prod",
+            "wingetvalidator-prod[bot]",
+            "microsoft-github-policy-service",
+            "microsoft-github-policy-service[bot]",
             "github-actions[bot]");
 
     public ImmutableHashSet<string> TrustedLabels { get; init; } =
@@ -162,7 +185,23 @@ public sealed record FeedbackPolicy
             "duplicate-entry",
             "hash-mismatch",
             "dependency-infrastructure",
-            "transient-internal-error");
+            "transient-internal-error",
+            "Error-Hash-Mismatch",
+            "Validation-Hash-Verification-Failed",
+            "Possible-Duplicate",
+            "Resolution-Duplicate",
+            "Validation-Defender-Error",
+            "Binary-Validation-Error",
+            "Validation-Certificate-Root",
+            "URL-Validation-Error",
+            "Error-Installer-Availability",
+            "Validation-Unattended-Failed",
+            "Validation-Installation-Error",
+            "Validation-Shell-Execute",
+            "Internal-Error",
+            "Retry-1",
+            "Validation-Executable-Error",
+            "Validation-No-Executables");
 }
 
 public sealed record FeedbackRetryMetadata(
@@ -187,7 +226,10 @@ public sealed record FeedbackWorkItem(
     DateTimeOffset RecordedAt,
     DateTimeOffset? RetryAfter,
     string? LearnedOverrideSignal,
-    string Reason);
+    string Reason,
+    string? PackageIdentifier = null,
+    string? PackageVersion = null,
+    IReadOnlyList<string>? Evidence = null);
 
 public sealed record FeedbackRemoteState(
     long PullRequestNumber,
@@ -220,6 +262,13 @@ public interface IFeedbackStateStore
     public Task<ImmutableArray<FeedbackWorkItem>> GetPendingAsync(
         string repository,
         DateTimeOffset now,
+        CancellationToken cancellationToken)
+        => Task.FromResult(ImmutableArray<FeedbackWorkItem>.Empty);
+
+    /// <summary>The newest recorded item per pull request that names <paramref name="packageIdentifier"/>.</summary>
+    public Task<ImmutableArray<FeedbackWorkItem>> GetByPackageAsync(
+        string repository,
+        PackageIdentifier packageIdentifier,
         CancellationToken cancellationToken)
         => Task.FromResult(ImmutableArray<FeedbackWorkItem>.Empty);
 }

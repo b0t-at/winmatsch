@@ -27,6 +27,7 @@ public static class RuleCatalogueIds
     public const string Scope2 = "SCOPE-2";
     public const string Scope3 = "SCOPE-3";
     public const string Scope4 = "SCOPE-4";
+    public const string Scope5 = "SCOPE-5";
     public const string Ver1 = "VER-1";
     public const string Meta1 = "META-1";
     public const string Meta2 = "META-2";

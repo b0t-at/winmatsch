@@ -248,6 +248,9 @@ public sealed record RepositorySubmissionEvidence
 
     public ImmutableArray<string> VanityUrlAnnotations { get; init; } = [];
 
+    /// <summary>Informational notes about best-effort evidence that could not be gathered.</summary>
+    public ImmutableArray<string> Notes { get; init; } = [];
+
     public static RepositorySubmissionEvidence Empty { get; } = new();
 }
 

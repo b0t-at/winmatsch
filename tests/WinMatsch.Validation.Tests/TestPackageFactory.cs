@@ -174,6 +174,12 @@ internal sealed class FakePreflightNetwork : IPreflightNetwork
 
     public string? InvalidOperationProbeUrl { get; init; }
 
+    /// <summary>A metadata origin whose host name does not resolve, after the downloader's retries.</summary>
+    public string? UnreachableProbeUrl { get; init; }
+
+    /// <summary>Every probe fails with a name-resolution error, as in a network-wide outage.</summary>
+    public bool AllProbesUnreachable { get; init; }
+
     public bool ReturnChangedContent { get; init; }
 
     public string? RevalidatedFinalUrl { get; init; }
@@ -200,6 +206,13 @@ internal sealed class FakePreflightNetwork : IPreflightNetwork
         if (string.Equals(url, InvalidOperationProbeUrl, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Insecure HTTP downloads are disabled.");
+        }
+
+        if (AllProbesUnreachable || string.Equals(url, UnreachableProbeUrl, StringComparison.Ordinal))
+        {
+            throw new DownloadNetworkException(
+                $"A transient failure downloading '{url}' persisted after 4 attempt(s).",
+                new HttpRequestException(HttpRequestError.NameResolutionError, "No such host is known."));
         }
 
         return Task.FromResult(new DownloadProbeResult

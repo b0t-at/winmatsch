@@ -7,6 +7,57 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.8.23] - 2026-09-03
+
+### Added
+
+- `SCOPE-5`: installer switches that accept a licence or EULA on the user's
+  behalf (`accept_eula=1`, `/ACCEPTEULA`, `--accept-license`, …) are flagged
+  when the locale manifest declares no `Agreements`; winget-pkgs moderators
+  reject such manifests (DiRoots.ProSheets, winget-pkgs PR #420154).
+- Preflight rejects a version that is equivalent to an existing version under
+  WinGet ordering but spelled differently (`VLD2301`; SteamTokenDumper was
+  submitted as both `2026.8.20` and `2026.08.20`), and a version that leaves
+  the stream a numerically pinned identifier declares (`VLD2302`;
+  `OpenJS.Electron.41` received 43.4.0, `LookupFoundation.RevitLookup.2021`
+  received 2027.0.3).
+- The CI workflow can be started manually (`workflow_dispatch`) on any branch.
+- Failure memory: escalated feedback items now record the package identity and,
+  for URL failures, the URLs the validator named. `new` and `update` refuse to
+  plan a submission that repeats a blocked version, keeps a rejected URL,
+  keeps unchanged installer traits after an installation failure, or follows an
+  untrusted-certificate verdict (`WF_UPSTREAM_VERDICT`);
+  `--ignore-upstream-verdict` bypasses the gate.
+- Duplicate pull-request discovery recognises an open pull request whose title
+  or manifest path uses an equivalent spelling of the planned version
+  (`2026.8.20` beside `2026.08.20`).
+- A resolved version is re-spelled to match the zero-padding style of the
+  package's existing versions when an equivalent release-tag or URL candidate
+  carries that spelling (`VERSION_RESPELLED` diagnostic); explicit `--version`
+  values are never changed.
+- `--submit` asks GitHub code search which manifests already carry each
+  installer hash, so a package that moved to another identifier
+  (HiroSystems.Clarinet → StacksLabs.Clarinet) is rejected with `GH1011`
+  before a pull request is opened; an unavailable search only records audit
+  entry `GH1017`.
+
+### Fixed
+
+- Pull-request feedback classification recognises the labels and commenters
+  winget-pkgs actually uses (`Error-Hash-Mismatch`, `Possible-Duplicate`,
+  `Validation-Defender-Error`, `Validation-Certificate-Root`,
+  `URL-Validation-Error`, `Validation-Unattended-Failed`, `Internal-Error*`,
+  `Validation-Executable-Error`, comments by `wingetvalidator-prod` and the
+  policy service, …). Previously every real verdict classified as `Unknown`.
+  Blocking verdicts now escalate with `GH3211` and are persisted; the
+  "pipeline passed, manual validation pending" state is reported as a wait
+  that must not be superseded.
+- Preflight treats a metadata URL whose host does not resolve or cannot
+  complete a TLS handshake as dead (`VLD5006`, dropped before submission)
+  when other origins respond in the same run; such URLs were carried forward
+  and resubmitted repeatedly (yhay81.sqrail, OmniEdge.OmniEdgeCLI,
+  RoniLehto.LMath). When nothing resolves the failure stays transient.
+
 ## [0.8.22] - 2026-08-22
 
 ### Fixed
@@ -421,7 +472,9 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.21...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.23...main
+[0.8.23]: https://github.com/b0t-at/winmatsch/compare/v0.8.22...v0.8.23
+[0.8.22]: https://github.com/b0t-at/winmatsch/compare/v0.8.21...v0.8.22
 [0.8.21]: https://github.com/b0t-at/winmatsch/compare/v0.8.20...v0.8.21
 [0.8.20]: https://github.com/b0t-at/winmatsch/compare/v0.8.19...v0.8.20
 [0.8.19]: https://github.com/b0t-at/winmatsch/compare/v0.8.18...v0.8.19

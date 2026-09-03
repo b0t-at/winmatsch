@@ -38,6 +38,158 @@ public sealed class GitHubFeedbackWorkflowTests
         Assert.Equal(FeedbackClassification.None, classification);
     }
 
+    [Theory]
+    [InlineData("Error-Hash-Mismatch", FeedbackClassification.HashMismatch)]
+    [InlineData("Validation-Hash-Verification-Failed", FeedbackClassification.HashMismatch)]
+    [InlineData("Possible-Duplicate", FeedbackClassification.DuplicateEntry)]
+    [InlineData("Resolution-Duplicate", FeedbackClassification.DuplicateEntry)]
+    [InlineData("Validation-Defender-Error", FeedbackClassification.ScannerBlocked)]
+    [InlineData("Binary-Validation-Error", FeedbackClassification.ScannerBlocked)]
+    [InlineData("Validation-Certificate-Root", FeedbackClassification.UntrustedCertificate)]
+    [InlineData("URL-Validation-Error", FeedbackClassification.UrlValidationError)]
+    [InlineData("Error-Installer-Availability", FeedbackClassification.InstallerUnavailable)]
+    [InlineData("Validation-Unattended-Failed", FeedbackClassification.InstallationFailure)]
+    [InlineData("Validation-Shell-Execute", FeedbackClassification.InstallationFailure)]
+    [InlineData("DriverInstall", FeedbackClassification.InstallationFailure)]
+    [InlineData("Internal-Error-Dynamic-Scan", FeedbackClassification.TransientInternalError)]
+    [InlineData("Retry-1", FeedbackClassification.TransientInternalError)]
+    [InlineData("Validation-Executable-Error", FeedbackClassification.AwaitingManualValidation)]
+    [InlineData("Validation-No-Executables", FeedbackClassification.AwaitingManualValidation)]
+    public void Upstream_validator_labels_are_classified(string label, FeedbackClassification expected)
+    {
+        PullRequestObservation observation = Observation("Validation pipeline passed.") with
+        {
+            Labels = [label, "New-Manifest", "Validation-Guide"],
+        };
+
+        FeedbackClassification classification = GitHubFeedbackWorkflow.Classify(observation);
+
+        Assert.Equal(expected, classification);
+    }
+
+    [Fact]
+    public void Blocking_verdict_outranks_manual_validation_marker()
+    {
+        PullRequestObservation observation = Observation("Validation pipeline passed.") with
+        {
+            Labels = ["Azure-Pipeline-Passed", "Validation-Executable-Error", "Validation-Defender-Error"],
+        };
+
+        Assert.Equal(FeedbackClassification.ScannerBlocked, GitHubFeedbackWorkflow.Classify(observation));
+    }
+
+    [Theory]
+    [InlineData(
+        "Possible duplicate package entry. Similar installer SHA256 hash found in manifest manifests/s/StacksLabs/Clarinet/3.23.1",
+        FeedbackClassification.DuplicateEntry)]
+    [InlineData(
+        "Url Validation Error\n- manifests/y/yhay81/sqrail/0.3.4\n  - https://sqrails.yhay81.com\n    - No such host is known.",
+        FeedbackClassification.UrlValidationError)]
+    [InlineData(
+        "One or more ESRP Scan Blocking detections found: Installer: k0sctl-win-amd64.exe | Detection Engine: AVAST | Detection Description: Win64:Malware-gen",
+        FeedbackClassification.ScannerBlocked)]
+    public void Validator_bot_comments_are_trusted_signatures(string text, FeedbackClassification expected)
+    {
+        PullRequestObservation observation = Observation("Validation pipeline passed.") with
+        {
+            Comments =
+            [
+                new("wingetvalidator-prod", text, new DateTimeOffset(2026, 8, 20, 0, 0, 0, TimeSpan.Zero)),
+            ],
+        };
+
+        Assert.Equal(expected, GitHubFeedbackWorkflow.Classify(observation));
+    }
+
+    [Fact]
+    public async Task Manual_validation_marker_waits_without_persisting_work()
+    {
+        var client = new FakeGitHubClient();
+        var store = new FakeFeedbackStateStore();
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            new FakeRepairPlanner(),
+            new FakeClock(),
+            store);
+        PullRequestObservation observation = Observation("Validation pipeline passed.") with
+        {
+            Labels = ["Azure-Pipeline-Passed", "Validation-Executable-Error"],
+        };
+
+        FeedbackResult result = await workflow.ProcessAsync(
+            GitHubLifecycleTestSupport.Upstream,
+            [observation]);
+
+        Assert.Equal(PullRequestLifecycleAction.Wait, result.Statuses[0].RecommendedAction);
+        Assert.Contains("do not supersede", result.Statuses[0].Reason, StringComparison.Ordinal);
+        Assert.Empty(store.Items);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Blocking_upstream_verdict_escalates_and_persists_the_class()
+    {
+        var client = new FakeGitHubClient();
+        var store = new FakeFeedbackStateStore();
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            new FakeRepairPlanner(),
+            new FakeClock(),
+            store);
+        PullRequestObservation observation = Observation("Validation pipeline passed.") with
+        {
+            Labels = ["New-Manifest", "Validation-Certificate-Root"],
+        };
+
+        FeedbackResult result = await workflow.ProcessAsync(
+            GitHubLifecycleTestSupport.Upstream,
+            [observation]);
+
+        Assert.Equal(PullRequestLifecycleAction.EscalateToHuman, result.Statuses[0].RecommendedAction);
+        Assert.Contains(result.Diagnostics, static diagnostic => diagnostic.Code == "GH3211");
+        FeedbackWorkItem item = Assert.Single(store.Items);
+        Assert.Equal(FeedbackClassification.UntrustedCertificate, item.Classification);
+        Assert.Equal(FeedbackWorkState.Escalated, item.State);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Blocking_url_verdict_persists_package_identity_and_rejected_urls()
+    {
+        var client = new FakeGitHubClient();
+        var store = new FakeFeedbackStateStore();
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            new FakeRepairPlanner(),
+            new FakeClock(),
+            store);
+        PullRequestObservation observation = Observation("Validation pipeline passed.") with
+        {
+            Labels = ["URL-Validation-Error", "Needs-Author-Feedback"],
+            Comments =
+            [
+                new(
+                    "wingetvalidator-prod",
+                    "Url Validation Error\n- manifests/y/yhay81/sqrail/0.3.4\n  - https://sqrails.yhay81.com\n    - No such host is known.",
+                    new DateTimeOffset(2026, 8, 20, 0, 0, 0, TimeSpan.Zero)),
+            ],
+        };
+
+        FeedbackResult result = await workflow.ProcessAsync(
+            GitHubLifecycleTestSupport.Upstream,
+            [observation]);
+
+        Assert.Equal(PullRequestLifecycleAction.EscalateToHuman, result.Statuses[0].RecommendedAction);
+        FeedbackWorkItem item = Assert.Single(store.Items);
+        Assert.Equal(FeedbackClassification.UrlValidationError, item.Classification);
+        Assert.Equal("Example.App", item.PackageIdentifier);
+        Assert.Equal("2.0.0", item.PackageVersion);
+        Assert.Equal("https://sqrails.yhay81.com", Assert.Single(item.Evidence!));
+    }
+
     [Fact]
     public async Task Infrastructure_failure_queues_retry_and_never_mutates_manifests()
     {

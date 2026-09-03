@@ -226,6 +226,11 @@ public sealed class GitHubLifecycleWorkflow
                     upstreamDefault.HeadSha,
                     cancellationToken).ConfigureAwait(false);
             request = RepositorySubmissionEvidenceMerger.Merge(request, repositoryEvidence);
+            foreach (string note in repositoryEvidence.Notes)
+            {
+                Audit(audit, "GH1017", note);
+            }
+
             plan = CreatePlan(request, _clock.UtcNow);
             if (!plan.CanApply)
             {
