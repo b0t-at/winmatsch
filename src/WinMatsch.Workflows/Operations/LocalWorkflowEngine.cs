@@ -23,6 +23,7 @@ public sealed class LocalWorkflowEngine
     private readonly IWorkflowRuleRunner _rules;
     private readonly IWorkflowPreflight _preflight;
     private readonly IWorkflowFileTransaction _transaction;
+    private readonly IUpstreamVerdictSource? _upstreamVerdicts;
     private readonly IWorkflowClock _clock;
     private readonly IOverridePackStore? _overridePackStore;
     private readonly ILocalOperationLockProvider _planLocks;
@@ -38,8 +39,10 @@ public sealed class LocalWorkflowEngine
         IWorkflowClock? clock = null,
         IOverridePackStore? overridePackStore = null,
         ILocalOperationLockProvider? planLocks = null,
-        string trustedGitHubHost = "github.com")
+        string trustedGitHubHost = "github.com",
+        IUpstreamVerdictSource? upstreamVerdicts = null)
     {
+        _upstreamVerdicts = upstreamVerdicts;
         _manifests = manifests ?? throw new ArgumentNullException(nameof(manifests));
         _rules = rules ?? throw new ArgumentNullException(nameof(rules));
         _preflight = preflight ?? throw new ArgumentNullException(nameof(preflight));
@@ -816,6 +819,9 @@ public sealed class LocalWorkflowEngine
             OverridePacks = operationRequest.OverridePacks,
             Assets = enrichedAssets.ToImmutable(),
         });
+        versionResolution = PackageVersionResolver.PreferExistingSpelling(
+            versionResolution,
+            packageVersions.Select(static snapshot => snapshot.PackageVersion.Value));
         ImmutableArray<UrlOverride> urlOverrides = create?.UrlOverrides ?? update!.UrlOverrides;
         AssetMappingPlan mapping = AssetMappingPlanner.CreatePlan(new()
         {
@@ -1028,6 +1034,13 @@ public sealed class LocalWorkflowEngine
         validation = MergeRuleFindings(validation, rules.Summary);
         validation = AddStaleLearnedOverrideFinding(validation, rules.Summary);
         validation = AddLearnedStoreFindings(validation, learnedSnapshot);
+        validation = await AddUpstreamVerdictFindingsAsync(
+            validation,
+            operationRequest,
+            identifier,
+            newVersion,
+            candidate,
+            cancellationToken).ConfigureAwait(false);
         WorkflowReleaseProvenance? releaseProvenance = CreateReleaseProvenance(enrichedAssets);
         LocalOperationPlan reviewedPlan = Plan(
             isUpdate ? "update" : "new",
@@ -2795,6 +2808,65 @@ public sealed class LocalWorkflowEngine
         ValidationReport validation,
         ValidationFinding finding)
         => new([.. validation.Findings, finding]);
+
+    /// <summary>
+    /// Blocks a plan that repeats what winget-pkgs already rejected for this package, unless the
+    /// caller opted out with <see cref="WorkflowOperationRequest.IgnoreUpstreamVerdicts"/>.
+    /// </summary>
+    private async Task<ValidationReport> AddUpstreamVerdictFindingsAsync(
+        ValidationReport validation,
+        WorkflowOperationRequest operationRequest,
+        PackageIdentifier identifier,
+        PackageVersion version,
+        PackageManifests candidate,
+        CancellationToken cancellationToken)
+    {
+        if (_upstreamVerdicts is null || operationRequest.IgnoreUpstreamVerdicts)
+        {
+            return validation;
+        }
+
+        ImmutableArray<UpstreamVerdict> verdicts = await _upstreamVerdicts.GetBlockingAsync(
+            identifier,
+            cancellationToken).ConfigureAwait(false);
+        if (verdicts.IsDefaultOrEmpty)
+        {
+            return validation;
+        }
+
+        var rejectedVersions = new Dictionary<string, PackageManifests>(StringComparer.Ordinal);
+        foreach (UpstreamVerdict verdict in verdicts)
+        {
+            if (verdict.PackageVersion is not { } rejected
+                || rejected.Equals(version)
+                || rejectedVersions.ContainsKey(rejected.Value))
+            {
+                continue;
+            }
+
+            PackageSnapshot? snapshot = await _manifests.LoadAsync(
+                operationRequest.OutputDirectory,
+                identifier,
+                rejected,
+                cancellationToken).ConfigureAwait(false);
+            if (snapshot is not null)
+            {
+                rejectedVersions[rejected.Value] = snapshot.Manifests;
+            }
+        }
+
+        foreach (ValidationFinding finding in UpstreamVerdictGate.Evaluate(
+                     identifier,
+                     version,
+                     candidate,
+                     verdicts,
+                     rejectedVersions))
+        {
+            validation = AddValidationFinding(validation, finding);
+        }
+
+        return validation;
+    }
 
     private static ValidationReport AddLearnedStoreFindings(
         ValidationReport validation,

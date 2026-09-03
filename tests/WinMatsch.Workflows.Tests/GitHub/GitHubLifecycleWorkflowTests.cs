@@ -183,6 +183,26 @@ public sealed class GitHubLifecycleWorkflowTests
     }
 
     [Fact]
+    public async Task Equivalent_version_spelling_in_an_open_pull_request_is_a_duplicate()
+    {
+        var client = new FakeGitHubClient
+        {
+            AutoConfigureCanonicalPullRequestEvidence = false,
+        };
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(7, author: "different-author") with
+        {
+            Title = "Update version: Example.App version 2.0",
+            Body = "Update Example.App to version 2.0.",
+        });
+
+        GitHubLifecycleResult result = await GitHubLifecycleTestSupport.Workflow(client)
+            .ExecuteAsync(GitHubLifecycleTestSupport.Request());
+
+        Assert.Equal(GitHubLifecycleResultCode.DuplicatePullRequest, result.Code);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
     public async Task Canonical_title_from_different_author_proves_duplicate_without_file_match()
     {
         var client = new FakeGitHubClient

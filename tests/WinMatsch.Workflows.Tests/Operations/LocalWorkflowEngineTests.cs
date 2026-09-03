@@ -12,6 +12,7 @@ using WinMatsch.Validation;
 using WinMatsch.Workflows.Diagnostics;
 using WinMatsch.Workflows.Discovery;
 using WinMatsch.Workflows.Mapping;
+using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
 using Xunit;
 
@@ -1377,6 +1378,35 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Update_is_blocked_by_a_recorded_upstream_verdict_unless_overridden()
+    {
+        using var temporary = new TemporaryDirectory();
+        PackageManifests package = CreatePackage("1.0.0", "A");
+        var verdicts = new FakeUpstreamVerdictSource(
+            new UpstreamVerdict(
+                4711,
+                FeedbackClassification.ScannerBlocked,
+                new PackageVersion("1.0.0"),
+                [],
+                new DateTimeOffset(2026, 9, 1, 0, 0, 0, TimeSpan.Zero)));
+        LocalWorkflowEngine engine = CreateEngine(
+            new DictionarySnapshotSource(Snapshot(package)),
+            new RecordingTransaction(),
+            upstreamVerdicts: verdicts);
+
+        WorkflowOperationResult blocked = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.0.0", "A")));
+        WorkflowOperationResult overridden = await engine.UpdateAsync(
+            UpdateRequest(temporary.Path, Asset("1.0.0", "A")) with { IgnoreUpstreamVerdicts = true });
+
+        Assert.Equal(WorkflowResultCode.ValidationFailed, blocked.Code);
+        Assert.Contains(
+            blocked.Plan.Validation.Findings,
+            static finding => finding.Code == UpstreamVerdictGate.FindingCode);
+        Assert.Equal(WorkflowResultCode.Succeeded, overridden.Code);
+    }
+
+    [Fact]
     public async Task Update_normalizes_mixed_line_endings_instead_of_hiding_the_style_change()
     {
         using var temporary = new TemporaryDirectory();
@@ -2396,13 +2426,15 @@ public sealed class LocalWorkflowEngineTests
     private static LocalWorkflowEngine CreateEngine(
         IManifestSnapshotSource source,
         IWorkflowFileTransaction transaction,
-        IWorkflowPreflight? preflight = null)
+        IWorkflowPreflight? preflight = null,
+        IUpstreamVerdictSource? upstreamVerdicts = null)
         => new(
             source,
             new PassThroughRuleRunner(),
             preflight ?? new CapturingPreflight(),
             transaction,
-            clock: new FixedClock());
+            clock: new FixedClock(),
+            upstreamVerdicts: upstreamVerdicts);
 
     private static ImmutableArray<WorkflowFileChange> TwoFileChanges()
         =>
@@ -3561,5 +3593,16 @@ public sealed class LocalWorkflowEngineTests
                 Directory.Delete(Path, recursive: true);
             }
         }
+    }
+}
+
+internal sealed class FakeUpstreamVerdictSource(params UpstreamVerdict[] verdicts) : IUpstreamVerdictSource
+{
+    public Task<ImmutableArray<UpstreamVerdict>> GetBlockingAsync(
+        PackageIdentifier packageIdentifier,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(ImmutableArray.Create(verdicts));
     }
 }

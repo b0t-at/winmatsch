@@ -1,11 +1,12 @@
 using System.Collections.Immutable;
+using System.Text.RegularExpressions;
 using WinMatsch.Core;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.Operations;
 
 namespace WinMatsch.Workflows.GitHub;
 
-public sealed class GitHubFeedbackWorkflow
+public sealed partial class GitHubFeedbackWorkflow
 {
     // Label vocabulary of the winget-pkgs validator (wingetvalidator-prod) and policy service,
     // grouped by what the bot should do next. A blocking verdict outranks a manual-validation
@@ -343,6 +344,11 @@ public sealed class GitHubFeedbackWorkflow
                         candidate.PullRequestNumber == observation.PullRequest.Number);
                 try
                 {
+                    _ = TryGetAssociation(
+                        observation.PullRequest.Body,
+                        out string? packageIdentifier,
+                        out string? packageVersion,
+                        out _);
                     await _stateStore.PersistAsync(
                         new(
                             upstream.ToString(),
@@ -352,7 +358,10 @@ public sealed class GitHubFeedbackWorkflow
                             _clock.UtcNow,
                             retry?.RetryAfter,
                             retry?.LearnedOverrideSignal,
-                            status.Reason),
+                            status.Reason,
+                            packageIdentifier,
+                            packageVersion,
+                            CollectValidatorUrls(observation, policy)),
                         CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception exception) when (
@@ -600,6 +609,35 @@ public sealed class GitHubFeedbackWorkflow
 
         return null;
     }
+
+    /// <summary>
+    /// The URLs the winget-pkgs validator listed in a "Url Validation Error" comment, so a later
+    /// submission can be refused while it still carries any of them.
+    /// </summary>
+    private static IReadOnlyList<string> CollectValidatorUrls(
+        PullRequestObservation observation,
+        FeedbackPolicy policy)
+    {
+        var urls = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (PullRequestCommentObservation comment in observation.Comments)
+        {
+            if (!policy.TrustedCommentAuthors.Contains(comment.Author)
+                || !comment.Body.Contains("url validation error", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (Match match in ValidatorUrl().Matches(comment.Body))
+            {
+                urls.Add(match.Value.TrimEnd('.', ',', ';', ')'));
+            }
+        }
+
+        return [.. urls];
+    }
+
+    [GeneratedRegex(@"https?://[^\s<>""')\]]+", RegexOptions.IgnoreCase)]
+    private static partial Regex ValidatorUrl();
 
     private static bool HasAny(ImmutableArray<string> labels, string[] candidates)
         => labels.Any(label => Array.Exists(

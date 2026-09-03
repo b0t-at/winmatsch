@@ -20,6 +20,24 @@ minor versions may contain breaking changes).
   `OpenJS.Electron.41` received 43.4.0, `LookupFoundation.RevitLookup.2021`
   received 2027.0.3).
 - The CI workflow can be started manually (`workflow_dispatch`) on any branch.
+- Failure memory: escalated feedback items now record the package identity and,
+  for URL failures, the URLs the validator named. `new` and `update` refuse to
+  plan a submission that repeats a blocked version, keeps a rejected URL,
+  keeps unchanged installer traits after an installation failure, or follows an
+  untrusted-certificate verdict (`WF_UPSTREAM_VERDICT`);
+  `--ignore-upstream-verdict` bypasses the gate.
+- Duplicate pull-request discovery recognises an open pull request whose title
+  or manifest path uses an equivalent spelling of the planned version
+  (`2026.8.20` beside `2026.08.20`).
+- A resolved version is re-spelled to match the zero-padding style of the
+  package's existing versions when an equivalent release-tag or URL candidate
+  carries that spelling (`VERSION_RESPELLED` diagnostic); explicit `--version`
+  values are never changed.
+- `--submit` asks GitHub code search which manifests already carry each
+  installer hash, so a package that moved to another identifier
+  (HiroSystems.Clarinet → StacksLabs.Clarinet) is rejected with `GH1011`
+  before a pull request is opened; an unavailable search only records audit
+  entry `GH1017`.
 
 ### Fixed
 

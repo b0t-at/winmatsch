@@ -21,7 +21,8 @@ using WinMatsch.Workflows.Versioning;
 
 namespace WinMatsch.Cli.Commands.Mutations;
 
-public sealed class ProductionMutationWorkflowFactory : IMutationWorkflowFactory
+public sealed class ProductionMutationWorkflowFactory(
+    IFeedbackStateStore? feedbackState = null) : IMutationWorkflowFactory
 {
     public Task<IMutationWorkflow> CreateAsync(
         Hosting.CommandContext context,
@@ -34,7 +35,8 @@ public sealed class ProductionMutationWorkflowFactory : IMutationWorkflowFactory
                 context.Configuration,
                 context.Tokens,
                 context.GitHubOptions,
-                context.Output.WriteDiagnostic));
+                context.Output.WriteDiagnostic,
+                feedbackState: feedbackState));
     }
 }
 
@@ -58,13 +60,19 @@ internal sealed class ProductionMutationWorkflow(
     Hosting.ITokenAccessor tokens,
     GitHubClientOptions gitHubOptions,
     Action<string>? cleanupWarning = null,
-    Action<string>? deleteDirectory = null) : IVerifiedMutationWorkflow, IDisposable
+    Action<string>? deleteDirectory = null,
+    IFeedbackStateStore? feedbackState = null) : IVerifiedMutationWorkflow, IDisposable
 {
     private WorkflowOperationRequest? _preparedRequest;
     private string? _artifactDirectory;
     private string? _submitCacheDirectory;
     private readonly Action<string> _deleteDirectory =
         deleteDirectory ?? (static path => Directory.Delete(path, recursive: true));
+
+    private IUpstreamVerdictSource? UpstreamVerdicts()
+        => feedbackState is null
+            ? null
+            : new FeedbackStoreVerdictSource(feedbackState, configuration.Repository.ToString());
 
     public async Task<WorkflowOperationResult> ExecuteAsync(
         WorkflowOperationRequest request,
@@ -97,7 +105,8 @@ internal sealed class ProductionMutationWorkflow(
                 clock: null,
                 overridePackStoreOptions: OverrideStoreOptions(configuration),
                 fallbackManifestSource: CreateRepositoryManifestSource(request, gitHub),
-                trustedGitHubHost: TrustedGitHubWebHost(gitHubOptions));
+                trustedGitHubHost: TrustedGitHubWebHost(gitHubOptions),
+                upstreamVerdicts: UpstreamVerdicts());
             if (!usePrepared)
             {
                 if (request is UpdateOperationRequest update)
@@ -193,7 +202,8 @@ internal sealed class ProductionMutationWorkflow(
             fallbackManifestSource: CreateRepositoryManifestSource(
                 prepared,
                 manifestGitHub ?? releaseGitHub),
-            trustedGitHubHost: TrustedGitHubWebHost(gitHubOptions));
+            trustedGitHubHost: TrustedGitHubWebHost(gitHubOptions),
+            upstreamVerdicts: UpstreamVerdicts());
         WorkflowOperationResult result = await engine.ApplyVerifiedPlanAsync(
             prepared,
             expectedPlanFingerprint,

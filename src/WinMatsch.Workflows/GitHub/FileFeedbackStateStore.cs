@@ -152,12 +152,51 @@ public sealed class FileFeedbackStateStore : IFeedbackStateStore
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(repository);
+        Dictionary<long, FeedbackWorkItem> latest = await ReadLatestAsync(
+            repository,
+            cancellationToken).ConfigureAwait(false);
+        return
+        [
+            .. latest.Values
+                .Where(item =>
+                    (item.State is FeedbackWorkState.AwaitingApprovedRepair
+                        or FeedbackWorkState.RetryScheduled)
+                    && item.RetryAfter.GetValueOrDefault(DateTimeOffset.MinValue) <= now)
+                .OrderBy(static item => item.PullRequestNumber),
+        ];
+    }
+
+    public async Task<ImmutableArray<FeedbackWorkItem>> GetByPackageAsync(
+        string repository,
+        PackageIdentifier packageIdentifier,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(repository);
+        ArgumentNullException.ThrowIfNull(packageIdentifier);
+        Dictionary<long, FeedbackWorkItem> latest = await ReadLatestAsync(
+            repository,
+            cancellationToken).ConfigureAwait(false);
+        return
+        [
+            .. latest.Values
+                .Where(item => string.Equals(
+                    item.PackageIdentifier,
+                    packageIdentifier.Value,
+                    StringComparison.OrdinalIgnoreCase))
+                .OrderBy(static item => item.PullRequestNumber),
+        ];
+    }
+
+    private async Task<Dictionary<long, FeedbackWorkItem>> ReadLatestAsync(
+        string repository,
+        CancellationToken cancellationToken)
+    {
+        var latest = new Dictionary<long, FeedbackWorkItem>();
         if (!Directory.Exists(_rootDirectory))
         {
-            return [];
+            return latest;
         }
 
-        var latest = new Dictionary<long, FeedbackWorkItem>();
         foreach (string path in Directory.EnumerateFiles(
                      _rootDirectory,
                      "*.json",
@@ -186,14 +225,6 @@ public sealed class FileFeedbackStateStore : IFeedbackStateStore
             latest[item.PullRequestNumber] = item;
         }
 
-        return
-        [
-            .. latest.Values
-                .Where(item =>
-                    (item.State is FeedbackWorkState.AwaitingApprovedRepair
-                        or FeedbackWorkState.RetryScheduled)
-                    && item.RetryAfter.GetValueOrDefault(DateTimeOffset.MinValue) <= now)
-                .OrderBy(static item => item.PullRequestNumber),
-        ];
+        return latest;
     }
 }

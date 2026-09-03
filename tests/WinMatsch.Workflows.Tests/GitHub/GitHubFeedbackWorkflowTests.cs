@@ -156,6 +156,41 @@ public sealed class GitHubFeedbackWorkflowTests
     }
 
     [Fact]
+    public async Task Blocking_url_verdict_persists_package_identity_and_rejected_urls()
+    {
+        var client = new FakeGitHubClient();
+        var store = new FakeFeedbackStateStore();
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            new FakeRepairPlanner(),
+            new FakeClock(),
+            store);
+        PullRequestObservation observation = Observation("Validation pipeline passed.") with
+        {
+            Labels = ["URL-Validation-Error", "Needs-Author-Feedback"],
+            Comments =
+            [
+                new(
+                    "wingetvalidator-prod",
+                    "Url Validation Error\n- manifests/y/yhay81/sqrail/0.3.4\n  - https://sqrails.yhay81.com\n    - No such host is known.",
+                    new DateTimeOffset(2026, 8, 20, 0, 0, 0, TimeSpan.Zero)),
+            ],
+        };
+
+        FeedbackResult result = await workflow.ProcessAsync(
+            GitHubLifecycleTestSupport.Upstream,
+            [observation]);
+
+        Assert.Equal(PullRequestLifecycleAction.EscalateToHuman, result.Statuses[0].RecommendedAction);
+        FeedbackWorkItem item = Assert.Single(store.Items);
+        Assert.Equal(FeedbackClassification.UrlValidationError, item.Classification);
+        Assert.Equal("Example.App", item.PackageIdentifier);
+        Assert.Equal("2.0.0", item.PackageVersion);
+        Assert.Equal("https://sqrails.yhay81.com", Assert.Single(item.Evidence!));
+    }
+
+    [Fact]
     public async Task Infrastructure_failure_queues_retry_and_never_mutates_manifests()
     {
         var client = new FakeGitHubClient();

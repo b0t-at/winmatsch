@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Text.RegularExpressions;
 using WinMatsch.Core;
 using WinMatsch.Rules.OverridePacks;
@@ -218,6 +219,80 @@ public static partial class PackageVersionResolver
             [.. candidates.OrderBy(static candidate => candidate.Source).ThenBy(static candidate => candidate.Provenance, StringComparer.Ordinal)],
             [.. diagnostics.Order(StringComparer.Ordinal)]);
     }
+
+    /// <summary>
+    /// Re-spells a resolved version to match the zero-padding style of the package's existing
+    /// versions when an equivalent candidate already carries that spelling: a package whose
+    /// versions read <c>2024.05.31</c> must not receive <c>2026.8.20</c> from a binary while the
+    /// release tag says <c>2026.08.20</c>, because winget treats both as one version and the
+    /// second spelling becomes a duplicate submission. Explicit overrides are never re-spelled.
+    /// </summary>
+    public static PackageVersionResolution PreferExistingSpelling(
+        PackageVersionResolution resolution,
+        IEnumerable<string> existingVersions)
+    {
+        ArgumentNullException.ThrowIfNull(resolution);
+        ArgumentNullException.ThrowIfNull(existingVersions);
+        if (!resolution.IsResolved
+            || resolution.Version is not { } resolved
+            || resolution.Source == PackageVersionSource.PackageOverride)
+        {
+            return resolution;
+        }
+
+        var shapes = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (string existing in existingVersions)
+        {
+            string shape = Shape(existing);
+            shapes[shape] = shapes.GetValueOrDefault(shape) + 1;
+        }
+
+        if (shapes.Count == 0)
+        {
+            return resolution;
+        }
+
+        int bestScore = shapes.GetValueOrDefault(Shape(resolved.Value));
+        PackageVersionCandidate? best = null;
+        foreach (PackageVersionCandidate candidate in resolution.Candidates
+                     .Where(candidate =>
+                         candidate.Version.IsEquivalentTo(resolved)
+                         && !string.Equals(candidate.Version.Value, resolved.Value, StringComparison.Ordinal))
+                     .OrderBy(static candidate => candidate.Source == PackageVersionSource.ReleaseTag ? 0 : 1)
+                     .ThenBy(static candidate => candidate.Version.Value, StringComparer.Ordinal))
+        {
+            int score = shapes.GetValueOrDefault(Shape(candidate.Version.Value));
+            if (score > bestScore)
+            {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+
+        if (best is null)
+        {
+            return resolution;
+        }
+
+        return resolution with
+        {
+            Version = best.Version,
+            Diagnostics =
+            [
+                .. resolution.Diagnostics,
+                $"VERSION_RESPELLED:{resolved.Value}->{best.Version.Value}:{best.Provenance}",
+            ],
+        };
+    }
+
+    /// <summary>The per-component digit widths of a version (<c>2024.05.31</c> is <c>4.2.2</c>).</summary>
+    internal static string Shape(string version)
+        => string.Join(
+            '.',
+            version.Trim().Split('.').Select(static part =>
+                part.Length > 0 && part.All(char.IsAsciiDigit)
+                    ? part.Length.ToString(CultureInfo.InvariantCulture)
+                    : "s"));
 
     public static string? NormalizeReleaseTag(string? tag, PackageIdentifier packageIdentifier)
     {

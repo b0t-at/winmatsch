@@ -573,4 +573,40 @@ public sealed class PackageVersionResolverTests
             },
         };
     }
+
+    [Fact]
+    public void Prefers_the_spelling_of_existing_versions_among_equivalent_candidates()
+    {
+        var resolved = new PackageVersion("2026.8.20");
+        var tag = new PackageVersion("2026.08.20");
+        var resolution = new PackageVersionResolution(
+            resolved,
+            PackageVersionSource.InstallerProductVersion,
+            EvidenceConfidence.Medium,
+            false,
+            [
+                new(resolved, PackageVersionSource.InstallerProductVersion, EvidenceConfidence.Medium, "analysis"),
+                new(tag, PackageVersionSource.ReleaseTag, EvidenceConfidence.Medium, "release-tag:2026.08.20"),
+            ],
+            []);
+
+        PackageVersionResolution respelled = PackageVersionResolver.PreferExistingSpelling(
+            resolution,
+            ["2024.05.31", "2025.12.17"]);
+        PackageVersionResolution untouched = PackageVersionResolver.PreferExistingSpelling(resolution, []);
+        PackageVersionResolution explicitVersion = PackageVersionResolver.PreferExistingSpelling(
+            resolution with { Source = PackageVersionSource.PackageOverride },
+            ["2024.05.31"]);
+        PackageVersionResolution alreadyMatching = PackageVersionResolver.PreferExistingSpelling(
+            resolution,
+            ["2024.5.31"]);
+
+        Assert.Equal("2026.08.20", respelled.Version?.Value);
+        Assert.Contains(
+            respelled.Diagnostics,
+            static diagnostic => diagnostic.StartsWith("VERSION_RESPELLED:2026.8.20->2026.08.20", StringComparison.Ordinal));
+        Assert.Equal("2026.8.20", untouched.Version?.Value);
+        Assert.Equal("2026.8.20", explicitVersion.Version?.Value);
+        Assert.Equal("2026.8.20", alreadyMatching.Version?.Value);
+    }
 }

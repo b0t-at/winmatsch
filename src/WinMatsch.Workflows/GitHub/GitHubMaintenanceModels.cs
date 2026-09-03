@@ -226,7 +226,10 @@ public sealed record FeedbackWorkItem(
     DateTimeOffset RecordedAt,
     DateTimeOffset? RetryAfter,
     string? LearnedOverrideSignal,
-    string Reason);
+    string Reason,
+    string? PackageIdentifier = null,
+    string? PackageVersion = null,
+    IReadOnlyList<string>? Evidence = null);
 
 public sealed record FeedbackRemoteState(
     long PullRequestNumber,
@@ -259,6 +262,13 @@ public interface IFeedbackStateStore
     public Task<ImmutableArray<FeedbackWorkItem>> GetPendingAsync(
         string repository,
         DateTimeOffset now,
+        CancellationToken cancellationToken)
+        => Task.FromResult(ImmutableArray<FeedbackWorkItem>.Empty);
+
+    /// <summary>The newest recorded item per pull request that names <paramref name="packageIdentifier"/>.</summary>
+    public Task<ImmutableArray<FeedbackWorkItem>> GetByPackageAsync(
+        string repository,
+        PackageIdentifier packageIdentifier,
         CancellationToken cancellationToken)
         => Task.FromResult(ImmutableArray<FeedbackWorkItem>.Empty);
 }

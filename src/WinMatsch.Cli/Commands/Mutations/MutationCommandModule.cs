@@ -1108,6 +1108,7 @@ public sealed class MutationCommandModule : ICommandModule
             createdWith = $"{createdWith} ({normalizedCreatedWithUrl.AbsoluteUri})";
         }
 
+        bool ignoreUpstreamVerdicts = context.ParseResult.GetValue(options.IgnoreUpstreamVerdict);
         return request switch
         {
             NewOperationRequest value => value with
@@ -1116,6 +1117,7 @@ public sealed class MutationCommandModule : ICommandModule
                 CreatedWith = createdWith,
                 WarningPolicy = WarningPolicy(context.ParseResult, options),
                 RuleRuntime = runtime,
+                IgnoreUpstreamVerdicts = ignoreUpstreamVerdicts,
                 OverridePacks = packs,
                 ExplainRules = context.ParseResult.GetValue(options.ExplainRules),
             },
@@ -1125,6 +1127,7 @@ public sealed class MutationCommandModule : ICommandModule
                 CreatedWith = createdWith,
                 WarningPolicy = WarningPolicy(context.ParseResult, options),
                 RuleRuntime = runtime,
+                IgnoreUpstreamVerdicts = ignoreUpstreamVerdicts,
                 OverridePacks = packs,
                 ExplainRules = context.ParseResult.GetValue(options.ExplainRules),
             },
@@ -1134,6 +1137,7 @@ public sealed class MutationCommandModule : ICommandModule
                 CreatedWith = createdWith,
                 WarningPolicy = WarningPolicy(context.ParseResult, options),
                 RuleRuntime = runtime,
+                IgnoreUpstreamVerdicts = ignoreUpstreamVerdicts,
                 OverridePacks = packs,
                 ExplainRules = context.ParseResult.GetValue(options.ExplainRules),
             },
@@ -1143,6 +1147,7 @@ public sealed class MutationCommandModule : ICommandModule
                 CreatedWith = createdWith,
                 WarningPolicy = WarningPolicy(context.ParseResult, options),
                 RuleRuntime = runtime,
+                IgnoreUpstreamVerdicts = ignoreUpstreamVerdicts,
                 OverridePacks = packs,
                 ExplainRules = context.ParseResult.GetValue(options.ExplainRules),
             },
@@ -1152,6 +1157,7 @@ public sealed class MutationCommandModule : ICommandModule
                 CreatedWith = createdWith,
                 WarningPolicy = WarningPolicy(context.ParseResult, options),
                 RuleRuntime = runtime,
+                IgnoreUpstreamVerdicts = ignoreUpstreamVerdicts,
                 OverridePacks = packs,
                 ExplainRules = context.ParseResult.GetValue(options.ExplainRules),
             },
@@ -1161,6 +1167,7 @@ public sealed class MutationCommandModule : ICommandModule
                 CreatedWith = createdWith,
                 WarningPolicy = WarningPolicy(context.ParseResult, options),
                 RuleRuntime = runtime,
+                IgnoreUpstreamVerdicts = ignoreUpstreamVerdicts,
                 OverridePacks = packs,
                 ExplainRules = context.ParseResult.GetValue(options.ExplainRules),
             },
@@ -1778,6 +1785,12 @@ public sealed class MutationCommandModule : ICommandModule
             Description = "Skip only the early duplicate pull-request check.",
         };
 
+        public Option<bool> IgnoreUpstreamVerdict { get; } = new("--ignore-upstream-verdict")
+        {
+            Description = "Plan although the last winget-pkgs verdict recorded for this package was blocking "
+                + "(scanner, certificate, URL, or installation failure).",
+        };
+
         public Option<string?> Replace { get; } = new("--replace")
         {
             Description = "Replace the previous version, optionally naming its exact version.",
@@ -1895,6 +1908,7 @@ public sealed class MutationCommandModule : ICommandModule
             command.Options.Add(CreatedWith);
             command.Options.Add(CreatedWithUrl);
             command.Options.Add(SkipPullRequestCheck);
+            command.Options.Add(IgnoreUpstreamVerdict);
             if (IncludeReplace)
             {
                 command.Options.Add(Replace);

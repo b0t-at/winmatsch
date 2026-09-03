@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Net;
@@ -80,11 +81,26 @@ public sealed class GitHubRepositorySubmissionEvidenceProvider(
                 }
             }
 
+            var notes = ImmutableArray.CreateBuilder<string>();
+            foreach (RepositoryInstallerEvidence item in await SearchInstallerHashEvidenceAsync(
+                         request,
+                         notes,
+                         cancellationToken).ConfigureAwait(false))
+            {
+                if (!evidence.Any(existing =>
+                        string.Equals(existing.ManifestPath, item.ManifestPath, StringComparison.Ordinal)
+                        && string.Equals(existing.InstallerSha256, item.InstallerSha256, StringComparison.OrdinalIgnoreCase)))
+                {
+                    evidence.Add(item);
+                }
+            }
+
             policy.VanityAnnotations.TryGetValue(
                 request.LocalPlan.PackageIdentifier.Value,
                 out ImmutableArray<string> vanityAnnotations);
             return new()
             {
+                Notes = notes.ToImmutable(),
                 InstallerEvidence =
                 [
                     .. evidence
@@ -119,6 +135,93 @@ public sealed class GitHubRepositorySubmissionEvidenceProvider(
                 "Pinned repository submission evidence is malformed or exceeds a safety limit.",
                 exception);
         }
+    }
+
+    /// <summary>
+    /// Asks GitHub code search which manifests already carry each installer hash, so a package
+    /// that moved to another identifier (HiroSystems.Clarinet → StacksLabs.Clarinet) or was
+    /// renamed (Docker.ds → Docker.sbx) trips GH1011 here instead of a Possible-Duplicate closure
+    /// upstream. The sibling scan only sees the same publisher directory. Search is best-effort:
+    /// an unsupported client, a rate limit, or an incomplete index adds a note and nothing else.
+    /// </summary>
+    private async Task<ImmutableArray<RepositoryInstallerEvidence>> SearchInstallerHashEvidenceAsync(
+        GitHubSubmissionRequest request,
+        ImmutableArray<string>.Builder notes,
+        CancellationToken cancellationToken)
+    {
+        var results = ImmutableArray.CreateBuilder<RepositoryInstallerEvidence>();
+        string[] hashes =
+        [
+            .. request.LocalPlan.Preflight.InstallerArtifacts
+                .Select(static artifact => artifact.Download.Sha256.Value)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Order(StringComparer.OrdinalIgnoreCase),
+        ];
+        foreach (string hash in hashes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            IReadOnlyList<CodeSearchMatch> matches;
+            try
+            {
+                matches = await _gitHub.SearchCodeAsync(
+                    request.UpstreamRepository,
+                    new CodeSearch(hash),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (NotSupportedException)
+            {
+                notes.Add("Cross-identifier installer-hash search is not supported by this GitHub client.");
+                break;
+            }
+            catch (GitHubApiException exception)
+            {
+                notes.Add($"Cross-identifier installer-hash search was unavailable: {exception.Message}");
+                break;
+            }
+            catch (HttpRequestException exception)
+            {
+                notes.Add($"Cross-identifier installer-hash search failed: {exception.Message}");
+                break;
+            }
+
+            foreach (CodeSearchMatch match in matches.OrderBy(static match => match.Path, StringComparer.Ordinal))
+            {
+                if (TryParseInstallerManifestPath(match.Path, out PackageIdentifier? identifier, out PackageVersion? version)
+                    && !string.Equals(
+                        identifier!.Value,
+                        request.LocalPlan.PackageIdentifier.Value,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    results.Add(new(identifier, version!, hash, match.Path));
+                }
+            }
+        }
+
+        return results.ToImmutable();
+    }
+
+    private static bool TryParseInstallerManifestPath(
+        string path,
+        out PackageIdentifier? identifier,
+        out PackageVersion? version)
+    {
+        identifier = null;
+        version = null;
+        const string suffix = ".installer.yaml";
+        if (!path.StartsWith("manifests/", StringComparison.Ordinal)
+            || !path.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string[] segments = path.Split('/');
+        if (segments.Length < 5)
+        {
+            return false;
+        }
+
+        return PackageIdentifier.TryCreate(segments[^1][..^suffix.Length], out identifier)
+            && PackageVersion.TryCreate(segments[^2], out version);
     }
 
     private async Task<ImmutableArray<RepositoryInstallerEvidence>> ReadSiblingInstallerEvidenceAsync(
@@ -481,20 +584,13 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                 $"{PullRequestManifestEvidenceLimits.MaximumOpenPullRequests}.");
         }
 
-        string targetPrefix = plan.PackageVersionDirectory + "/";
-        var plannedPaths = new HashSet<string>(
-            plan.Request.LocalPlan.FileChanges
-                .Where(change => change.RepositoryPath.StartsWith(
-                    targetPrefix,
-                    StringComparison.Ordinal))
-                .Select(static change => change.RepositoryPath),
-            StringComparer.Ordinal);
+        var plannedPaths = new ManifestPathSet(plan);
         if (openPullRequests.Count > PullRequestManifestEvidenceLimits.MaximumCandidates)
         {
             PullRequestInfo[] canonicalCandidates =
             [
                 .. openPullRequests
-                    .Where(pullRequest => GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                    .Where(pullRequest => GitHubSubmissionFormatter.IsCanonicalTitleForEquivalentVersion(
                         pullRequest.Title,
                         plan.Request.LocalPlan.PackageIdentifier,
                         plan.Request.LocalPlan.PackageVersion))
@@ -532,7 +628,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                         original.BaseBranch,
                         StringComparison.Ordinal);
                 if (remainsInScope
-                    && GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                    && GitHubSubmissionFormatter.IsCanonicalTitleForEquivalentVersion(
                         current.Title,
                         plan.Request.LocalPlan.PackageIdentifier,
                         plan.Request.LocalPlan.PackageVersion))
@@ -631,7 +727,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
                         original.BaseBranch,
                         StringComparison.Ordinal);
                 if (remainsInScope
-                    && GitHubSubmissionFormatter.IsCanonicalTitleFor(
+                    && GitHubSubmissionFormatter.IsCanonicalTitleForEquivalentVersion(
                         current.Title,
                         plan.Request.LocalPlan.PackageIdentifier,
                         plan.Request.LocalPlan.PackageVersion))
@@ -723,7 +819,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
             current.BaseSha!);
         if (_cache.TryGetValue(key, out PullRequestManifestEvidence? cached))
         {
-            bool hasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleFor(
+            bool hasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleForEquivalentVersion(
                 current.Title,
                 plan.Request.LocalPlan.PackageIdentifier,
                 plan.Request.LocalPlan.PackageVersion);
@@ -760,7 +856,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        bool hasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleFor(
+        bool hasCanonicalTitle = GitHubSubmissionFormatter.IsCanonicalTitleForEquivalentVersion(
             pullRequest.Title,
             plan.Request.LocalPlan.PackageIdentifier,
             plan.Request.LocalPlan.PackageVersion);
@@ -779,9 +875,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
             .. plan.Request.LocalPlan.FileChanges.Where(change =>
                 change.RepositoryPath.StartsWith(targetPrefix, StringComparison.Ordinal)),
         ];
-        var targetPaths = new HashSet<string>(
-            plannedChanges.Select(static change => change.RepositoryPath),
-            StringComparer.Ordinal);
+        IReadOnlySet<string> targetPaths = new ManifestPathSet(plan);
         bool requiresContentFallback = IsContentFallbackCandidate(
             plan.Request.UpstreamRepository,
             pullRequest);
@@ -919,7 +1013,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         GetPathScreeningSnapshotsAsync(
             RepositoryCoordinates repository,
             IReadOnlyList<PullRequestInfo> pullRequests,
-            HashSet<string> plannedPaths,
+            IReadOnlySet<string> plannedPaths,
             int maximumMatches,
             CancellationToken cancellationToken)
     {
@@ -949,7 +1043,7 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
 
     private static bool ContainsTargetPath(
         IReadOnlyList<PullRequestChangedFile> files,
-        HashSet<string> plannedPaths)
+        IReadOnlySet<string> plannedPaths)
         => files.Any(file =>
             plannedPaths.Contains(file.Path)
             || (file.PreviousPath is not null && plannedPaths.Contains(file.PreviousPath)));
@@ -1380,6 +1474,85 @@ public sealed class GitHubPullRequestManifestEvidenceProvider(IGitHubRepositoryC
         string NodeId,
         string? BaseSha,
         IReadOnlyList<PullRequestChangedFile> Files);
+}
+
+/// <summary>
+/// The repository paths a submission plans to write, where <see cref="Contains"/> also accepts the
+/// same file under a version directory that is a different spelling of the same WinGet version
+/// (<c>2026.8.20</c> beside <c>2026.08.20</c>), so an open pull request for the equivalent
+/// spelling screens as a duplicate. Set algebra delegates to the exact planned paths.
+/// </summary>
+internal sealed class ManifestPathSet : IReadOnlySet<string>
+{
+    private readonly HashSet<string> _exact;
+    private readonly HashSet<string> _fileNames;
+    private readonly string _packageDirectoryPrefix;
+    private readonly PackageVersion _version;
+
+    public ManifestPathSet(GitHubSubmissionPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        string targetPrefix = plan.PackageVersionDirectory + "/";
+        _exact = new HashSet<string>(
+            plan.Request.LocalPlan.FileChanges
+                .Where(change => change.RepositoryPath.StartsWith(targetPrefix, StringComparison.Ordinal))
+                .Select(static change => change.RepositoryPath),
+            StringComparer.Ordinal);
+        _fileNames = new HashSet<string>(
+            _exact.Select(path => path[targetPrefix.Length..]),
+            StringComparer.Ordinal);
+        int slash = plan.PackageVersionDirectory.LastIndexOf('/');
+        _packageDirectoryPrefix = slash < 0 ? string.Empty : plan.PackageVersionDirectory[..(slash + 1)];
+        _version = plan.Request.LocalPlan.PackageVersion;
+    }
+
+    public int Count => _exact.Count;
+
+    public bool Contains(string item)
+    {
+        if (item is null)
+        {
+            return false;
+        }
+
+        if (_exact.Contains(item))
+        {
+            return true;
+        }
+
+        if (_packageDirectoryPrefix.Length == 0
+            || !item.StartsWith(_packageDirectoryPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string remainder = item[_packageDirectoryPrefix.Length..];
+        int slash = remainder.IndexOf('/');
+        if (slash <= 0)
+        {
+            return false;
+        }
+
+        return _fileNames.Contains(remainder[(slash + 1)..])
+            && PackageVersion.TryCreate(remainder[..slash], out PackageVersion? parsed)
+            && parsed!.IsEquivalentTo(_version);
+    }
+
+    public IEnumerator<string> GetEnumerator() => _exact.GetEnumerator();
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    public bool IsProperSubsetOf(IEnumerable<string> other) => _exact.IsProperSubsetOf(other);
+
+    public bool IsProperSupersetOf(IEnumerable<string> other) => _exact.IsProperSupersetOf(other);
+
+    public bool IsSubsetOf(IEnumerable<string> other) => _exact.IsSubsetOf(other);
+
+    public bool IsSupersetOf(IEnumerable<string> other) => _exact.IsSupersetOf(other);
+
+    public bool Overlaps(IEnumerable<string> other) => _exact.Overlaps(other);
+
+    public bool SetEquals(IEnumerable<string> other) => _exact.SetEquals(other);
 }
 
 internal static class RepositorySubmissionEvidenceMerger

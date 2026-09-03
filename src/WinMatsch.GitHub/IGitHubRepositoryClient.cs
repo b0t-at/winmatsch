@@ -130,6 +130,17 @@ public interface IGitHubRepositoryClient : IDisposable
         PullRequestSearch search,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Finds files on the repository's default branch that contain one search token.</summary>
+    public Task<IReadOnlyList<CodeSearchMatch>> SearchCodeAsync(
+        RepositoryCoordinates repository,
+        CodeSearch search,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromException<IReadOnlyList<CodeSearchMatch>>(
+            new NotSupportedException(
+                "This GitHub client does not support server-side code search."));
+    }
+
     public Task<IReadOnlyList<PullRequestInfo>> SearchPullRequestsByTextAsync(
         RepositoryCoordinates repository,
         PullRequestTextSearch search,

@@ -262,6 +262,9 @@ public abstract record WorkflowOperationRequest
 
     public bool ExplainRules { get; init; }
 
+    /// <summary>Plan although the feedback store holds a blocking winget-pkgs verdict for the package.</summary>
+    public bool IgnoreUpstreamVerdicts { get; init; }
+
     public bool ApproveReview { get; init; }
 
     public ImmutableArray<string> ApprovedReviewFingerprints { get; init; } = [];

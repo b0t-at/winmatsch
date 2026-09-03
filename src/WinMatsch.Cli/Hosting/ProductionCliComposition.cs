@@ -27,7 +27,7 @@ public static class ProductionCliComposition
         [
             new DiagnosticsCommandModule(),
             new MutationCommandModule(
-                new ProductionMutationWorkflowFactory(),
+                new ProductionMutationWorkflowFactory(feedbackState),
                 new ProductionSubmissionWorkflowFactory()),
             new MaintenanceCommandModule(feedbackStateStore: feedbackState),
             new TokenCommandModule(tokenStore),

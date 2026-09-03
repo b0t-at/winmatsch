@@ -151,6 +151,15 @@ public sealed record PullRequestTextSearch(
     public int MaximumResults { get; init; } = 64;
 }
 
+/// <summary>A single-token repository code search, e.g. an installer SHA-256.</summary>
+public sealed record CodeSearch(string Term)
+{
+    public int MaximumResults { get; init; } = 32;
+}
+
+/// <summary>One file matched by <see cref="IGitHubRepositoryClient.SearchCodeAsync"/>.</summary>
+public sealed record CodeSearchMatch(string Path, string Sha);
+
 public sealed record PullRequestInfo(
     long Number,
     string NodeId,

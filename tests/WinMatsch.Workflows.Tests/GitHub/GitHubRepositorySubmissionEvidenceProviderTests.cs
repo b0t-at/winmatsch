@@ -10,6 +10,66 @@ namespace WinMatsch.Workflows.Tests.GitHub;
 public sealed class GitHubRepositorySubmissionEvidenceProviderTests
 {
     [Fact]
+    public async Task Code_search_reports_installer_hashes_published_under_another_identifier()
+    {
+        var client = new FakeGitHubClient();
+        ConfigureTrees(client);
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            GitHubRepositorySubmissionEvidenceProvider.PolicyPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            Encoding.UTF8.GetBytes("{}"));
+        GitHubSubmissionRequest request = GitHubLifecycleTestSupport.Request();
+        string hash = request.LocalPlan.Preflight.InstallerArtifacts[0].Download.Sha256.Value;
+        client.CodeSearchMatches[hash] =
+        [
+            new("manifests/s/StacksLabs/Clarinet/3.23.1/StacksLabs.Clarinet.installer.yaml", "abc"),
+            new("manifests/e/Example/App/2.0.0/Example.App.installer.yaml", "def"),
+            new("README.md", "ghi"),
+        ];
+
+        RepositorySubmissionEvidence evidence =
+            await new GitHubRepositorySubmissionEvidenceProvider(client).GetEvidenceAsync(
+                request,
+                GitHubLifecycleTestSupport.UpstreamSha,
+                CancellationToken.None);
+
+        RepositoryInstallerEvidence moved = Assert.Single(
+            evidence.InstallerEvidence,
+            item => item.PackageIdentifier == new PackageIdentifier("StacksLabs.Clarinet"));
+        Assert.Equal(hash, moved.InstallerSha256);
+        Assert.Equal("3.23.1", moved.PackageVersion.Value);
+        Assert.DoesNotContain(
+            evidence.InstallerEvidence,
+            static item => item.ManifestPath.EndsWith("Example.App.installer.yaml", StringComparison.Ordinal));
+        Assert.Empty(evidence.Notes);
+    }
+
+    [Fact]
+    public async Task Unavailable_code_search_only_adds_a_note()
+    {
+        var client = new FakeGitHubClient
+        {
+            CodeSearchFailure = new GitHubApiException("GitHub code search returned incomplete results."),
+        };
+        ConfigureTrees(client);
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            GitHubRepositorySubmissionEvidenceProvider.PolicyPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            Encoding.UTF8.GetBytes("{}"));
+
+        RepositorySubmissionEvidence evidence =
+            await new GitHubRepositorySubmissionEvidenceProvider(client).GetEvidenceAsync(
+                GitHubLifecycleTestSupport.Request(),
+                GitHubLifecycleTestSupport.UpstreamSha,
+                CancellationToken.None);
+
+        string note = Assert.Single(evidence.Notes);
+        Assert.Contains("installer-hash search", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Reads_policy_and_sibling_hashes_from_pinned_upstream_sha()
     {
         PackageIdentifier package = new("MongoDB.Compass.Community");
