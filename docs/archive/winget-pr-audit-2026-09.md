@@ -332,6 +332,61 @@ recent merged PRs (#428657, #428540, #428404, #427973, #427639, #428408,
 `Add version: X - Update version: X` (#412755, canonical title passed as
 custom title) has not recurred either.
 
+## Status after implementation (3 Sep 2026)
+
+Implemented on branch `claude/winget-bot-pr-issues-q1ajuy` (CI run 138 green
+on Linux with analyzers, Windows, macOS, the compiled installer corpus and
+the format check):
+
+- Feedback classification speaks the validator's vocabulary: real labels and
+  commenters, six new classes, `GH3211` escalation for blocking verdicts, and
+  a reported-only wait state for `Validation-Executable-Error` /
+  `Validation-No-Executables` (`complete` output; see `docs/commands.md`).
+- `VLD2301` rejects a version equivalent to an existing one under WinGet
+  ordering; `VLD2302` rejects a version outside a numerically pinned
+  identifier's stream.
+- A metadata host that does not resolve or cannot negotiate TLS is treated as
+  dead (`VLD5006`, dropped before submission) when another origin responded
+  in the same run; otherwise it stays a transient warning.
+- `SCOPE-5` warns on licence-accepting switches without `Agreements`.
+- The CI workflow accepts `workflow_dispatch`.
+- `docs/archive/winget-updates-actions-2026-09.md` is the per-package action
+  list for the orchestrator.
+
+Proposed, not implemented (each needs a design decision):
+
+1. Freshness delay without release provenance (finding E): keep the
+   configured delay and derive `ReleaseUpdatedAt` from the installer's
+   `Last-Modified` header when the release API path is unavailable. This
+   means relaxing `GH1014`/`GH1016`, which today insist on live release
+   evidence; decide whether header-based evidence is acceptable.
+2. Equivalent-version matching in open-PR duplicate discovery (both
+   SteamTokenDumper spellings were open at once): the planned-path screen in
+   `GitHubSubmissionEvidence` matches `PackageVersionDirectory + "/"` by
+   prefix in two places; generalise to "same package directory and a version
+   segment that `IsEquivalentTo` ours", including the GraphQL text-search
+   scope.
+3. Signature-chain inspection (`SIG-1`): parse `AppxSignature.p7x` (strip the
+   four-byte `PKCX` prefix) and PE Authenticode with `SignedCms`; a
+   self-signed leaf is a hard stop. Needs the
+   `System.Security.Cryptography.Pkcs` package (trimming, AOT and
+   `THIRD-PARTY-NOTICES.txt`) and a decision on the trusted-root source on
+   Linux.
+4. Per-package failure memory and a pre-submission quarantine gate: persist
+   the classified verdict per package (the learned override store is the
+   natural home) and refuse a submission whose manifest still carries the
+   failing trait. Until then the orchestrator must consume `complete` output
+   before running `update`.
+5. Cross-publisher duplicate-hash search (one code-search call per installer
+   hash) and moved-identifier learning from `Possible-Duplicate` comments.
+6. `InstallationMetadata.Files` with `InvocationParameter: --version` for
+   portable executables: run one experiment before generalising.
+7. Dropping 32-bit `arm` installers by default: policy decision.
+8. Line endings: winmatsch only preserves CRLF on in-place rewrites of an
+   existing version directory; the two August incidents were new directories,
+   so the fix belongs in the orchestrator's checkout (`core.autocrlf=false`).
+9. Supersede policy for pipeline-passed PRs: orchestrator behaviour.
+
 ## Prioritised actions for winmatsch
 
 1. Replace the feedback vocabulary with the real winget-pkgs labels and
