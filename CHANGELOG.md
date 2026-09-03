@@ -7,6 +7,37 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- `SCOPE-5`: installer switches that accept a licence or EULA on the user's
+  behalf (`accept_eula=1`, `/ACCEPTEULA`, `--accept-license`, …) are flagged
+  when the locale manifest declares no `Agreements`; winget-pkgs moderators
+  reject such manifests (DiRoots.ProSheets, winget-pkgs PR #420154).
+- Preflight rejects a version that is equivalent to an existing version under
+  WinGet ordering but spelled differently (`VLD2301`; SteamTokenDumper was
+  submitted as both `2026.8.20` and `2026.08.20`), and a version that leaves
+  the stream a numerically pinned identifier declares (`VLD2302`;
+  `OpenJS.Electron.41` received 43.4.0, `LookupFoundation.RevitLookup.2021`
+  received 2027.0.3).
+- The CI workflow can be started manually (`workflow_dispatch`) on any branch.
+
+### Fixed
+
+- Pull-request feedback classification recognises the labels and commenters
+  winget-pkgs actually uses (`Error-Hash-Mismatch`, `Possible-Duplicate`,
+  `Validation-Defender-Error`, `Validation-Certificate-Root`,
+  `URL-Validation-Error`, `Validation-Unattended-Failed`, `Internal-Error*`,
+  `Validation-Executable-Error`, comments by `wingetvalidator-prod` and the
+  policy service, …). Previously every real verdict classified as `Unknown`.
+  Blocking verdicts now escalate with `GH3211` and are persisted; the
+  "pipeline passed, manual validation pending" state is reported as a wait
+  that must not be superseded.
+- Preflight treats a metadata URL whose host does not resolve or cannot
+  complete a TLS handshake as dead (`VLD5006`, dropped before submission)
+  when other origins respond in the same run; such URLs were carried forward
+  and resubmitted repeatedly (yhay81.sqrail, OmniEdge.OmniEdgeCLI,
+  RoniLehto.LMath). When nothing resolves the failure stays transient.
+
 ## [0.8.22] - 2026-08-22
 
 ### Fixed

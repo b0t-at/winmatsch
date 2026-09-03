@@ -84,6 +84,7 @@ normalization, observing the canonical shape.
 | `SCOPE-2` | Set installer scope from trusted installer-metadata evidence only — never guessed. |
 | `SCOPE-3` | Trim or drop blank installer switches; flag switches carried across installer-family changes; flag `Custom` switch values that embed a network address. |
 | `SCOPE-4` | Correct `msi`/`wix` classifications to the analyzer's detected outer wrapper. |
+| `SCOPE-5` | Flag installer switches that accept a licence or EULA on the user's behalf (`accept_eula=1`, `/ACCEPTEULA`, `--accept-license`, …) when the locale manifest declares no `Agreements`; winget-pkgs moderators reject such manifests. Finding-only. |
 | `META-1` | Upgrade `http://` metadata URLs to `https://` when a workflow probe confirmed the HTTPS variant. |
 | `META-3` | Normalize GitHub license/copyright URLs to their stable `blob/HEAD` form. |
 | `META-4` | Sanitize release-notes formatting, bound their length, verify the ReleaseNotesUrl refers to the version. |

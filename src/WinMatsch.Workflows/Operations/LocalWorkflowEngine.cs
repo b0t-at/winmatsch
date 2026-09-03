@@ -1020,7 +1020,7 @@ public sealed class LocalWorkflowEngine
                 validation = AddValidationFinding(validation, new ValidationFinding(
                     "WF_DEAD_METADATA_URL_DROPPED",
                     ValidationSeverity.Info,
-                    "An optional metadata URL returned a definitive HTTP 404/410 and was dropped before submission.",
+                    "An optional metadata URL is definitively dead (HTTP 404/410, unresolvable host, or failed TLS handshake) and was dropped before submission.",
                     droppedUrl));
             }
         }

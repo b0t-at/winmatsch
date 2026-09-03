@@ -61,5 +61,6 @@ internal static class PolicyTestSupport
         new Pipe5ContentPolicyAnnotationRule(),
         new Pipe1SerializerInvariantsRule(),
         new Pipe3IdentityImmutabilityRule(),
+        new Scope5LicenseAcceptanceAgreementRule(),
     ];
 }

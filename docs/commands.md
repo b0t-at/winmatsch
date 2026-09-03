@@ -550,6 +550,26 @@ recommended action for each.
 | `--apply-safe` | After inspection, apply only known-safe responses (fixed keep-alive comments for transient infrastructure failures). Requires confirmation; never posts arbitrary comments and never repairs manifests. |
 | `--yes` | Confirm mutating actions without prompting. |
 
+Feedback is classified from the labels the `winget-pkgs` validator actually
+applies (comment signatures from `wingetvalidator-prod`, `wingetbot` and the
+policy service are the fallback):
+
+| Upstream labels | Classification | Recommended action |
+|---|---|---|
+| `Error-Hash-Mismatch`, `Validation-Hash-Verification-Failed` | hash mismatch | allowlisted approved repair |
+| `Possible-Duplicate`, `Resolution-Duplicate` | duplicate entry | allowlisted approved repair |
+| `Validation-Defender-Error`, `Binary-Validation-Error` | scanner blocked | escalate (`GH3211`); resubmitting the same binaries fails again |
+| `Validation-Certificate-Root` | untrusted certificate | escalate (`GH3211`) |
+| `URL-Validation-Error` and its 404/HTTP/forbidden variants | URL validation error | escalate (`GH3211`); drop the URLs the validator named |
+| `Error-Installer-Availability` | installer unavailable | escalate (`GH3211`) |
+| `Validation-Unattended-Failed`, `Validation-Installation-Error`, `Validation-Shell-Execute`, `Blocking-Issue`, `DriverInstall` | installation failure | escalate (`GH3211`) |
+| `Internal-Error*`, `Retry-1`, `Validation-Retry` | transient internal error | rerun checks |
+| `Validation-Executable-Error`, `Validation-No-Executables` (with `Azure-Pipeline-Passed`) | awaiting manual validation | wait; do not supersede for a patch release |
+
+A blocking verdict outranks the manual-validation marker when both are present.
+Escalations are persisted as `Escalated` work items; the wait state is only
+reported.
+
 ### submissions
 
 ```text

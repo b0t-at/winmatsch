@@ -36,6 +36,7 @@ public class ProductionRuleComposerTests
         RuleIds.ApplyOverridePackFields,
         RuleCatalogueIds.Arp4,
         RuleCatalogueIds.Dep2,
+        RuleCatalogueIds.Scope5,
         RuleCatalogueIds.Pipe3,
         RuleCatalogueIds.Pipe1,
         RuleIds.DisplayVersionConsistency,
