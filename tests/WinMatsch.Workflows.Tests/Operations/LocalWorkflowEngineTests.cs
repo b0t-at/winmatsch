@@ -11,8 +11,8 @@ using WinMatsch.Rules.Policy;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Diagnostics;
 using WinMatsch.Workflows.Discovery;
-using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.GitHub;
+using WinMatsch.Workflows.Mapping;
 using WinMatsch.Workflows.Operations;
 using Xunit;
 

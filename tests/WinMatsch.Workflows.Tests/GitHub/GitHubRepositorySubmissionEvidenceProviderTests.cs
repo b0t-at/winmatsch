@@ -3,6 +3,7 @@ using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.GitHub;
+using WinMatsch.Workflows.Operations;
 using Xunit;
 
 namespace WinMatsch.Workflows.Tests.GitHub;
@@ -19,8 +20,8 @@ public sealed class GitHubRepositorySubmissionEvidenceProviderTests
             GitHubRepositorySubmissionEvidenceProvider.PolicyPath,
             GitHubLifecycleTestSupport.UpstreamSha,
             Encoding.UTF8.GetBytes("{}"));
-        GitHubSubmissionRequest request = GitHubLifecycleTestSupport.Request();
-        string hash = request.LocalPlan.Preflight.InstallerArtifacts[0].Download.Sha256.Value;
+        string hash = new('C', 64);
+        GitHubSubmissionRequest request = RequestWithInstaller(hash);
         client.CodeSearchMatches[hash] =
         [
             new("manifests/s/StacksLabs/Clarinet/3.23.1/StacksLabs.Clarinet.installer.yaml", "abc"),
@@ -61,7 +62,7 @@ public sealed class GitHubRepositorySubmissionEvidenceProviderTests
 
         RepositorySubmissionEvidence evidence =
             await new GitHubRepositorySubmissionEvidenceProvider(client).GetEvidenceAsync(
-                GitHubLifecycleTestSupport.Request(),
+                RequestWithInstaller(new string('D', 64)),
                 GitHubLifecycleTestSupport.UpstreamSha,
                 CancellationToken.None);
 
@@ -341,5 +342,33 @@ public sealed class GitHubRepositorySubmissionEvidenceProviderTests
             ],
         };
         return Encoding.UTF8.GetBytes(ManifestYamlWriter.Serialize(manifest));
+    }
+
+    private static GitHubSubmissionRequest RequestWithInstaller(string sha256)
+    {
+        const string installerUrl = "https://example.invalid/app.exe";
+        LocalOperationPlan plan = GitHubLifecycleTestSupport.Plan();
+        return GitHubLifecycleTestSupport.Request() with
+        {
+            LocalPlan = plan with
+            {
+                Preflight = plan.Preflight with
+                {
+                    InstallerArtifacts =
+                    [
+                        new(installerUrl, new WinMatsch.Downloads.DownloadResult
+                        {
+                            FilePath = "app.exe",
+                            FileName = "app.exe",
+                            Sha256 = new Sha256Hash(sha256),
+                            SizeInBytes = 1,
+                            RetrievedAt = DateTimeOffset.UtcNow,
+                            InitialUrl = installerUrl,
+                            FinalUrl = installerUrl,
+                        }),
+                    ],
+                },
+            },
+        };
     }
 }

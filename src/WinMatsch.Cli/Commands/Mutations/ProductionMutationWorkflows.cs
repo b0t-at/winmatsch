@@ -69,7 +69,7 @@ internal sealed class ProductionMutationWorkflow(
     private readonly Action<string> _deleteDirectory =
         deleteDirectory ?? (static path => Directory.Delete(path, recursive: true));
 
-    private IUpstreamVerdictSource? UpstreamVerdicts()
+    private FeedbackStoreVerdictSource? UpstreamVerdicts()
         => feedbackState is null
             ? null
             : new FeedbackStoreVerdictSource(feedbackState, configuration.Repository.ToString());
