@@ -572,6 +572,8 @@ internal sealed class DurableInstallerPreflightNetwork :
     private readonly string _stateDirectory;
     private readonly IWorkflowScratchCleanup _scratchCleanup;
     private readonly ConcurrentQueue<ValidationFinding> _diagnostics = new();
+    private readonly ConcurrentDictionary<string, Task<DownloadProbeResult>> _probes =
+        new(StringComparer.Ordinal);
 
     public DurableInstallerPreflightNetwork(InstallerDownloader downloader)
         : this(downloader, DefaultStateDirectory(), BoundedWorkflowScratchCleanup.Instance)
@@ -588,8 +590,26 @@ internal sealed class DurableInstallerPreflightNetwork :
         _scratchCleanup = scratchCleanup ?? throw new ArgumentNullException(nameof(scratchCleanup));
     }
 
-    public Task<DownloadProbeResult> ProbeAsync(string url, CancellationToken cancellationToken)
-        => _downloader.ProbeAsync(url, cancellationToken);
+    // Plan, re-plan and the verified apply boundary each probe every URL. An origin behind bot
+    // protection can answer consecutive probes differently (altair-graphql.altair flapped on
+    // 403), which made the re-plan differ from the approved plan on every run. One answer per
+    // URL and process keeps the passes consistent; installer bytes are still revalidated by
+    // RevalidateAsync.
+    public async Task<DownloadProbeResult> ProbeAsync(string url, CancellationToken cancellationToken)
+    {
+        Task<DownloadProbeResult> probe = _probes.GetOrAdd(
+            url,
+            key => _downloader.ProbeAsync(key, cancellationToken));
+        try
+        {
+            return await probe.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _probes.TryRemove(new KeyValuePair<string, Task<DownloadProbeResult>>(url, probe));
+            throw;
+        }
+    }
 
     public async Task<DownloadRevalidationResult> RevalidateAsync(
         DownloadResult previous,

@@ -100,4 +100,34 @@ public class Wm0003DedupeArpVsDefaultLocaleTests
 
         Assert.Null(manifests.Installer.AppsAndFeaturesEntries);
     }
+
+    [Fact]
+    public void Fields_the_previous_version_declared_are_kept_on_update()
+    {
+        // Lando.Lando: dropping Publisher changed the ARP shape vs the previous version, which
+        // ARP-4 reports and winget-pkgs flags as Manifest-Metadata-Consistency.
+        Installer previousInstaller = TestManifests.CreateInstaller();
+        previousInstaller.AppsAndFeaturesEntries =
+        [
+            new AppsAndFeaturesEntry { DisplayName = "Lando CLI", Publisher = TestManifests.DefaultPublisher },
+        ];
+        PackageManifests previous = TestManifests.Create(previousInstaller);
+        Installer current = TestManifests.CreateInstaller();
+        current.AppsAndFeaturesEntries =
+        [
+            new AppsAndFeaturesEntry
+            {
+                DisplayName = "Lando CLI",
+                Publisher = TestManifests.DefaultPublisher,
+                DisplayVersion = TestManifests.DefaultVersion,
+            },
+        ];
+        PackageManifests manifests = TestManifests.Create(current);
+
+        _rule.Apply(TestManifests.CreateContext(manifests, previous: previous));
+
+        AppsAndFeaturesEntry entry = Assert.Single(current.AppsAndFeaturesEntries!);
+        Assert.Equal(TestManifests.DefaultPublisher, entry.Publisher);
+        Assert.Null(entry.DisplayVersion);
+    }
 }

@@ -118,8 +118,16 @@ internal sealed class ResultJsonRecorder
             return (question.Code, question.Prompt);
         }
 
-        ValidationFinding? finding = _local.Plan.Validation.Findings.FirstOrDefault(
-            static value => value.Severity != ValidationSeverity.Info);
+        // A stale plan, conflict or apply failure is described by its error message; reporting
+        // the first warning instead (VLD5005, RULE_ARP-4) hid WF_STALE_PLAN from automation.
+        bool findingsDecide = _local.Code is WorkflowResultCode.ValidationFailed
+            || string.IsNullOrWhiteSpace(_local.ErrorMessage);
+        ValidationFinding? finding = findingsDecide
+            ? _local.Plan.Validation.Findings.FirstOrDefault(
+                  static value => value.Severity == ValidationSeverity.Error)
+              ?? _local.Plan.Validation.Findings.FirstOrDefault(
+                  static value => value.Severity != ValidationSeverity.Info)
+            : null;
         if (finding is not null)
         {
             return (finding.Code, finding.Message);

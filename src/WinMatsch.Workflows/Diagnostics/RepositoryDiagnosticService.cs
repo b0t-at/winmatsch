@@ -81,7 +81,7 @@ public sealed class RepositoryDiagnosticService : IRepositoryDiagnosticService
             RepositoryContent content = await _client
                 .GetContentAsync(repository, fullPath, branch.HeadSha, cancellationToken)
                 .ConfigureAwait(false);
-            string text = content.GetText();
+            string text = ManifestYamlText.RepairForReading(content.GetText(), out _);
             VerifyIdentity(text, fullPath, identifier, version);
             files.Add(new RepositoryManifestFile(
                 fullPath,

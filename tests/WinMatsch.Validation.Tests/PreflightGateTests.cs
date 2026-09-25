@@ -247,6 +247,38 @@ public sealed class PreflightGateTests
     }
 
     [Fact]
+    public async Task Github_latest_download_alias_is_hard_blocking()
+    {
+        // OpenWhispr.OpenWhispr: the alias 404s once the next release ships.
+        PackageManifests manifests = TestPackageFactory.CreateManifests();
+        Installer installer = Assert.Single(manifests.Installer.Installers!);
+        installer.InstallerUrl =
+            "https://github.com/OpenWhispr/openwhispr/releases/latest/download/OpenWhispr-Setup-1.10.2.exe";
+
+        ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+            .ValidateAsync(TestPackageFactory.CreateRequest(manifests));
+
+        ValidationFinding finding = Assert.Single(
+            report.Findings,
+            static finding => finding.Code == "VLD3013");
+        Assert.Equal(ValidationSeverity.Error, finding.Severity);
+    }
+
+    [Theory]
+    [InlineData("https://github.com/OpenWhispr/openwhispr/releases/download/v1.10.2/OpenWhispr-Setup-1.10.2.exe")]
+    [InlineData("https://example.test/releases/latest/download/app.exe")]
+    public async Task Tag_pinned_or_non_github_urls_are_not_latest_aliases(string url)
+    {
+        PackageManifests manifests = TestPackageFactory.CreateManifests();
+        Assert.Single(manifests.Installer.Installers!).InstallerUrl = url;
+
+        ValidationReport report = await new PreflightGate(new FakePreflightNetwork())
+            .ValidateAsync(TestPackageFactory.CreateRequest(manifests));
+
+        Assert.DoesNotContain(report.Findings, static finding => finding.Code == "VLD3013");
+    }
+
+    [Fact]
     public async Task Same_url_with_incompatible_effective_semantics_is_hard_blocking()
     {
         PackageManifests manifests = TestPackageFactory.CreateManifests();

@@ -216,6 +216,14 @@ internal static class ManifestSemanticValidator
             return;
         }
 
+        if (IsGitHubLatestReleaseDownload(uri))
+        {
+            findings.Add(Error(
+                "VLD3013",
+                "InstallerUrl uses GitHub's moving '/releases/latest/download/' alias, which serves another file or 404 once a newer release ships; use the tag-specific '/releases/download/<tag>/' URL.",
+                $"Installers[{index}].InstallerUrl"));
+        }
+
         InstallerSwitches? switches = installer.InstallerSwitches ?? manifest.InstallerSwitches;
         var semantics = new InstallerSemantics(
             installer.InstallerType ?? manifest.InstallerType,
@@ -241,6 +249,22 @@ internal static class ManifestSemanticValidator
         {
             urlSemantics.TryAdd(url, (semantics, index));
         }
+    }
+
+    // OpenWhispr.OpenWhispr: four merged versions pointed at /releases/latest/download/ and
+    // returned 404 after the next release until the publisher repaired them upstream.
+    private static bool IsGitHubLatestReleaseDownload(Uri uri)
+    {
+        if (!string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string[] segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return segments.Length >= 6
+            && string.Equals(segments[2], "releases", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(segments[3], "latest", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(segments[4], "download", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool HaveCompatibleUrlSemantics(

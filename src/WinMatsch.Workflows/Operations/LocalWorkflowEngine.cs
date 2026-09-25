@@ -1021,17 +1021,22 @@ public sealed class LocalWorkflowEngine
                 installerArtifacts.ToImmutable(),
                 existingVersionEvidence,
                 cancellationToken).ConfigureAwait(false);
-            foreach (string droppedUrl in droppedDeadUrls)
-            {
-                validation = AddValidationFinding(validation, new ValidationFinding(
-                    "WF_DEAD_METADATA_URL_DROPPED",
-                    ValidationSeverity.Info,
-                    "An optional metadata URL is definitively dead (HTTP 404/410, unresolvable host, or failed TLS handshake) and was dropped before submission.",
-                    droppedUrl));
-            }
         }
 
         validation = MergeRuleFindings(validation, rules.Summary);
+
+        // Everything after this point is planning evidence the verified apply boundary cannot
+        // recompute from a fresh preflight; the plan carries it so the boundary report matches.
+        int boundaryFindingCount = validation.Findings.Count;
+        foreach (string droppedUrl in droppedDeadUrls)
+        {
+            validation = AddValidationFinding(validation, new ValidationFinding(
+                "WF_DEAD_METADATA_URL_DROPPED",
+                ValidationSeverity.Info,
+                "An optional metadata URL is definitively dead (HTTP 404/410, unresolvable host, or failed TLS handshake) and was dropped before submission.",
+                droppedUrl));
+        }
+
         validation = AddStaleLearnedOverrideFinding(validation, rules.Summary);
         validation = AddLearnedStoreFindings(validation, learnedSnapshot);
         validation = await AddUpstreamVerdictFindingsAsync(
@@ -1176,6 +1181,7 @@ public sealed class LocalWorkflowEngine
                             existingVersionEvidence,
                             cancellationToken).ConfigureAwait(false);
                         validation = MergeRuleFindings(validation, rules.Summary);
+                        boundaryFindingCount = validation.Findings.Count;
                         validation = MergeRuleFindings(validation, approvedRules.Summary);
                         validation = AddLearnedStoreFindings(validation, learnedSnapshot);
                         if (approvedRules.Summary.Findings.Any(static finding =>
@@ -1255,6 +1261,10 @@ public sealed class LocalWorkflowEngine
             LearnedOverrideFingerprint = learnedOverride is null
                 ? null
                 : LocalOperationPlanFingerprint.CreateComponent(learnedOverride),
+            PlanningFindings =
+            [
+                .. validation.Findings.Skip(Math.Min(boundaryFindingCount, validation.Findings.Count)),
+            ],
         };
         if (learnedOverride is not null)
         {
@@ -1531,9 +1541,9 @@ public sealed class LocalWorkflowEngine
                     plan.Preflight,
                     async (boundaryValidation, token) =>
                     {
-                        ValidationReport completeValidation = MergeRuleFindings(
-                            boundaryValidation,
-                            plan.Rules);
+                        ValidationReport completeValidation = WithPlanningFindings(
+                            MergeRuleFindings(boundaryValidation, plan.Rules),
+                            plan);
                         LocalOperationPlan boundaryPlan = plan with
                         {
                             Validation = completeValidation,
@@ -1562,7 +1572,9 @@ public sealed class LocalWorkflowEngine
                     ApplyBoundaryAsync,
                     cancellationToken).ConfigureAwait(false);
             }
-            finalValidation = MergeRuleFindings(finalValidation, plan.Rules);
+            finalValidation = WithPlanningFindings(
+                MergeRuleFindings(finalValidation, plan.Rules),
+                plan);
             if (persisted is not null && plan.LearnedOverride is not null)
             {
                 plan = AddLearnedOverrideAudit(plan, plan.LearnedOverride, persisted);
@@ -2808,6 +2820,13 @@ public sealed class LocalWorkflowEngine
         ValidationReport validation,
         ValidationFinding finding)
         => new([.. validation.Findings, finding]);
+
+    private static ValidationReport WithPlanningFindings(
+        ValidationReport validation,
+        LocalOperationPlan plan)
+        => plan.PlanningFindings.IsDefaultOrEmpty
+            ? validation
+            : new([.. validation.Findings, .. plan.PlanningFindings]);
 
     /// <summary>
     /// Blocks a plan that repeats what winget-pkgs already rejected for this package, unless the

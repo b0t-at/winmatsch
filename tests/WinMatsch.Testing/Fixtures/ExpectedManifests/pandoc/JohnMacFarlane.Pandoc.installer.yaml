@@ -4,6 +4,7 @@
 PackageIdentifier: JohnMacFarlane.Pandoc
 PackageVersion: 3.6.2
 InstallerType: wix
+ReleaseDate: 2025-01-15
 Installers:
 - Architecture: x64
   Scope: user

@@ -80,4 +80,57 @@ public sealed class ManifestYamlDocumentTests
 
         Assert.Contains("YAML events", exception.Message, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Decoded_byte_order_mark_does_not_rename_the_first_key()
+    {
+        // Niklas2233.CarBudget 0.2.0 is published with a UTF-8 BOM; the identity check read
+        // "\uFEFFPackageIdentifier" and rejected the manifest.
+        ManifestHeader header = ManifestYamlReader.ReadHeader(
+            "\uFEFFPackageIdentifier: Niklas2233.CarBudget\nPackageVersion: 0.2.0\nManifestType: installer\n");
+
+        Assert.Equal("Niklas2233.CarBudget", header.PackageIdentifier);
+        Assert.Equal("0.2.0", header.PackageVersion);
+    }
+
+    [Fact]
+    public void Duplicate_root_keys_are_rejected_unless_repaired_for_reading()
+    {
+        // CarthageSoftware.Mago 1.47.2 was merged with ReleaseNotesUrl twice.
+        const string yaml = """
+            PackageIdentifier: CarthageSoftware.Mago
+            PackageVersion: 1.47.2
+            ReleaseNotesUrl: https://example.test/releases/tag/1.42.0
+            Documentations:
+            - DocumentLabel: Documentation
+              DocumentUrl: https://example.test/docs
+            ReleaseNotes: |-
+              # Mago 1.47.2
+            ReleaseNotesUrl: https://example.test/releases/tag/1.47.2
+            ManifestType: defaultLocale
+            ManifestVersion: 1.12.0
+
+            """;
+        Assert.ThrowsAny<Exception>(() => ManifestYamlDocument.Parse(yaml));
+
+        string repaired = ManifestYamlText.RepairForReading(yaml, out IReadOnlyList<string> removed);
+
+        Assert.Equal(["ReleaseNotesUrl"], removed);
+        ManifestYamlDocument document = ManifestYamlDocument.Parse(repaired);
+        DefaultLocaleManifest locale = ManifestYamlReader.ReadDefaultLocale(document.Content);
+        Assert.Equal("https://example.test/releases/tag/1.47.2", locale.ReleaseNotesUrl);
+        Assert.Equal("https://example.test/docs", Assert.Single(locale.Documentations!).DocumentUrl);
+        Assert.Equal("# Mago 1.47.2", locale.ReleaseNotes);
+    }
+
+    [Fact]
+    public void Repair_for_reading_leaves_well_formed_manifests_untouched()
+    {
+        const string yaml = "PackageIdentifier: Example.App\nPackageVersion: 1.0\nManifestType: version\n";
+
+        string repaired = ManifestYamlText.RepairForReading(yaml, out IReadOnlyList<string> removed);
+
+        Assert.Same(yaml, repaired);
+        Assert.Empty(removed);
+    }
 }

@@ -393,6 +393,54 @@ public sealed class LocalWorkflowEngineTests
     }
 
     [Fact]
+    public async Task Verified_apply_accepts_a_plan_that_dropped_a_dead_metadata_url()
+    {
+        // WF_DEAD_METADATA_URL_DROPPED is planning evidence: the boundary preflight validates the
+        // already-cleaned documents and cannot re-derive it. Before the fix the boundary report
+        // lacked it, so every such plan failed as WF_STALE_PLAN (RimSort, poe-writer, Plover).
+        using var temporary = new TemporaryDirectory();
+        const string deadUrl = "https://dead.example.test/privacy";
+        PackageManifests previous = CreatePackage("1.0.0", "A");
+        previous.DefaultLocale.PrivacyUrl = deadUrl;
+        var transaction = new RecordingTransaction();
+        var engine = new LocalWorkflowEngine(
+            new DictionarySnapshotSource(Snapshot(previous)),
+            new PassThroughRuleRunner(),
+            new DeadUrlVerifiedPreflight(deadUrl),
+            transaction,
+            releases: new MetadataReleaseSource(),
+            clock: new FixedClock());
+        UpdateOperationRequest request = UpdateRequest(temporary.Path, Asset("2.0.0", "A")) with
+        {
+            PackageVersion = "2.0.0",
+        };
+
+        WorkflowOperationResult planned = await engine.UpdateAsync(request);
+
+        Assert.True(
+            planned.Code == WorkflowResultCode.Succeeded,
+            $"Code: {planned.Code}; "
+            + string.Join(", ", planned.Plan.Questions.Select(static question => question.Code)));
+        Assert.Contains(
+            planned.Plan.Validation.Findings,
+            static finding => finding.Code == "WF_DEAD_METADATA_URL_DROPPED");
+        Assert.DoesNotContain(
+            planned.Plan.AfterDocuments,
+            document => System.Text.Encoding.UTF8.GetString(document.Content.AsSpan())
+                .Contains(deadUrl, StringComparison.Ordinal));
+
+        WorkflowOperationResult applied = await engine.ApplyVerifiedPlanAsync(
+            request,
+            planned.Plan.Fingerprint);
+
+        Assert.True(applied.Applied, $"Code: {applied.Code}; Error: {applied.ErrorMessage}");
+        Assert.Equal(1, transaction.Calls);
+        Assert.Contains(
+            applied.Plan.Validation.Findings,
+            static finding => finding.Code == "WF_DEAD_METADATA_URL_DROPPED");
+    }
+
+    [Fact]
     public async Task Release_date_falls_back_to_the_download_last_modified_header()
     {
         // A plain installer URL belongs to no discoverable release, so the Last-Modified header
@@ -3235,6 +3283,47 @@ public sealed class LocalWorkflowEngineTests
                 },
             });
         }
+    }
+
+    private sealed class DeadUrlVerifiedPreflight(string deadUrl) : IWorkflowVerifiedPreflight
+    {
+        public Task<ValidationReport> ValidateAsync(
+            WorkflowPreflightRequest request,
+            CancellationToken cancellationToken)
+            => Task.FromResult(Report(request));
+
+        public async Task<ValidationReport> ExecuteAsync(
+            WorkflowPreflightRequest request,
+            Func<CancellationToken, Task> boundary,
+            CancellationToken cancellationToken)
+        {
+            await boundary(cancellationToken);
+            return Report(request);
+        }
+
+        public async Task<ValidationReport> ExecuteVerifiedAsync(
+            WorkflowPreflightRequest request,
+            Func<ValidationReport, CancellationToken, Task> boundary,
+            CancellationToken cancellationToken)
+        {
+            ValidationReport report = Report(request);
+            await boundary(report, cancellationToken);
+            return report;
+        }
+
+        private ValidationReport Report(WorkflowPreflightRequest request)
+            => request.AfterDocuments.Any(document =>
+                    System.Text.Encoding.UTF8.GetString(document.Content.AsSpan())
+                        .Contains(deadUrl, StringComparison.Ordinal))
+                ? new ValidationReport(
+                [
+                    new ValidationFinding(
+                        PreflightGate.DeadMetadataUrlCode,
+                        ValidationSeverity.Warning,
+                        "Metadata URL is definitively dead at the origin.",
+                        deadUrl),
+                ])
+                : new ValidationReport();
     }
 
     private sealed class VerifyingArtifactPreflight : IWorkflowVerifiedPreflight

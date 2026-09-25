@@ -176,6 +176,38 @@ public class Meta5FieldSetParityRuleTests
     }
 
     [Fact]
+    public void Release_date_is_set_from_evidence_even_when_the_previous_version_had_none()
+    {
+        // chuccp.win-sshpass 0.9.4: winget-pkgs reported ReleaseDate missing although the
+        // GitHub release date was known.
+        (PackageManifests current, PackageManifests previous) = CreateUpdatePair();
+        var rule = new Meta5FieldSetParityRule(new PolicyEvidence
+        {
+            ReleaseDate = new DateOnly(2026, 9, 14),
+        });
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        rule.Apply(context);
+
+        Assert.Equal(new DateOnly(2026, 9, 14), current.Installer.ReleaseDate);
+        Assert.Empty(context.Findings);
+    }
+
+    [Fact]
+    public void No_release_date_and_no_evidence_is_not_a_finding()
+    {
+        (PackageManifests current, PackageManifests previous) = CreateUpdatePair();
+        ManifestContext context = TestManifests.CreateContext(current, previous: previous);
+
+        new Meta5FieldSetParityRule().Apply(context);
+
+        Assert.Null(current.Installer.ReleaseDate);
+        Assert.DoesNotContain(
+            context.Findings,
+            static finding => finding.Message.Contains("ReleaseDate", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Installer_root_fields_are_carried()
     {
         (PackageManifests current, PackageManifests previous) = CreateUpdatePair();

@@ -47,6 +47,10 @@ public sealed class ManifestYamlDocument
     public static ManifestYamlDocument Parse(string yaml)
     {
         ArgumentNullException.ThrowIfNull(yaml);
+
+        // A UTF-8 BOM decoded into the string turns the first key into "\uFEFFPackageIdentifier"
+        // (Niklas2233.CarBudget 0.2.0), so identity checks failed on a valid manifest.
+        yaml = ManifestYamlText.StripByteOrderMark(yaml);
         int byteCount = Encoding.UTF8.GetByteCount(yaml);
         if (byteCount > MaxManifestBytes)
         {
@@ -253,9 +257,109 @@ internal readonly record struct YamlResourceUsage(
     int Scalars,
     int Tags);
 
-/// <summary>Line-ending policy helpers for manifest serialization.</summary>
+/// <summary>Text-level helpers for serializing and reading manifests.</summary>
 public static class ManifestYamlText
 {
+    /// <summary>Removes a leading U+FEFF left behind when a UTF-8 BOM was decoded into text.</summary>
+    public static string StripByteOrderMark(string yaml)
+    {
+        ArgumentNullException.ThrowIfNull(yaml);
+        return yaml.Length > 0 && yaml[0] == '\uFEFF' ? yaml[1..] : yaml;
+    }
+
+    /// <summary>
+    /// Repairs an already-published manifest just enough to be read: strips a BOM and, when a
+    /// top-level key occurs more than once, keeps only its last occurrence (the value YAML
+    /// loaders such as winget's use). winget-pkgs merged such files — CarthageSoftware.Mago
+    /// 1.47.2 declares <c>ReleaseNotesUrl</c> twice — and rejecting them blocked every later
+    /// update. Generated manifests are never repaired; this is for reading remote input only.
+    /// </summary>
+    public static string RepairForReading(string yaml, out IReadOnlyList<string> removedDuplicateKeys)
+    {
+        yaml = StripByteOrderMark(yaml);
+        removedDuplicateKeys = [];
+        if (Encoding.UTF8.GetByteCount(yaml) > ManifestYamlDocument.MaxManifestBytes)
+        {
+            return yaml;
+        }
+
+        var keys = new List<(string Name, int Start)>();
+        int rootEnd = -1;
+        try
+        {
+            using var reader = new StringReader(yaml);
+            var parser = new Parser(reader);
+            int depth = 0;
+            int events = 0;
+            bool expectKey = true;
+            while (parser.MoveNext())
+            {
+                if (++events > ManifestYamlDocument.MaxYamlEvents)
+                {
+                    return yaml;
+                }
+
+                ParsingEvent parsingEvent = parser.Current!;
+
+                // Stream, document and root mapping starts put the root's entries at depth 3.
+                if (depth == 3 && parsingEvent is NodeEvent)
+                {
+                    if (expectKey)
+                    {
+                        if (parsingEvent is not Scalar key)
+                        {
+                            return yaml;
+                        }
+
+                        keys.Add((key.Value, (int)key.Start.Index));
+                    }
+
+                    expectKey = !expectKey;
+                }
+                else if (depth == 3 && parsingEvent is MappingEnd)
+                {
+                    rootEnd = (int)parsingEvent.Start.Index;
+                }
+
+                depth += parsingEvent.NestingIncrease;
+            }
+        }
+        catch (YamlException)
+        {
+            return yaml;
+        }
+
+        var lastIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int i = 0; i < keys.Count; i++)
+        {
+            lastIndex[keys[i].Name] = i;
+        }
+
+        if (lastIndex.Count == keys.Count || rootEnd < 0)
+        {
+            return yaml;
+        }
+
+        var builder = new StringBuilder(yaml.Length);
+        var removed = new List<string>();
+        int cursor = 0;
+        for (int i = 0; i < keys.Count; i++)
+        {
+            if (lastIndex[keys[i].Name] == i)
+            {
+                continue;
+            }
+
+            int end = i + 1 < keys.Count ? keys[i + 1].Start : rootEnd;
+            builder.Append(yaml, cursor, keys[i].Start - cursor);
+            cursor = end;
+            removed.Add(keys[i].Name);
+        }
+
+        builder.Append(yaml, cursor, yaml.Length - cursor);
+        removedDuplicateKeys = removed;
+        return builder.ToString();
+    }
     /// <summary>
     /// Applies the line-ending style of an existing source file to canonical LF serialization.
     /// Existing CRLF files remain CRLF; existing LF files and newly generated files remain LF.

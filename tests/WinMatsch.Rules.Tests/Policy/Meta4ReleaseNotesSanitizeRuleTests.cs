@@ -38,6 +38,18 @@ public class Meta4ReleaseNotesSanitizeRuleTests
     }
 
     [Fact]
+    public void Crlf_line_endings_are_normalized_to_lf()
+    {
+        // GDQuest.GDScript.Formatter 0.26.0 shipped a double-quoted scalar full of \r\n escapes.
+        PackageManifests manifests = CreateWithNotes("## Changelog\r\n\r\n### Fixed\r\nA bug\rB bug");
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        new Meta4ReleaseNotesSanitizeRule().Apply(context);
+
+        Assert.Equal("## Changelog\n\n### Fixed\nA bug\nB bug", manifests.DefaultLocale.ReleaseNotes);
+    }
+
+    [Fact]
     public void Bullet_transform_can_be_feature_flagged_off()
     {
         // The META-4-bullets subbehavior: cosmetic transform behind its own flag.

@@ -154,4 +154,52 @@ public class Wm0001HoistCommonInstallerFieldsTests
 
         Assert.Null(manifests.Installer.InstallerType);
     }
+
+    [Fact]
+    public void Restores_the_previous_root_default_when_one_installer_overrides_it()
+    {
+        // edde746.Plezy: root VCRedist x64 plus an arm64 override. WM0002 pushed the root down,
+        // the equality hoist could not bring it back, and winget-pkgs reported the root
+        // Dependencies property as missing.
+        PackageManifests previous = TestManifests.Create(TestManifests.CreateInstaller());
+        previous.Installer.Dependencies = Dependencies("Microsoft.VCRedist.2015+.x64");
+        Installer x64 = TestManifests.CreateInstaller(Architecture.X64);
+        Installer arm64 = TestManifests.CreateInstaller(Architecture.Arm64, url: "https://example.com/app-arm64.msi");
+        x64.Dependencies = Dependencies("Microsoft.VCRedist.2015+.x64");
+        arm64.Dependencies = Dependencies("Microsoft.VCRedist.2015+.x64", "Microsoft.VCRedist.2015+.arm64");
+        PackageManifests manifests = TestManifests.Create(x64, arm64);
+
+        _rule.Apply(TestManifests.CreateContext(manifests, previous: previous));
+
+        Assert.Equal(
+            "Microsoft.VCRedist.2015+.x64",
+            Assert.Single(manifests.Installer.Dependencies!.PackageDependencies!).PackageIdentifier!.Value);
+        Assert.Null(x64.Dependencies);
+        Assert.Equal(2, arm64.Dependencies!.PackageDependencies!.Count);
+    }
+
+    [Fact]
+    public void Does_not_restore_a_previous_root_value_an_installer_would_newly_inherit()
+    {
+        PackageManifests previous = TestManifests.Create(TestManifests.CreateInstaller());
+        previous.Installer.Scope = Scope.Machine;
+        Installer a = TestManifests.CreateInstaller(scope: Scope.Machine);
+        Installer b = TestManifests.CreateInstaller(Architecture.X86, url: "https://example.com/app-x86.msi");
+        PackageManifests manifests = TestManifests.Create(a, b);
+
+        _rule.Apply(TestManifests.CreateContext(manifests, previous: previous));
+
+        Assert.Null(manifests.Installer.Scope);
+        Assert.Equal(Scope.Machine, a.Scope);
+        Assert.Null(b.Scope);
+    }
+
+    private static Dependencies Dependencies(params string[] identifiers)
+        => new()
+        {
+            PackageDependencies =
+            [
+                .. identifiers.Select(static id => new PackageDependency { PackageIdentifier = new PackageIdentifier(id) }),
+            ],
+        };
 }

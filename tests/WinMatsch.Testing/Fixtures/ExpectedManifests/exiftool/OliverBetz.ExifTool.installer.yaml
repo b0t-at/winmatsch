@@ -4,6 +4,7 @@
 PackageIdentifier: OliverBetz.ExifTool
 PackageVersion: "12.87"
 InstallerType: inno
+ReleaseDate: 2024-06-17
 Installers:
 - Architecture: x86
   Scope: user

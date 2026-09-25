@@ -1393,6 +1393,40 @@ public sealed class WorkflowProductionCompositionTests
     }
 
     [Fact]
+    public async Task Workflow_preflight_answers_each_url_probe_once_per_run()
+    {
+        // Plan, re-plan and the verified boundary probe the same metadata URLs. An origin that
+        // flaps (200, then 403) must not turn the re-plan into WF_STALE_PLAN.
+        int requests = 0;
+        var handler = new StubHttpMessageHandler(_ => Interlocked.Increment(ref requests) == 1
+            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) }
+            : new HttpResponseMessage(HttpStatusCode.Forbidden));
+        using var downloader = new InstallerDownloader(handler);
+        string state = CreateDirectory();
+        var network = new DurableInstallerPreflightNetwork(
+            downloader,
+            state,
+            new RecordingWorkflowScratchCleanup(delete: true));
+        try
+        {
+            DownloadProbeResult first = await network.ProbeAsync(
+                "https://example.test/home",
+                CancellationToken.None);
+            int afterFirst = Volatile.Read(ref requests);
+            DownloadProbeResult second = await network.ProbeAsync(
+                "https://example.test/home",
+                CancellationToken.None);
+
+            Assert.Same(first, second);
+            Assert.Equal(afterFirst, Volatile.Read(ref requests));
+        }
+        finally
+        {
+            Directory.Delete(state, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Workflow_preflight_preserves_origin_failure_when_cleanup_is_scheduled()
     {
         var handler = new StubHttpMessageHandler(_ =>
