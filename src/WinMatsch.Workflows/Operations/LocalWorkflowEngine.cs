@@ -1028,15 +1028,7 @@ public sealed class LocalWorkflowEngine
         // Everything after this point is planning evidence the verified apply boundary cannot
         // recompute from a fresh preflight; the plan carries it so the boundary report matches.
         int boundaryFindingCount = validation.Findings.Count;
-        foreach (string droppedUrl in droppedDeadUrls)
-        {
-            validation = AddValidationFinding(validation, new ValidationFinding(
-                "WF_DEAD_METADATA_URL_DROPPED",
-                ValidationSeverity.Info,
-                "An optional metadata URL is definitively dead (HTTP 404/410, unresolvable host, or failed TLS handshake) and was dropped before submission.",
-                droppedUrl));
-        }
-
+        validation = AddDroppedDeadUrlFindings(validation, droppedDeadUrls);
         validation = AddStaleLearnedOverrideFinding(validation, rules.Summary);
         validation = AddLearnedStoreFindings(validation, learnedSnapshot);
         validation = await AddUpstreamVerdictFindingsAsync(
@@ -1183,7 +1175,17 @@ public sealed class LocalWorkflowEngine
                         validation = MergeRuleFindings(validation, rules.Summary);
                         boundaryFindingCount = validation.Findings.Count;
                         validation = MergeRuleFindings(validation, approvedRules.Summary);
+                        validation = AddDroppedDeadUrlFindings(validation, droppedDeadUrls);
                         validation = AddLearnedStoreFindings(validation, learnedSnapshot);
+
+                        // Rebuilding the report must not lose the verdict gate the reviewed plan showed.
+                        validation = await AddUpstreamVerdictFindingsAsync(
+                            validation,
+                            operationRequest,
+                            identifier,
+                            newVersion,
+                            candidate,
+                            cancellationToken).ConfigureAwait(false);
                         if (approvedRules.Summary.Findings.Any(static finding =>
                                 string.Equals(
                                     finding.RuleId,
@@ -2827,6 +2829,22 @@ public sealed class LocalWorkflowEngine
         => plan.PlanningFindings.IsDefaultOrEmpty
             ? validation
             : new([.. validation.Findings, .. plan.PlanningFindings]);
+
+    private static ValidationReport AddDroppedDeadUrlFindings(
+        ValidationReport validation,
+        ImmutableArray<string> droppedUrls)
+    {
+        foreach (string droppedUrl in droppedUrls)
+        {
+            validation = AddValidationFinding(validation, new ValidationFinding(
+                "WF_DEAD_METADATA_URL_DROPPED",
+                ValidationSeverity.Info,
+                "An optional metadata URL is definitively dead (HTTP 404/410, unresolvable host, or failed TLS handshake) and was dropped before submission.",
+                droppedUrl));
+        }
+
+        return validation;
+    }
 
     /// <summary>
     /// Blocks a plan that repeats what winget-pkgs already rejected for this package, unless the

@@ -1393,32 +1393,43 @@ public sealed class WorkflowProductionCompositionTests
     }
 
     [Fact]
-    public async Task Workflow_preflight_answers_each_url_probe_once_per_run()
+    public async Task Workflow_preflight_answers_each_url_probe_once_per_mutation()
     {
-        // Plan, re-plan and the verified boundary probe the same metadata URLs. An origin that
-        // flaps (200, then 403) must not turn the re-plan into WF_STALE_PLAN.
+        // The plan and the verified apply run on separate engines and networks; both must see
+        // the same answer, or an origin that flaps (200, then 403) turns the re-plan into
+        // WF_STALE_PLAN (altair-graphql.altair).
         int requests = 0;
-        var handler = new StubHttpMessageHandler(_ => Interlocked.Increment(ref requests) == 1
+        StubHttpMessageHandler Handler() => new(_ => Interlocked.Increment(ref requests) == 1
             ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) }
             : new HttpResponseMessage(HttpStatusCode.Forbidden));
-        using var downloader = new InstallerDownloader(handler);
         string state = CreateDirectory();
-        var network = new DurableInstallerPreflightNetwork(
-            downloader,
-            state,
-            new RecordingWorkflowScratchCleanup(delete: true));
+        var probes = new PreflightProbeCache();
         try
         {
-            DownloadProbeResult first = await network.ProbeAsync(
-                "https://example.test/home",
-                CancellationToken.None);
-            int afterFirst = Volatile.Read(ref requests);
-            DownloadProbeResult second = await network.ProbeAsync(
+            DownloadProbeResult first;
+            using (var planDownloader = new InstallerDownloader(Handler()))
+            {
+                var planNetwork = new DurableInstallerPreflightNetwork(
+                    planDownloader,
+                    state,
+                    new RecordingWorkflowScratchCleanup(delete: true),
+                    probes);
+                first = await planNetwork.ProbeAsync("https://example.test/home", CancellationToken.None);
+            }
+
+            int afterPlan = Volatile.Read(ref requests);
+            using var applyDownloader = new InstallerDownloader(Handler());
+            var applyNetwork = new DurableInstallerPreflightNetwork(
+                applyDownloader,
+                state,
+                new RecordingWorkflowScratchCleanup(delete: true),
+                probes);
+            DownloadProbeResult second = await applyNetwork.ProbeAsync(
                 "https://example.test/home",
                 CancellationToken.None);
 
             Assert.Same(first, second);
-            Assert.Equal(afterFirst, Volatile.Read(ref requests));
+            Assert.Equal(afterPlan, Volatile.Read(ref requests));
         }
         finally
         {

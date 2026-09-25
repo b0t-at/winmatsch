@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
 using WinMatsch.Core;
+using WinMatsch.Core.Yaml;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.Diagnostics;
 
@@ -185,10 +186,12 @@ public sealed class RepositoryManifestSnapshotSource :
                         $"Remote manifest path '{file.Path}' does not have a unique file name.");
                 }
 
+                // Parse a repaired copy (BOM, duplicated root key) but keep the published bytes
+                // as the snapshot documents, so diffs and delete preconditions match upstream.
                 await File.WriteAllTextAsync(
                     Path.Combine(temporaryDirectory, fileName),
-                    file.Content,
-                    Encoding.UTF8,
+                    ManifestYamlText.RepairForReading(file.Content, out _),
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
                     cancellationToken).ConfigureAwait(false);
             }
 

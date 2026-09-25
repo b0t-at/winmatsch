@@ -194,6 +194,43 @@ public class Wm0001HoistCommonInstallerFieldsTests
         Assert.Null(b.Scope);
     }
 
+    [Fact]
+    public void Does_not_restore_a_composite_root_value_whose_merge_would_change_an_override()
+    {
+        // WinGet merges InstallerSwitches key by key: a restored root Custom switch would leak
+        // into an installer that deliberately declares only Silent.
+        PackageManifests previous = TestManifests.Create(TestManifests.CreateInstaller());
+        previous.Installer.InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" };
+        Installer a = TestManifests.CreateInstaller();
+        Installer b = TestManifests.CreateInstaller(Architecture.X86, url: "https://example.com/app-x86.msi");
+        a.InstallerSwitches = new InstallerSwitches { Custom = "/ALLUSERS" };
+        b.InstallerSwitches = new InstallerSwitches { Silent = "/S" };
+        PackageManifests manifests = TestManifests.Create(a, b);
+
+        _rule.Apply(TestManifests.CreateContext(manifests, previous: previous));
+
+        Assert.Null(manifests.Installer.InstallerSwitches);
+        Assert.Equal("/ALLUSERS", a.InstallerSwitches!.Custom);
+        Assert.Equal("/S", b.InstallerSwitches!.Silent);
+    }
+
+    [Fact]
+    public void Does_not_restore_root_dependencies_an_override_does_not_contain()
+    {
+        PackageManifests previous = TestManifests.Create(TestManifests.CreateInstaller());
+        previous.Installer.Dependencies = Dependencies("Microsoft.VCRedist.2015+.x64");
+        Installer a = TestManifests.CreateInstaller(Architecture.X64);
+        Installer b = TestManifests.CreateInstaller(Architecture.Arm64, url: "https://example.com/app-arm64.msi");
+        a.Dependencies = Dependencies("Microsoft.VCRedist.2015+.x64");
+        b.Dependencies = Dependencies("Microsoft.VCRedist.2015+.arm64");
+        PackageManifests manifests = TestManifests.Create(a, b);
+
+        _rule.Apply(TestManifests.CreateContext(manifests, previous: previous));
+
+        Assert.Null(manifests.Installer.Dependencies);
+        Assert.NotNull(a.Dependencies);
+    }
+
     private static Dependencies Dependencies(params string[] identifiers)
         => new()
         {

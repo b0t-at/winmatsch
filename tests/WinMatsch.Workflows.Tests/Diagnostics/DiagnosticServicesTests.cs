@@ -246,6 +246,20 @@ public sealed class DiagnosticServicesTests
             "https://example.test/releases/tag/1.23.1",
             snapshot.Manifests.DefaultLocale.ReleaseNotesUrl);
         Assert.Equal(version, snapshot.Manifests.Installer.PackageVersion);
+
+        // The published bytes stay untouched for diffs and for `show --raw`.
+        Assert.Contains(
+            snapshot.Documents,
+            static document => System.Text.Encoding.UTF8.GetString(document.Content.AsSpan())
+                .Contains("releases/tag/1.0.0", StringComparison.Ordinal));
+        PackageVersionResult raw = await new RepositoryDiagnosticService(client).GetPackageVersionAsync(
+            Repository,
+            manifests.Version.PackageIdentifier!,
+            version,
+            normalize: false);
+        Assert.Contains(
+            raw.Files,
+            static file => file.Content.StartsWith('\uFEFF'));
     }
 
     private static RepositoryCoordinates Repository { get; } = new("owner", "repo");

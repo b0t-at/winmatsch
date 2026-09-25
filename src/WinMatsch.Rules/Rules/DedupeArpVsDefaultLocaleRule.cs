@@ -8,8 +8,9 @@ namespace WinMatsch.Rules;
 /// to the default locale's <c>Publisher</c>, and <c>DisplayVersion</c> equal to the
 /// <c>PackageVersion</c>. Entries that end up with all fields null are dropped, and a list that
 /// becomes empty is removed. Applies to the manifest root and to every installer. On an update,
-/// a field the previous version's entries declared is kept: removing it changes the ARP shape,
-/// which winget-pkgs flags as Manifest-Metadata-Consistency and ARP-4 reports (Lando.Lando).
+/// a DisplayName or Publisher the previous version's entries declared is kept: removing it
+/// changes the ARP shape, which winget-pkgs flags as Manifest-Metadata-Consistency and ARP-4
+/// reports (Lando.Lando).
 /// </summary>
 public sealed class DedupeArpVsDefaultLocaleRule : IRule
 {
@@ -68,8 +69,8 @@ public sealed class DedupeArpVsDefaultLocaleRule : IRule
                 context.AddTrace(this, $"{path}: dropped Publisher equal to the default locale Publisher.");
             }
 
+            // DisplayVersion is not preserved: ARP-2 removes a redundant DisplayVersion anyway.
             if (entry.DisplayVersion is not null
-                && !redundant.Previous.DisplayVersion
                 && string.Equals(entry.DisplayVersion, redundant.PackageVersion, StringComparison.Ordinal))
             {
                 entry.DisplayVersion = null;
@@ -98,7 +99,7 @@ public sealed class DedupeArpVsDefaultLocaleRule : IRule
         string? PackageVersion,
         PreviousFields Previous);
 
-    private readonly record struct PreviousFields(bool DisplayName, bool Publisher, bool DisplayVersion)
+    private readonly record struct PreviousFields(bool DisplayName, bool Publisher)
     {
         public static PreviousFields From(InstallerManifest? previous)
         {
@@ -114,8 +115,7 @@ public sealed class DedupeArpVsDefaultLocaleRule : IRule
             ];
             return new(
                 entries.Any(static entry => entry.DisplayName is not null),
-                entries.Any(static entry => entry.Publisher is not null),
-                entries.Any(static entry => entry.DisplayVersion is not null));
+                entries.Any(static entry => entry.Publisher is not null));
         }
     }
 }

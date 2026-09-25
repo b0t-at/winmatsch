@@ -99,7 +99,9 @@ public sealed class HoistCommonInstallerFieldsRule : IRule
         [
             .. installers.Where(installer => accessor.ValueEquals(previousRoot, accessor.Get(installer)!)),
         ];
-        if (matching.Length == 0)
+        if (matching.Length == 0
+            || !installers.Except(matching).All(installer =>
+                OverrideIsLossless(previousRoot, accessor.Get(installer)!)))
         {
             return;
         }
@@ -113,6 +115,34 @@ public sealed class HoistCommonInstallerFieldsRule : IRule
         context.AddTrace(this,
             $"Restored the previous version's root {accessor.Name}; {installers.Count - matching.Length} installer(s) keep their own value.");
     }
+
+    /// <summary>
+    /// Whether an installer's own value yields the same effective value whether WinGet replaces
+    /// the root default or merges it key by key. Scalars always replace; Dependencies qualify
+    /// only when the installer's set already contains the root's; other composites and lists
+    /// are not restored because their merge behaviour is not modelled here.
+    /// </summary>
+    private static bool OverrideIsLossless(object root, object value)
+        => (root, value) switch
+        {
+            (Dependencies rootDependencies, Dependencies installerDependencies) =>
+                Covers(rootDependencies.WindowsFeatures, installerDependencies.WindowsFeatures)
+                && Covers(rootDependencies.WindowsLibraries, installerDependencies.WindowsLibraries)
+                && Covers(rootDependencies.ExternalDependencies, installerDependencies.ExternalDependencies)
+                && (rootDependencies.PackageDependencies ?? []).All(required =>
+                    (installerDependencies.PackageDependencies ?? []).Any(candidate =>
+                        string.Equals(
+                            candidate.PackageIdentifier?.Value,
+                            required.PackageIdentifier?.Value,
+                            StringComparison.OrdinalIgnoreCase)
+                        && Equals(candidate.MinimumVersion, required.MinimumVersion))),
+            (System.Collections.IEnumerable and not string, _) => false,
+            (InstallerSwitches or InstallationMetadata or Markets or Authentication, _) => false,
+            _ => true,
+        };
+
+    private static bool Covers(List<string>? required, List<string>? available)
+        => (required ?? []).All(item => (available ?? []).Contains(item, StringComparer.OrdinalIgnoreCase));
 
     private static void ClearOnAllInstallers(List<Installer> installers, InstallerFieldAccessor accessor)
     {

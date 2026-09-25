@@ -65,9 +65,9 @@ Run first, in a fixed order, to produce a canonical manifest shape
 | `WM0002` | Push root-level installer fields down to installers when per-installer conflicts exist. |
 | `WM0004` | Scrub junk: null out empty strings, remove empty lists, prune empty composite objects. |
 | `WM0006` | Normalize GUID product/upgrade codes to canonical uppercase-in-braces form. |
-| `WM0003` | Drop ARP (Apps & Features) entries that merely duplicate the default locale name/publisher or the package version. On update, a field the previous version's entries declared is kept (removing it would change the ARP shape `ARP-4` guards). |
+| `WM0003` | Drop ARP (Apps & Features) entries that merely duplicate the default locale name/publisher or the package version. On update, a `DisplayName` or `Publisher` the previous version's entries declared is kept (removing it would change the ARP shape `ARP-4` guards). |
 | `WM0005` | Remove installers that are exact duplicates on effective architecture + type + scope + URL. |
-| `WM0001` | Hoist installer fields shared by every installer up to the manifest root. On update, a field the previous version declared at the root is restored there when every installer carries a value and at least one equals the previous root (root default plus per-installer overrides). Runs last so it sees the final shape. |
+| `WM0001` | Hoist installer fields shared by every installer up to the manifest root. On update, a field the previous version declared at the root is restored there when every installer carries a value and at least one equals the previous root (root default plus per-installer overrides) — for scalar fields, and for `Dependencies` only when every overriding installer already contains the root set. Runs last so it sees the final shape. |
 
 ### Policy rules
 
