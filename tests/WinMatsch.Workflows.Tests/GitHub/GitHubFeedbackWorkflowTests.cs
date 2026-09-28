@@ -559,6 +559,83 @@ public sealed class GitHubFeedbackWorkflowTests
     }
 
     [Fact]
+    public void Passing_labels_do_not_hide_a_request_for_author_changes()
+    {
+        PullRequestObservation observation = Observation("Please update the license URL.") with
+        {
+            Labels = ["Azure-Pipeline-Passed", "Validation-Completed", "Needs-Author-Feedback"],
+        };
+
+        Assert.Equal(FeedbackClassification.Unknown, GitHubFeedbackWorkflow.Classify(observation));
+    }
+
+    [Fact]
+    public async Task Keep_alive_comments_are_never_posted_on_branch_prefix_pull_requests()
+    {
+        var client = new FakeGitHubClient();
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            new FakeRepairPlanner(),
+            new FakeClock(),
+            new FakeFeedbackStateStore());
+        PullRequestObservation observation = Observation("Internal error, please rerun.") with
+        {
+            PullRequest = GitHubLifecycleTestSupport.PullRequest(20) with
+            {
+                Title = "Update version: Example.App version 2.0.0",
+                Body = "Update Example.App to version 2.0.0.",
+                HeadBranch = "winget-autosubmit/example.app-2.0.0-0123456789abcdef",
+            },
+            Labels = ["Internal-Error-Dynamic-Scan"],
+            AssociatedPackageIdentifier = "Example.App",
+            AssociatedPackageVersion = "2.0.0",
+        };
+
+        FeedbackResult result = await workflow.ProcessAsync(
+            GitHubLifecycleTestSupport.Upstream,
+            [observation],
+            new FeedbackPolicy { ApplyKnownSafeResponses = true });
+
+        Assert.Equal(PullRequestLifecycleAction.RerunChecks, result.Statuses[0].RecommendedAction);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Unreadable_rejected_manifest_still_records_the_installation_verdict()
+    {
+        var client = new FakeGitHubClient();
+        var store = new FakeFeedbackStateStore();
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            new FakeRepairPlanner(),
+            new FakeClock(),
+            store);
+        var headRepository = new RepositoryCoordinates("damn-good-b0t", "winget-pkgs");
+        const string installerPath =
+            "manifests/e/Example/App/2.0.0/Example.App.installer.yaml";
+        client.SetContent(headRepository, installerPath, "head-sha", "PackageIdentifier: [unterminated"u8);
+        PullRequestObservation observation = Observation("Installation failed.") with
+        {
+            PullRequest = GitHubLifecycleTestSupport.PullRequest(20) with
+            {
+                HeadSha = "head-sha",
+                HeadRepository = headRepository,
+            },
+            Labels = ["Validation-Unattended-Failed"],
+            ChangedFiles = [new(installerPath)],
+        };
+
+        await workflow.ProcessAsync(GitHubLifecycleTestSupport.Upstream, [observation]);
+
+        FeedbackWorkItem item = Assert.Single(store.Items);
+        Assert.Equal(FeedbackClassification.InstallationFailure, item.Classification);
+        Assert.Equal(FeedbackWorkState.Escalated, item.State);
+        Assert.Null(item.InstallerTraits);
+    }
+
+    [Fact]
     public async Task Installation_failure_on_another_automations_pull_request_records_identity_and_traits()
     {
         // Pipeline ForkBranch PRs carry no winmatsch body marker; the observation source supplies

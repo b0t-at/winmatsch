@@ -152,6 +152,30 @@ public sealed class UpstreamVerdictGateTests
         Assert.Empty(changed);
     }
 
+    [Fact]
+    public void Recorded_rejected_traits_win_over_a_later_merged_manifest_of_that_version()
+    {
+        // The rejected version may merge later with fixed switches; comparing against that
+        // merged manifest would block every following update with the fixed switches.
+        UpstreamVerdict verdict = Verdict(FeedbackClassification.InstallationFailure, "1.0.0") with
+        {
+            InstallerTraits = UpstreamVerdictGate.InstallerTraits(Manifests("1.0.0", silent: "/S").Installer),
+        };
+        var mergedAfterFix = new Dictionary<string, PackageManifests>(StringComparer.Ordinal)
+        {
+            ["1.0.0"] = Manifests("1.0.0", silent: "/S /ALLUSERS"),
+        };
+
+        ImmutableArray<ValidationFinding> findings = UpstreamVerdictGate.Evaluate(
+            _identifier,
+            new PackageVersion("1.1.0"),
+            Manifests("1.1.0", silent: "/S /ALLUSERS"),
+            [verdict],
+            mergedAfterFix);
+
+        Assert.Empty(findings);
+    }
+
     private static UpstreamVerdict Verdict(
         FeedbackClassification classification,
         string version,

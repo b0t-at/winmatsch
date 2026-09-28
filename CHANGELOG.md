@@ -31,13 +31,14 @@ winmatsch.
 - `complete --branch-prefix <prefix>` also classifies the fork's pull requests
   that another automation opened on that head-branch prefix (the update
   pipeline's `winget-autosubmit/` branches), identified by their conventional
-  title because they carry no winmatsch marker. Repairs and supersession stay
-  limited to `winmatsch/` pull requests. `--schedule-pending` is now
-  documented.
+  title because they carry no winmatsch marker. Repairs, supersession and
+  keep-alive comments stay limited to pull requests winmatsch opened.
+  `--schedule-pending` is now documented.
 - Installation-failure escalations record the rejected manifest's installer
   type, scope and switches from the pull-request head. The rejected version is
-  rarely merged, so the `WF_UPSTREAM_VERDICT` gate previously had nothing to
-  compare against (DiRoots.ProSheets 2.4.2 was resubmitted with the switches
+  rarely merged (and, if it is, usually with fixed switches), so the
+  `WF_UPSTREAM_VERDICT` gate previously had nothing reliable to compare
+  against (DiRoots.ProSheets 2.4.2 was resubmitted with the switches
   that failed unattended for 2.4.1).
 
 ### Changed
@@ -88,7 +89,9 @@ winmatsch.
 - `complete` escalated every healthy pull request as unknown feedback: the
   policy service comments on each one, and passing labels
   (`Azure-Pipeline-Passed`, `Validation-Completed`, `Moderator-Approved`,
-  `Publish-Pipeline-Succeeded`) were not recognized. They now mean "wait".
+  `Publish-Pipeline-Succeeded`) were not recognized. They now mean "wait"
+  unless a moderator asked for changes (`Needs-Author-Feedback`,
+  `Changes-Requested`, `No-Recent-Activity`).
   Fresh unknown feedback is no longer recorded (only once stale), and a later
   blocking verdict replaces an earlier non-blocking terminal item; previously
   the first observation froze the item before the validator answered.

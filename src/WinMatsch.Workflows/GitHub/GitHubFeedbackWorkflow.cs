@@ -68,6 +68,11 @@ public sealed partial class GitHubFeedbackWorkflow
         "Publish-Pipeline-Succeeded",
     ];
 
+    // A moderator asking for changes leaves the passing labels in place; such a PR still needs a
+    // human, so it keeps the comment path (unknown feedback, escalated once stale).
+    private static readonly string[] _authorActionLabels =
+        ["Needs-Author-Feedback", "Changes-Requested", "No-Recent-Activity"];
+
     private readonly IGitHubRepositoryClient _gitHub;
     private readonly GitHubLifecycleWorkflow _submissions;
     private readonly IApprovedRepairPlanner _repairs;
@@ -279,7 +284,10 @@ public sealed partial class GitHubFeedbackWorkflow
                         _clock.UtcNow.AddHours(1),
                         null));
                     workState = FeedbackWorkState.RetryScheduled;
-                    if (policy.ApplyKnownSafeResponses)
+
+                    // Keep-alive comments are only posted on winmatsch's own pull requests;
+                    // --branch-prefix pull requests are classified and recorded, never commented on.
+                    if (policy.ApplyKnownSafeResponses && IsWinMatschPullRequest(observation.PullRequest))
                     {
                         try
                         {
@@ -634,7 +642,7 @@ public sealed partial class GitHubFeedbackWorkflow
             return FeedbackClassification.AwaitingManualValidation;
         }
 
-        if (HasAny(labels, _pipelinePassedLabels))
+        if (HasAny(labels, _pipelinePassedLabels) && !HasAny(labels, _authorActionLabels))
         {
             return FeedbackClassification.None;
         }
@@ -871,6 +879,11 @@ public sealed partial class GitHubFeedbackWorkflow
                 StringComparison.OrdinalIgnoreCase);
     }
 
+    // winmatsch writes the association marker into every pull request it opens; pull requests
+    // owned through --branch-prefix carry none.
+    private static bool IsWinMatschPullRequest(PullRequestInfo pullRequest)
+        => pullRequest.Body?.Contains("<!-- winmatsch:package=", StringComparison.Ordinal) == true;
+
     private static bool TryGetAssociation(
         string? body,
         out string? packageIdentifier,
@@ -961,15 +974,11 @@ public sealed partial class GitHubFeedbackWorkflow
             return UpstreamVerdictGate.InstallerTraits(manifest);
         }
         catch (Exception exception) when (
-            exception is GitHubApiException
-                or HttpRequestException
-                or NotSupportedException
-                or InvalidDataException
-                or FormatException
-                or ArgumentException
-                or InvalidOperationException
-                or YamlDotNet.Core.YamlException)
+            exception is not OperationCanceledException
+            || !cancellationToken.IsCancellationRequested)
         {
+            // Optional evidence: transport, timeout and parse failures must neither drop the
+            // verdict nor abort the run.
             return null;
         }
     }

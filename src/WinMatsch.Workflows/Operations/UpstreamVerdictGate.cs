@@ -163,12 +163,14 @@ public static class UpstreamVerdictGate
 
                 return null;
             case FeedbackClassification.InstallationFailure:
-                // The rejected version is rarely merged; the traits recorded from the rejected
-                // pull request stand in for a manifest that cannot be loaded.
-                string? rejectedTraits = verdict.PackageVersion is { } installVersion
-                    && rejectedVersions.TryGetValue(installVersion.Value, out PackageManifests? rejectedByInstall)
-                        ? InstallerTraits(rejectedByInstall.Installer)
-                        : verdict.InstallerTraits;
+                // The traits recorded from the rejected pull request describe exactly what
+                // failed. A manifest loaded for that version is only a fallback: it exists only
+                // when the version was merged later, usually after its switches were fixed.
+                string? rejectedTraits = verdict.InstallerTraits
+                    ?? (verdict.PackageVersion is { } installVersion
+                        && rejectedVersions.TryGetValue(installVersion.Value, out PackageManifests? rejectedByInstall)
+                            ? InstallerTraits(rejectedByInstall.Installer)
+                            : null);
                 return rejectedTraits is not null
                     && string.Equals(rejectedTraits, candidateTraits, StringComparison.Ordinal)
                     ? "the installer type, scope and switches are unchanged since the rejected version."
