@@ -57,6 +57,7 @@ public sealed class Scope1UserMachineTwinRule : IRule
             }
 
             assignedTwinScopes |= TryAssignTwinScopes(context, manifest, installers, group[0], group[1]);
+            RepairInheritedScopeSwitch(context, manifest, installers, group[0], group[1]);
         }
 
         if (assignedTwinScopes && manifest.Scope is { } rootScope)
@@ -126,6 +127,87 @@ public sealed class Scope1UserMachineTwinRule : IRule
             RuleChangeConfidence.High);
         context.AddTrace(this, $"Installers[{index}]: assigned Scope '{scope}' from switch tokens.");
         return true;
+    }
+
+    /// <summary>
+    /// Nullsoft user/machine twins that declare opposite explicit scopes but share one root
+    /// switch set carrying a single MultiUser token (Automattic.Wordpress: root
+    /// <c>Custom: /CURRENTUSER</c> for both twins) install the machine twin per-user. The twin
+    /// whose scope contradicts the token gets its own switch set with the paired token
+    /// (<c>/CURRENTUSER</c> ↔ <c>/ALLUSERS</c>); nothing else changes.
+    /// </summary>
+    private void RepairInheritedScopeSwitch(
+        ManifestContext context,
+        InstallerManifest manifest,
+        List<Installer> installers,
+        int firstIndex,
+        int secondIndex)
+    {
+        Installer first = installers[firstIndex];
+        Installer second = installers[secondIndex];
+        if (first.Scope is not { } firstScope
+            || second.Scope is not { } secondScope
+            || firstScope == secondScope
+            || first.InstallerSwitches is not null
+            || second.InstallerSwitches is not null
+            || manifest.InstallerSwitches is not { } shared
+            || (first.InstallerType ?? manifest.InstallerType) != InstallerType.Nullsoft
+            || (second.InstallerType ?? manifest.InstallerType) != InstallerType.Nullsoft)
+        {
+            return;
+        }
+
+        string?[] values = [.. EnumerateSwitchValues(shared)];
+        bool user = values.Any(static value => value is not null && ContainsToken(value, "/CURRENTUSER"));
+        bool machine = values.Any(static value => value is not null && ContainsToken(value, "/ALLUSERS"));
+        if (user == machine)
+        {
+            return;
+        }
+
+        Scope tokenScope = user ? Scope.User : Scope.Machine;
+        (Installer target, int index) = firstScope == tokenScope ? (second, secondIndex) : (first, firstIndex);
+        string from = user ? "/CURRENTUSER" : "/ALLUSERS";
+        string to = user ? "/ALLUSERS" : "/CURRENTUSER";
+        InstallerSwitches repaired = ManifestValues.CloneSwitches(shared);
+        repaired.Silent = ReplaceToken(repaired.Silent, from, to);
+        repaired.SilentWithProgress = ReplaceToken(repaired.SilentWithProgress, from, to);
+        repaired.Interactive = ReplaceToken(repaired.Interactive, from, to);
+        repaired.Custom = ReplaceToken(repaired.Custom, from, to);
+        repaired.Upgrade = ReplaceToken(repaired.Upgrade, from, to);
+        target.InstallerSwitches = repaired;
+        context.AddChangeEvidence(
+            this,
+            ManifestContext.GetInstallerManifestPath(context.Manifests),
+            $"Installers[{index}].InstallerSwitches",
+            $"the {target.Scope} twin inherited the shared {from} switch; the paired NSIS MultiUser token {to} selects its declared scope",
+            RuleChangeConfidence.High);
+        context.AddTrace(this, $"Installers[{index}]: replaced inherited {from} with {to} for its declared scope.");
+    }
+
+    private static string? ReplaceToken(string? value, string token, string replacement)
+    {
+        if (value is null || !ContainsToken(value, token))
+        {
+            return value;
+        }
+
+        int index = value.IndexOf(token, StringComparison.OrdinalIgnoreCase);
+        while (index >= 0)
+        {
+            bool leftOk = index == 0 || !char.IsLetterOrDigit(value[index - 1]);
+            int end = index + token.Length;
+            bool rightOk = end == value.Length || !char.IsLetterOrDigit(value[end]);
+            if (leftOk && rightOk)
+            {
+                value = string.Concat(value.AsSpan(0, index), replacement, value.AsSpan(end));
+                end = index + replacement.Length;
+            }
+
+            index = value.IndexOf(token, end, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return value;
     }
 
     /// <summary>The scope the entry's switches unambiguously indicate, or null.</summary>

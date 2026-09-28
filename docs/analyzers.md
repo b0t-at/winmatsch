@@ -26,7 +26,7 @@ installer formats because those installers may embed archives as payloads.
 | Java executable archive (`.exe`) | `PortableExe` | Detects PE/JAR polyglots and reports neutral when bundled native libraries cover multiple architectures. |
 | 7-Zip SFX (`.exe`) | `GenericInstallerExe` | Bounded embedded PE inspection with installed-application architecture voting; excludes setup/uninstall helper executables. Uses the shared 10,000-entry/1 GB archive ceilings and emits `SFX002` with partial evidence when a ceiling is reached. |
 | Squirrel / Clowd.Squirrel (`.exe`) | `Squirrel` | Squirrel package metadata. |
-| Generic installer (`.exe`) | `GenericInstallerExe` | PE version info (product name, company, product version, file version, copyright, original filename, description), architecture, elevation requirement. Chosen when installer keywords (`installer`, `setup`, 7z SFX markers) match but no specific format probe does. |
+| Generic installer (`.exe`) | `GenericInstallerExe` | PE version info (product name, company, product version, file version, copyright, original filename, description), architecture, elevation requirement. Chosen when installer keywords (`installer`, `setup`, 7z SFX markers) match but no specific format probe does. A name whose last word is `CLI` (`AppInstallerCLI.exe`, `TizenAppInstallerCli.exe`) names a command-line tool and stays portable. |
 | Portable executable (`.exe`) | `PortableExe` | Same PE metadata; classified as portable when no installer signals are present. |
 
 Every extracted value is attached to the manifest as *evidence* with a source

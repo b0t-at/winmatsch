@@ -80,7 +80,7 @@ normalization, observing the canonical shape.
 | `ARP-2` | Remove ARP DisplayVersion values that equal PackageVersion or are already declared elsewhere. |
 | `ARP-3` | Drop garbage from ARP/installation metadata: unexpanded `%VAR%` variables, `ms-resource:` references, non-printable characters, temp paths. |
 | `ARP-4` | Require ARP entry shape parity with the previously merged version, or an explicit override annotation. |
-| `SCOPE-1` | Assign per-installer scope to same-URL switch twins (`/CURRENTUSER` vs `/ALLUSERS`), keeping the root scope null. |
+| `SCOPE-1` | Assign per-installer scope to same-URL switch twins (`/CURRENTUSER` vs `/ALLUSERS`), keeping the root scope null. Nullsoft twins with opposite explicit scopes that share one root `/CURRENTUSER` or `/ALLUSERS` switch get the paired token on the contradicting twin. |
 | `SCOPE-2` | Set installer scope from trusted installer-metadata evidence only — never guessed. |
 | `SCOPE-3` | Trim or drop blank installer switches; flag switches carried across installer-family changes; flag `Custom` switch values that embed a network address. |
 | `SCOPE-4` | Correct `msi`/`wix` classifications to the analyzer's detected outer wrapper. |

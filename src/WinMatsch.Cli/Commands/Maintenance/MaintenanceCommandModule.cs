@@ -355,6 +355,15 @@ public sealed class MaintenanceCommandModule : ICommandModule
             Description = "Allowlisted repair input as PR_NUMBER=MANIFEST_DIRECTORY. May be "
                 + "repeated; only duplicate/hash classifications can consume it.",
         };
+        var branchPrefix = new Option<string[]>("--branch-prefix")
+        {
+            Description = "Additional head-branch prefix of pull requests your own automation "
+                + "opened from the fork (e.g. winget-autosubmit/). May be repeated. Such pull "
+                + "requests are classified and their verdicts recorded, identified by their "
+                + "conventional title; repairs and supersession stay limited to winmatsch/ "
+                + "pull requests.",
+            HelpName = "prefix",
+        };
         var command = new Command(
             "complete",
             "Inspect the lifecycle of open tool-created pull requests and report the "
@@ -367,6 +376,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
                 schedulePending,
                 replayPending,
                 approvedRepair,
+                branchPrefix,
                 yes,
             },
         };
@@ -396,6 +406,16 @@ public sealed class MaintenanceCommandModule : ICommandModule
             }
 
             RepositoryCoordinates upstream = context.Configuration.Repository;
+            string[] extraPrefixes = context.ParseResult.GetValue(branchPrefix) ?? [];
+            if (extraPrefixes.Any(static prefix =>
+                    string.IsNullOrWhiteSpace(prefix)
+                    || !prefix.EndsWith('/')
+                    || prefix.Contains("..", StringComparison.Ordinal)))
+            {
+                throw new CliUsageException(
+                    "--branch-prefix must be a non-empty branch prefix ending in '/'.");
+            }
+
             using IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
             RepositoryCoordinates forkRepository = await ResolveForkAsync(context, client, fork, upstream)
                 .ConfigureAwait(false);
@@ -414,7 +434,8 @@ public sealed class MaintenanceCommandModule : ICommandModule
                     forkRepository.Owner,
                     new GitHubPullRequestMetadataSource(
                         context.GitHubOptions,
-                        token.Token.RevealValue()));
+                        token.Token.RevealValue()),
+                    extraPrefixes);
             }
 
             using IDisposable? sourceLease = source as IDisposable;

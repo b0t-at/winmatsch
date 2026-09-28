@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text.RegularExpressions;
 using WinMatsch.Core;
+using WinMatsch.Core.Yaml;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.Operations;
 
@@ -54,6 +55,17 @@ public sealed partial class GitHubFeedbackWorkflow
         "Validation-No-Executables",
         "Validation-Domain",
         "Validation-Agreement-Domain",
+    ];
+
+    // Healthy pipeline states: nothing for the bot to do while moderators review. Without them
+    // every passing PR fell through to the routine policy-service comments and was escalated as
+    // Unknown.
+    private static readonly string[] _pipelinePassedLabels =
+    [
+        "Azure-Pipeline-Passed",
+        "Validation-Completed",
+        "Moderator-Approved",
+        "Publish-Pipeline-Succeeded",
     ];
 
     private readonly IGitHubRepositoryClient _gitHub;
@@ -326,7 +338,11 @@ public sealed partial class GitHubFeedbackWorkflow
                     diagnostics.Add(new(
                         "GH3201",
                         $"Unknown feedback on PR #{observation.PullRequest.Number} requires human escalation."));
-                    workState = FeedbackWorkState.Escalated;
+
+                    // Escalated is terminal in the store. Recording a fresh unknown signal (the
+                    // routine policy-service comments on every PR) would freeze the item before
+                    // the validator's real verdict arrives, so only a stale one is recorded.
+                    workState = stale ? FeedbackWorkState.Escalated : null;
                     break;
                 default:
                     statuses.Add(Status(
@@ -349,6 +365,14 @@ public sealed partial class GitHubFeedbackWorkflow
                         out string? packageIdentifier,
                         out string? packageVersion,
                         out _);
+                    packageIdentifier ??= observation.AssociatedPackageIdentifier;
+                    packageVersion ??= observation.AssociatedPackageIdentifier is null
+                        ? null
+                        : observation.AssociatedPackageVersion;
+                    string? installerTraits = classification == FeedbackClassification.InstallationFailure
+                        ? await ReadRejectedInstallerTraitsAsync(observation, cancellationToken)
+                            .ConfigureAwait(false)
+                        : null;
                     await _stateStore.PersistAsync(
                         new(
                             upstream.ToString(),
@@ -361,7 +385,10 @@ public sealed partial class GitHubFeedbackWorkflow
                             status.Reason,
                             packageIdentifier,
                             packageVersion,
-                            CollectValidatorUrls(observation, policy)),
+                            CollectValidatorUrls(observation, policy))
+                        {
+                            InstallerTraits = installerTraits,
+                        },
                         CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception exception) when (
@@ -605,6 +632,11 @@ public sealed partial class GitHubFeedbackWorkflow
         if (HasAny(labels, _manualValidationLabels))
         {
             return FeedbackClassification.AwaitingManualValidation;
+        }
+
+        if (HasAny(labels, _pipelinePassedLabels))
+        {
+            return FeedbackClassification.None;
         }
 
         return null;
@@ -867,6 +899,79 @@ public sealed partial class GitHubFeedbackWorkflow
         packageIdentifier = association[..separator];
         packageVersion = association[(separator + versionSeparator.Length)..];
         return GitHubSubmissionFormatter.TryGetOperation(body, out operation);
+    }
+
+    /// <summary>
+    /// The installer type, scope and switches of the manifest an installation test rejected,
+    /// read from the pull request head. A rejected version is usually never merged, so without
+    /// this the upstream-verdict gate has nothing to compare the next version against
+    /// (DiRoots.ProSheets 2.4.2 was resubmitted with the switches that failed for 2.4.1).
+    /// Best effort: any failure returns null and the verdict is recorded without traits.
+    /// </summary>
+    private async Task<string?> ReadRejectedInstallerTraitsAsync(
+        PullRequestObservation observation,
+        CancellationToken cancellationToken)
+    {
+        const int maximumManifestBytes = 1_048_576;
+        PullRequestInfo pullRequest = observation.PullRequest;
+        if (pullRequest.HeadRepository is not { } headRepository
+            || string.IsNullOrWhiteSpace(pullRequest.HeadSha))
+        {
+            return null;
+        }
+
+        string? path = observation.ChangedFiles
+            .Where(static file => file.Status != PullRequestFileStatus.Removed
+                && file.Path.EndsWith(".installer.yaml", StringComparison.OrdinalIgnoreCase))
+            .Select(static file => file.Path)
+            .Order(StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (path is null)
+        {
+            _ = TryGetAssociation(pullRequest.Body, out string? markerIdentifier, out string? markerVersion, out _);
+            string? identifierValue = markerIdentifier ?? observation.AssociatedPackageIdentifier;
+            string? versionValue = markerVersion ?? observation.AssociatedPackageVersion;
+            if (PackageIdentifier.TryCreate(identifierValue, out PackageIdentifier? identifier)
+                && PackageVersion.TryCreate(versionValue, out PackageVersion? version))
+            {
+                path = ManifestPaths.GetVersionDirectory(identifier!, version!)
+                    + "/" + ManifestPaths.GetInstallerFileName(identifier!);
+            }
+        }
+
+        if (path is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            RepositoryContent content = await _gitHub.GetContentAsync(
+                headRepository,
+                path,
+                pullRequest.HeadSha,
+                cancellationToken).ConfigureAwait(false);
+            if (content.Bytes.Length > maximumManifestBytes)
+            {
+                return null;
+            }
+
+            InstallerManifest manifest = ManifestYamlReader.ReadInstaller(
+                ManifestYamlText.RepairForReading(content.GetText(), out _));
+            return UpstreamVerdictGate.InstallerTraits(manifest);
+        }
+        catch (Exception exception) when (
+            exception is GitHubApiException
+                or HttpRequestException
+                or NotSupportedException
+                or InvalidDataException
+                or FormatException
+                or ArgumentException
+                or InvalidOperationException
+                or YamlDotNet.Core.YamlException)
+        {
+            return null;
+        }
     }
 
     private async Task<SupersessionResult> CloseSupersededAsync(

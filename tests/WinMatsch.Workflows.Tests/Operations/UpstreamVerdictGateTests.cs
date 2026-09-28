@@ -125,6 +125,33 @@ public sealed class UpstreamVerdictGateTests
         Assert.Empty(unknown);
     }
 
+    [Fact]
+    public void Installation_failure_uses_recorded_traits_when_the_rejected_version_was_never_merged()
+    {
+        // DiRoots.ProSheets 2.4.1 failed unattended installation and was closed unmerged; 2.4.2
+        // was resubmitted with the same switches because the gate had nothing to compare with.
+        UpstreamVerdict verdict = Verdict(FeedbackClassification.InstallationFailure, "1.0.0") with
+        {
+            InstallerTraits = UpstreamVerdictGate.InstallerTraits(Manifests("1.0.0", silent: "/S").Installer),
+        };
+
+        ImmutableArray<ValidationFinding> unchanged = UpstreamVerdictGate.Evaluate(
+            _identifier,
+            new PackageVersion("1.1.0"),
+            Manifests("1.1.0", silent: "/S"),
+            [verdict],
+            _noRejectedVersions);
+        ImmutableArray<ValidationFinding> changed = UpstreamVerdictGate.Evaluate(
+            _identifier,
+            new PackageVersion("1.1.0"),
+            Manifests("1.1.0", silent: "/S /ALLUSERS"),
+            [verdict],
+            _noRejectedVersions);
+
+        Assert.Single(unchanged);
+        Assert.Empty(changed);
+    }
+
     private static UpstreamVerdict Verdict(
         FeedbackClassification classification,
         string version,

@@ -272,6 +272,22 @@ public sealed class MaintenanceWorkflowCommandTests
         Assert.Empty(harness.Interaction.Questions);
     }
 
+    [Theory]
+    [InlineData("winget-autosubmit")]
+    [InlineData("../")]
+    [InlineData(" ")]
+    public async Task Complete_rejects_a_malformed_branch_prefix(string prefix)
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        CliHarness harness = CreateHarness(client);
+
+        CliRunResult result = await harness.RunAsync(["complete", "--branch-prefix", prefix]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains("--branch-prefix", result.StandardError, StringComparison.Ordinal);
+        Assert.Empty(client.Mutations);
+    }
+
     [Fact]
     public async Task Complete_json_reports_statuses()
     {

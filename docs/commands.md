@@ -550,6 +550,8 @@ recommended action for each.
 |---|---|
 | `--fork <owner/name>` | Fork repository (default: `<authenticated user>/<upstream name>`). |
 | `--apply-safe` | After inspection, apply only known-safe responses (fixed keep-alive comments for transient infrastructure failures). Requires confirmation; never posts arbitrary comments and never repairs manifests. |
+| `--schedule-pending` | Persist the classified retry schedule and escalations without any remote write. Requires confirmation (`--yes` in non-interactive sessions). |
+| `--branch-prefix <prefix>` | Also classify open pull requests your own automation opened from the fork on this head-branch prefix (for example `winget-autosubmit/`). May be repeated; must end in `/`. They carry no winmatsch body marker, so the package is taken from the conventional title (`Update version: <Id> version <Version>`, `New version: …`, `New package: …`); pull requests with another title stay unowned. Repairs and supersession remain limited to `winmatsch/` pull requests. |
 | `--yes` | Confirm mutating actions without prompting. |
 
 Feedback is classified from the labels the `winget-pkgs` validator actually
@@ -567,19 +569,27 @@ policy service are the fallback):
 | `Validation-Unattended-Failed`, `Validation-Installation-Error`, `Validation-Shell-Execute`, `Blocking-Issue`, `DriverInstall` | installation failure | escalate (`GH3211`) |
 | `Internal-Error*`, `Retry-1`, `Validation-Retry` | transient internal error | rerun checks |
 | `Validation-Executable-Error`, `Validation-No-Executables` (with `Azure-Pipeline-Passed`) | awaiting manual validation | wait; do not supersede for a patch release |
+| `Azure-Pipeline-Passed`, `Validation-Completed`, `Moderator-Approved`, `Publish-Pipeline-Succeeded` (and none of the above) | none | wait for moderators |
 
 A blocking verdict outranks the manual-validation marker when both are present.
 Escalations are persisted as `Escalated` work items together with the package
-identity from the pull-request body and, for URL failures, the URLs the
-validator named; the wait state is only reported.
+identity from the pull-request body (or, for `--branch-prefix` pull requests,
+from the title), for URL failures the URLs the validator named, and for
+installation failures the installer type, scope and switches of the rejected
+manifest, read from the pull-request head. The wait state is only reported.
+Unrecognized feedback is only recorded once it reaches the stale window, and a
+later blocking verdict replaces an earlier non-blocking terminal item of the
+same pull request, so the routine policy-service comments every pull request
+receives cannot freeze it before the validator answers.
 
 `new` and `update` consult those escalations before planning. A plan that
 repeats the rejected version (or an equivalent spelling), still carries a URL
 the validator rejected, keeps the installer type, scope and switches of a
-version that failed installation testing, or follows an untrusted-certificate
-verdict fails validation with `WF_UPSTREAM_VERDICT`. Scanner and
-installer-availability verdicts only block the rejected version itself.
-`--ignore-upstream-verdict` bypasses the gate once the cause is fixed.
+version that failed installation testing (compared with the rejected manifest
+itself when it is available, otherwise with the recorded traits), or follows an
+untrusted-certificate verdict fails validation with `WF_UPSTREAM_VERDICT`.
+Scanner and installer-availability verdicts only block the rejected version
+itself. `--ignore-upstream-verdict` bypasses the gate once the cause is fixed.
 
 `--submit` additionally looks for manifests under other identifiers that
 already carry an installer hash, so a package that moved to another identifier

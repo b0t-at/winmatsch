@@ -70,6 +70,50 @@ public sealed class MaintenanceAdapterTests
     }
 
     [Fact]
+    public async Task Pull_request_source_accepts_opted_in_prefixes_by_conventional_title()
+    {
+        // The update pipeline opens winget-autosubmit/ PRs without a winmatsch marker.
+        var client = new FakeMaintenanceGitHubClient();
+        PullRequestInfo pipeline = MaintenancePullRequests.ToolOwned(
+            51,
+            headBranch: "winget-autosubmit/contoso.app-1.2.3-0123456789abcdef") with
+        {
+            Title = "Update version: Contoso.App version 1.2.3",
+            Body = "Update Contoso.App to version 1.2.3.",
+        };
+        PullRequestInfo freeform = MaintenancePullRequests.ToolOwned(
+            52,
+            headBranch: "winget-autosubmit/contoso.app-1.2.4-0123456789abcdef") with
+        {
+            Title = "Something else",
+            Body = "No marker.",
+        };
+        client.PullRequests.Add(pipeline);
+        client.PullRequests.Add(freeform);
+        var metadata = new FakePullRequestMetadataSource();
+        using var optedIn = new ToolPullRequestObservationSource(
+            client,
+            "octocat",
+            metadata,
+            ["winget-autosubmit/"]);
+        using var defaultSource = new ToolPullRequestObservationSource(client, "octocat");
+        var upstream = new RepositoryCoordinates("microsoft", "winget-pkgs");
+
+        ImmutableArray<PullRequestObservation> observations =
+            await optedIn.GetOpenToolPullRequestsAsync(upstream, CancellationToken.None);
+        ImmutableArray<PullRequestObservation> defaults =
+            await defaultSource.GetOpenToolPullRequestsAsync(upstream, CancellationToken.None);
+
+        PullRequestObservation recognised = Assert.Single(observations, static o => o.PullRequest.Number == 51);
+        Assert.True(recognised.ToolOwned);
+        Assert.Equal("Contoso.App", recognised.AssociatedPackageIdentifier);
+        Assert.Equal("1.2.3", recognised.AssociatedPackageVersion);
+        Assert.False(Assert.Single(observations, static o => o.PullRequest.Number == 52).ToolOwned);
+        Assert.Equal([51L], metadata.RequestedPullRequests);
+        Assert.All(defaults, static observation => Assert.False(observation.ToolOwned));
+    }
+
+    [Fact]
     public async Task Pull_request_metadata_follows_pages_and_skips_deleted_users()
     {
         var handler = new FeedbackMetadataHandler();

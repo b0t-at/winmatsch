@@ -7,7 +7,7 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-09-25
+## [0.9.0] - 2026-09-28
 
 Fixes for everything the September 2026 audit of the bot's winget-pkgs pull
 requests (455 PRs) and update pipeline (432 failed jobs) traced back to
@@ -28,6 +28,17 @@ winmatsch.
 - `WINMATSCH_FEEDBACK_DIRECTORY` relocates the feedback store read by the
   `WF_UPSTREAM_VERDICT` gate, so ephemeral CI runners can persist the
   escalations `complete` records.
+- `complete --branch-prefix <prefix>` also classifies the fork's pull requests
+  that another automation opened on that head-branch prefix (the update
+  pipeline's `winget-autosubmit/` branches), identified by their conventional
+  title because they carry no winmatsch marker. Repairs and supersession stay
+  limited to `winmatsch/` pull requests. `--schedule-pending` is now
+  documented.
+- Installation-failure escalations record the rejected manifest's installer
+  type, scope and switches from the pull-request head. The rejected version is
+  rarely merged, so the `WF_UPSTREAM_VERDICT` gate previously had nothing to
+  compare against (DiRoots.ProSheets 2.4.2 was resubmitted with the switches
+  that failed unattended for 2.4.1).
 
 ### Changed
 
@@ -47,6 +58,10 @@ winmatsch.
   when every installer carries its own value and the overrides stay lossless
   under WinGet's merge (winget-pkgs reported root `Dependencies` missing for
   edde746.Plezy 2.19.0/2.19.1).
+- `SCOPE-1` repairs Nullsoft user/machine twins that declare opposite scopes
+  but share one root `/CURRENTUSER` (or `/ALLUSERS`) switch: the contradicting
+  twin gets the paired MultiUser token. The machine entry of
+  Automattic.Wordpress installed per-user, and `VLD3002` blocked 19 runs.
 
 ### Fixed
 
@@ -70,6 +85,18 @@ winmatsch.
   `ReleaseNotesUrl` twice, 13 runs) aborted every later update; they are now
   read with the last value winning. Generated manifests are never repaired, and
   `show --raw` still prints the published bytes.
+- `complete` escalated every healthy pull request as unknown feedback: the
+  policy service comments on each one, and passing labels
+  (`Azure-Pipeline-Passed`, `Validation-Completed`, `Moderator-Approved`,
+  `Publish-Pipeline-Succeeded`) were not recognized. They now mean "wait".
+  Fresh unknown feedback is no longer recorded (only once stale), and a later
+  blocking verdict replaces an earlier non-blocking terminal item; previously
+  the first observation froze the item before the validator answered.
+- An executable whose name ends in the word `CLI` is analyzed as a portable
+  command even when its name mentions installing (`TizenAppInstallerCli.exe`
+  was classified as a nested installer, so elfpie.TizenAppInstaller kept an
+  invalid `PortableCommandAlias` on a nested `exe` and failed `VLD3008` in 20
+  runs).
 
 ## [0.8.23] - 2026-09-03
 

@@ -1,3 +1,4 @@
+using WinMatsch.Core;
 using WinMatsch.GitHub;
 using WinMatsch.Workflows.GitHub;
 using WinMatsch.Workflows.Operations;
@@ -500,12 +501,13 @@ public sealed class GitHubFeedbackWorkflowTests
     public async Task Unknown_feedback_escalates_before_stale_window_without_unsafe_action()
     {
         var client = new FakeGitHubClient();
+        var store = new FakeFeedbackStateStore();
         var workflow = new GitHubFeedbackWorkflow(
             client,
             GitHubLifecycleTestSupport.Workflow(client),
             new FakeRepairPlanner(),
             new FakeClock(),
-            new FakeFeedbackStateStore());
+            store);
 
         FeedbackResult result = await workflow.ProcessAsync(
             GitHubLifecycleTestSupport.Upstream,
@@ -515,6 +517,152 @@ public sealed class GitHubFeedbackWorkflowTests
         Assert.Equal(PullRequestLifecycleAction.EscalateToHuman, result.Statuses[0].RecommendedAction);
         Assert.Contains("before", result.Statuses[0].Reason, StringComparison.Ordinal);
         Assert.Empty(client.Mutations);
+
+        // A fresh unknown signal is not recorded: the store treats Escalated as terminal, and
+        // the validator's real verdict usually arrives later.
+        Assert.Empty(store.Items);
+    }
+
+    [Fact]
+    public async Task Stale_unknown_feedback_is_recorded()
+    {
+        var client = new FakeGitHubClient();
+        var store = new FakeFeedbackStateStore();
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            new FakeRepairPlanner(),
+            new FakeClock(),
+            store);
+
+        await workflow.ProcessAsync(
+            GitHubLifecycleTestSupport.Upstream,
+            [Observation("Reviewer asks an unknown question")],
+            new FeedbackPolicy { StaleEscalationWindow = TimeSpan.Zero });
+
+        FeedbackWorkItem item = Assert.Single(store.Items);
+        Assert.Equal(FeedbackClassification.Unknown, item.Classification);
+        Assert.Equal(FeedbackWorkState.Escalated, item.State);
+    }
+
+    [Fact]
+    public void Healthy_pipeline_labels_are_not_unknown_feedback()
+    {
+        // Every PR carries routine policy-service comments ("Validation Pipeline Badge",
+        // "Validation has completed"); with passing labels they must not read as unknown.
+        PullRequestObservation observation = Observation("Validation has completed.") with
+        {
+            Labels = ["Azure-Pipeline-Passed", "Validation-Completed", "New-Manifest"],
+        };
+
+        Assert.Equal(FeedbackClassification.None, GitHubFeedbackWorkflow.Classify(observation));
+    }
+
+    [Fact]
+    public async Task Installation_failure_on_another_automations_pull_request_records_identity_and_traits()
+    {
+        // Pipeline ForkBranch PRs carry no winmatsch body marker; the observation source supplies
+        // the package from the conventional title, and the rejected installer traits are read
+        // from the PR head because the rejected version is never merged (DiRoots.ProSheets).
+        var client = new FakeGitHubClient();
+        var store = new FakeFeedbackStateStore();
+        var headRepository = new RepositoryCoordinates("damn-good-b0t", "winget-pkgs");
+        const string installerPath =
+            "manifests/d/DiRoots/ProSheets/2.4.1/DiRoots.ProSheets.installer.yaml";
+        var rejected = new InstallerManifest
+        {
+            PackageIdentifier = new PackageIdentifier("DiRoots.ProSheets"),
+            PackageVersion = new PackageVersion("2.4.1"),
+            InstallerType = InstallerType.Exe,
+            Scope = Scope.Machine,
+            InstallerSwitches = new InstallerSwitches { Silent = "/i // /qn accept_eula=1" },
+            Installers =
+            [
+                new Installer
+                {
+                    Architecture = Architecture.X64,
+                    InstallerUrl = "https://example.test/ProSheets-2.4.1.exe",
+                    InstallerSha256 = new Sha256Hash(new string('A', 64)),
+                },
+            ],
+        };
+        client.SetContent(
+            headRepository,
+            installerPath,
+            "head-sha",
+            System.Text.Encoding.UTF8.GetBytes(WinMatsch.Core.Yaml.ManifestYamlWriter.Serialize(rejected)));
+        var workflow = new GitHubFeedbackWorkflow(
+            client,
+            GitHubLifecycleTestSupport.Workflow(client),
+            new FakeRepairPlanner(),
+            new FakeClock(),
+            store);
+        PullRequestObservation observation = new()
+        {
+            PullRequest = GitHubLifecycleTestSupport.PullRequest(420154) with
+            {
+                Title = "Update version: DiRoots.ProSheets version 2.4.1",
+                Body = "Update DiRoots.ProSheets to version 2.4.1.",
+                HeadBranch = "winget-autosubmit/diroots.prosheets-2.4.1-0123456789abcdef",
+                HeadSha = "head-sha",
+                HeadRepository = headRepository,
+            },
+            Author = "damn-good-b0t",
+            ToolOwned = true,
+            Labels = ["Validation-Unattended-Failed", "Needs-Author-Feedback"],
+            ChangedFiles = [new(installerPath)],
+            AssociatedPackageIdentifier = "DiRoots.ProSheets",
+            AssociatedPackageVersion = "2.4.1",
+        };
+
+        await workflow.ProcessAsync(GitHubLifecycleTestSupport.Upstream, [observation]);
+
+        FeedbackWorkItem item = Assert.Single(store.Items);
+        Assert.Equal(FeedbackClassification.InstallationFailure, item.Classification);
+        Assert.Equal("DiRoots.ProSheets", item.PackageIdentifier);
+        Assert.Equal("2.4.1", item.PackageVersion);
+        Assert.Equal(UpstreamVerdictGate.InstallerTraits(rejected), item.InstallerTraits);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
+    public async Task File_feedback_store_upgrades_a_non_blocking_terminal_item_to_a_blocking_verdict()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"winmatsch-feedback-{Guid.NewGuid():N}");
+        var store = new FileFeedbackStateStore(root);
+        var recordedAt = new DateTimeOffset(2026, 9, 1, 0, 0, 0, TimeSpan.Zero);
+        try
+        {
+            await store.PersistAsync(
+                new("microsoft/winget-pkgs", 7, FeedbackClassification.Unknown, FeedbackWorkState.Escalated,
+                    recordedAt, null, null, "stale", "Example.App", "1.0.0"),
+                CancellationToken.None);
+            await store.PersistAsync(
+                new("microsoft/winget-pkgs", 7, FeedbackClassification.ScannerBlocked, FeedbackWorkState.Escalated,
+                    recordedAt.AddDays(1), null, null, "defender", "Example.App", "1.0.0")
+                {
+                    InstallerTraits = "type=exe",
+                },
+                CancellationToken.None);
+            await store.PersistAsync(
+                new("microsoft/winget-pkgs", 7, FeedbackClassification.Unknown, FeedbackWorkState.Escalated,
+                    recordedAt.AddDays(2), null, null, "later unknown", "Example.App", "1.0.0"),
+                CancellationToken.None);
+
+            FeedbackWorkItem item = Assert.Single(await store.GetByPackageAsync(
+                "microsoft/winget-pkgs",
+                new PackageIdentifier("Example.App"),
+                CancellationToken.None));
+            Assert.Equal(FeedbackClassification.ScannerBlocked, item.Classification);
+            Assert.Equal("type=exe", item.InstallerTraits);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 
     [Fact]

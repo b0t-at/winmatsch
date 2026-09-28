@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using WinMatsch.Core;
+using WinMatsch.Workflows.Operations;
 
 namespace WinMatsch.Workflows.GitHub;
 
@@ -105,7 +106,11 @@ public sealed class FileFeedbackStateStore : IFeedbackStateStore
             or FeedbackWorkState.Escalated;
         if (currentTerminal)
         {
-            return false;
+            // A blocking validator verdict must still be recorded when an earlier observation
+            // of the same pull request already ended in a non-blocking terminal state.
+            return incoming.State == FeedbackWorkState.Escalated
+                && UpstreamVerdictGate.IsBlocking(incoming.Classification)
+                && !UpstreamVerdictGate.IsBlocking(current.Classification);
         }
 
         bool incomingTerminal = incoming.State is FeedbackWorkState.Completed

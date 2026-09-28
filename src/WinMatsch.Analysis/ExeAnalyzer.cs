@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using WinMatsch.Analysis.Advanced;
 using WinMatsch.Analysis.Burn;
 using WinMatsch.Analysis.Inno;
@@ -13,7 +14,7 @@ namespace WinMatsch.Analysis;
 /// generic fallback classifies it as an installer or a portable executable based on keywords
 /// in its version strings and its file name.
 /// </summary>
-public sealed class ExeAnalyzer : IInstallerAnalyzer
+public sealed partial class ExeAnalyzer : IInstallerAnalyzer
 {
     private static readonly IReadOnlyList<IExeFormatProbe> _probes =
     [
@@ -215,7 +216,7 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
 
     private static bool ContainsInstallerKeyword(string? value)
     {
-        if (value is null)
+        if (value is null || IsCommandLineToolName(value))
         {
             return false;
         }
@@ -230,6 +231,26 @@ public sealed class ExeAnalyzer : IInstallerAnalyzer
 
         return false;
     }
+
+    /// <summary>
+    /// A name whose last word is "CLI" names a command-line tool, not a setup program, even when
+    /// it mentions installing: winget's own AppInstallerCLI.exe, or TizenAppInstallerCli.exe
+    /// (elfpie.TizenAppInstaller), which was classified as a nested installer instead of a
+    /// portable command.
+    /// </summary>
+    private static bool IsCommandLineToolName(string value)
+    {
+        string name = value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            || value.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                ? value[..^4]
+                : value;
+        string[] words = WordBoundary().Split(name.Trim());
+        return words.Length > 1
+            && string.Equals(words[^1], "cli", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [GeneratedRegex(@"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])", RegexOptions.CultureInvariant)]
+    private static partial Regex WordBoundary();
 
     private static bool IsSelfExtractorStub(VersionInfo version)
         => IsSelfExtractorStubName(version.OriginalFilename)
