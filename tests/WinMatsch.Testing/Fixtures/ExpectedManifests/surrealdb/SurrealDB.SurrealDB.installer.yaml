@@ -4,6 +4,7 @@
 PackageIdentifier: SurrealDB.SurrealDB
 PackageVersion: 2.3.0
 InstallerType: portable
+ReleaseDate: 2025-05-02
 Installers:
 - Architecture: x64
   InstallerUrl: https://github.com/surrealdb/surrealdb/releases/download/v2.3.0/surreal-v2.3.0.windows-amd64.exe

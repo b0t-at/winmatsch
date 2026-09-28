@@ -1393,6 +1393,51 @@ public sealed class WorkflowProductionCompositionTests
     }
 
     [Fact]
+    public async Task Workflow_preflight_answers_each_url_probe_once_per_mutation()
+    {
+        // The plan and the verified apply run on separate engines and networks; both must see
+        // the same answer, or an origin that flaps (200, then 403) turns the re-plan into
+        // WF_STALE_PLAN (altair-graphql.altair).
+        int requests = 0;
+        StubHttpMessageHandler Handler() => new(_ => Interlocked.Increment(ref requests) == 1
+            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) }
+            : new HttpResponseMessage(HttpStatusCode.Forbidden));
+        string state = CreateDirectory();
+        var probes = new PreflightProbeCache();
+        try
+        {
+            DownloadProbeResult first;
+            using (var planDownloader = new InstallerDownloader(Handler()))
+            {
+                var planNetwork = new DurableInstallerPreflightNetwork(
+                    planDownloader,
+                    state,
+                    new RecordingWorkflowScratchCleanup(delete: true),
+                    probes);
+                first = await planNetwork.ProbeAsync("https://example.test/home", CancellationToken.None);
+            }
+
+            int afterPlan = Volatile.Read(ref requests);
+            using var applyDownloader = new InstallerDownloader(Handler());
+            var applyNetwork = new DurableInstallerPreflightNetwork(
+                applyDownloader,
+                state,
+                new RecordingWorkflowScratchCleanup(delete: true),
+                probes);
+            DownloadProbeResult second = await applyNetwork.ProbeAsync(
+                "https://example.test/home",
+                CancellationToken.None);
+
+            Assert.Same(first, second);
+            Assert.Equal(afterPlan, Volatile.Read(ref requests));
+        }
+        finally
+        {
+            Directory.Delete(state, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Workflow_preflight_preserves_origin_failure_when_cleanup_is_scheduled()
     {
         var handler = new StubHttpMessageHandler(_ =>

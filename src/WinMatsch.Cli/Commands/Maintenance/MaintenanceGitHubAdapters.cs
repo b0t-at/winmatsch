@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using WinMatsch.Cli.Output;
 using WinMatsch.Core;
 using WinMatsch.Downloads;
@@ -68,10 +69,13 @@ public sealed class GitHubTokenValidator : ITokenValidator
 /// Observes the open tool-owned pull requests a fork owner has against the upstream
 /// repository. Tool ownership is proven by the <c>winmatsch/</c> head-branch prefix and the
 /// association marker in the pull request body; anything else is reported as not tool-owned
-/// and is never acted on. The core REST surface exposes neither labels nor comments, so those
-/// collections stay empty here; richer sources can be injected where available.
+/// and is never acted on. Callers may opt in further head-branch prefixes of their own
+/// automation (<c>complete --branch-prefix</c>); for those, a conventional winget-pkgs title
+/// ("Update version: Publisher.App version 1.2.3") stands in for a missing body marker. The
+/// core REST surface exposes neither labels nor comments, so those collections stay empty
+/// here; richer sources can be injected where available.
 /// </summary>
-public sealed class ToolPullRequestObservationSource : IPullRequestFeedbackSource, IDisposable
+public sealed partial class ToolPullRequestObservationSource : IPullRequestFeedbackSource, IDisposable
 {
     /// <summary>The head-branch prefix that marks a branch as tool-created.</summary>
     public const string ToolBranchPrefix = "winmatsch/";
@@ -82,17 +86,26 @@ public sealed class ToolPullRequestObservationSource : IPullRequestFeedbackSourc
     private readonly IGitHubRepositoryClient _gitHub;
     private readonly string _forkOwner;
     private readonly IPullRequestMetadataSource? _metadata;
+    private readonly ImmutableArray<string> _additionalBranchPrefixes;
 
     public ToolPullRequestObservationSource(
         IGitHubRepositoryClient gitHub,
         string forkOwner,
-        IPullRequestMetadataSource? metadata = null)
+        IPullRequestMetadataSource? metadata = null,
+        IEnumerable<string>? additionalBranchPrefixes = null)
     {
         ArgumentNullException.ThrowIfNull(gitHub);
         ArgumentException.ThrowIfNullOrWhiteSpace(forkOwner);
         _gitHub = gitHub;
         _forkOwner = forkOwner;
         _metadata = metadata;
+        _additionalBranchPrefixes =
+        [
+            .. (additionalBranchPrefixes ?? [])
+                .Where(static prefix => !string.IsNullOrWhiteSpace(prefix)
+                    && !string.Equals(prefix, ToolBranchPrefix, StringComparison.Ordinal))
+                .Distinct(StringComparer.Ordinal),
+        ];
     }
 
     public async Task<ImmutableArray<PullRequestObservation>> GetOpenToolPullRequestsAsync(
@@ -109,13 +122,13 @@ public sealed class ToolPullRequestObservationSource : IPullRequestFeedbackSourc
         foreach (PullRequestInfo pullRequest in pullRequests.Where(pullRequest =>
                      pullRequest.HeadOwner.Equals(_forkOwner, StringComparison.OrdinalIgnoreCase)))
         {
-            AuthoritativePullRequestChanges evidence = IsToolOwned(pullRequest)
+            AuthoritativePullRequestChanges evidence = IsOwned(pullRequest)
                 ? await ReadAuthoritativeChangesAsync(
                     upstream,
                     pullRequest,
                     cancellationToken).ConfigureAwait(false)
                 : new(pullRequest, [], null, null);
-            bool toolOwned = IsToolOwned(evidence.PullRequest)
+            bool toolOwned = IsOwned(evidence.PullRequest)
                 && evidence.PullRequest.HeadOwner.Equals(
                     _forkOwner,
                     StringComparison.OrdinalIgnoreCase);
@@ -126,6 +139,9 @@ public sealed class ToolPullRequestObservationSource : IPullRequestFeedbackSourc
                     evidence.PullRequest.Number,
                     cancellationToken)
                     .ConfigureAwait(false);
+            (string? associatedPackage, string? associatedVersion) = toolOwned
+                ? TitleAssociation(evidence.PullRequest)
+                : (null, null);
             observations.Add(new PullRequestObservation
             {
                 PullRequest = evidence.PullRequest,
@@ -136,6 +152,8 @@ public sealed class ToolPullRequestObservationSource : IPullRequestFeedbackSourc
                 ChangedFiles = evidence.ChangedFiles,
                 EvidenceHeadSha = evidence.HeadSha,
                 EvidenceBaseSha = evidence.BaseSha,
+                AssociatedPackageIdentifier = associatedPackage,
+                AssociatedPackageVersion = associatedVersion,
             });
         }
 
@@ -149,6 +167,34 @@ public sealed class ToolPullRequestObservationSource : IPullRequestFeedbackSourc
         return pullRequest.HeadBranch.StartsWith(ToolBranchPrefix, StringComparison.Ordinal)
             && pullRequest.Body?.Contains(AssociationMarker, StringComparison.Ordinal) == true;
     }
+
+    private bool IsOwned(PullRequestInfo pullRequest)
+        => IsToolOwned(pullRequest)
+            || _additionalBranchPrefixes.Any(prefix =>
+                pullRequest.HeadBranch.StartsWith(prefix, StringComparison.Ordinal))
+            && TitleAssociation(pullRequest).PackageIdentifier is not null;
+
+    /// <summary>
+    /// The package a pull request on an opted-in prefix is about, from winget-pkgs' conventional
+    /// title. Tool-marker PRs return null: their body marker is authoritative.
+    /// </summary>
+    private static (string? PackageIdentifier, string? PackageVersion) TitleAssociation(PullRequestInfo pullRequest)
+    {
+        if (IsToolOwned(pullRequest))
+        {
+            return (null, null);
+        }
+
+        Match match = ConventionalTitle().Match(pullRequest.Title ?? "");
+        return match.Success
+            && PackageIdentifier.TryCreate(match.Groups["id"].Value, out PackageIdentifier? identifier)
+            && PackageVersion.TryCreate(match.Groups["version"].Value, out PackageVersion? version)
+            ? (identifier!.Value, version!.Value)
+            : (null, null);
+    }
+
+    [GeneratedRegex(@"^(?:Update version|New version|New package): (?<id>\S+) version (?<version>\S+)$", RegexOptions.CultureInvariant)]
+    private static partial Regex ConventionalTitle();
 
     private async Task<AuthoritativePullRequestChanges> ReadAuthoritativeChangesAsync(
         RepositoryCoordinates upstream,

@@ -82,10 +82,11 @@ public sealed class RepositoryDiagnosticService : IRepositoryDiagnosticService
                 .GetContentAsync(repository, fullPath, branch.HeadSha, cancellationToken)
                 .ConfigureAwait(false);
             string text = content.GetText();
-            VerifyIdentity(text, fullPath, identifier, version);
+            string readable = ManifestYamlText.RepairForReading(text, out _);
+            VerifyIdentity(readable, fullPath, identifier, version);
             files.Add(new RepositoryManifestFile(
                 fullPath,
-                normalize ? NormalizeManifest(text, fullPath) : text));
+                normalize ? NormalizeManifest(readable, fullPath) : text));
         }
 
         return new PackageVersionResult(

@@ -66,6 +66,7 @@ internal sealed class ProductionMutationWorkflow(
     private WorkflowOperationRequest? _preparedRequest;
     private string? _artifactDirectory;
     private string? _submitCacheDirectory;
+    private readonly PreflightProbeCache _probeCache = new();
     private readonly Action<string> _deleteDirectory =
         deleteDirectory ?? (static path => Directory.Delete(path, recursive: true));
 
@@ -89,6 +90,7 @@ internal sealed class ProductionMutationWorkflow(
         {
             CleanupArtifactDirectory();
             _preparedRequest = null;
+            _probeCache.Clear();
         }
 
         using var downloader = new InstallerDownloader(
@@ -106,7 +108,8 @@ internal sealed class ProductionMutationWorkflow(
                 overridePackStoreOptions: OverrideStoreOptions(configuration),
                 fallbackManifestSource: CreateRepositoryManifestSource(request, gitHub),
                 trustedGitHubHost: TrustedGitHubWebHost(gitHubOptions),
-                upstreamVerdicts: UpstreamVerdicts());
+                upstreamVerdicts: UpstreamVerdicts(),
+                probeCache: _probeCache);
             if (!usePrepared)
             {
                 if (request is UpdateOperationRequest update)
@@ -203,7 +206,8 @@ internal sealed class ProductionMutationWorkflow(
                 prepared,
                 manifestGitHub ?? releaseGitHub),
             trustedGitHubHost: TrustedGitHubWebHost(gitHubOptions),
-            upstreamVerdicts: UpstreamVerdicts());
+            upstreamVerdicts: UpstreamVerdicts(),
+            probeCache: _probeCache);
         WorkflowOperationResult result = await engine.ApplyVerifiedPlanAsync(
             prepared,
             expectedPlanFingerprint,

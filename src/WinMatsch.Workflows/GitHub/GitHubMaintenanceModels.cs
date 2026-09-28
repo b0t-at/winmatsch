@@ -61,6 +61,14 @@ public sealed record PullRequestObservation
 
     public bool ToolOwned { get; init; }
 
+    /// <summary>
+    /// The package a tool-owned PR without a winmatsch body marker is about (from its
+    /// conventional title), used to record verdicts for other automation's PRs.
+    /// </summary>
+    public string? AssociatedPackageIdentifier { get; init; }
+
+    public string? AssociatedPackageVersion { get; init; }
+
     public bool HasAuthoritativeChangeEvidence =>
         PullRequest.HeadRepository is not null
         && PullRequest.BaseSha is not null
@@ -229,7 +237,14 @@ public sealed record FeedbackWorkItem(
     string Reason,
     string? PackageIdentifier = null,
     string? PackageVersion = null,
-    IReadOnlyList<string>? Evidence = null);
+    IReadOnlyList<string>? Evidence = null)
+{
+    /// <summary>
+    /// The canonical installer type, scope and switches of the manifest an installation test
+    /// rejected (see <c>UpstreamVerdictGate.InstallerTraits</c>), when it could be read.
+    /// </summary>
+    public string? InstallerTraits { get; init; }
+}
 
 public sealed record FeedbackRemoteState(
     long PullRequestNumber,

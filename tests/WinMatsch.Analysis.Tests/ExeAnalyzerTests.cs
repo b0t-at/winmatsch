@@ -241,6 +241,26 @@ public class ExeAnalyzerTests
     }
 
     [Theory]
+    [InlineData("TizenAppInstallerCli.dll", "TizenAppInstallerCli")]
+    [InlineData("AppInstallerCLI.exe", "Windows Package Manager")]
+    [InlineData("setup-cli.exe", "setup-cli")]
+    public void Command_line_tools_named_after_installing_are_portable(
+        string originalFilename,
+        string fileDescription)
+    {
+        // elfpie.TizenAppInstaller ships TizenAppInstallerCli.exe, a command-line tool that was
+        // classified as a nested installer because its name contains "Installer".
+        using MemoryStream stream = PeFixtures.BuildExeStream(version: new VersionStrings(
+            OriginalFilename: originalFilename,
+            FileDescription: fileDescription));
+
+        InstallerAnalysis analysis = _analyzer.Analyze(stream, "TizenAppInstallerCli.exe");
+
+        Assert.Equal(DetectedInstallerFormat.PortableExe, analysis.Format);
+        Assert.Equal(InstallerType.Portable, Assert.Single(analysis.Installers).InstallerType);
+    }
+
+    [Theory]
     [InlineData("7z.sfx")]
     [InlineData("7zCon.sfx")]
     [InlineData("7zS.sfx")]

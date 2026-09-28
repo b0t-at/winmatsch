@@ -65,9 +65,9 @@ Run first, in a fixed order, to produce a canonical manifest shape
 | `WM0002` | Push root-level installer fields down to installers when per-installer conflicts exist. |
 | `WM0004` | Scrub junk: null out empty strings, remove empty lists, prune empty composite objects. |
 | `WM0006` | Normalize GUID product/upgrade codes to canonical uppercase-in-braces form. |
-| `WM0003` | Drop ARP (Apps & Features) entries that merely duplicate the default locale name/publisher or the package version. |
+| `WM0003` | Drop ARP (Apps & Features) entries that merely duplicate the default locale name/publisher or the package version. On update, a `DisplayName` or `Publisher` the previous version's entries declared is kept (removing it would change the ARP shape `ARP-4` guards). |
 | `WM0005` | Remove installers that are exact duplicates on effective architecture + type + scope + URL. |
-| `WM0001` | Hoist installer fields shared by every installer up to the manifest root. Runs last so it sees the final shape. |
+| `WM0001` | Hoist installer fields shared by every installer up to the manifest root. On update, a field the previous version declared at the root is restored there when every installer carries a value and at least one equals the previous root (root default plus per-installer overrides) — for scalar fields, and for `Dependencies` only when every overriding installer already contains the root set. Runs last so it sees the final shape. |
 
 ### Policy rules
 
@@ -80,7 +80,7 @@ normalization, observing the canonical shape.
 | `ARP-2` | Remove ARP DisplayVersion values that equal PackageVersion or are already declared elsewhere. |
 | `ARP-3` | Drop garbage from ARP/installation metadata: unexpanded `%VAR%` variables, `ms-resource:` references, non-printable characters, temp paths. |
 | `ARP-4` | Require ARP entry shape parity with the previously merged version, or an explicit override annotation. |
-| `SCOPE-1` | Assign per-installer scope to same-URL switch twins (`/CURRENTUSER` vs `/ALLUSERS`), keeping the root scope null. |
+| `SCOPE-1` | Assign per-installer scope to same-URL switch twins (`/CURRENTUSER` vs `/ALLUSERS`), keeping the root scope null. Nullsoft twins with opposite explicit scopes that share one root `/CURRENTUSER` or `/ALLUSERS` switch get the paired token on the contradicting twin. |
 | `SCOPE-2` | Set installer scope from trusted installer-metadata evidence only — never guessed. |
 | `SCOPE-3` | Trim or drop blank installer switches; flag switches carried across installer-family changes; flag `Custom` switch values that embed a network address. |
 | `SCOPE-4` | Correct `msi`/`wix` classifications to the analyzer's detected outer wrapper. |
@@ -88,7 +88,7 @@ normalization, observing the canonical shape.
 | `META-1` | Upgrade `http://` metadata URLs to `https://` when a workflow probe confirmed the HTTPS variant. |
 | `META-3` | Normalize GitHub license/copyright URLs to their stable `blob/HEAD` form. |
 | `META-4` | Sanitize release-notes formatting, bound their length, verify the ReleaseNotesUrl refers to the version. |
-| `META-5` | Carry still-valid locale fields forward from the previous version, or require an explicit drop override. |
+| `META-5` | Carry still-valid locale fields forward from the previous version, or require an explicit drop override. On update, `ReleaseDate` is set from release evidence (never copied), also when the previous version had none. |
 | `DEP-1` | Add architecture-matched runtime dependencies discovered from payload analysis evidence, and refresh a stale pin of the same .NET runtime family in place. |
 | `DEP-2` | Classify dependency-outage pipeline signatures as infrastructure issues rather than manifest errors. |
 | `PIPE-1` | Assert serializer invariants: LF-only line endings, single trailing newline. |

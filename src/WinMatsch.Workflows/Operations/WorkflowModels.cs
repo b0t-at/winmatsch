@@ -174,6 +174,14 @@ public sealed record LocalOperationPlan
 
     public ImmutableArray<WorkflowQuestion> Questions { get; init; } = [];
 
+    /// <summary>
+    /// Findings the engine added to <see cref="Validation"/> after preflight and rule evaluation
+    /// (dropped dead URLs, learned-override state, upstream verdicts). A fresh preflight at the
+    /// verified apply boundary cannot recompute them, so they are re-appended there; otherwise
+    /// every plan carrying one would fail as stale.
+    /// </summary>
+    public ImmutableArray<ValidationFinding> PlanningFindings { get; init; } = [];
+
     public ImmutableArray<WorkflowAuditEntry> Audit { get; init; } = [];
 
     public bool ReviewApproved { get; init; }

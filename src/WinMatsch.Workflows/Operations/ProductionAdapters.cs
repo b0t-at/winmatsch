@@ -559,6 +559,37 @@ public sealed class InstallerWorkflowArtifactProcessor(
     }
 }
 
+/// <summary>
+/// One answer per URL probe for the lifetime of a mutation: the plan, the re-plan inside the
+/// verified apply and its boundary each probe every metadata URL, and they run on separate
+/// engines. An origin behind bot protection can answer consecutive probes differently
+/// (altair-graphql.altair flapped on 403), which made the re-plan differ from the approved
+/// plan on every run. Installer bytes are still revalidated independently of this cache.
+/// </summary>
+public sealed class PreflightProbeCache
+{
+    private readonly ConcurrentDictionary<string, Task<DownloadProbeResult>> _probes =
+        new(StringComparer.Ordinal);
+
+    public void Clear() => _probes.Clear();
+
+    internal async Task<DownloadProbeResult> GetOrProbeAsync(
+        string url,
+        Func<string, Task<DownloadProbeResult>> probe)
+    {
+        Task<DownloadProbeResult> pending = _probes.GetOrAdd(url, probe);
+        try
+        {
+            return await pending.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _probes.TryRemove(new KeyValuePair<string, Task<DownloadProbeResult>>(url, pending));
+            throw;
+        }
+    }
+}
+
 internal sealed class DurableInstallerPreflightNetwork :
     IPreflightNetwork,
     IWorkflowPreflightDiagnosticSource
@@ -572,24 +603,34 @@ internal sealed class DurableInstallerPreflightNetwork :
     private readonly string _stateDirectory;
     private readonly IWorkflowScratchCleanup _scratchCleanup;
     private readonly ConcurrentQueue<ValidationFinding> _diagnostics = new();
+    private readonly PreflightProbeCache _probes;
 
     public DurableInstallerPreflightNetwork(InstallerDownloader downloader)
         : this(downloader, DefaultStateDirectory(), BoundedWorkflowScratchCleanup.Instance)
     {
     }
 
+    internal DurableInstallerPreflightNetwork(InstallerDownloader downloader, PreflightProbeCache? probes)
+        : this(downloader, DefaultStateDirectory(), BoundedWorkflowScratchCleanup.Instance, probes)
+    {
+    }
+
     internal DurableInstallerPreflightNetwork(
         InstallerDownloader downloader,
         string stateDirectory,
-        IWorkflowScratchCleanup scratchCleanup)
+        IWorkflowScratchCleanup scratchCleanup,
+        PreflightProbeCache? probes = null)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
         _stateDirectory = Path.GetFullPath(stateDirectory);
         _scratchCleanup = scratchCleanup ?? throw new ArgumentNullException(nameof(scratchCleanup));
+        _probes = probes ?? new PreflightProbeCache();
     }
 
     public Task<DownloadProbeResult> ProbeAsync(string url, CancellationToken cancellationToken)
-        => _downloader.ProbeAsync(url, cancellationToken);
+        => _probes.GetOrProbeAsync(
+            url,
+            key => _downloader.ProbeAsync(key, cancellationToken));
 
     public async Task<DownloadRevalidationResult> RevalidateAsync(
         DownloadResult previous,

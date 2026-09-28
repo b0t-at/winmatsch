@@ -32,7 +32,7 @@ public sealed class EmptyRepositorySubmissionEvidenceProvider : IRepositorySubmi
     }
 }
 
-public sealed class GitHubRepositorySubmissionEvidenceProvider(
+public sealed partial class GitHubRepositorySubmissionEvidenceProvider(
     IGitHubRepositoryClient gitHub) : IRepositorySubmissionEvidenceProvider
 {
     public const string PolicyPath = ".github/winmatsch/submission-evidence.json";
@@ -40,6 +40,8 @@ public sealed class GitHubRepositorySubmissionEvidenceProvider(
     private const int MaximumInstallerFiles = 512;
     private const int MaximumPolicyItems = 1_024;
     private const long MaximumEvidenceFileBytes = 1_048_576;
+    private const int MaximumMovedIdentifierPullRequests = 30;
+    private const int MaximumMovedIdentifierCandidates = 8;
     private readonly IGitHubRepositoryClient _gitHub =
         gitHub ?? throw new ArgumentNullException(nameof(gitHub));
 
@@ -84,6 +86,8 @@ public sealed class GitHubRepositorySubmissionEvidenceProvider(
             var notes = ImmutableArray.CreateBuilder<string>();
             foreach (RepositoryInstallerEvidence item in await SearchInstallerHashEvidenceAsync(
                          request,
+                         upstreamHeadSha,
+                         installerEvidence,
                          notes,
                          cancellationToken).ConfigureAwait(false))
             {
@@ -138,14 +142,23 @@ public sealed class GitHubRepositorySubmissionEvidenceProvider(
     }
 
     /// <summary>
-    /// Asks GitHub code search which manifests already carry each installer hash, so a package
-    /// that moved to another identifier (HiroSystems.Clarinet → StacksLabs.Clarinet) or was
-    /// renamed (Docker.ds → Docker.sbx) trips GH1011 here instead of a Possible-Duplicate closure
-    /// upstream. The sibling scan only sees the same publisher directory. Search is best-effort:
-    /// an unsupported client, a rate limit, or an incomplete index adds a note and nothing else.
+    /// Finds manifests under other identifiers that already carry one of the planned installer
+    /// hashes, so a package that moved (HiroSystems.Clarinet → StacksLabs.Clarinet,
+    /// PatrickHener.Goshs → GoshsLabs.Goshs, Grandpied33.STH → STH.STH) trips GH1011 here
+    /// instead of a Possible-Duplicate removal upstream. The sibling scan only sees the same
+    /// publisher directory. Two best-effort sources are combined; a failure adds a note only:
+    /// <list type="bullet">
+    /// <item>GitHub code search, first probed with a hash already published for this package —
+    /// code search does not index every repository (microsoft/winget-pkgs returns nothing), and
+    /// an empty answer from a blind index must not read as "no duplicate".</item>
+    /// <item>Pull requests whose title names another identifier with the same final segment and
+    /// the same version; the manifest at the pinned commit is read and its hashes compared.</item>
+    /// </list>
     /// </summary>
     private async Task<ImmutableArray<RepositoryInstallerEvidence>> SearchInstallerHashEvidenceAsync(
         GitHubSubmissionRequest request,
+        string upstreamHeadSha,
+        ImmutableArray<RepositoryInstallerEvidence> siblingEvidence,
         ImmutableArray<string>.Builder notes,
         CancellationToken cancellationToken)
     {
@@ -157,6 +170,86 @@ public sealed class GitHubRepositorySubmissionEvidenceProvider(
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Order(StringComparer.OrdinalIgnoreCase),
         ];
+        if (hashes.Length == 0)
+        {
+            return [];
+        }
+
+        if (await IsCodeSearchEffectiveAsync(request, siblingEvidence, notes, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            await SearchCodeForHashesAsync(request, hashes, results, notes, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        await SearchMovedIdentifierManifestsAsync(
+            request,
+            upstreamHeadSha,
+            hashes,
+            results,
+            notes,
+            cancellationToken).ConfigureAwait(false);
+        return results.ToImmutable();
+    }
+
+    private async Task<bool> IsCodeSearchEffectiveAsync(
+        GitHubSubmissionRequest request,
+        ImmutableArray<RepositoryInstallerEvidence> siblingEvidence,
+        ImmutableArray<string>.Builder notes,
+        CancellationToken cancellationToken)
+    {
+        RepositoryInstallerEvidence? published = siblingEvidence
+            .Where(item => !item.RetiredIdentifier
+                && !string.IsNullOrWhiteSpace(item.InstallerSha256)
+                && string.Equals(
+                    item.PackageIdentifier.Value,
+                    request.LocalPlan.PackageIdentifier.Value,
+                    StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(static item => item.PackageVersion)
+            .FirstOrDefault();
+        if (published is null)
+        {
+            // A new package has nothing to probe with; an unverified search is still better than none.
+            return true;
+        }
+
+        IReadOnlyList<CodeSearchMatch> matches;
+        try
+        {
+            matches = await _gitHub.SearchCodeAsync(
+                request.UpstreamRepository,
+                new CodeSearch(published.InstallerSha256),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (NotSupportedException)
+        {
+            notes.Add("Cross-identifier installer-hash search is not supported by this GitHub client.");
+            return false;
+        }
+        catch (Exception exception) when (exception is GitHubApiException or HttpRequestException)
+        {
+            notes.Add($"Cross-identifier installer-hash search was unavailable: {exception.Message}");
+            return false;
+        }
+
+        if (matches.Any(match => string.Equals(match.Path, published.ManifestPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        notes.Add(
+            $"Cross-identifier installer-hash code search does not index {request.UpstreamRepository}: "
+            + $"the published hash in '{published.ManifestPath}' was not found, so code search was skipped.");
+        return false;
+    }
+
+    private async Task SearchCodeForHashesAsync(
+        GitHubSubmissionRequest request,
+        string[] hashes,
+        ImmutableArray<RepositoryInstallerEvidence>.Builder results,
+        ImmutableArray<string>.Builder notes,
+        CancellationToken cancellationToken)
+    {
         foreach (string hash in hashes)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -196,9 +289,115 @@ public sealed class GitHubRepositorySubmissionEvidenceProvider(
                 }
             }
         }
-
-        return results.ToImmutable();
     }
+
+    private async Task SearchMovedIdentifierManifestsAsync(
+        GitHubSubmissionRequest request,
+        string upstreamHeadSha,
+        string[] hashes,
+        ImmutableArray<RepositoryInstallerEvidence>.Builder results,
+        ImmutableArray<string>.Builder notes,
+        CancellationToken cancellationToken)
+    {
+        PackageIdentifier ours = request.LocalPlan.PackageIdentifier;
+        PackageVersion version = request.LocalPlan.PackageVersion;
+        string name = ours.Value[(ours.Value.LastIndexOf('.') + 1)..];
+        if (name.Length == 0 || name.Length > 64 || version.Value.Length > 64)
+        {
+            return;
+        }
+
+        IReadOnlyList<PullRequestInfo> pullRequests;
+        try
+        {
+            pullRequests = await _gitHub.SearchPullRequestsByTextAsync(
+                request.UpstreamRepository,
+                new PullRequestTextSearch([name, version.Value], PullRequestState.All)
+                {
+                    MaximumResults = MaximumMovedIdentifierPullRequests,
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (NotSupportedException)
+        {
+            return;
+        }
+        catch (Exception exception) when (exception is GitHubApiException or HttpRequestException)
+        {
+            notes.Add($"Moved-identifier pull-request search was unavailable: {exception.Message}");
+            return;
+        }
+
+        string suffix = "." + name;
+        PackageIdentifier[] candidates =
+        [
+            .. pullRequests
+                .SelectMany(static pullRequest => IdentifierToken().Matches(pullRequest.Title))
+                .Select(static match => match.Value)
+                .Where(value => value.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(value, ours.Value, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Order(StringComparer.OrdinalIgnoreCase)
+                .Take(MaximumMovedIdentifierCandidates)
+                .Select(static value => PackageIdentifier.TryCreate(value, out PackageIdentifier? identifier)
+                    ? identifier
+                    : null)
+                .OfType<PackageIdentifier>(),
+        ];
+        foreach (PackageIdentifier candidate in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string path = ManifestPaths.GetVersionDirectory(candidate, version)
+                + "/" + ManifestPaths.GetInstallerFileName(candidate);
+            RepositoryContent content;
+            try
+            {
+                content = await _gitHub.GetContentAsync(
+                    request.UpstreamRepository,
+                    path,
+                    upstreamHeadSha,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (GitHubApiException exception) when (exception.StatusCode == HttpStatusCode.NotFound)
+            {
+                continue;
+            }
+            catch (Exception exception) when (exception is GitHubApiException or HttpRequestException)
+            {
+                notes.Add($"Moved-identifier manifest '{path}' could not be read: {exception.Message}");
+                continue;
+            }
+
+            if (content.Bytes.Length > MaximumEvidenceFileBytes)
+            {
+                continue;
+            }
+
+            InstallerManifest manifest;
+            try
+            {
+                manifest = ManifestYamlReader.ReadInstaller(
+                    ManifestYamlText.RepairForReading(content.GetText(), out _));
+            }
+            catch (Exception exception) when (
+                exception is InvalidDataException or FormatException or ArgumentException or YamlException)
+            {
+                continue;
+            }
+
+            foreach (string hash in (manifest.Installers ?? [])
+                         .Select(static installer => installer.InstallerSha256?.Value)
+                         .OfType<string>()
+                         .Where(value => hashes.Contains(value, StringComparer.OrdinalIgnoreCase))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                results.Add(new(candidate, version, hash, path));
+            }
+        }
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"[A-Za-z0-9][A-Za-z0-9_+\-]*(?:\.[A-Za-z0-9_+\-]+)+")]
+    private static partial System.Text.RegularExpressions.Regex IdentifierToken();
 
     private static bool TryParseInstallerManifestPath(
         string path,

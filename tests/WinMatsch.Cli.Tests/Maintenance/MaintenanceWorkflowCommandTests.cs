@@ -272,6 +272,22 @@ public sealed class MaintenanceWorkflowCommandTests
         Assert.Empty(harness.Interaction.Questions);
     }
 
+    [Theory]
+    [InlineData("winget-autosubmit")]
+    [InlineData("../")]
+    [InlineData(" ")]
+    public async Task Complete_rejects_a_malformed_branch_prefix(string prefix)
+    {
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        CliHarness harness = CreateHarness(client);
+
+        CliRunResult result = await harness.RunAsync(["complete", "--branch-prefix", prefix]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains("--branch-prefix", result.StandardError, StringComparison.Ordinal);
+        Assert.Empty(client.Mutations);
+    }
+
     [Fact]
     public async Task Complete_json_reports_statuses()
     {
@@ -431,6 +447,48 @@ public sealed class MaintenanceWorkflowCommandTests
         Assert.Contains("\"number\":41", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("\"number\":42", result.StandardOutput, StringComparison.Ordinal);
         Assert.Single(client.Mutations);
+    }
+
+    [Fact]
+    public async Task Complete_does_not_report_applied_responses_for_branch_prefix_pull_requests()
+    {
+        // No keep-alive comment is posted on another automation's pull request, so nothing was
+        // applied even though the pull request still needs a rerun.
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        PullRequestInfo pipeline = MaintenancePullRequests.ToolOwned(
+            51,
+            headBranch: "winget-autosubmit/contoso.app-1.2.3-0123456789abcdef") with
+        {
+            Title = "Update version: Contoso.App version 1.2.3",
+            Body = "Update Contoso.App to version 1.2.3.",
+        };
+        client.PullRequests.Add(pipeline);
+        var source = new ScriptedFeedbackSource(
+        [
+            Assert.Single(MaintenancePullRequests.Observe(pipeline)) with
+            {
+                ToolOwned = true,
+                AssociatedPackageIdentifier = "Contoso.App",
+                AssociatedPackageVersion = "1.2.3",
+                Comments =
+                [
+                    new PullRequestCommentObservation(
+                        "wingetbot",
+                        "Please rerun after the transient infrastructure error.",
+                        DateTimeOffset.UnixEpoch),
+                ],
+            },
+        ]);
+        CliHarness harness = CreateHarness(client, source);
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--apply-safe", "--yes", "--format", "json"]);
+
+        Assert.Contains(
+            "\"appliedKnownSafeResponses\":false",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.Empty(client.Mutations);
     }
 
     [Fact]

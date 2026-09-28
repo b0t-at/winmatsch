@@ -4,6 +4,7 @@
 PackageIdentifier: Waytech.CloudDrive2
 PackageVersion: 0.9.8
 InstallerType: inno
+ReleaseDate: 2025-09-09
 AppsAndFeaturesEntries:
 - DisplayName: CloudDrive2 0.9.8
   ProductCode: "{A1B2C3D4-E5F6-47A8-9012-3456789ABCDE}_is1"

@@ -122,6 +122,49 @@ public sealed class ResultJsonTests
     }
 
     [Fact]
+    public async Task Stale_plan_reports_its_own_code_instead_of_the_first_warning()
+    {
+        using var temporary = new TemporaryDirectory();
+        string resultPath = Path.Combine(temporary.Path, "stale.json");
+        var workflow = new FakeMutationWorkflow
+        {
+            Handler = request => FakeMutationWorkflow.Result(
+                request,
+                WorkflowResultCode.StalePlan,
+                validation: new WinMatsch.Validation.ValidationReport(
+                [
+                    new(
+                        "VLD5005",
+                        WinMatsch.Validation.ValidationSeverity.Warning,
+                        "Metadata URL probe failed.",
+                        "https://example.test/"),
+                ])) with
+            {
+                ErrorMessage = "The operation changed after approval; review the new plan before applying.",
+            },
+        };
+        CliHarness harness = CreateHarness(workflow);
+
+        await harness.RunAsync(
+        [
+            "update",
+            "Example.App",
+            "1.0",
+            "--result-json",
+            resultPath,
+        ]);
+
+        using JsonDocument document = JsonDocument.Parse(
+            await File.ReadAllTextAsync(resultPath));
+        JsonElement error = document.RootElement.GetProperty("error");
+        Assert.Equal("WF_STALE_PLAN", error.GetProperty("code").GetString());
+        Assert.Contains(
+            "changed after approval",
+            error.GetProperty("message").GetString(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Usage_error_writes_result_without_echoing_token()
     {
         using var temporary = new TemporaryDirectory();

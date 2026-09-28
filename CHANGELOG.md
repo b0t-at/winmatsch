@@ -7,6 +7,100 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-28
+
+Fixes for everything the September 2026 audit of the bot's winget-pkgs pull
+requests (455 PRs) and update pipeline (432 failed jobs) traced back to
+winmatsch.
+
+### Added
+
+- `VLD3013`: an installer URL on GitHub's moving `/releases/latest/download/`
+  alias is rejected; it serves another file or 404s as soon as the next release
+  ships (OpenWhispr.OpenWhispr: four merged versions had to be repaired by the
+  publisher).
+- `--submit` finds packages that moved to another identifier without relying
+  on GitHub code search: pull requests whose title names another identifier
+  with the same final segment and version are checked, and that identifier's
+  manifest at the pinned upstream commit is compared hash by hash (`GH1011`).
+  PatrickHener.Goshs → GoshsLabs.Goshs and Grandpied33.STH → STH.STH
+  duplicates had to be removed by moderators.
+- `WINMATSCH_FEEDBACK_DIRECTORY` relocates the feedback store read by the
+  `WF_UPSTREAM_VERDICT` gate, so ephemeral CI runners can persist the
+  escalations `complete` records.
+- `complete --branch-prefix <prefix>` also classifies the fork's pull requests
+  that another automation opened on that head-branch prefix (the update
+  pipeline's `winget-autosubmit/` branches), identified by their conventional
+  title because they carry no winmatsch marker. Repairs, supersession and
+  keep-alive comments stay limited to pull requests winmatsch opened.
+  `--schedule-pending` is now documented.
+- Installation-failure escalations record the rejected manifest's installer
+  type, scope and switches from the pull-request head. The rejected version is
+  rarely merged (and, if it is, usually with fixed switches), so the
+  `WF_UPSTREAM_VERDICT` gate previously had nothing reliable to compare
+  against (DiRoots.ProSheets 2.4.2 was resubmitted with the switches
+  that failed unattended for 2.4.1).
+
+### Changed
+
+- Code search is first probed with an installer hash already published for
+  the package. GitHub code search does not index `microsoft/winget-pkgs`; a
+  blind index is now reported (`GH1017`) and skipped instead of being read as
+  "no duplicate".
+- On update, `META-5` sets `ReleaseDate` from release evidence even when the
+  previous version declared none (winget-pkgs reported it missing for
+  chuccp.win-sshpass 0.9.4).
+- `META-4` normalizes CRLF release notes to LF, so they serialize as a block
+  scalar instead of a quoted string full of `\r\n` escapes.
+- On update, `WM0003` keeps an ARP `DisplayName`/`Publisher` the previous
+  version declared; dropping it changed the ARP shape (`ARP-4`,
+  Manifest-Metadata-Consistency; Lando.Lando failed 18 runs).
+- On update, `WM0001` restores a root default the previous version declared
+  when every installer carries its own value and the overrides stay lossless
+  under WinGet's merge (winget-pkgs reported root `Dependencies` missing for
+  edde746.Plezy 2.19.0/2.19.1).
+- `SCOPE-1` repairs Nullsoft user/machine twins that declare opposite scopes
+  but share one root `/CURRENTUSER` (or `/ALLUSERS`) switch: the contradicting
+  twin gets the paired MultiUser token. The machine entry of
+  Automattic.Wordpress installed per-user, and `VLD3002` blocked 19 runs.
+
+### Fixed
+
+- Verified apply failed with `WF_STALE_PLAN` whenever planning dropped a dead
+  optional metadata URL: the plan listed `WF_DEAD_METADATA_URL_DROPPED`, the
+  boundary preflight could not. Engine-added findings now travel with the plan
+  and are re-applied at the boundary (RimSort, poe-writer, eai, Plover, qmcli,
+  flip — 56 failed runs). The approval path of learned overrides no longer
+  drops these findings or the `WF_UPSTREAM_VERDICT` gate when it rebuilds its
+  report.
+- Metadata URL probes are answered once per mutation, shared by the plan and
+  the verified apply; an origin behind bot protection that answered
+  consecutive probes differently failed every run as stale
+  (altair-graphql.altair, 17 runs).
+- `--result-json` reported the first unrelated warning (`VLD5005`,
+  `RULE_ARP-4`) as the error of a stale, conflicting or failed apply; it now
+  reports `WF_STALE_PLAN`/`WF_CONFLICT`/`WF_APPLY_FAILED` with the actual
+  message, and prefers error findings for validation failures.
+- Previously published manifests with a UTF-8 BOM (Niklas2233.CarBudget, 24
+  runs) or a duplicated top-level key (CarthageSoftware.Mago declares
+  `ReleaseNotesUrl` twice, 13 runs) aborted every later update; they are now
+  read with the last value winning. Generated manifests are never repaired, and
+  `show --raw` still prints the published bytes.
+- `complete` escalated every healthy pull request as unknown feedback: the
+  policy service comments on each one, and passing labels
+  (`Azure-Pipeline-Passed`, `Validation-Completed`, `Moderator-Approved`,
+  `Publish-Pipeline-Succeeded`) were not recognized. They now mean "wait"
+  unless a moderator asked for changes (`Needs-Author-Feedback`,
+  `Changes-Requested`, `No-Recent-Activity`).
+  Fresh unknown feedback is no longer recorded (only once stale), and a later
+  blocking verdict replaces an earlier non-blocking terminal item; previously
+  the first observation froze the item before the validator answered.
+- An executable whose name ends in the word `CLI` is analyzed as a portable
+  command even when its name mentions installing (`TizenAppInstallerCli.exe`
+  was classified as a nested installer, so elfpie.TizenAppInstaller kept an
+  invalid `PortableCommandAlias` on a nested `exe` and failed `VLD3008` in 20
+  runs).
+
 ## [0.8.23] - 2026-09-03
 
 ### Added
@@ -472,7 +566,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.8.23...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.9.0...main
+[0.9.0]: https://github.com/b0t-at/winmatsch/compare/v0.8.23...v0.9.0
 [0.8.23]: https://github.com/b0t-at/winmatsch/compare/v0.8.22...v0.8.23
 [0.8.22]: https://github.com/b0t-at/winmatsch/compare/v0.8.21...v0.8.22
 [0.8.21]: https://github.com/b0t-at/winmatsch/compare/v0.8.20...v0.8.21

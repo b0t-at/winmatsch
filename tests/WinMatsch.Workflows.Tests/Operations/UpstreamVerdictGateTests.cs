@@ -125,6 +125,57 @@ public sealed class UpstreamVerdictGateTests
         Assert.Empty(unknown);
     }
 
+    [Fact]
+    public void Installation_failure_uses_recorded_traits_when_the_rejected_version_was_never_merged()
+    {
+        // DiRoots.ProSheets 2.4.1 failed unattended installation and was closed unmerged; 2.4.2
+        // was resubmitted with the same switches because the gate had nothing to compare with.
+        UpstreamVerdict verdict = Verdict(FeedbackClassification.InstallationFailure, "1.0.0") with
+        {
+            InstallerTraits = UpstreamVerdictGate.InstallerTraits(Manifests("1.0.0", silent: "/S").Installer),
+        };
+
+        ImmutableArray<ValidationFinding> unchanged = UpstreamVerdictGate.Evaluate(
+            _identifier,
+            new PackageVersion("1.1.0"),
+            Manifests("1.1.0", silent: "/S"),
+            [verdict],
+            _noRejectedVersions);
+        ImmutableArray<ValidationFinding> changed = UpstreamVerdictGate.Evaluate(
+            _identifier,
+            new PackageVersion("1.1.0"),
+            Manifests("1.1.0", silent: "/S /ALLUSERS"),
+            [verdict],
+            _noRejectedVersions);
+
+        Assert.Single(unchanged);
+        Assert.Empty(changed);
+    }
+
+    [Fact]
+    public void Recorded_rejected_traits_win_over_a_later_merged_manifest_of_that_version()
+    {
+        // The rejected version may merge later with fixed switches; comparing against that
+        // merged manifest would block every following update with the fixed switches.
+        UpstreamVerdict verdict = Verdict(FeedbackClassification.InstallationFailure, "1.0.0") with
+        {
+            InstallerTraits = UpstreamVerdictGate.InstallerTraits(Manifests("1.0.0", silent: "/S").Installer),
+        };
+        var mergedAfterFix = new Dictionary<string, PackageManifests>(StringComparer.Ordinal)
+        {
+            ["1.0.0"] = Manifests("1.0.0", silent: "/S /ALLUSERS"),
+        };
+
+        ImmutableArray<ValidationFinding> findings = UpstreamVerdictGate.Evaluate(
+            _identifier,
+            new PackageVersion("1.1.0"),
+            Manifests("1.1.0", silent: "/S /ALLUSERS"),
+            [verdict],
+            mergedAfterFix);
+
+        Assert.Empty(findings);
+    }
+
     private static UpstreamVerdict Verdict(
         FeedbackClassification classification,
         string version,

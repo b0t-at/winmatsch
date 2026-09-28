@@ -8,8 +8,9 @@ namespace WinMatsch.Rules.Policy;
 /// "Missing Properties value based on version X" class). Fields the previous default locale
 /// declared but the new manifests dropped are carried forward when they are still valid:
 /// non-URL fields verbatim, URL fields only when <see cref="PolicyEvidence.ConfirmedUrls"/>
-/// re-validated the previous value. A previous root <c>ReleaseDate</c> is recomputed from
-/// supplied release metadata — never copied. Dropping a field silently requires an explicit
+/// re-validated the previous value. A root <c>ReleaseDate</c> is recomputed from supplied
+/// release metadata — never copied — and set from that evidence even when the previous
+/// version declared none. Dropping a field silently requires an explicit
 /// <see cref="OverridePack.DroppedFields"/> entry; otherwise a finding calls the drop out.
 /// Per-installer <c>InstallerSwitches</c> and <c>Dependencies</c> carry-over is owned by
 /// WM0007 <c>PreserveOnUpdateRule</c> (which matches entries by uniqueness key); this rule
@@ -307,21 +308,26 @@ public sealed class Meta5FieldSetParityRule : IRule
             RecordCarry(context, $"Installer.{nameof(manifest.InstallModes)}");
         }
 
-        if (!HasAnyReleaseDate(manifest) && HasAnyReleaseDate(previousManifest)
+        if (!HasAnyReleaseDate(manifest)
             && !Skip(context, droppedFields, $"Installer.{nameof(manifest.ReleaseDate)}"))
         {
+            bool previousDeclared = HasAnyReleaseDate(previousManifest);
             if (_evidence.ReleaseDate is { } releaseDate)
             {
+                // Set even when the previous version had none: winget-pkgs compares against the
+                // published index and reported ReleaseDate missing for chuccp.win-sshpass 0.9.4.
                 manifest.ReleaseDate = releaseDate;
                 context.AddChangeEvidence(
                     this,
                     ManifestContext.GetInstallerManifestPath(context.Manifests),
                     "ReleaseDate",
-                    "recomputed from supplied release metadata (the previous manifest declared one)",
+                    previousDeclared
+                        ? "recomputed from supplied release metadata (the previous manifest declared one)"
+                        : "set from supplied release metadata",
                     RuleChangeConfidence.High);
                 context.AddTrace(this, "Installer: recomputed ReleaseDate from supplied release metadata.");
             }
-            else
+            else if (previousDeclared)
             {
                 context.AddFinding(this, RuleSeverity.Warning,
                     "The previous version declared ReleaseDate but no release-date evidence was supplied for the new version; the field must be recomputed, not copied.");

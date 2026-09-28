@@ -15,7 +15,8 @@ public static class WorkflowProductionComposition
         IWorkflowClock? clock = null,
         OverridePackStoreOptions? overridePackStoreOptions = null,
         string trustedGitHubHost = "github.com",
-        IUpstreamVerdictSource? upstreamVerdicts = null)
+        IUpstreamVerdictSource? upstreamVerdicts = null,
+        PreflightProbeCache? probeCache = null)
         => CreateLocalEngine(
             downloader,
             releaseSource,
@@ -23,7 +24,8 @@ public static class WorkflowProductionComposition
             overridePackStoreOptions,
             fallbackManifestSource: null,
             trustedGitHubHost: trustedGitHubHost,
-            upstreamVerdicts: upstreamVerdicts);
+            upstreamVerdicts: upstreamVerdicts,
+            probeCache: probeCache);
 
     public static LocalWorkflowEngine CreateLocalEngine(
         InstallerDownloader downloader,
@@ -32,11 +34,12 @@ public static class WorkflowProductionComposition
         OverridePackStoreOptions? overridePackStoreOptions,
         IManifestSnapshotSource? fallbackManifestSource,
         string trustedGitHubHost = "github.com",
-        IUpstreamVerdictSource? upstreamVerdicts = null)
+        IUpstreamVerdictSource? upstreamVerdicts = null,
+        PreflightProbeCache? probeCache = null)
     {
         ArgumentNullException.ThrowIfNull(downloader);
         var originalSubmissions = new FileOriginalSubmissionStore();
-        var network = new DurableInstallerPreflightNetwork(downloader);
+        var network = new DurableInstallerPreflightNetwork(downloader, probeCache);
         var preflight = new PreflightGateWorkflowAdapter(
             new PreflightGate(network),
             network);

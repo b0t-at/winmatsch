@@ -7,7 +7,10 @@ namespace WinMatsch.Rules;
 /// <c>DisplayName</c> equal to the default locale's <c>PackageName</c>, <c>Publisher</c> equal
 /// to the default locale's <c>Publisher</c>, and <c>DisplayVersion</c> equal to the
 /// <c>PackageVersion</c>. Entries that end up with all fields null are dropped, and a list that
-/// becomes empty is removed. Applies to the manifest root and to every installer.
+/// becomes empty is removed. Applies to the manifest root and to every installer. On an update,
+/// a DisplayName or Publisher the previous version's entries declared is kept: removing it
+/// changes the ARP shape, which winget-pkgs flags as Manifest-Metadata-Consistency and ARP-4
+/// reports (Lando.Lando).
 /// </summary>
 public sealed class DedupeArpVsDefaultLocaleRule : IRule
 {
@@ -24,21 +27,23 @@ public sealed class DedupeArpVsDefaultLocaleRule : IRule
         ArgumentNullException.ThrowIfNull(context);
 
         InstallerManifest manifest = context.Manifests.Installer;
-        string? packageName = context.Manifests.DefaultLocale.PackageName;
-        string? publisher = context.Manifests.DefaultLocale.Publisher;
-        string? packageVersion = manifest.PackageVersion?.Value;
+        var redundant = new RedundantValues(
+            context.Manifests.DefaultLocale.PackageName,
+            context.Manifests.DefaultLocale.Publisher,
+            manifest.PackageVersion?.Value,
+            PreviousFields.From(context.Previous?.Installer));
 
-        Dedupe(context, manifest, "AppsAndFeaturesEntries", packageName, publisher, packageVersion);
+        Dedupe(context, manifest, "AppsAndFeaturesEntries", redundant);
         if (manifest.Installers is { } installers)
         {
             for (int i = 0; i < installers.Count; i++)
             {
-                Dedupe(context, installers[i], $"Installers[{i}].AppsAndFeaturesEntries", packageName, publisher, packageVersion);
+                Dedupe(context, installers[i], $"Installers[{i}].AppsAndFeaturesEntries", redundant);
             }
         }
     }
 
-    private void Dedupe(ManifestContext context, InstallerFieldsBase fields, string path, string? packageName, string? publisher, string? packageVersion)
+    private void Dedupe(ManifestContext context, InstallerFieldsBase fields, string path, RedundantValues redundant)
     {
         List<AppsAndFeaturesEntry>? entries = fields.AppsAndFeaturesEntries;
         if (entries is null)
@@ -48,19 +53,25 @@ public sealed class DedupeArpVsDefaultLocaleRule : IRule
 
         foreach (AppsAndFeaturesEntry entry in entries)
         {
-            if (entry.DisplayName is not null && string.Equals(entry.DisplayName, packageName, StringComparison.Ordinal))
+            if (entry.DisplayName is not null
+                && !redundant.Previous.DisplayName
+                && string.Equals(entry.DisplayName, redundant.PackageName, StringComparison.Ordinal))
             {
                 entry.DisplayName = null;
                 context.AddTrace(this, $"{path}: dropped DisplayName equal to the default locale PackageName.");
             }
 
-            if (entry.Publisher is not null && string.Equals(entry.Publisher, publisher, StringComparison.Ordinal))
+            if (entry.Publisher is not null
+                && !redundant.Previous.Publisher
+                && string.Equals(entry.Publisher, redundant.Publisher, StringComparison.Ordinal))
             {
                 entry.Publisher = null;
                 context.AddTrace(this, $"{path}: dropped Publisher equal to the default locale Publisher.");
             }
 
-            if (entry.DisplayVersion is not null && string.Equals(entry.DisplayVersion, packageVersion, StringComparison.Ordinal))
+            // DisplayVersion is not preserved: ARP-2 removes a redundant DisplayVersion anyway.
+            if (entry.DisplayVersion is not null
+                && string.Equals(entry.DisplayVersion, redundant.PackageVersion, StringComparison.Ordinal))
             {
                 entry.DisplayVersion = null;
                 context.AddTrace(this, $"{path}: dropped DisplayVersion equal to the PackageVersion.");
@@ -79,6 +90,32 @@ public sealed class DedupeArpVsDefaultLocaleRule : IRule
         {
             fields.AppsAndFeaturesEntries = null;
             context.AddTrace(this, $"{path}: removed the empty list.");
+        }
+    }
+
+    private readonly record struct RedundantValues(
+        string? PackageName,
+        string? Publisher,
+        string? PackageVersion,
+        PreviousFields Previous);
+
+    private readonly record struct PreviousFields(bool DisplayName, bool Publisher)
+    {
+        public static PreviousFields From(InstallerManifest? previous)
+        {
+            if (previous is null)
+            {
+                return default;
+            }
+
+            AppsAndFeaturesEntry[] entries =
+            [
+                .. previous.AppsAndFeaturesEntries ?? [],
+                .. (previous.Installers ?? []).SelectMany(static installer => installer.AppsAndFeaturesEntries ?? []),
+            ];
+            return new(
+                entries.Any(static entry => entry.DisplayName is not null),
+                entries.Any(static entry => entry.Publisher is not null));
         }
     }
 }

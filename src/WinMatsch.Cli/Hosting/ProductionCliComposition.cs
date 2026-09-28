@@ -17,12 +17,18 @@ public static class ProductionCliComposition
         string? configurationPath = UserConfigurationFile.GetDefaultPath(
             environment,
             homeDirectory);
-        IFeedbackStateStore feedbackState = configurationPath is null
-            ? new FileFeedbackStateStore()
-            : new FileFeedbackStateStore(
-                Path.Combine(
-                    Path.GetDirectoryName(configurationPath)!,
-                    "feedback"));
+
+        // CI runners are ephemeral: without a persisted directory the upstream-verdict gate
+        // never sees the escalations `complete` recorded in an earlier run.
+        string? feedbackDirectory = environment("WINMATSCH_FEEDBACK_DIRECTORY");
+        IFeedbackStateStore feedbackState = !string.IsNullOrWhiteSpace(feedbackDirectory)
+            ? new FileFeedbackStateStore(Path.GetFullPath(feedbackDirectory))
+            : configurationPath is null
+                ? new FileFeedbackStateStore()
+                : new FileFeedbackStateStore(
+                    Path.Combine(
+                        Path.GetDirectoryName(configurationPath)!,
+                        "feedback"));
         IReadOnlyList<ICommandModule> modules =
         [
             new DiagnosticsCommandModule(),

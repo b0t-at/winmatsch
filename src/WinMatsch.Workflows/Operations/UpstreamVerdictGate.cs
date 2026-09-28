@@ -12,7 +12,11 @@ public sealed record UpstreamVerdict(
     FeedbackClassification Classification,
     PackageVersion? PackageVersion,
     ImmutableArray<string> Evidence,
-    DateTimeOffset RecordedAt);
+    DateTimeOffset RecordedAt)
+{
+    /// <summary>Installer traits of the manifest an installation test rejected, when recorded.</summary>
+    public string? InstallerTraits { get; init; }
+}
 
 /// <summary>Supplies the blocking upstream verdicts recorded for a package.</summary>
 public interface IUpstreamVerdictSource
@@ -55,7 +59,10 @@ public sealed class FeedbackStoreVerdictSource : IUpstreamVerdictSource
                     item.Classification,
                     PackageVersion.TryCreate(item.PackageVersion, out PackageVersion? version) ? version : null,
                     item.Evidence is null ? [] : [.. item.Evidence],
-                    item.RecordedAt))
+                    item.RecordedAt)
+                {
+                    InstallerTraits = item.InstallerTraits,
+                })
                 .OrderBy(static verdict => verdict.PullRequestNumber),
         ];
     }
@@ -156,9 +163,16 @@ public static class UpstreamVerdictGate
 
                 return null;
             case FeedbackClassification.InstallationFailure:
-                return verdict.PackageVersion is { } installVersion
-                    && rejectedVersions.TryGetValue(installVersion.Value, out PackageManifests? rejectedByInstall)
-                    && string.Equals(InstallerTraits(rejectedByInstall.Installer), candidateTraits, StringComparison.Ordinal)
+                // The traits recorded from the rejected pull request describe exactly what
+                // failed. A manifest loaded for that version is only a fallback: it exists only
+                // when the version was merged later, usually after its switches were fixed.
+                string? rejectedTraits = verdict.InstallerTraits
+                    ?? (verdict.PackageVersion is { } installVersion
+                        && rejectedVersions.TryGetValue(installVersion.Value, out PackageManifests? rejectedByInstall)
+                            ? InstallerTraits(rejectedByInstall.Installer)
+                            : null);
+                return rejectedTraits is not null
+                    && string.Equals(rejectedTraits, candidateTraits, StringComparison.Ordinal)
                     ? "the installer type, scope and switches are unchanged since the rejected version."
                     : null;
             default:

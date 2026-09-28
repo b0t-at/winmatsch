@@ -138,4 +138,43 @@ public class Scope1UserMachineTwinRuleTests
         Assert.Null(manifests.Installer.Installers![0].Scope);
         Assert.Empty(context.Changes);
     }
+
+    [Fact]
+    public void Machine_twin_inheriting_the_shared_currentuser_switch_gets_the_paired_token()
+    {
+        // Automattic.Wordpress: user/machine twins with only a root Custom /CURRENTUSER, so the
+        // machine entry installed per-user and VLD3002 blocked every update.
+        Installer user = TestManifests.CreateInstaller(Architecture.X86, InstallerType.Nullsoft, SharedUrl, Scope.User);
+        Installer machine = TestManifests.CreateInstaller(Architecture.X86, InstallerType.Nullsoft, SharedUrl, Scope.Machine);
+        PackageManifests manifests = TestManifests.Create(user, machine);
+        manifests.Installer.InstallerSwitches = new InstallerSwitches { Custom = "/CURRENTUSER" };
+        ManifestContext context = TestManifests.CreateContext(manifests);
+
+        _rule.Apply(context);
+
+        Assert.Null(user.InstallerSwitches);
+        Assert.Equal("/ALLUSERS", machine.InstallerSwitches!.Custom);
+        Assert.Equal("/CURRENTUSER", manifests.Installer.InstallerSwitches.Custom);
+    }
+
+    [Fact]
+    public void Shared_switch_is_not_rewritten_for_non_nullsoft_or_undeclared_twins()
+    {
+        Installer user = TestManifests.CreateInstaller(url: SharedUrl, scope: Scope.User);
+        Installer machine = TestManifests.CreateInstaller(url: SharedUrl, scope: Scope.Machine);
+        PackageManifests msi = TestManifests.Create(user, machine);
+        msi.Installer.InstallerSwitches = new InstallerSwitches { Custom = "/CURRENTUSER" };
+
+        Installer first = TestManifests.CreateInstaller(installerType: InstallerType.Nullsoft, url: SharedUrl);
+        Installer second = TestManifests.CreateInstaller(Architecture.X86, InstallerType.Nullsoft, SharedUrl);
+        PackageManifests undeclared = TestManifests.Create(first, second);
+        undeclared.Installer.InstallerSwitches = new InstallerSwitches { Custom = "/CURRENTUSER" };
+
+        _rule.Apply(TestManifests.CreateContext(msi));
+        _rule.Apply(TestManifests.CreateContext(undeclared));
+
+        Assert.Null(machine.InstallerSwitches);
+        Assert.Null(first.InstallerSwitches);
+        Assert.Null(second.InstallerSwitches);
+    }
 }

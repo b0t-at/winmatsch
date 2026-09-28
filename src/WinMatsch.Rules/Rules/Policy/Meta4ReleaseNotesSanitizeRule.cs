@@ -64,7 +64,9 @@ public sealed class Meta4ReleaseNotesSanitizeRule : IRule
             return null;
         }
 
-        string sanitized = SanitizeLines(context, notes, documentName);
+        // GitHub release bodies often use CRLF; the serializer then has to fall back to a
+        // double-quoted scalar full of \r\n escapes (GDQuest.GDScript.Formatter 0.26.0).
+        string sanitized = SanitizeLines(context, notes.ReplaceLineEndings("\n"), documentName);
         if (sanitized.Length > _maximumLength)
         {
             int boundary = sanitized.LastIndexOf("\n\n", _maximumLength, StringComparison.Ordinal);
@@ -92,7 +94,7 @@ public sealed class Meta4ReleaseNotesSanitizeRule : IRule
                 this,
                 manifestPath,
                 "ReleaseNotes",
-                "bounded release-notes sanitization (bullets, key-value colons, maximum length)",
+                "bounded release-notes sanitization (line endings, bullets, key-value colons, maximum length)",
                 RuleChangeConfidence.High);
         }
 

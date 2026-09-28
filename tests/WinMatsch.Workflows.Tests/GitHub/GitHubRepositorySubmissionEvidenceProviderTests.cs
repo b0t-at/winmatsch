@@ -71,6 +71,105 @@ public sealed class GitHubRepositorySubmissionEvidenceProviderTests
     }
 
     [Fact]
+    public async Task Blind_code_search_is_probed_with_a_published_hash_and_skipped()
+    {
+        // GitHub code search does not index microsoft/winget-pkgs: every query returns nothing,
+        // so GH1011 never fired for PatrickHener.Goshs or Grandpied33.STH. A published hash
+        // that is not found proves the index is blind; the empty answer must not read as clean.
+        PackageIdentifier package = new("MongoDB.Compass.Community");
+        var client = new FakeGitHubClient();
+        ConfigureTrees(client);
+        string communityPath =
+            "manifests/m/MongoDB/Compass/Community/1.0.0/MongoDB.Compass.Community.installer.yaml";
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            communityPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            InstallerYaml(package, new string('A', 64)));
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            "manifests/m/MongoDB/Compass/Full/1.0.0/MongoDB.Compass.Full.installer.yaml",
+            GitHubLifecycleTestSupport.UpstreamSha,
+            InstallerYaml(new PackageIdentifier("MongoDB.Compass.Full"), new string('B', 64)));
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            GitHubRepositorySubmissionEvidenceProvider.PolicyPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            Encoding.UTF8.GetBytes("{}"));
+        string hash = new('E', 64);
+        client.CodeSearchMatches[hash] =
+        [
+            new("manifests/o/Other/Compass/2.0.0/Other.Compass.installer.yaml", "abc"),
+        ];
+        GitHubSubmissionRequest request = RequestWithInstaller(hash);
+        request = request with
+        {
+            LocalPlan = request.LocalPlan with { PackageIdentifier = package },
+        };
+
+        RepositorySubmissionEvidence evidence =
+            await new GitHubRepositorySubmissionEvidenceProvider(client).GetEvidenceAsync(
+                request,
+                GitHubLifecycleTestSupport.UpstreamSha,
+                CancellationToken.None);
+
+        Assert.Contains(
+            evidence.Notes,
+            static note => note.Contains("does not index", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            evidence.InstallerEvidence,
+            static item => item.PackageIdentifier == new PackageIdentifier("Other.Compass"));
+    }
+
+    [Fact]
+    public async Task Moved_identifier_is_found_through_pull_request_titles_and_its_manifest()
+    {
+        // PatrickHener.Goshs 2.1.6 was submitted although GoshsLabs.Goshs 2.1.6 already
+        // carried the same installers; moderators had to remove it again.
+        var client = new FakeGitHubClient();
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            GitHubRepositorySubmissionEvidenceProvider.PolicyPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            Encoding.UTF8.GetBytes("{}"));
+        string hash = new('F', 64);
+        var moved = new PackageIdentifier("GoshsLabs.Goshs");
+        var version = new PackageVersion("2.1.6");
+        string movedPath = $"{ManifestPaths.GetVersionDirectory(moved, version)}/GoshsLabs.Goshs.installer.yaml";
+        client.SetContent(
+            GitHubLifecycleTestSupport.Upstream,
+            movedPath,
+            GitHubLifecycleTestSupport.UpstreamSha,
+            InstallerYaml(moved, hash));
+        client.AddPullRequest(GitHubLifecycleTestSupport.PullRequest(423160, PullRequestState.Closed) with
+        {
+            Title = "New version: GoshsLabs.Goshs 2.1.6",
+            Body = "",
+        });
+        GitHubSubmissionRequest request = RequestWithInstaller(hash);
+        request = request with
+        {
+            LocalPlan = request.LocalPlan with
+            {
+                PackageIdentifier = new PackageIdentifier("PatrickHener.Goshs"),
+                PackageVersion = version,
+            },
+        };
+
+        RepositorySubmissionEvidence evidence =
+            await new GitHubRepositorySubmissionEvidenceProvider(client).GetEvidenceAsync(
+                request,
+                GitHubLifecycleTestSupport.UpstreamSha,
+                CancellationToken.None);
+
+        RepositoryInstallerEvidence duplicate = Assert.Single(
+            evidence.InstallerEvidence,
+            item => item.PackageIdentifier == moved);
+        Assert.Equal(hash, duplicate.InstallerSha256);
+        Assert.Equal(movedPath, duplicate.ManifestPath);
+    }
+
+    [Fact]
     public async Task Reads_policy_and_sibling_hashes_from_pinned_upstream_sha()
     {
         PackageIdentifier package = new("MongoDB.Compass.Community");

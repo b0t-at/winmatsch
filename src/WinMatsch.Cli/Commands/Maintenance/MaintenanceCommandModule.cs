@@ -355,6 +355,15 @@ public sealed class MaintenanceCommandModule : ICommandModule
             Description = "Allowlisted repair input as PR_NUMBER=MANIFEST_DIRECTORY. May be "
                 + "repeated; only duplicate/hash classifications can consume it.",
         };
+        var branchPrefix = new Option<string[]>("--branch-prefix")
+        {
+            Description = "Additional head-branch prefix of pull requests your own automation "
+                + "opened from the fork (e.g. winget-autosubmit/). May be repeated. Such pull "
+                + "requests are classified and their verdicts recorded, identified by their "
+                + "conventional title; repairs and supersession stay limited to winmatsch/ "
+                + "pull requests.",
+            HelpName = "prefix",
+        };
         var command = new Command(
             "complete",
             "Inspect the lifecycle of open tool-created pull requests and report the "
@@ -367,6 +376,7 @@ public sealed class MaintenanceCommandModule : ICommandModule
                 schedulePending,
                 replayPending,
                 approvedRepair,
+                branchPrefix,
                 yes,
             },
         };
@@ -396,6 +406,16 @@ public sealed class MaintenanceCommandModule : ICommandModule
             }
 
             RepositoryCoordinates upstream = context.Configuration.Repository;
+            string[] extraPrefixes = context.ParseResult.GetValue(branchPrefix) ?? [];
+            if (extraPrefixes.Any(static prefix =>
+                    string.IsNullOrWhiteSpace(prefix)
+                    || !prefix.EndsWith('/')
+                    || prefix.Contains("..", StringComparison.Ordinal)))
+            {
+                throw new CliUsageException(
+                    "--branch-prefix must be a non-empty branch prefix ending in '/'.");
+            }
+
             using IGitHubRepositoryClient client = await CreateClientAsync(context).ConfigureAwait(false);
             RepositoryCoordinates forkRepository = await ResolveForkAsync(context, client, fork, upstream)
                 .ConfigureAwait(false);
@@ -414,7 +434,8 @@ public sealed class MaintenanceCommandModule : ICommandModule
                     forkRepository.Owner,
                     new GitHubPullRequestMetadataSource(
                         context.GitHubOptions,
-                        token.Token.RevealValue()));
+                        token.Token.RevealValue()),
+                    extraPrefixes);
             }
 
             using IDisposable? sourceLease = source as IDisposable;
@@ -578,8 +599,19 @@ public sealed class MaintenanceCommandModule : ICommandModule
                 upstream,
                 pending,
                 result);
-            bool appliedKnownSafeResponse = result.Statuses.Any(static status =>
-                    status.RecommendedAction == PullRequestLifecycleAction.RerunChecks)
+            // Keep-alive comments are only posted on pull requests winmatsch opened, so a
+            // --branch-prefix pull request that merely needs a rerun does not count as applied.
+            HashSet<long> commentable =
+            [
+                .. observations
+                    .Where(static observation => observation.PullRequest.Body?.Contains(
+                        ToolPullRequestObservationSource.AssociationMarker,
+                        StringComparison.Ordinal) == true)
+                    .Select(static observation => observation.PullRequest.Number),
+            ];
+            bool appliedKnownSafeResponse = result.Statuses.Any(status =>
+                    status.RecommendedAction == PullRequestLifecycleAction.RerunChecks
+                    && commentable.Contains(status.PullRequestNumber))
                 || result.Statuses.Any(status =>
                     status.RecommendedAction == PullRequestLifecycleAction.RepairManifest
                     && result.RemoteStates.Any(remote =>

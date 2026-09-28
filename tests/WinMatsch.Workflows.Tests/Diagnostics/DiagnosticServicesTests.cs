@@ -194,6 +194,74 @@ public sealed class DiagnosticServicesTests
         Assert.True(snapshot.IsRemote);
     }
 
+    [Fact]
+    public async Task Repository_source_reads_published_manifests_with_a_bom_or_duplicate_root_key()
+    {
+        // Niklas2233.CarBudget (BOM) and CarthageSoftware.Mago (ReleaseNotesUrl twice) were
+        // merged upstream; rejecting them blocked every later update of those packages.
+        PackageManifests manifests = CreateManifests();
+        var version = new PackageVersion("1.23.1");
+        manifests.Version.PackageVersion = version;
+        manifests.Installer.PackageVersion = version;
+        manifests.DefaultLocale.PackageVersion = version;
+        manifests.DefaultLocale.ReleaseNotesUrl = "https://example.test/releases/tag/1.23.1";
+        IReadOnlyDictionary<string, string> files = PackageManifestIO.SerializeFiles(manifests);
+        var client = new FakeGitHubRepositoryClient();
+        client.AddTree("root", Tree("manifests", "manifests-sha"));
+        client.AddTree("manifests-sha", Tree("e", "letter-sha"));
+        client.AddTree("letter-sha", Tree("Example", "publisher-sha"));
+        client.AddTree("publisher-sha", Tree("App", "package-sha"));
+        client.AddTree("package-sha", Tree("1.23.1", "v1.23.1"));
+        client.AddTree(
+            "v1.23.1",
+            files.Keys.Select((name, index) => Blob(name, $"file-{index}")).ToArray());
+        string versionDirectory = ManifestPaths.GetVersionDirectory(
+            manifests.Version.PackageIdentifier!,
+            version);
+        foreach ((string name, string content) in files)
+        {
+            string published = name.Contains(".locale.", StringComparison.Ordinal)
+                ? content.Replace(
+                    "PackageLocale:",
+                    "ReleaseNotesUrl: https://example.test/releases/tag/1.0.0\nPackageLocale:",
+                    StringComparison.Ordinal)
+                : name.Contains(".installer.", StringComparison.Ordinal)
+                    ? "\uFEFF" + content
+                    : content;
+            client.AddContent($"{versionDirectory}/{name}", published);
+        }
+
+        var source = new RepositoryManifestSnapshotSource(
+            new RepositoryDiagnosticService(client),
+            Repository);
+
+        PackageSnapshot? snapshot = await source.LoadAsync(
+            ".",
+            manifests.Version.PackageIdentifier!,
+            version,
+            CancellationToken.None);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(
+            "https://example.test/releases/tag/1.23.1",
+            snapshot.Manifests.DefaultLocale.ReleaseNotesUrl);
+        Assert.Equal(version, snapshot.Manifests.Installer.PackageVersion);
+
+        // The published bytes stay untouched for diffs and for `show --raw`.
+        Assert.Contains(
+            snapshot.Documents,
+            static document => System.Text.Encoding.UTF8.GetString(document.Content.AsSpan())
+                .Contains("releases/tag/1.0.0", StringComparison.Ordinal));
+        PackageVersionResult raw = await new RepositoryDiagnosticService(client).GetPackageVersionAsync(
+            Repository,
+            manifests.Version.PackageIdentifier!,
+            version,
+            normalize: false);
+        Assert.Contains(
+            raw.Files,
+            static file => file.Content.StartsWith('\uFEFF'));
+    }
+
     private static RepositoryCoordinates Repository { get; } = new("owner", "repo");
 
     private static (FakeGitHubRepositoryClient Client, PackageManifests Manifests) CreateRepository()
