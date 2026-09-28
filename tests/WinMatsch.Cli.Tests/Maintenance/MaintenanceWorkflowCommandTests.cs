@@ -450,6 +450,48 @@ public sealed class MaintenanceWorkflowCommandTests
     }
 
     [Fact]
+    public async Task Complete_does_not_report_applied_responses_for_branch_prefix_pull_requests()
+    {
+        // No keep-alive comment is posted on another automation's pull request, so nothing was
+        // applied even though the pull request still needs a rerun.
+        FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");
+        PullRequestInfo pipeline = MaintenancePullRequests.ToolOwned(
+            51,
+            headBranch: "winget-autosubmit/contoso.app-1.2.3-0123456789abcdef") with
+        {
+            Title = "Update version: Contoso.App version 1.2.3",
+            Body = "Update Contoso.App to version 1.2.3.",
+        };
+        client.PullRequests.Add(pipeline);
+        var source = new ScriptedFeedbackSource(
+        [
+            Assert.Single(MaintenancePullRequests.Observe(pipeline)) with
+            {
+                ToolOwned = true,
+                AssociatedPackageIdentifier = "Contoso.App",
+                AssociatedPackageVersion = "1.2.3",
+                Comments =
+                [
+                    new PullRequestCommentObservation(
+                        "wingetbot",
+                        "Please rerun after the transient infrastructure error.",
+                        DateTimeOffset.UnixEpoch),
+                ],
+            },
+        ]);
+        CliHarness harness = CreateHarness(client, source);
+
+        CliRunResult result = await harness.RunAsync(
+            ["complete", "--apply-safe", "--yes", "--format", "json"]);
+
+        Assert.Contains(
+            "\"appliedKnownSafeResponses\":false",
+            result.StandardOutput,
+            StringComparison.Ordinal);
+        Assert.Empty(client.Mutations);
+    }
+
+    [Fact]
     public async Task Queued_allowlisted_repair_remains_pending_and_unapplied()
     {
         FakeMaintenanceGitHubClient client = CreateClient(forkSha: "sha-upstream");

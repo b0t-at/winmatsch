@@ -599,8 +599,19 @@ public sealed class MaintenanceCommandModule : ICommandModule
                 upstream,
                 pending,
                 result);
-            bool appliedKnownSafeResponse = result.Statuses.Any(static status =>
-                    status.RecommendedAction == PullRequestLifecycleAction.RerunChecks)
+            // Keep-alive comments are only posted on pull requests winmatsch opened, so a
+            // --branch-prefix pull request that merely needs a rerun does not count as applied.
+            HashSet<long> commentable =
+            [
+                .. observations
+                    .Where(static observation => observation.PullRequest.Body?.Contains(
+                        ToolPullRequestObservationSource.AssociationMarker,
+                        StringComparison.Ordinal) == true)
+                    .Select(static observation => observation.PullRequest.Number),
+            ];
+            bool appliedKnownSafeResponse = result.Statuses.Any(status =>
+                    status.RecommendedAction == PullRequestLifecycleAction.RerunChecks
+                    && commentable.Contains(status.PullRequestNumber))
                 || result.Statuses.Any(status =>
                     status.RecommendedAction == PullRequestLifecycleAction.RepairManifest
                     && result.RemoteStates.Any(remote =>
