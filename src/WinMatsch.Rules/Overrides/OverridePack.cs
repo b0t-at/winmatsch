@@ -19,6 +19,12 @@ public sealed record OverridePack
 
     public ImmutableArray<AssetMappingOverride> AssetMappings { get; init; } = [];
 
+    /// <summary>
+    /// Selects the analyzed portable ZIP payload with this file name instead of carrying the
+    /// previous version's nested executable forward.
+    /// </summary>
+    public string? PortableExecutableFileName { get; init; }
+
     public ScopeLayoutOverride? ScopeLayout { get; init; }
 
     public string? VersionSource { get; init; }

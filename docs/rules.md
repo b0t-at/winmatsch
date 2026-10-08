@@ -160,6 +160,7 @@ forcedArchitectures:                 # architecture corrections by asset pattern
 assetMappings:                       # asset → installer entry mapping
   - assetPattern: "*.msixbundle"
     entry: primary
+portableExecutableFileName: "app.exe" # select this analyzed portable ZIP executable
 scopeLayout: Preserve                # Preserve | Root | PerInstaller
 versionSource: "…"                   # version detection override
 metadataUrlReplacements:             # exact metadata-field URL rewrites; targets must be safe HTTPS
@@ -178,6 +179,18 @@ quirks:
 ```
 
 ### Field selectors and layout keys
+
+`portableExecutableFileName` is an asset-mapping setting for portable ZIP
+packages. On updates, nested installer paths are normally carried forward from
+the previous manifest; when that manifest pinned the wrong executable (for
+example a helper shipped next to the main program), the mistake is repeated
+for every new version. This key instead selects the analyzed portable payload
+with exactly this file name for every ZIP installer of the package. It accepts
+a plain `.exe` file name only, no paths or wildcards. When the analyzed archive
+has no match or more than one match, mapping stops with
+`NESTED_PORTABLE_OVERRIDE_UNRESOLVED` instead of falling back to the previous
+selection. A `PortableCommandAlias` is kept only if the previous manifest used
+it for the same executable.
 
 `preservedFields`, `droppedFields`, `metadataUrlReplacements`, and
 `scopeLayout` are applied by rule `WM0202` in that order, so an explicit drop

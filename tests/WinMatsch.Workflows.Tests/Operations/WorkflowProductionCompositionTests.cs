@@ -7,6 +7,7 @@ using WinMatsch.Core;
 using WinMatsch.Core.Yaml;
 using WinMatsch.Downloads;
 using WinMatsch.GitHub;
+using WinMatsch.Rules.OverridePacks;
 using WinMatsch.Testing.Infrastructure;
 using WinMatsch.Validation;
 using WinMatsch.Workflows.Discovery;
@@ -22,6 +23,71 @@ public sealed class WorkflowProductionCompositionTests
 {
     private const string NestedZipInstallerUrl =
         "https://example.test/RoslynPad-windows-x64.zip";
+
+    [Fact]
+    public async Task Portable_executable_override_replaces_a_pinned_helper_in_the_serialized_manifest()
+    {
+        byte[] executable = await File.ReadAllBytesAsync(
+            Path.Combine(AppContext.BaseDirectory, "WinMatsch.Workflows.Tests.dll"));
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (string fileName in (string[])["tool-completions.exe", "tool-helper.exe", "tool.exe"])
+            {
+                using Stream entry = archive.CreateEntry($"tool-2.0.0/{fileName}").Open();
+                entry.Write(executable);
+            }
+        }
+
+        byte[] content = buffer.ToArray();
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(content),
+        });
+        using var downloader = new InstallerDownloader(handler);
+        string output = CreateDirectory();
+        try
+        {
+            LocalWorkflowEngine engine = WorkflowProductionComposition.CreateLocalEngine(
+                downloader,
+                new DirectWorkflowReleaseSource(),
+                overridePackStoreOptions: new() { RootDirectory = Path.Combine(output, "overrides") });
+            var identifier = new PackageIdentifier("Example.Composed");
+            WriteNestedPrevious(
+                output,
+                InstallerType.Zip,
+                [(Architecture.Arm64, "https://example.test/1.0.0/tool-arm64.zip")],
+                "tool-1.0.0/tool-helper.exe");
+            var url = new Uri("https://example.test/2.0.0/tool-arm64.zip");
+
+            WorkflowOperationResult result = await engine.UpdateAsync(new UpdateOperationRequest
+            {
+                OutputDirectory = output,
+                PackageIdentifier = identifier,
+                PreviousVersion = new("1.0.0"),
+                PackageVersion = "2.0.0",
+                Release = new(null, [url], []),
+                UrlOverrides = [new(url, Architecture.Arm64, null, null)],
+                OverridePacks = new OverridePackSet(
+                [
+                    new OverridePack { PackageIdentifier = identifier, PortableExecutableFileName = "tool.exe" },
+                ]),
+            });
+
+            AssertSucceeded(result);
+            InstallerManifest manifest = ReadInstaller(result);
+            Installer installer = Assert.Single(manifest.Installers!);
+            NestedInstallerFile selected = Assert.Single(installer.NestedInstallerFiles ?? manifest.NestedInstallerFiles!);
+            Assert.Equal(Architecture.Arm64, installer.Architecture);
+            Assert.Equal("tool-2.0.0/tool.exe", selected.RelativeFilePath);
+            Assert.Equal("tool", selected.PortableCommandAlias);
+            Assert.Equal(new Sha256Hash(Convert.ToHexString(SHA256.HashData(content))), installer.InstallerSha256);
+        }
+        finally
+        {
+            Directory.Delete(output, recursive: true);
+        }
+    }
 
     [Fact]
     public async Task Direct_release_source_deduplicates_identical_installer_urls()
@@ -2403,7 +2469,8 @@ public sealed class WorkflowProductionCompositionTests
     private static void WriteNestedPrevious(
         string output,
         InstallerType installerType,
-        IReadOnlyList<(Architecture Architecture, string Url)> installers)
+        IReadOnlyList<(Architecture Architecture, string Url)> installers,
+        string nestedPath = "tool.exe")
     {
         var identifier = new PackageIdentifier("Example.Composed");
         var version = new PackageVersion("1.0.0");
@@ -2427,7 +2494,7 @@ public sealed class WorkflowProductionCompositionTests
                 [
                     new NestedInstallerFile
                     {
-                        RelativeFilePath = "tool.exe",
+                        RelativeFilePath = nestedPath,
                         PortableCommandAlias = "tool",
                     },
                 ],

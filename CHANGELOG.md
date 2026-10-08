@@ -7,6 +7,15 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- Override packs accept `portableExecutableFileName`, which selects the
+  analyzed portable ZIP executable by file name instead of carrying a wrongly
+  pinned previous `NestedInstallerFiles` path forward to every new version
+  (orhun.git-cliff shipped `git-cliff-mangen.exe` for ARM64 since its first
+  manifest). No match or an ambiguous match stops mapping with
+  `NESTED_PORTABLE_OVERRIDE_UNRESOLVED`.
+
 ## [0.9.0] - 2026-09-28
 
 Fixes for everything the September 2026 audit of the bot's winget-pkgs pull

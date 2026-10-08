@@ -86,6 +86,7 @@ public static class OverridePackYaml
             "rules",
             "forcedArchitectures",
             "assetMappings",
+            "portableExecutableFileName",
             "scopeLayout",
             "versionSource",
             "metadataUrlReplacements",
@@ -111,6 +112,7 @@ public static class OverridePackYaml
             RuleModes = ParseRuleModes(values.OptionalMapping("rules")),
             ForcedArchitectures = ParseForcedArchitectures(values.OptionalSequence("forcedArchitectures")),
             AssetMappings = ParseAssetMappings(values.OptionalSequence("assetMappings")),
+            PortableExecutableFileName = values.OptionalScalar("portableExecutableFileName"),
             ScopeLayout = ParseOptionalEnum<ScopeLayoutOverride>(values.OptionalScalar("scopeLayout"), "scopeLayout"),
             VersionSource = values.OptionalScalar("versionSource"),
             MetadataUrlReplacements = ParseStringMap(values.OptionalMapping("metadataUrlReplacements")),
@@ -210,6 +212,7 @@ public static class OverridePackYaml
         WriteRuleModes(yaml, pack.RuleModes);
         WriteForcedArchitectures(yaml, pack.ForcedArchitectures);
         WriteAssetMappings(yaml, pack.AssetMappings);
+        Scalar(yaml, "portableExecutableFileName", pack.PortableExecutableFileName);
         Scalar(yaml, "scopeLayout", pack.ScopeLayout?.ToString());
         Scalar(yaml, "versionSource", pack.VersionSource);
         WriteStringMap(yaml, "metadataUrlReplacements", pack.MetadataUrlReplacements);
@@ -291,6 +294,12 @@ public static class OverridePackYaml
                     ValidateEnum(scope, "assetMappings.scope");
                 }
             }
+        }
+
+        if (pack.PortableExecutableFileName is { } portableExecutable)
+        {
+            nodeCount += 2;
+            scalarOutputLength += ValidateScalar(portableExecutable, "portableExecutableFileName");
         }
 
         if (pack.ScopeLayout is { } scopeLayout)
@@ -429,6 +438,16 @@ public static class OverridePackYaml
 
     private static void ValidateSemantics(OverridePack pack)
     {
+        if (pack.PortableExecutableFileName is { } executable
+            && (executable.Length <= ".exe".Length
+                || !executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                || executable != executable.Trim()
+                || executable.Any(static character => char.IsControl(character) || "<>:\"/\\|?*".Contains(character))))
+        {
+            throw new FormatException(
+                "portableExecutableFileName must be a plain .exe file name without paths or wildcards.");
+        }
+
         if (pack.VersionSource is { } versionSource)
         {
             string normalized = versionSource.Trim();

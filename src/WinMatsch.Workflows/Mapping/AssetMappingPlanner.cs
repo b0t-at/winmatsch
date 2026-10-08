@@ -285,6 +285,7 @@ public static class AssetMappingPlanner
                 request.Version.Version!.Value,
                 preservePreviousStructure: false,
                 allowStructuralRewrite: false,
+                pack?.PortableExecutableFileName,
                 diagnostics,
                 questions);
             decisions.Add(new(
@@ -1244,12 +1245,14 @@ public static class AssetMappingPlanner
         }
 
         ValidateVersionContinuity(previous, candidate, request.Version.Version!, diagnostics);
+        request.OverridePacks.TryGet(request.PackageIdentifier, out OverridePack? pack);
         PlannedInstaller installer = CreateInstaller(
             candidate,
             previous,
             request.Version.Version!.Value,
             preserveIntentionalLayout,
             request.AllowStructuralRewrite,
+            pack?.PortableExecutableFileName,
             diagnostics,
             questions);
         if (exactUrl && hashChanged && !request.AllowStableUrlContentChange)
@@ -1268,8 +1271,9 @@ public static class AssetMappingPlanner
                 previous.Position));
         }
 
+        bool nestedSelectionChanged = !installer.NestedInstallerFiles.SequenceEqual(previous.NestedInstallerFiles);
         decisions.Add(new(
-            exactUrl && !hashChanged
+            exactUrl && !hashChanged && !nestedSelectionChanged
                 ? AssetMappingDecisionKind.Preserved
                 : AssetMappingDecisionKind.Updated,
             previous.Position,
@@ -1277,7 +1281,9 @@ public static class AssetMappingPlanner
             exactUrl
                 ? hashChanged
                     ? "Stable URL has new content identity."
-                    : "Exact URL and accepted layout preserved."
+                    : nestedSelectionChanged
+                        ? "Nested installer selection updated from analyzed payloads."
+                        : "Exact URL and accepted layout preserved."
                 : "Unique structurally compatible release asset.",
             exactUrl ? EvidenceConfidence.High : candidate.Confidence));
     }
@@ -1288,6 +1294,7 @@ public static class AssetMappingPlanner
         string newVersion,
         bool preservePreviousStructure,
         bool allowStructuralRewrite,
+        string? portableExecutableFileName,
         List<AssetMappingDiagnostic> diagnostics,
         List<AssetMappingQuestion> questions)
     {
@@ -1299,7 +1306,8 @@ public static class AssetMappingPlanner
                 previous,
                 candidate.Asset.Analysis,
                 candidate.AnalyzedShape,
-                newVersion);
+                newVersion,
+                portableExecutableFileName);
         if (nested.ErrorCode is not null)
         {
             diagnostics.Add(new(
@@ -1315,6 +1323,15 @@ public static class AssetMappingPlanner
                     .. (candidate.Asset.Analysis?.NestedInstallerCandidates ?? [])
                         .Order(StringComparer.Ordinal),
                 ],
+                candidate.Asset.DownloadUri.AbsoluteUri,
+                previous?.Position));
+        }
+        else if (portableExecutableFileName is not null && !nested.Files.IsEmpty)
+        {
+            diagnostics.Add(new(
+                "NESTED_PORTABLE_OVERRIDE",
+                AssetMappingDiagnosticSeverity.Information,
+                $"Package override selected analyzed portable payload '{nested.Files[0].RelativeFilePath}'.",
                 candidate.Asset.DownloadUri.AbsoluteUri,
                 previous?.Position));
         }

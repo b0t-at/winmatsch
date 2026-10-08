@@ -89,6 +89,7 @@ public sealed class OverridePackSet
             AssetMappings = higher.AssetMappings.IsDefaultOrEmpty
                 ? lower.AssetMappings
                 : higher.AssetMappings,
+            PortableExecutableFileName = higher.PortableExecutableFileName ?? lower.PortableExecutableFileName,
             ScopeLayout = higher.ScopeLayout ?? lower.ScopeLayout,
             VersionSource = higher.VersionSource ?? lower.VersionSource,
             MetadataUrlReplacements = lower.MetadataUrlReplacements.SetItems(
