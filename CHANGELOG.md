@@ -7,6 +7,8 @@ minor versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-08
+
 ### Added
 
 - Override packs accept `portableExecutableFileName`, which selects the
@@ -575,7 +577,8 @@ Initial development toward a first release. Implemented so far:
   human-correction reviews, the durable local-to-remote submission journals,
   and the override-pack field selectors and scope-layout semantics.
 
-[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.9.0...main
+[Unreleased]: https://github.com/b0t-at/winmatsch/compare/v0.9.1...main
+[0.9.1]: https://github.com/b0t-at/winmatsch/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/b0t-at/winmatsch/compare/v0.8.23...v0.9.0
 [0.8.23]: https://github.com/b0t-at/winmatsch/compare/v0.8.22...v0.8.23
 [0.8.22]: https://github.com/b0t-at/winmatsch/compare/v0.8.21...v0.8.22
