@@ -10,7 +10,8 @@ internal static class NestedInstallerPathResolver
         PreviousInstallerEntry? previous,
         AssetAnalysisEvidence? analysis,
         AnalyzedInstallerShape? shape,
-        string newVersion)
+        string newVersion,
+        string? portableExecutableFileName = null)
     {
         if (analysis is null)
         {
@@ -38,6 +39,11 @@ internal static class NestedInstallerPathResolver
                     "NESTED_BOUNDED_CONTENTS_REQUIRED",
                     "Nested installer paths require the bounded archive entry set.")
                 : NestedPathResolution.Empty;
+        }
+
+        if (portableExecutableFileName is not null)
+        {
+            return ResolvePortableExecutableOverride(previous, shape, actualPaths, portableExecutableFileName);
         }
 
         if (previous is null || previous.NestedInstallerFiles.IsEmpty)
@@ -121,6 +127,41 @@ internal static class NestedInstallerPathResolver
 
         return new([.. resolved], null, null);
     }
+
+    private static NestedPathResolution ResolvePortableExecutableOverride(
+        PreviousInstallerEntry? previous,
+        AnalyzedInstallerShape? shape,
+        IReadOnlyCollection<string> actualPaths,
+        string fileName)
+    {
+        if (shape is not { InstallerType: InstallerType.Zip, NestedInstallerType: InstallerType.Portable })
+        {
+            return NestedPathResolution.Unresolved(
+                "NESTED_PORTABLE_OVERRIDE_UNRESOLVED",
+                "The portableExecutableFileName override requires an analyzed ZIP portable payload.");
+        }
+
+        PlannedNestedInstallerFile[] matches = [.. shape.NestedInstallerFiles.Where(file => HasFileName(file, fileName))];
+        if (matches.Length != 1)
+        {
+            return NestedPathResolution.Unresolved(
+                "NESTED_PORTABLE_OVERRIDE_UNRESOLVED",
+                $"The portableExecutableFileName override '{fileName}' must match exactly one analyzed payload for this installer.");
+        }
+
+        // Keep a reviewed alias only when it already belonged to the selected executable.
+        PlannedNestedInstallerFile selected = matches[0];
+        PlannedNestedInstallerFile[] previousMatches = [.. (previous?.NestedInstallerFiles ?? []).Where(file => HasFileName(file, fileName))];
+        if (previousMatches.Length == 1)
+        {
+            selected = selected with { PortableCommandAlias = previousMatches[0].PortableCommandAlias };
+        }
+
+        return ValidateAnalyzedFiles([selected], actualPaths);
+    }
+
+    private static bool HasFileName(PlannedNestedInstallerFile file, string fileName)
+        => string.Equals(Path.GetFileName(file.RelativeFilePath), fileName, StringComparison.OrdinalIgnoreCase);
 
     private static NestedPathResolution ValidateAnalyzedFiles(
         ImmutableArray<PlannedNestedInstallerFile> files,

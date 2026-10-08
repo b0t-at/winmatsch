@@ -57,6 +57,7 @@ public class OverridePackYamlTests
                 },
             ],
             ScopeLayout = ScopeLayoutOverride.PerInstaller,
+            PortableExecutableFileName = "tool.exe",
             VersionSource = "installer.ProductVersion",
             MetadataUrlReplacements = ImmutableDictionary.CreateRange(
                 [KeyValuePair.Create("http://old.example.test", "https://new.example.test")]),
@@ -96,6 +97,7 @@ public class OverridePackYamlTests
         Assert.Equal(Architecture.X64, Assert.Single(parsed.ForcedArchitectures).Architecture);
         Assert.Equal(InstallerType.Portable, Assert.Single(parsed.AssetMappings).InstallerType);
         Assert.Equal(ScopeLayoutOverride.PerInstaller, parsed.ScopeLayout);
+        Assert.Equal("tool.exe", parsed.PortableExecutableFileName);
         Assert.True(parsed.ManualOnly);
         Assert.Equal(2, parsed.Policies.Length);
         Assert.Equal("Machine", Assert.Single(parsed.LearnedFields).Value);
@@ -253,6 +255,41 @@ public class OverridePackYamlTests
         FormatException exception = Assert.Throws<FormatException>(() => OverridePackYaml.Read(yaml));
 
         Assert.Contains("depth", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("../tool.exe")]
+    [InlineData("bin/tool.exe")]
+    [InlineData("bin\\tool.exe")]
+    [InlineData("*.exe")]
+    [InlineData("tool?.exe")]
+    [InlineData("C:tool.exe")]
+    [InlineData(".exe")]
+    [InlineData("tool.dll")]
+    [InlineData(" tool.exe")]
+    public void Portable_executable_override_rejects_paths_and_non_executables(string fileName)
+    {
+        string yaml = $"formatVersion: 1\npackageIdentifier: Test.App\nportableExecutableFileName: '{fileName}'\n";
+
+        Assert.Throws<FormatException>(() => OverridePackYaml.Read(yaml));
+        Assert.Throws<FormatException>(() => OverridePackYaml.Write(new OverridePack
+        {
+            PackageIdentifier = new("Test.App"),
+            PortableExecutableFileName = fileName,
+        }));
+    }
+
+    [Theory]
+    [InlineData(null, "tool.exe")]
+    [InlineData("other.exe", "other.exe")]
+    public void Portable_executable_override_follows_pack_precedence(string? higherFileName, string expected)
+    {
+        var identifier = new PackageIdentifier("Test.App");
+        var lower = new OverridePackSet([new OverridePack { PackageIdentifier = identifier, PortableExecutableFileName = "tool.exe" }]);
+        var higher = new OverridePackSet([new OverridePack { PackageIdentifier = identifier, PortableExecutableFileName = higherFileName }]);
+
+        Assert.True(OverridePackSet.Compose(lower, higher).TryGet(identifier, out OverridePack? pack));
+        Assert.Equal(expected, pack!.PortableExecutableFileName);
     }
 
     [Fact]

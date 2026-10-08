@@ -12,6 +12,168 @@ namespace WinMatsch.Workflows.Tests.Mapping;
 
 public sealed class AssetMappingPlannerTests
 {
+    [Theory]
+    [InlineData(Architecture.X86, "tool.exe", null)]
+    [InlineData(Architecture.X64, "tool.exe", "custom-tool")]
+    [InlineData(Architecture.Arm64, "tool-helper.exe", null)]
+    [InlineData(Architecture.Arm64, "tool-helper.exe", "helper-alias")]
+    public void Portable_executable_override_replaces_an_inherited_helper_selection(
+        Architecture architecture,
+        string previousFileName,
+        string? previousAlias)
+    {
+        AssetMappingRequest request = PortableOverrideRequest(architecture, previousFileName, previousAlias);
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(request);
+
+        Assert.True(plan.CanApply, string.Join("; ", plan.Diagnostics.Select(static item => item.Message)));
+        PlannedInstaller installer = Assert.Single(plan.Decisions).Installer!;
+        PlannedNestedInstallerFile nested = Assert.Single(installer.NestedInstallerFiles);
+        Assert.Equal("tool-2.0.0/tool.exe", nested.RelativeFilePath);
+        Assert.Equal(previousFileName == "tool.exe" ? previousAlias : "tool", nested.PortableCommandAlias);
+        Assert.Equal(architecture, installer.Architecture);
+        Assert.Contains(plan.Diagnostics, static item => item.Code == "NESTED_PORTABLE_OVERRIDE");
+    }
+
+    [Fact]
+    public void Portable_executable_override_selects_one_payload_for_a_new_package()
+    {
+        AssetMappingRequest request = PortableOverrideRequest(Architecture.Arm64, "tool-helper.exe", null)
+            with
+        { PreviousInstallers = [] };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(request);
+
+        Assert.True(plan.CanApply);
+        Assert.Equal(
+            "tool-2.0.0/tool.exe",
+            Assert.Single(Assert.Single(plan.Decisions).Installer!.NestedInstallerFiles).RelativeFilePath);
+    }
+
+    [Fact]
+    public void Portable_executable_override_on_the_same_artifact_is_an_update()
+    {
+        AssetMappingRequest request = PortableOverrideRequest(Architecture.Arm64, "tool-helper.exe", null);
+        DiscoveredAsset asset = request.Assets[0];
+        PreviousInstallerEntry previous = request.PreviousInstallers[0] with
+        {
+            PackageVersion = new("2.0.0"),
+            Url = asset.DownloadUri,
+            Sha256 = asset.Content!.Identity.Sha256,
+            NestedInstallerFiles = [new("tool-2.0.0/tool-helper.exe", null)],
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(request with { PreviousInstallers = [previous] });
+
+        Assert.True(plan.CanApply);
+        AssetMappingDecision decision = Assert.Single(plan.Decisions);
+        Assert.Equal(AssetMappingDecisionKind.Updated, decision.Kind);
+        Assert.Equal("tool-2.0.0/tool.exe", Assert.Single(decision.Installer!.NestedInstallerFiles).RelativeFilePath);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Portable_executable_override_requires_exactly_one_analyzed_match(bool ambiguous)
+    {
+        AssetMappingRequest request = PortableOverrideRequest(Architecture.Arm64, "tool-helper.exe", null);
+        DiscoveredAsset asset = request.Assets[0];
+        AssetAnalysisEvidence analysis = asset.Analysis!;
+        AnalyzedInstallerShape shape = analysis.InstallerShapes[0] with
+        {
+            NestedInstallerFiles = ambiguous
+                ? [new("first/tool.exe", null), new("second/tool.exe", null)]
+                : [new("tool-2.0.0/tool-helper.exe", null)],
+        };
+        asset = asset with
+        {
+            Analysis = analysis with
+            {
+                InstallerShapes = [shape],
+                ArchiveEntries = [.. analysis.ArchiveEntries, "first/tool.exe", "second/tool.exe"],
+            },
+        };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(request with { Assets = [asset] });
+
+        Assert.False(plan.CanApply);
+        Assert.Contains(plan.UnresolvedQuestions, static item => item.Code == "NESTED_PORTABLE_OVERRIDE_UNRESOLVED");
+        Assert.Empty(Assert.Single(plan.Decisions).Installer!.NestedInstallerFiles);
+    }
+
+    [Fact]
+    public void Without_the_override_a_pinned_nested_selection_is_carried_forward()
+    {
+        AssetMappingRequest request = PortableOverrideRequest(Architecture.Arm64, "tool-helper.exe", "manual-command")
+            with
+        { OverridePacks = OverridePackSet.Empty };
+
+        AssetMappingPlan plan = AssetMappingPlanner.CreatePlan(request);
+
+        Assert.True(plan.CanApply);
+        PlannedNestedInstallerFile nested = Assert.Single(Assert.Single(plan.Decisions).Installer!.NestedInstallerFiles);
+        Assert.Equal("tool-2.0.0/tool-helper.exe", nested.RelativeFilePath);
+        Assert.Equal("manual-command", nested.PortableCommandAlias);
+        Assert.DoesNotContain(plan.Diagnostics, static item => item.Code == "NESTED_PORTABLE_OVERRIDE");
+    }
+
+    private static AssetMappingRequest PortableOverrideRequest(
+        Architecture architecture,
+        string previousFileName,
+        string? previousAlias)
+    {
+        string token = architecture.ToString().ToLowerInvariant();
+        DiscoveredAsset asset = AtUrl(
+            Asset($"tool-2.0.0-{token}.zip", InstallerType.Zip, architecture),
+            $"https://example.test/2.0.0/tool-2.0.0-{token}.zip");
+        ImmutableArray<string> paths =
+        [
+            .. ((string[])["tool-completions.exe", "tool-helper.exe", "tool.exe"]).Select(static name => $"tool-2.0.0/{name}"),
+        ];
+        asset = asset with
+        {
+            Analysis = asset.Analysis! with
+            {
+                InstallerShapes =
+                [
+                    new()
+                    {
+                        Architecture = architecture,
+                        InstallerType = InstallerType.Zip,
+                        NestedInstallerType = InstallerType.Portable,
+                        NestedInstallerFiles =
+                        [
+                            .. paths.Select(static path => new PlannedNestedInstallerFile(path, Path.GetFileNameWithoutExtension(path))),
+                        ],
+                    },
+                ],
+                ArchiveEntries = paths,
+                NestedInstallerCandidates = paths,
+            },
+        };
+        PreviousInstallerEntry previous = Previous(
+            0,
+            $"https://example.test/1.0.0/tool-1.0.0-{token}.zip",
+            architecture,
+            InstallerType.Zip) with
+        {
+            PackageVersion = new("1.0.0"),
+            NestedInstallerType = InstallerType.Portable,
+            NestedInstallerFiles = [new($"tool-1.0.0/{previousFileName}", previousAlias)],
+        };
+        return Request([asset], [previous]) with
+        {
+            OverridePacks = new OverridePackSet(
+            [
+                new OverridePack
+                {
+                    PackageIdentifier = new("Vendor.Product"),
+                    PortableExecutableFileName = "tool.exe",
+                },
+            ]),
+        };
+    }
+
     [Fact]
     public void Setup_and_portable_assets_remain_distinct()
     {
