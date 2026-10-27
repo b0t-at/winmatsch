@@ -34,7 +34,7 @@ ASSETS_FILE = Path("src") / "WinMatsch.Cli" / "obj" / "project.assets.json"
 # Mirrors LicenseNoticeTests: packages that never ship to users.
 TEST_ONLY_PACKAGES = {
     "Microsoft.NET.Test.Sdk",
-    "xunit.v3",
+    "xunit.v3.mtp-off",
     "xunit.runner.visualstudio",
 }
 

@@ -36,8 +36,12 @@
 
     <!-- Tests -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
-    <PackageVersion Include="xunit.v3" Version="3.2.2" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <!--
+      xunit.v3 4.x defaults to Microsoft.Testing.Platform v2, which dotnet test on the .NET 10 SDK
+      only runs in MTP mode. The mtp-off package keeps the VSTest adapter path used by CI.
+    -->
+    <PackageVersion Include="xunit.v3.mtp-off" Version="4.0.1" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
   </ItemGroup>
 
 </Project>

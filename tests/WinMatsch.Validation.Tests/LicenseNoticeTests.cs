@@ -20,7 +20,7 @@ public sealed class LicenseNoticeTests
     private static readonly HashSet<string> _testOnlyPackages = new(StringComparer.OrdinalIgnoreCase)
     {
         "Microsoft.NET.Test.Sdk",
-        "xunit.v3",
+        "xunit.v3.mtp-off",
         "xunit.runner.visualstudio",
     };
 
