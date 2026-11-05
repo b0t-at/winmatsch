@@ -56,6 +56,7 @@ jobs:
           name: test-results-${{ matrix.os }}
           path: TestResults/
           if-no-files-found: ignore
+          retention-days: 7
 
   windows-compiled-corpus:
     name: Windows compiled installer corpus
@@ -105,6 +106,7 @@ jobs:
             TestResults/windows-compiled-corpus.trx
             ${{ runner.temp }}\winmatsch-compiled-corpus\*.txt
           if-no-files-found: ignore
+          retention-days: 7
 
   format:
     name: Format check
