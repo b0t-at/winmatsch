@@ -183,6 +183,7 @@ jobs:
           name: winmatsch-${{ matrix.rid }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 1
 
   release:
     name: Create draft release
