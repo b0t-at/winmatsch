@@ -21,7 +21,7 @@
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />
 
     <!-- Analysis -->
-    <PackageVersion Include="OpenMcdf" Version="3.3.0" />
+    <PackageVersion Include="OpenMcdf" Version="3.4.0" />
     <!--
       SharpCompress 1.0.0 is unlisted and deprecated by its publisher as an accidental build.
       0.50.3 was manually reviewed despite the normal three-day patch cooldown: changes from
@@ -32,7 +32,7 @@
 
     <!-- Cli -->
     <PackageVersion Include="Spectre.Console" Version="0.57.2" />
-    <PackageVersion Include="System.CommandLine" Version="2.0.13" />
+    <PackageVersion Include="System.CommandLine" Version="2.0.14" />
 
     <!-- Tests -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
@@ -40,8 +40,8 @@
       xunit.v3 4.x defaults to Microsoft.Testing.Platform v2, which dotnet test on the .NET 10 SDK
       only runs in MTP mode. The mtp-off package keeps the VSTest adapter path used by CI.
     -->
-    <PackageVersion Include="xunit.v3.mtp-off" Version="4.0.1" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
+    <PackageVersion Include="xunit.v3.mtp-off" Version="4.0.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.1" />
   </ItemGroup>
 
 </Project>
